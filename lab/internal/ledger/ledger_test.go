@@ -41,3 +41,30 @@ func TestRejectInvalidLedger(t *testing.T) {
 		}
 	}
 }
+
+func TestAtomProvenanceRoundTripPreservesUnknownAndExtensions(t *testing.T) {
+	for _, atom := range []string{
+		`{"id":"old","type":"ship","status":"done"}`,
+		`{"id":"custom","provenance":{"declaredSource":"declared","declaredBinding":"recipe","declaredWorkflows":["workflow"],"actions":[{"attemptId":"original","resolvedSource":"bound-harness:custom","plannedAction":"invoke-coding-harness","observed":{"action":"invoke-coding-harness","result":"process-succeeded","evidence":[{"path":"result.json","sha256":"hash"}],"futureObservation":{"preserve":true}}}],"futureProvenance":"preserve"}}`,
+	} {
+		raw := []byte(`{"schemaVersion":"v0","kind":"molecule","id":"mol-provenance","formulaId":"f","status":"waiting","atoms":[` + atom + `],"futureRecord":{"keep":true}}`)
+		l, err := Decode(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := l.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var before, after any
+		if err = json.Unmarshal(raw, &before); err != nil {
+			t.Fatal(err)
+		}
+		if err = json.Unmarshal(encoded, &after); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, after) {
+			t.Fatal("lost provenance, extension, or historical absence")
+		}
+	}
+}
