@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "v0",
+  "kind": "molecule",
+  "id": "mol-12-fixture",
+  "mode": "ticket",
+  "status": "waiting",
+  "formulaId": "formula-fixture",
+  "formulaApproved": true,
+  "startedAt": "2026-09-28T12:00:00Z",
+  "finishedAt": "2026-09-28T12:01:00Z",
+  "labDir": "/fixture/.forgecell",
+  "issue": {"number":12,"repo":"acme/widgets"},
+  "atoms": [{"id":"gate","type":"gate","status":"waiting","detail":"Human review required."}],
+  "notes": [],
+  "extensionForCompatibility": {"keep":true}
+}

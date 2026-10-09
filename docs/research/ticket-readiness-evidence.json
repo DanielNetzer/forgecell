@@ -1,0 +1,194 @@
+{
+  "candidateCommit": "b2fe256f7088e2abeb03df0e1f30dcdd61f14e33",
+  "molecule": "mol-13-d23da90966c023c6d2b7e2c7",
+  "issue": 13,
+  "planDigest": "5437dffeaa3c6c95cce70a017e8af313f58727ff46747af278df2d37ac8098a6",
+  "capture": {
+    "tree": "7685dbdd0b8a774aae668b8b926520f28dcc2d36",
+    "changes": [
+      "lab/internal/cli/cli.go",
+      "lab/internal/cli/ledger.go",
+      "lab/internal/cli/ledger_test.go"
+    ],
+    "violations": []
+  },
+  "candidateVerification": {
+    "sourceTree": "7685dbdd0b8a774aae668b8b926520f28dcc2d36",
+    "requiredChecksPassed": true,
+    "independentAcceptanceVerified": true,
+    "containment": "Filtered environment and temporary HOME; no OS filesystem/network sandbox. Network access is unrestricted.",
+    "checks": [
+      {
+        "id": "retain-reviewed-patch",
+        "category": "independent-acceptance",
+        "argv": [
+          "git",
+          "diff",
+          "--exit-code",
+          "7685dbdd0b8a774aae668b8b926520f28dcc2d36",
+          "--"
+        ],
+        "ok": true,
+        "exitCode": 0,
+        "elapsedMs": 8
+      },
+      {
+        "id": "candidate-ledger-boundaries",
+        "category": "candidate",
+        "argv": [
+          "go",
+          "test",
+          "./internal/cli",
+          "-run",
+          "^TestLedgerInspectionBoundaries$",
+          "-count=1"
+        ],
+        "ok": true,
+        "exitCode": 0,
+        "elapsedMs": 1129
+      },
+      {
+        "id": "go-regression",
+        "category": "regression",
+        "argv": [
+          "go",
+          "test",
+          "-p",
+          "1",
+          "./..."
+        ],
+        "ok": true,
+        "exitCode": 0,
+        "elapsedMs": 39053
+      },
+      {
+        "id": "go-vet",
+        "category": "regression",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "ok": true,
+        "exitCode": 0,
+        "elapsedMs": 592
+      },
+      {
+        "id": "independent-ledger-inspection",
+        "category": "independent-acceptance",
+        "argv": [
+          "python3",
+          "{input:acceptance-contract}",
+          "../.forgecell-check/forgecell"
+        ],
+        "ok": true,
+        "exitCode": 0,
+        "elapsedMs": 476
+      }
+    ]
+  },
+  "protectedRegression": {
+    "sourceTree": "212986b22b6be4ed1e51defc547e16d5c5f9e952",
+    "requiredChecksPassed": true,
+    "independentAcceptanceVerified": false,
+    "containment": "Filtered environment and temporary HOME; no OS filesystem/network sandbox. Network access is unrestricted.",
+    "checks": [
+      {
+        "id": "go-regression",
+        "category": "regression",
+        "argv": [
+          "go",
+          "test",
+          "-p",
+          "1",
+          "./..."
+        ],
+        "ok": true,
+        "exitCode": 0,
+        "elapsedMs": 38879
+      },
+      {
+        "id": "go-vet",
+        "category": "regression",
+        "argv": [
+          "go",
+          "vet",
+          "./..."
+        ],
+        "ok": true,
+        "exitCode": 0,
+        "elapsedMs": 535
+      }
+    ]
+  },
+  "note": "Compact observation summary, not a replacement for full local ledgers or an independently replayable approval.",
+  "delivery": {
+    "pr": "https://github.com/DanielNetzer/forgecell/pull/16",
+    "commit": "bd6a42284cb0c5633cc8450c8a9f0c8644690834",
+    "draft": true
+  },
+  "ci": {
+    "commit": "bd6a42284cb0c5633cc8450c8a9f0c8644690834",
+    "observedHead": "bd6a42284cb0c5633cc8450c8a9f0c8644690834",
+    "checkedAt": "2026-10-03T09:32:57.601803Z",
+    "required": [
+      "Go core (macos-latest)",
+      "Go core (ubuntu-latest)",
+      "test, typecheck, build (ubuntu-latest, Node 20)",
+      "test, typecheck, build (ubuntu-latest, Node 22)",
+      "test, typecheck, build (macos-latest, Node 20)",
+      "test, typecheck, build (macos-latest, Node 22)"
+    ],
+    "status": "passed",
+    "checks": [
+      {
+        "name": "test, typecheck, build (ubuntu-latest, Node 20)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/DanielNetzer/forgecell/actions/runs/37113285465/job/111175169924"
+      },
+      {
+        "name": "test, typecheck, build (ubuntu-latest, Node 22)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/DanielNetzer/forgecell/actions/runs/37113285465/job/111175169871"
+      },
+      {
+        "name": "test, typecheck, build (macos-latest, Node 20)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/DanielNetzer/forgecell/actions/runs/37113285465/job/111175169853"
+      },
+      {
+        "name": "test, typecheck, build (macos-latest, Node 22)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/DanielNetzer/forgecell/actions/runs/37113285465/job/111175169881"
+      },
+      {
+        "name": "Go core (ubuntu-latest)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/DanielNetzer/forgecell/actions/runs/37113285465/job/111175169730"
+      },
+      {
+        "name": "Go core (macos-latest)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/DanielNetzer/forgecell/actions/runs/37113285465/job/111175169894"
+      },
+      {
+        "name": "Vercel",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://vercel.com/danielnetzer7-3575s-projects/forgecell/DxskdmFbUhiFJNV4bZVb4133yvG7"
+      },
+      {
+        "name": "Vercel Preview Comments",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": "https://vercel.com/github"
+      }
+    ]
+  }
+}

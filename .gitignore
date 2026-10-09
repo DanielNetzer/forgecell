@@ -1,0 +1,14 @@
+.DS_Store
+node_modules/
+.next/
+.env
+.env.*
+*.log
+.forgecell-local/
+.forgecell/
+.vercel
+.env*
+
+# Go development build output
+/lab/bin/
+/lab/forgecell

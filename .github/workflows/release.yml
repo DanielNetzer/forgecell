@@ -1,0 +1,48 @@
+name: Release Lab CLI
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: verify and prepare native release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: lab/go.mod
+          cache: false
+      - name: Test Go core
+        working-directory: lab
+        run: |
+          go test ./...
+          go vet ./...
+      - name: Build and verify installer lifecycle
+        run: |
+          sh scripts/build-native-release.sh 0.0.0-smoke.1 "${RUNNER_TEMP}/smoke"
+          sh scripts/build-native-release.sh 0.0.0-smoke.2 "${RUNNER_TEMP}/smoke"
+          python3 scripts/test-native-installer.py "${RUNNER_TEMP}/smoke" 0.0.0-smoke.1 0.0.0-smoke.2
+      - name: Build versioned native CLI
+        run: sh scripts/build-native-release.sh "${GITHUB_REF_NAME#v}" "${RUNNER_TEMP}/release"
+      - name: Prepare draft release for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          cat > "${notes_file}" <<'NOTES'
+          Native Forgecell CLI for macOS and Linux (amd64/arm64), with per-artifact SHA-256 files, MIT LICENSE and dependency notices. End users do not need Node, Go or source-repository access.
+
+          This is a draft release for review, not automatic publication. The rendered installer pins this exact version and its v-prefixed tag at DanielNetzer/forgecell. Approve public visibility and exact-head Actions results before draft review and approved publication. Verify anonymous install, upgrade and rollback before switching the documented legacy endpoint.
+
+          Installer activation smoke-checks the version and preserves Lab data. `forgecell rollback` restores the previous validated release. Running tickets requires Git, authenticated gh and a configured coding harness.
+          NOTES
+          gh release create "${GITHUB_REF_NAME}" \
+            "${RUNNER_TEMP}/release/${version}/"* \
+            "${RUNNER_TEMP}/release/latest.txt" \
+            --draft --title "${GITHUB_REF_NAME}" --notes-file "${notes_file}"

@@ -1,0 +1,139 @@
+# Lab
+
+Forgecell's terminal runtime is a Go CLI. **Compose once. Improve forever.**
+
+The **Lab** runs **Molecules**: one ticket unit of work and its ledger. Each Molecule
+is **Atoms** (workflow steps) arranged by a **Formula** (a durable YAML recipe).
+Your coding harness implements the ticket; the Lab records the evidence and human decisions.
+
+## Install and start
+
+Use [Install](../docs/install.md) for the existing versioned public CLI installer
+(`0.2.0-preview.1`), prerequisites, PATH, upgrades and rollback. Installing the
+compiled CLI requires neither Node nor Go. Running tickets requires Git,
+authenticated GitHub CLI (`gh`) and an authenticated supported harness.
+
+Inside the repository you want to work on, choose a distinct local Lab name and use
+it for every command with the published preview:
+
+```sh
+lab_dir="$HOME/.forgecell/labs/YOUR_REPOSITORY"
+forgecell doctor --lab "$lab_dir"
+forgecell init --lab "$lab_dir"
+# Inspect the saved Formula YAML and binding, then approve its actual proposal ID:
+forgecell init --lab "$lab_dir" --approve PROPOSAL_ID
+forgecell run ISSUE_NUMBER --lab "$lab_dir"
+```
+
+Doctor performs read-only capability and authentication checks; it does not prove
+model access or repository policy readiness. Init's Bootstrap Assay proposes a
+Formula without running a model and preserves existing approved Formulas.
+For structured onboarding and harness selection, see [agent onboarding](../docs/agent-onboarding.md).
+
+## Review a ticket (development build)
+
+Ticket readiness on this branch is **not in the published `0.2.0-preview.1`**.
+Formula approval and ticket scope approval are separate decisions. Existing
+Formulas need an explicitly reviewed scope gate before new readiness runs.
+
+```sh
+forgecell run ISSUE_NUMBER --target TARGET_BRANCH
+# Inspect exact paths, acceptance criteria, check commands, limits and unknowns.
+# Only then use the CLI-generated approval command with PLAN_DIGEST.
+forgecell ledger MOLECULE_ID
+```
+
+Choose `TARGET_BRANCH` as the intended PR base in your repository. Follow the
+generated approval command to retain the reviewed base commit, target, Formula
+and Lab directory; approval must use the same inputs as analysis.
+
+The first run analyzes the issue and waits before coding. Approval binds the exact
+plan; execution uses an isolated checkout, and required checks run in a fresh
+checkout before final review. The ledger preserves the Molecule, exact Formula
+snapshot and check provenance. Use the same `--lab DIR` throughout when overriding
+the default Lab. In the development CLI, each checkout has a private Lab under
+`~/.forgecell/labs/`; `doctor --json` reports its exact path. Existing checkout
+`.forgecell` data is never moved or deleted automatically. Pass `--lab .forgecell`
+to inspect an older Lab deliberately.
+
+Delivery is a separate review: `deliver` previews the exact file scope without
+publishing. A separately approved digest authorizes committing those files,
+pushing the isolated branch and opening a **draft PR**. Local checks do not
+replace exact-commit GitHub CI.
+Merge, deployment and issue closure are not automatic; scope approval does not
+authorize them or publication. See [ticket readiness](../docs/ticket-readiness.md)
+for delivery, checks, amendments, recovery and execution limits.
+
+## Harnesses and learning
+
+Native bindings support Codex, Claude Code and Cursor, retaining the harness's
+configured model. Choose explicitly with `init --harness codex`, `claude-code` or
+`cursor`. Codex coding uses workspace-write and learning uses read-only mode;
+Claude Code uses print mode with explicit allowances; Cursor uses print mode with
+its sandbox enabled. These permission modes provide different guarantees;
+arbitrary adapters retain their process permissions.
+
+Binding availability does not imply ticket-analysis support. Codex analysis has
+been verified; Claude Code's live analysis probe remains outstanding. Cursor and
+custom bindings stop new readiness runs because read-only action isolation has
+not been established. See [adapter boundaries](../docs/agent-onboarding.md#adapter-boundaries)
+and [provider support](../docs/ticket-readiness.md#provider-and-policy-support).
+
+The coding harness changes ticket code. A separately bound meta harness uses
+finished Molecule evidence to propose a Formula change for future work:
+`learn MOLECULE_ID` → inspect `suggestion SUGGESTION_ID` → human approval or dismissal.
+Go onboarding does not silently configure a learn binding. Approval changes the
+recipe; it does not prove improvement. Evaluation remains manual. See
+[Learning](../docs/learning.md).
+
+## Contribute
+
+From a source checkout with the Go toolchain required by `go.mod`:
+
+```sh
+cd lab
+go test -p 1 ./...
+go vet ./...
+go build ./cmd/forgecell
+./forgecell --help
+```
+
+The build writes `lab/forgecell`; `--help` lists the development CLI commands.
+For the wider project, see the [repository README](../README.md).
+
+### Exact current Formula approval
+
+Only the currently active, explicitly approved YAML bytes can execute. `lab.json`
+stores `currentApproval` with the Formula ID, exact SHA-256, decision ID and
+proposal/suggestion identity. Its matching record in `formula-decisions/` must
+contain the same exact intent and a completed activation decision. A comment-only
+edit changes the digest. `run --formula ID` can select the current approved ID;
+it cannot activate injected YAML, historical IDs or restored historical bytes.
+
+Existing Labs without this record fail closed. Run `forgecell init --lab DIR` to
+save the current YAML unchanged for explicit review, then use the displayed
+`forgecell init --lab DIR --approve PROPOSAL_ID` command. Historical approvals
+are evidence for inspection and never silently migrate a Lab. Missing or malformed
+YAML must be restored or corrected before it can be reviewed. `doctor` still
+inspects saved bindings without granting execution approval.
+
+Bootstrap and learning approvals share `.formula-write.lock`. Activation persists
+an exact intent before replacing YAML and configuration; execution remains blocked
+until the decision completes. After an interruption, confirm the writer has
+stopped and inspect the lock and saved proposal/suggestion before removing a stale
+lock, then repeat the same approve command. Conflicting or newer state refuses
+replay. An applying approval cannot be dismissed. Historical files and ledgers
+remain readable; approval grants neither ticket scope nor delivery authority.
+
+Evaluation needs a **new** exact execution decision. Run
+`forgecell evaluate --inputs PLAN --source REPO --out NEW_DIRECTORY` to see the
+frozen plan, both exact recipes, hashes, destinations and approval command. Before
+approval, no output directory, setup, check or model execution is created. Review
+those inputs, then repeat with the displayed `--approve DIGEST`. Changing plan
+bytes, either variant, source or destination invalidates the digest. The new
+activation provenance is retained in the report and each isolated Lab. A saved
+historical learning decision cannot authorize this execution. `--recheck` grades
+retained output without approving or rerunning a model.
+
+Direct `__adapter` CLI invocation is unsupported. Approved `run` and `learn`
+paths retain the native in-process binding.
