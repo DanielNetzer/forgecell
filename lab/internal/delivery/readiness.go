@@ -3,7 +3,6 @@ package delivery
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
@@ -35,7 +34,7 @@ func validateReadiness(ctx context.Context, o Options, r molecule.Record, expect
 		}
 		found := false
 		for _, obs := range v.Checks {
-			if obs.ID == check.ID && reflect.DeepEqual(obs.Command, check) && obs.Category == check.Category && obs.SourceTree == v.SourceTree && obs.Result.OK && !obs.Result.TimedOut && !obs.Result.Interrupted && !obs.Result.Overflow {
+			if verification.MatchesCheckObservation(p, check, obs, v.SourceTree, false) {
 				found = true
 			}
 		}
@@ -65,7 +64,7 @@ func validateReadiness(ctx context.Context, o Options, r molecule.Record, expect
 			}
 			found := false
 			for _, obs := range v.Protected.Checks {
-				if obs.ID == check.ID && reflect.DeepEqual(obs.Command, check) && obs.Category == check.Category && obs.SourceTree == protectedTree && obs.Result.OK && !obs.Result.TimedOut && !obs.Result.Interrupted && !obs.Result.Overflow {
+				if verification.MatchesCheckObservation(p, check, obs, protectedTree, true) {
 					found = true
 				}
 			}

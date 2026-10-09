@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
@@ -85,6 +86,82 @@ func TestStaleIssueAndWorkspaceRefuseCoding(t *testing.T) {
 				t.Fatal("stale run reached coding")
 			}
 		})
+	}
+}
+
+func TestDefinitionOverlapIsReviewableButCannotStartCoding(t *testing.T) {
+	o, _ := fixture(t)
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		a, err := analyze(ctx, b, i, s)
+		a.Scope = append(a.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Update checker", Evidence: a.Checks[0].Definitions})
+		return a, err
+	}
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Readiness == nil || r.Status != "waiting" {
+		t.Fatal("overlap should remain reviewable")
+	}
+	if !strings.Contains(strings.Join(r.Notes, "\n"), "package.json [definition] checks check") {
+		t.Fatal("overlap not surfaced before approval")
+	}
+	o.Approve = r.Readiness.Plans[0].Digest
+	if _, err = Run(context.Background(), o); err == nil {
+		t.Fatal("definition overlap reached coding without reviewed repair")
+	}
+	if _, err = os.Stat(filepath.Join(r.Workspace.Path, "request.json")); !os.IsNotExist(err) {
+		t.Fatal("coding ran under overlapping definitions")
+	}
+}
+
+func TestRepairCannotDropEarlierProtectedGate(t *testing.T) {
+	o, _ := fixture(t)
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		a, e := analyze(ctx, b, i, s)
+		a.Checks[0].Category = "regression"
+		a.Scope = append(a.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Checker", Evidence: a.Checks[0].Definitions})
+		return a, e
+	}
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := r.Readiness.Plans[0]
+	next := copyPlan(t, parent.Plan)
+	input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human", Path: "acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("true")))}, Content: "true"}
+	next.CheckInputs = []readiness.FileEvidence{input}
+	next.Evidence = append(next.Evidence, input.Evidence)
+	// A new check with a new identity must not substitute for the retained gate.
+	next.Analysis.Checks[0].ID = "replacement"
+	next.Analysis.Checks[0].ReviewedAcceptance = "human-check"
+	next.Analysis.Checks = append(next.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "human review fixture", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen external acceptance"})
+	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Approve = r.Readiness.Plans[1].Digest
+	if _, err = Run(context.Background(), o); err == nil {
+		t.Fatal("repair removed prior protected gate")
+	}
+	if _, err = os.Stat(filepath.Join(r.Workspace.Path, "request.json")); !os.IsNotExist(err) {
+		t.Fatal("unsafe repair reached coding")
+	}
+}
+
+func TestRepairHistoryRetainsGatesAfterRepairMarkerRemoval(t *testing.T) {
+	check := readiness.Check{ID: "baseline", Category: "regression", Required: true, Definitions: []string{"frozen"}}
+	before := readiness.Plan{Analysis: readiness.Analysis{Checks: []readiness.Check{check}}}
+	repaired := copyPlan(t, before)
+	repaired.Analysis.Checks[0].ReviewedAcceptance = "human-check"
+	restored := copyPlan(t, before)
+	dropped := copyPlan(t, before)
+	dropped.Analysis.Checks = nil
+	plans := []readiness.Proposal{{Plan: before}, {Plan: repaired}, {Plan: restored}, {Plan: dropped}}
+	if err := validateRepairHistory(plans); err == nil {
+		t.Fatal("later amendment dropped retained protected gate")
 	}
 }
 

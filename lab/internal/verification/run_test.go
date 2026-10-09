@@ -126,3 +126,112 @@ func TestHistoryPersistenceFailureStopsProtectedExecution(t *testing.T) {
 		t.Fatal("protected commands started after persistence failure")
 	}
 }
+
+func repairCheckPlan(p readiness.Plan, content string) readiness.Plan {
+	input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human", Path: "external-acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content}
+	p.CheckInputs = []readiness.FileEvidence{input}
+	p.Evidence = append(p.Evidence, input.Evidence)
+	p.Analysis.Checks[0].ReviewedAcceptance = "human-check"
+	p.Analysis.Checks = append(p.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "separate human fixture review", Dir: ".", Argv: []string{"/bin/sh", "{input:human}"}, TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen human acceptance"})
+	return p
+}
+func TestReviewedCheckerRepairRetainsAllCandidateAndProtectedCommands(t *testing.T) {
+	// Reproduce the immutable issue22 excerpt's mechanism in an isolated repo;
+	// the original ledger/result hashes are historical evidence, not verified here.
+	dir, base := sourceFixture(t)
+	p := checkPlan(dir, base)
+	p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "check.sh", Reason: "Edit checker", Evidence: []string{"check"}})
+	p = repairCheckPlan(p, "test -f code.txt\n")
+	os.WriteFile(filepath.Join(dir, "check.sh"), []byte("printf candidate\n"), 0600)
+	c, err := Capture(context.Background(), dir, base, []string{"check.sh", "code.txt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.ValidateForCoding(); err != nil {
+		t.Fatal(err)
+	}
+	v := Run(context.Background(), dir, filepath.Join(t.TempDir(), "verify"), p, c)
+	if !v.RequiredChecksPassed || !v.IndependentAcceptanceVerified || len(v.Checks) != 2 || v.Protected == nil || !v.Protected.RequiredChecksPassed || len(v.Protected.Checks) != 1 {
+		t.Fatalf("repair lost candidate/protected outcomes: %+v", v)
+	}
+	if v.Checks[0].Category != "candidate" || v.Checks[0].Command.Definitions[0] != "check" || v.Protected.Checks[0].Category != "regression" || v.SourceTree == v.Protected.SourceTree {
+		t.Fatal("checker provenance or source identity lost", v)
+	}
+}
+func TestExternalAcceptanceMutationCannotPass(t *testing.T) {
+	for _, script := range []string{"chmod u+w \"$0\"; printf tampered > \"$0\"\n", "rm \"$0\"; ln -s /dev/null \"$0\"\n"} {
+		t.Run(script, func(t *testing.T) {
+			dir, base := sourceFixture(t)
+			p := checkPlan(dir, base)
+			p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "check.sh", Reason: "Checker", Evidence: []string{"check"}})
+			p = repairCheckPlan(p, script)
+			c, err := Capture(context.Background(), dir, base, []string{"code.txt", "check.sh"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := Run(context.Background(), dir, filepath.Join(t.TempDir(), "verify"), p, c)
+			if v.RequiredChecksPassed || v.IndependentAcceptanceVerified || !strings.Contains(v.Error, "reviewed check input changed") {
+				t.Fatalf("tampered external acceptance passed: %+v", v)
+			}
+		})
+	}
+}
+
+func TestReviewedRepairCannotBypassProtectedFailure(t *testing.T) {
+	dir, _ := sourceFixture(t)
+	if err := os.WriteFile(filepath.Join(dir, "check.sh"), []byte("exit 7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", "check.sh")
+	gitTest(t, dir, "commit", "-m", "protected failing checker")
+	base := gitTest(t, dir, "rev-parse", "HEAD")
+	p := checkPlan(dir, base)
+	p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "check.sh", Reason: "Edit checker", Evidence: []string{"check"}})
+	p = repairCheckPlan(p, "true\n")
+	if err := os.WriteFile(filepath.Join(dir, "check.sh"), []byte("true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Capture(context.Background(), dir, base, []string{"check.sh", "code.txt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := Run(context.Background(), dir, filepath.Join(t.TempDir(), "verify"), p, c)
+	if v.RequiredChecksPassed || v.IndependentAcceptanceVerified || v.Protected == nil || v.Protected.RequiredChecksPassed || len(v.Checks) != 2 || !v.Checks[0].Result.OK || !v.Checks[1].Result.OK || len(v.Protected.Checks) != 1 || v.Protected.Checks[0].Result.OK {
+		t.Fatalf("candidate acceptance bypassed protected failure: %+v", v)
+	}
+}
+func TestReviewedRepairRejectsReboundBaselineHashBeforeCommands(t *testing.T) {
+	dir, base := sourceFixture(t)
+	p := checkPlan(dir, base)
+	p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "check.sh", Reason: "Edit checker", Evidence: []string{"check"}})
+	p = repairCheckPlan(p, "true\n")
+	p.Evidence[0].SHA256 = strings.Repeat("f", 64)
+	if err := os.WriteFile(filepath.Join(dir, "check.sh"), []byte("true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Capture(context.Background(), dir, base, []string{"check.sh", "code.txt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := Run(context.Background(), dir, filepath.Join(t.TempDir(), "verify"), p, c)
+	if v.RequiredChecksPassed || v.IndependentAcceptanceVerified || len(v.Checks) != 0 || v.Protected == nil || len(v.Protected.Checks) != 0 {
+		t.Fatalf("rebound baseline hash executed commands: %+v", v)
+	}
+}
+func TestExternalAcceptanceMutationStopsBeforeNextCommand(t *testing.T) {
+	dir, base := sourceFixture(t)
+	p := checkPlan(dir, base)
+	// All external inputs, even those not used until a later check, must be intact
+	// after setup; its successful exit cannot mask acceptance-input tampering.
+	p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "check.sh", Reason: "Checker", Evidence: []string{"check"}})
+	p = repairCheckPlan(p, "true\n")
+	p.Setup = []readiness.Check{{ID: "mutate-input", Category: "setup", Dir: ".", Argv: []string{"/bin/sh", "-c", "chmod u+w \"$1\"; printf tampered > \"$1\"", "setup", "{input:human}"}, TimeoutMS: 1000, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Synthetic tampering setup"}}
+	c, err := Capture(context.Background(), dir, base, []string{"code.txt", "check.sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := Run(context.Background(), dir, filepath.Join(t.TempDir(), "verify"), p, c)
+	if v.RequiredChecksPassed || v.IndependentAcceptanceVerified || len(v.Setup) != 1 || len(v.Checks) != 0 || !strings.Contains(v.Error, "reviewed check input changed") {
+		t.Fatalf("continued after setup tampered with acceptance: %+v", v)
+	}
+}

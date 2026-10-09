@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -22,6 +23,38 @@ type Observation struct {
 	Command    readiness.Check     `json:"command"`
 	Result     process.Result      `json:"result"`
 }
+
+// MatchesCheckObservation binds delivery evidence to the approved command and
+// view. Only valid explicit repairs permit candidate provenance or the protected
+// runner's removal of the candidate-only acceptance reference.
+func MatchesCheckObservation(p readiness.Plan, check readiness.Check, obs Observation, tree string, protected bool) bool {
+	if obs.ID != check.ID || obs.SourceTree != tree || !obs.Result.OK || obs.Result.TimedOut || obs.Result.Interrupted || obs.Result.Overflow {
+		return false
+	}
+	expected := check
+	category := check.Category
+	if check.ReviewedAcceptance != "" {
+		if p.Validate() != nil {
+			return false
+		}
+		found := false
+		for _, approved := range p.Analysis.Checks {
+			if reflect.DeepEqual(approved, check) {
+				found = true
+			}
+		}
+		if !found {
+			return false
+		}
+		if protected {
+			expected.ReviewedAcceptance = ""
+		} else if obs.Category == "candidate" {
+			category = "candidate"
+		}
+	}
+	return obs.Category == category && reflect.DeepEqual(obs.Command, expected)
+}
+
 type Result struct {
 	Protected                     *Result       `json:"protectedRegression,omitempty"`
 	SchemaVersion                 string        `json:"schemaVersion"`
@@ -134,6 +167,7 @@ func runViewObserved(ctx context.Context, source, destination string, p readines
 	}
 	commands := append(append([]readiness.Check{}, p.Setup...), p.Analysis.Checks...)
 	required := false
+	repaired := map[string]bool{}
 	for _, command := range commands {
 		if command.Required && command.Category != "setup" {
 			required = true
@@ -162,7 +196,17 @@ func runViewObserved(ctx context.Context, source, destination string, p readines
 				content, err = git(ctx, source, "", nil, "cat-file", "blob", c.Tree+":"+e.Path)
 			}
 			if err != nil || fmt.Sprintf("%x", sha256.Sum256([]byte(content))) != e.SHA256 {
-				return fail(fmt.Errorf("command definition %s changed; review a scope/check amendment before execution", e.Path))
+				// Only an explicit reviewed repair permits execution of an edited
+				// scoped checker. It is candidate evidence; the original hash is
+				// still enforced on the separately retained protected view.
+				if command.ReviewedAcceptance == "" || !allowed[e.Path] || reviewed[id].ID != "" || err != nil {
+					return fail(fmt.Errorf("command definition %s changed; review a scope/check amendment before execution", e.Path))
+				}
+				baseline, baselineErr := git(ctx, source, "", nil, "cat-file", "blob", p.Inputs.BaseCommit+":"+e.Path)
+				if baselineErr != nil || fmt.Sprintf("%x", sha256.Sum256([]byte(baseline))) != e.SHA256 {
+					return fail(fmt.Errorf("protected command definition %s does not match frozen baseline", e.Path))
+				}
+				repaired[command.ID] = true
 			}
 		}
 	}
@@ -266,7 +310,11 @@ func runViewObserved(ctx context.Context, source, destination string, p readines
 			}
 		}
 		result := process.Run(ctx, process.Options{Argv: argv, Dir: filepath.Join(destination, filepath.FromSlash(command.Dir)), Env: env, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000})
-		observation := Observation{ID: command.ID, Category: command.Category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets)}
+		category := command.Category
+		if repaired[command.ID] {
+			category = "candidate"
+		}
+		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets)}
 		if i < len(p.Setup) {
 			v.Setup = append(v.Setup, observation)
 		} else {

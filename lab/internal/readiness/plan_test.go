@@ -1,7 +1,10 @@
 package readiness
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -175,6 +178,94 @@ func TestNoChangePermissionPreservesHistoricalDigest(t *testing.T) {
 	permitted, err := p.Digest()
 	if err != nil || permitted == d {
 		t.Fatal("no-change permission not bound to exact approval")
+	}
+}
+
+func reviewedRepairPlan() Plan {
+	p := fixture()
+	p.Analysis.Scope[0].Path = "lab/go.mod"
+	input := FileEvidence{Evidence: Evidence{ID: "human", Path: "acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("true")))}, Content: "true"}
+	p.Evidence = append(p.Evidence, input.Evidence)
+	p.CheckInputs = []FileEvidence{input}
+	p.Analysis.Checks[0].ReviewedAcceptance = "human-check"
+	p.Analysis.Checks = append(p.Analysis.Checks, Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "human review fixture", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Separately reviewed acceptance"})
+	return p
+}
+func TestDefinitionOverlapAssessmentAndReviewedRepair(t *testing.T) {
+	p := fixture()
+	p.Analysis.Scope[0].Path = "lab/go.mod"
+	if err := p.Validate(); err != nil {
+		t.Fatal("overlap conflated with structural validity", err)
+	}
+	overlaps := p.DefinitionOverlaps()
+	if len(overlaps) != 1 || overlaps[0].Path != "lab/go.mod" || overlaps[0].Kind != "definition" || !reflect.DeepEqual(overlaps[0].CheckIDs, []string{"regression"}) {
+		t.Fatalf("%+v", overlaps)
+	}
+	if err := p.ValidateForCoding(); err == nil || !strings.Contains(err.Error(), "lab/go.mod (regression)") {
+		t.Fatal("missing exact pre-coding diagnostic", err)
+	}
+	p.Analysis.Scope[0].Path = "lab/parser_test.go"
+	overlaps = p.DefinitionOverlaps()
+	if len(overlaps) != 1 || overlaps[0].Kind != "test-source" || p.ValidateForCoding() != nil {
+		t.Fatal("ordinary test edit blocked or not assessed", overlaps)
+	}
+	p.Analysis.Scope[0].Path = "lab/parser.go"
+	if len(p.DefinitionOverlaps()) != 0 {
+		t.Fatal("unaffected check reported")
+	}
+	p = reviewedRepairPlan()
+	if err := p.ValidateForCoding(); err != nil {
+		t.Fatal(err)
+	}
+	if p.Analysis.Checks[0].Category != "regression" || p.Evidence[0].SHA256 != strings.Repeat("e", 64) {
+		t.Fatal("repair discarded protected definition")
+	}
+	for _, mutate := range []func(*Plan){
+		func(p *Plan) { p.Analysis.Checks[1].Required = false },
+		func(p *Plan) { p.Analysis.Checks[1].IndependentProvenance = "" },
+		func(p *Plan) { p.Analysis.Checks[1].Category = "candidate" },
+		func(p *Plan) { p.Analysis.Checks[1].Argv = []string{"/bin/true"} },
+		func(p *Plan) { p.Analysis.Checks[1].Definitions = []string{"manifest"} },
+		func(p *Plan) { p.Analysis.Checks[0].Category = "candidate" },
+		func(p *Plan) { p.Analysis.Checks[0].ReviewedAcceptance = "missing" },
+	} {
+		p = reviewedRepairPlan()
+		mutate(&p)
+		if p.ValidateForCoding() == nil {
+			t.Fatal("unreviewed repair accepted")
+		}
+	}
+	a := reviewedRepairPlan().Analysis
+	raw, _ := json.Marshal(a)
+	if _, err := DecodeAnalysis(raw); err == nil {
+		t.Fatal("model supplied its own repair")
+	}
+}
+func TestOverlapNamesEveryCheckAndSetup(t *testing.T) {
+	p := fixture()
+	p.Analysis.Scope[0].Path = "lab/go.mod"
+	other := p.Analysis.Checks[0]
+	other.ID = "second"
+	p.Analysis.Checks = append(p.Analysis.Checks, other)
+	other.ID = "prepare"
+	other.Category = "setup"
+	p.Setup = []Check{other}
+	got := p.DefinitionOverlaps()
+	if len(got) != 1 || !reflect.DeepEqual(got[0].CheckIDs, []string{"regression", "second", "prepare"}) {
+		t.Fatalf("%+v", got)
+	}
+	if err := p.ValidateForCoding(); err == nil || !strings.Contains(err.Error(), "prepare") {
+		t.Fatal("overlapping setup not blocked", err)
+	}
+}
+
+func TestFrozenTestDefinitionHasBothAssessments(t *testing.T) {
+	p := fixture()
+	p.Evidence[0].Path = "lab/parser_test.go"
+	p.Analysis.Scope[0].Path = "lab/parser_test.go"
+	got := p.DefinitionOverlaps()
+	if len(got) != 2 || got[0].Kind != "definition" || got[1].Kind != "test-source" || p.Validate() != nil || p.ValidateForCoding() == nil {
+		t.Fatal("frozen test definition conflated with ordinary test edit", got)
 	}
 }
 
