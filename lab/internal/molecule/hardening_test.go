@@ -109,6 +109,102 @@ func TestCheckOnlyRejectsDriftAndUncertainCoding(t *testing.T) {
 	}
 }
 
+func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *testing.T) {
+	o, _ := fixture(t)
+	harness := filepath.Join(filepath.Dir(o.LabDir), "harness")
+	raw, err := os.ReadFile(harness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, []byte("\nprintf '%s' '{\"scripts\":{\"test\":\"true\"}}' > package.json\n")...)
+	if err = os.WriteFile(harness, raw, 0700); err != nil {
+		t.Fatal(err)
+	}
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		a, e := analyze(ctx, b, i, s)
+		a.Scope = append(a.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Edit frozen checker manifest", Evidence: a.Checks[0].Definitions})
+		a.Checks[0].Category = "regression"
+		return a, e
+	}
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := r.Readiness.Plans[0]
+	next := copyPlan(t, parent.Plan)
+	content := "exit 1\n"
+	input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human", Path: "acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content}
+	next.CheckInputs = []readiness.FileEvidence{input}
+	next.Evidence = append(next.Evidence, input.Evidence)
+	next.Analysis.Checks[0].ReviewedAcceptance = "human-check"
+	next.Analysis.Checks = append(next.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "human fixture review", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen external acceptance"})
+	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Join(r.Workspace.Path, "request.json")); !os.IsNotExist(err) {
+		t.Fatal("repair proposal executed coding")
+	}
+	o.Approve = parent.Digest
+	if _, err = Run(context.Background(), o); err == nil {
+		t.Fatal("stale approval accepted repair")
+	}
+	o.Approve = r.Readiness.Plans[1].Digest
+	r, err = Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Verification == nil || r.Verification.RequiredChecksPassed || r.Verification.Protected == nil || !r.Verification.Protected.RequiredChecksPassed {
+		t.Fatal("failed human acceptance lost distinct protected success")
+	}
+	tree := r.Capture.Tree
+	artifacts := artifactHash(*r.Capture)
+	trace, _ := os.ReadFile(filepath.Join(r.Workspace.Path, "request.json"))
+	historicalPlans, _ := json.Marshal(r.Readiness.Plans)
+	historicalEvents, _ := json.Marshal(r.Readiness.Events)
+	historicalAttempts, _ := json.Marshal(r.VerificationAttempts)
+	evidenceBefore, _, err := LearningVerificationEvidence(r, 4000000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent = r.Readiness.Plans[1]
+	next = copyPlan(t, parent.Plan)
+	next.Continuation = "checks-only"
+	next.CheckInputs[0].Content = "test \"$(cat code.txt)\" = changed\n"
+	next.CheckInputs[0].SHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte(next.CheckInputs[0].Content)))
+	next.Evidence[len(next.Evidence)-1] = next.CheckInputs[0].Evidence
+	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Capture.Tree != tree || artifactHash(*r.Capture) != artifacts {
+		t.Fatal("checks-only proposal changed source/artifacts")
+	}
+	plans, _ := json.Marshal(r.Readiness.Plans[:2])
+	events, _ := json.Marshal(r.Readiness.Events[:len(r.Readiness.Events)-1])
+	attempts, _ := json.Marshal(r.VerificationAttempts)
+	evidenceAfter, _, err := LearningVerificationEvidence(r, 4000000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(plans, historicalPlans) || !bytes.Equal(events, historicalEvents) || !bytes.Equal(attempts, historicalAttempts) || !reflect.DeepEqual(evidenceBefore, evidenceAfter) {
+		t.Fatal("repair rewrote immutable history")
+	}
+	o.Approve = r.Readiness.Plans[2].Digest
+	r, err = Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(filepath.Join(r.Workspace.Path, "request.json"))
+	if !bytes.Equal(trace, after) || r.Capture.Tree != tree || artifactHash(*r.Capture) != artifacts || len(r.HarnessAttempts) != 1 || len(r.VerificationAttempts) != 2 {
+		t.Fatal("repair replayed coding or lost source/history")
+	}
+	if r.Verification == nil || !r.Verification.RequiredChecksPassed || !r.Verification.IndependentAcceptanceVerified || r.Verification.Protected == nil || !r.Verification.Protected.RequiredChecksPassed {
+		t.Fatal("safe repaired continuation failed")
+	}
+}
+
 func TestVerificationEvidenceSurvivesAmendmentAndRejectsCorruption(t *testing.T) {
 	o, _ := fixture(t)
 	r, e := runApprovedFixture(t, o)

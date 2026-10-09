@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -228,6 +229,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		return stopIntake(r, err.Error())
 	}
 	r.Readiness = &state
+	for _, overlap := range p.DefinitionOverlaps() {
+		r.Notes = append(r.Notes, fmt.Sprintf("Scope/check overlap %s [%s] checks %s: %s", overlap.Path, overlap.Kind, strings.Join(overlap.CheckIDs, ", "), overlap.Detail))
+	}
 	atom(&r, 0, "done", a.Summary)
 	atom(&r, 1, "waiting", "Review exact scope, checks and process limits before approving the digest.")
 	return allocateRecord(ctx, o, r, allocateWorkspace, save)
@@ -343,6 +347,12 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	p := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan
+	if err = p.ValidateForCoding(); err != nil {
+		return r, err
+	}
+	if err = validateRepairHistory(r.Readiness.Plans); err != nil {
+		return r, err
+	}
 	if o.TargetBranch != "" && o.TargetBranch != p.Inputs.TargetBranch {
 		return r, fmt.Errorf("target branch changed")
 	}
@@ -636,4 +646,60 @@ func harnessOutcomeSummary(result process.Result, ref VerificationFile) string {
 		message = message[:512] + " (truncated; see evidence)"
 	}
 	return fmt.Sprintf("Harness failed: exit=%d elapsedMs=%d timeout=%t interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s).", result.Code, result.ElapsedMS, result.TimedOut, result.Interrupted, result.Overflow, result.Reconciled, message, ref.Path, ref.SHA256)
+}
+
+// An explicit checker repair cannot shed earlier protected gates or rebind their
+// baseline hashes. Historical plans are immutable; approval checks every link.
+func validateRepairHistory(plans []readiness.Proposal) error {
+	repair := false
+	for i := 1; i < len(plans); i++ {
+		previous, next := plans[i-1].Plan, plans[i].Plan
+		for _, p := range []readiness.Plan{previous, next} {
+			for _, c := range p.Analysis.Checks {
+				if c.ReviewedAcceptance != "" {
+					repair = true
+				}
+			}
+		}
+		if !repair {
+			continue
+		}
+		for _, old := range previous.Analysis.Checks {
+			if old.Category != "regression" || !old.Required {
+				continue
+			}
+			retained := false
+			for _, current := range next.Analysis.Checks {
+				if current.ID != old.ID {
+					continue
+				}
+				before, after := old, current
+				before.ReviewedAcceptance, after.ReviewedAcceptance = "", ""
+				if !reflect.DeepEqual(before, after) {
+					return fmt.Errorf("definition repair must retain exact protected gate %s", old.ID)
+				}
+				retained = true
+			}
+			if !retained {
+				return fmt.Errorf("definition repair removed protected gate %s", old.ID)
+			}
+			for _, id := range old.Definitions {
+				var before, after readiness.Evidence
+				for _, e := range previous.Evidence {
+					if e.ID == id {
+						before = e
+					}
+				}
+				for _, e := range next.Evidence {
+					if e.ID == id {
+						after = e
+					}
+				}
+				if before != after {
+					return fmt.Errorf("definition repair rebound protected definition %s", id)
+				}
+			}
+		}
+	}
+	return nil
 }

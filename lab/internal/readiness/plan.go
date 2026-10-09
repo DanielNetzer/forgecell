@@ -72,6 +72,9 @@ type Check struct {
 	// Only substantive separate review can supply independent provenance. Analysis
 	// output alone must not promote model-selected tests to independent acceptance.
 	IndependentProvenance string `json:"independentProvenance"`
+	// ReviewedAcceptance explicitly permits candidate execution of scoped checker
+	// edits. Frozen definitions remain required in the protected regression view.
+	ReviewedAcceptance string `json:"reviewedAcceptance,omitempty"`
 }
 type ArtifactRoot struct {
 	Path      string `json:"path"`
@@ -167,7 +170,7 @@ func DecodeAnalysis(raw []byte) (Analysis, error) {
 		return a, fmt.Errorf("analysis needs a bounded summary")
 	}
 	for _, c := range a.Checks {
-		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" {
+		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" || c.ReviewedAcceptance != "" {
 			return a, fmt.Errorf("analysis cannot assert independent acceptance review; retain as a candidate check for separate human review")
 		}
 	}
@@ -263,7 +266,12 @@ func (p Plan) Validate() error {
 	if len(p.Evidence) > 256 {
 		return fmt.Errorf("too many evidence references")
 	}
+	evidencePaths := map[string]bool{}
 	for _, e := range p.Evidence {
+		if evidencePaths[e.Path] {
+			return fmt.Errorf("ambiguous evidence path: %s", e.Path)
+		}
+		evidencePaths[e.Path] = true
 		if !identifier.MatchString(e.ID) || refs[e.ID] || !hex256.MatchString(e.SHA256) {
 			return fmt.Errorf("invalid or duplicate evidence identity: %s", e.ID)
 		}
@@ -271,6 +279,9 @@ func (p Plan) Validate() error {
 			return err
 		}
 		refs[e.ID] = true
+	}
+	if err := validateCheckInputs(p.CheckInputs); err != nil {
+		return err
 	}
 	if len(p.CheckInputs) > 32 {
 		return fmt.Errorf("too many reviewed check inputs")
@@ -323,6 +334,11 @@ func (p Plan) Validate() error {
 		paths[s.Path] = true
 		if err := cited(s.Evidence); err != nil {
 			return err
+		}
+	}
+	for _, input := range p.CheckInputs {
+		if paths[input.Path] {
+			return fmt.Errorf("reviewed check input overlaps source scope: %s", input.Path)
 		}
 	}
 	for _, c := range append(append([]Criterion{}, a.Acceptance...), a.Impacts...) {
@@ -390,6 +406,9 @@ func (p Plan) Validate() error {
 			}
 		}
 	}
+	if err := p.validateDefinitionRepairs(); err != nil {
+		return err
+	}
 	if !required {
 		return fmt.Errorf("at least one required check is necessary")
 	}
@@ -450,6 +469,155 @@ func (a ArtifactRoot) Limits() (int, int64, int, error) {
 		return 0, 0, 0, fmt.Errorf("artifact bounds must be positive and within v1 limits")
 	}
 	return files, bytes, depth, nil
+}
+
+// ConventionalTestPath is shared with the protected-tree builder. It identifies
+// preserved regression sources, never independently reviewed acceptance.
+func ConventionalTestPath(file string) bool {
+	lower := strings.ToLower(file)
+	base := path.Base(lower)
+	for _, part := range strings.Split(lower, "/") {
+		switch part {
+		case "test", "tests", "__tests__", "testdata", "fixtures", "spec", "specs":
+			return true
+		}
+	}
+	return strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, "_test.py") || strings.Contains(base, ".test.") || strings.Contains(base, ".spec.")
+}
+
+type DefinitionOverlap struct {
+	Path     string   `json:"path"`
+	CheckIDs []string `json:"checkIds"`
+	Kind     string   `json:"kind"`
+	Detail   string   `json:"detail"`
+}
+
+// DefinitionOverlaps is an assessment, separate from structural validity. Scope
+// is a proposed edit, not proof that frozen bytes have already changed.
+func (p Plan) DefinitionOverlaps() []DefinitionOverlap {
+	refs := map[string]string{}
+	for _, e := range p.Evidence {
+		refs[e.ID] = e.Path
+	}
+	byPath := map[string][]string{}
+	tests := []string{}
+	for _, c := range append(append([]Check{}, p.Analysis.Checks...), p.Setup...) {
+		for _, id := range c.Definitions {
+			byPath[refs[id]] = append(byPath[refs[id]], c.ID)
+		}
+		// Commands can invoke tests indirectly; conservatively report every check.
+		if c.Category != "setup" {
+			tests = append(tests, c.ID)
+		}
+	}
+	out := []DefinitionOverlap{}
+	for _, scoped := range p.Analysis.Scope {
+		definitions := byPath[scoped.Path]
+		if len(definitions) > 0 {
+			out = append(out, DefinitionOverlap{scoped.Path, definitions, "definition", "Frozen definition may change: candidate verification requires an explicit reviewedAcceptance repair tied to a required human-supplied frozen acceptance check; retain regression definitions and protected gates."})
+		}
+		if ConventionalTestPath(scoped.Path) && len(tests) > 0 {
+			out = append(out, DefinitionOverlap{scoped.Path, tests, "test-source", "Candidate-authored tests remain candidate evidence; regression checks also run with protected baseline test sources. This assessment does not block ordinary test edits."})
+		}
+	}
+	return out
+}
+
+func (p Plan) validateDefinitionRepairs() error {
+	inputs := map[string]bool{}
+	for _, input := range p.CheckInputs {
+		inputs[input.ID] = true
+	}
+	commands := append(append([]Check{}, p.Analysis.Checks...), p.Setup...)
+	overlaps := p.DefinitionOverlaps()
+	for _, c := range commands {
+		// Every input argument must cite the exact frozen evidence identity, via
+		// definitions or evidence. Supplying bytes establishes no review provenance.
+		for _, arg := range c.Argv {
+			if strings.HasPrefix(arg, "{input:") {
+				id := strings.TrimSuffix(strings.TrimPrefix(arg, "{input:"), "}")
+				if arg != "{input:"+id+"}" || !inputs[id] || (!containsID(c.Definitions, id) && !containsID(c.Evidence, id)) {
+					return fmt.Errorf("command %s has unbound reviewed input %s", c.ID, arg)
+				}
+			}
+		}
+		if c.ReviewedAcceptance == "" {
+			continue
+		}
+		if c.Category != "regression" {
+			return fmt.Errorf("definition repair %s must retain a protected regression check", c.ID)
+		}
+		overlap := false
+		for _, o := range overlaps {
+			if o.Kind == "definition" && containsID(o.CheckIDs, c.ID) {
+				overlap = true
+			}
+		}
+		if !overlap {
+			return fmt.Errorf("definition repair %s has no scoped definition overlap", c.ID)
+		}
+		found := false
+		for _, acceptance := range p.Analysis.Checks {
+			if acceptance.ID != c.ReviewedAcceptance {
+				continue
+			}
+			if acceptance.Category != "independent-acceptance" || !acceptance.Required || !textOK(acceptance.IndependentProvenance) || acceptance.ReviewedAcceptance != "" {
+				return fmt.Errorf("definition repair %s requires a separately reviewed required acceptance check", c.ID)
+			}
+			external := false
+			for _, id := range acceptance.Definitions {
+				if inputs[id] && containsID(acceptance.Argv, "{input:"+id+"}") {
+					external = true
+				}
+			}
+			if !external {
+				return fmt.Errorf("definition repair %s requires a frozen human acceptance input argument", c.ID)
+			}
+			for _, o := range overlaps {
+				if o.Kind == "definition" && containsID(o.CheckIDs, acceptance.ID) {
+					return fmt.Errorf("acceptance repair itself overlaps scoped source: %s", acceptance.ID)
+				}
+			}
+			found = true
+		}
+		if !found {
+			return fmt.Errorf("definition repair %s names missing acceptance check %s", c.ID, c.ReviewedAcceptance)
+		}
+	}
+	return nil
+}
+func containsID(ids []string, id string) bool {
+	for _, value := range ids {
+		if value == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateForCoding leaves overlapping proposals digestible and reviewable, but
+// prevents an exact approval from starting coding under unusable frozen checks.
+func (p Plan) ValidateForCoding() error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	blocked := []string{}
+	for _, o := range p.DefinitionOverlaps() {
+		if o.Kind != "definition" {
+			continue
+		}
+		for _, id := range o.CheckIDs {
+			for _, c := range append(append([]Check{}, p.Analysis.Checks...), p.Setup...) {
+				if c.ID == id && c.ReviewedAcceptance == "" {
+					blocked = append(blocked, fmt.Sprintf("%s (%s)", o.Path, id))
+				}
+			}
+		}
+	}
+	if len(blocked) > 0 {
+		return fmt.Errorf("frozen definition overlaps proposed scope: %s; review a scope/check amendment with separately frozen human acceptance input and reviewedAcceptance; retain protected regression gates", strings.Join(blocked, "; "))
+	}
+	return nil
 }
 
 func ValidateEvidenceRequests(requests []EvidenceRequest, evidence []Evidence) error {

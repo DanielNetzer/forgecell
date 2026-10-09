@@ -19,6 +19,10 @@ import (
 )
 
 func fixture(t *testing.T) Options {
+	return fixtureWithRepair(t, false)
+}
+
+func fixtureWithRepair(t *testing.T, repair bool) Options {
 	t.Helper()
 	root := t.TempDir()
 	git := func(args ...string) string {
@@ -46,6 +50,19 @@ func fixture(t *testing.T) Options {
 	r := molecule.Record{SchemaVersion: "v0", Kind: "molecule", ID: "mol-fixture", Status: "waiting", FormulaApproved: true, FinishedAt: "2026-09-29T00:00:00Z", Workspace: molecule.Workspace{SourceRoot: root, Path: workspace, Repo: "owner/repo", Branch: "forgecell/fixture", BaseCommit: sha}, Issue: molecule.Issue{Repo: "owner/repo", Number: 9}, Atoms: []molecule.Atom{{Type: "harness", Status: "done"}}}
 	os.WriteFile(filepath.Join(workspace, "a.txt"), []byte("after\n"), 0600)
 	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: "owner/repo", TargetBranch: "main", BaseCommit: sha, FormulaSHA256: strings.Repeat("a", 64), EvidenceSHA256: strings.Repeat("b", 64), BindingSHA256: strings.Repeat("c", 64), Issue: readiness.Issue{Repository: "owner/repo", Number: 9, Title: "Change a", URL: "https://github.com/owner/repo/issues/9", State: "OPEN"}}, Evidence: []readiness.Evidence{{ID: "source", Path: "a.txt", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("before\n")))}}, Analysis: readiness.Analysis{Summary: "Change a", Scope: []readiness.ScopedPath{{Path: "a.txt", Reason: "Requested change", Evidence: []string{"issue"}}}, Acceptance: []readiness.Criterion{{Description: "a contains after", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "acceptance", Category: "independent-acceptance", IndependentProvenance: "Explicit delivery test fixture", Argv: []string{"test", "ok"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"source"}, Reason: "Fixture", Evidence: []string{"issue"}}}}}
+	if repair {
+		input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human", Path: "acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("test -f a.txt\n")))}, Content: "test -f a.txt\n"}
+		p.CheckInputs = []readiness.FileEvidence{input}
+		p.Evidence = append(p.Evidence, input.Evidence)
+		p.Analysis.Checks = []readiness.Check{
+			{ID: "checker", Category: "regression", ReviewedAcceptance: "acceptance", Argv: []string{"/bin/sh", "-c", "test -f a.txt"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"source"}, Reason: "Retain frozen checker", Evidence: []string{"issue"}},
+			{ID: "acceptance", Category: "independent-acceptance", IndependentProvenance: "Separate human fixture review", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Reason: "External acceptance", Evidence: []string{"human"}},
+		}
+		p.Policy = readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}
+		if err := p.ValidateForCoding(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, e := readiness.NewState(p, "now")
 	if e != nil {
 		t.Fatal(e)
@@ -82,6 +99,13 @@ func fixture(t *testing.T) Options {
 	result.Stdout = ""
 	r.HarnessAttempts = []molecule.HarnessAttempt{{ID: "completed", PlanDigest: d, Result: result, Coding: &coding, Evidence: &ref, Capture: &c}}
 	r.Verification = &verification.Result{SourceTree: c.Tree, RequiredChecksPassed: true, IndependentAcceptanceVerified: true, Checks: []verification.Observation{{ID: "acceptance", Category: "independent-acceptance", SourceTree: c.Tree, Command: p.Analysis.Checks[0], Result: process.Result{OK: true}}}}
+	if repair {
+		v := verification.Run(context.Background(), workspace, filepath.Join(t.TempDir(), "verify"), p, c)
+		if !v.RequiredChecksPassed || !v.IndependentAcceptanceVerified || v.Protected == nil || v.Checks[0].Category != "candidate" {
+			t.Fatalf("repaired execution: %+v", v)
+		}
+		r.Verification = &v
+	}
 	raw, _ := json.Marshal(r)
 	os.MkdirAll(filepath.Join(lab, "ledgers"), 0700)
 	os.WriteFile(filepath.Join(lab, "ledgers", r.ID+".json"), raw, 0600)
@@ -136,6 +160,55 @@ func TestPreviewRejectsOutsideScopeAndDestinations(t *testing.T) {
 			}
 			if _, err := Preview(context.Background(), o); err == nil {
 				t.Fatal("unsafe preview accepted")
+			}
+		})
+	}
+}
+
+func TestPreviewReviewedRepairRequiresExactEvidence(t *testing.T) {
+	for _, kind := range []string{"valid", "command", "tree", "category", "acceptance-reference", "protected-command", "protected-tree", "protected-category", "protected-acceptance"} {
+		t.Run(kind, func(t *testing.T) {
+			o := fixtureWithRepair(t, true)
+			file := filepath.Join(o.LabDir, "ledgers", o.MoleculeID+".json")
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var r molecule.Record
+			if err := json.Unmarshal(raw, &r); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "command":
+				r.Verification.Checks[0].Command.Argv = []string{"true"}
+			case "tree":
+				r.Verification.Checks[0].SourceTree = r.Workspace.BaseCommit
+			case "category":
+				r.Verification.Checks[0].Category = "independent-acceptance"
+			case "acceptance-reference":
+				r.Verification.Checks[0].Command.ReviewedAcceptance = "other"
+			case "protected-command":
+				r.Verification.Protected.Checks[0].Command.Argv = []string{"true"}
+			case "protected-tree":
+				r.Verification.Protected.Checks[0].SourceTree = r.Verification.SourceTree
+			case "protected-category":
+				r.Verification.Protected.Checks[0].Category = "candidate"
+			case "protected-acceptance":
+				r.Verification.Protected.Checks[0].Command.ReviewedAcceptance = "other"
+			}
+			raw, err = json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = Preview(context.Background(), o)
+			if kind == "valid" && err != nil {
+				t.Fatal(err)
+			}
+			if kind != "valid" && err == nil {
+				t.Fatal("altered evidence accepted")
 			}
 		})
 	}

@@ -5,24 +5,12 @@ import (
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 )
 
 // V1 protects conventional test suites plus every explicitly cited checker.
 // This is a preserved regression view, not independent behavioral acceptance.
-func regressionPath(file string) bool {
-	lower := strings.ToLower(file)
-	base := path.Base(lower)
-	for _, part := range strings.Split(lower, "/") {
-		switch part {
-		case "test", "tests", "__tests__", "testdata", "fixtures", "spec", "specs":
-			return true
-		}
-	}
-	return strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, "_test.py") || strings.Contains(base, ".test.") || strings.Contains(base, ".spec.")
-}
 
 func ProtectedTree(ctx context.Context, source string, p readiness.Plan, candidate string) (string, error) {
 	protected := map[string]bool{}
@@ -43,7 +31,7 @@ func ProtectedTree(ctx context.Context, source string, p readiness.Plan, candida
 	}
 	files := []string{}
 	for _, file := range paths(changed) {
-		if protected[file] || regressionPath(file) {
+		if protected[file] || readiness.ConventionalTestPath(file) {
 			files = append(files, file)
 		}
 	}
@@ -112,6 +100,9 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 	regression := []readiness.Check{}
 	for _, check := range p.Analysis.Checks {
 		if check.Category == "regression" {
+			// Repair authorizes only the candidate view. Protected definitions
+			// always retain their original hashes and regression provenance.
+			check.ReviewedAcceptance = ""
 			regression = append(regression, check)
 		}
 	}
