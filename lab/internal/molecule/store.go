@@ -44,6 +44,39 @@ func atomicWrite(file string, data []byte) error {
 	defer d.Close()
 	return d.Sync()
 }
+func known(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+func renderAtomProvenance(b *strings.Builder, p *AtomProvenance) {
+	if p == nil {
+		p = &AtomProvenance{}
+	}
+	fmt.Fprintf(b, "\nDeclared source: %s\nDeclared binding: %s\nDeclared workflows: %s\nDeclared purpose: %s\nPlanned action: %s\nExecution: %s\n", known(p.DeclaredSource), known(p.DeclaredBinding), known(strings.Join(p.DeclaredWorkflows, ", ")), known(p.DeclaredPurpose), known(p.PlannedAction), known(p.Execution))
+	if p.SkipReason != "" {
+		fmt.Fprintf(b, "Skip reason: %s\n", p.SkipReason)
+	}
+	if len(p.Actions) == 0 {
+		fmt.Fprintln(b, "Resolved source: unknown\nObserved action/result: unknown\nExternal action/result: unknown\nEvidence references: unknown")
+	}
+	for _, a := range p.Actions {
+		fmt.Fprintf(b, "\nAttempt: %s; plan: %s\nResolved source: %s\nPlanned action: %s\n", known(a.AttemptID), known(a.PlanDigest), known(a.ResolvedSource), known(a.PlannedAction))
+		if a.Observed == nil {
+			fmt.Fprintln(b, "Observed action/result: unknown\nExternal action/result: unknown\nEvidence references: unknown")
+			continue
+		}
+		obs := a.Observed
+		fmt.Fprintf(b, "Observed action/result: %s / %s\nExternal action/result: %s / %s\n", known(obs.Action), known(obs.Result), known(obs.ExternalAction), known(obs.ExternalResult))
+		if len(obs.Evidence) == 0 {
+			fmt.Fprintln(b, "Evidence references: unknown")
+		}
+		for _, ref := range obs.Evidence {
+			fmt.Fprintf(b, "Evidence reference: pointer %s; file %s; SHA-256 %s\n", known(ref.Pointer), known(ref.Path), known(ref.SHA256))
+		}
+	}
+}
 func save(r Record) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
@@ -76,6 +109,7 @@ func save(r Record) error {
 	}
 	for _, a := range r.Atoms {
 		fmt.Fprintf(&b, "\n### %s (%s) — %s\n\n%s\n", a.ID, a.Type, a.Status, a.Detail)
+		renderAtomProvenance(&b, a.Provenance)
 	}
 	if r.Analysis != nil {
 		fmt.Fprintf(&b, "\n## Intake assessment\n\n%s\n", r.Analysis.Summary)

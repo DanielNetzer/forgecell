@@ -1,14 +1,17 @@
 package molecule
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
@@ -544,5 +547,322 @@ func TestClarificationRevisionsRetainEvidenceWithoutCheckout(t *testing.T) {
 	}
 	if prepared != 1 {
 		t.Fatal("preparation did not wait for approval")
+	}
+}
+
+func TestHistoricalAtomProvenanceStaysUnknown(t *testing.T) {
+	r := Record{LabDir: t.TempDir(), ID: "mol-history", Atoms: []Atom{{ID: "old", Type: "ship", Status: "done", Detail: "legacy detail"}}}
+	if err := save(r); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(r.LabDir, "ledgers", r.ID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "provenance") {
+		t.Fatal("historical provenance inferred")
+	}
+	md, err := os.ReadFile(filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"Declared source: unknown", "Resolved source: unknown", "Planned action: unknown", "Observed action/result: unknown", "External action/result: unknown"} {
+		if !strings.Contains(string(md), label) {
+			t.Fatalf("missing %q", label)
+		}
+	}
+}
+
+func TestAtomProvenanceSeparatesIntentAndObservedExecution(t *testing.T) {
+	o, _ := fixture(t)
+	file := filepath.Join(o.LabDir, "formulas", "sample.yaml")
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe := strings.ReplaceAll(string(raw), "id: harness, type: harness", "id: coding-custom, type: harness, source: declared-context, binding: declared-binding, workflows: [declared-workflow]")
+	if err = os.WriteFile(file, []byte(recipe), 0600); err != nil {
+		t.Fatal(err)
+	}
+	approveFixture(t, o.LabDir, recipe, "provenance")
+	reader := o.ReadIssue
+	o.ReadIssue = func(ctx context.Context, repo string, n int64, dir string) (Issue, error) {
+		entries, e := os.ReadDir(filepath.Join(o.LabDir, "ledgers"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			data, e := os.ReadFile(filepath.Join(o.LabDir, "ledgers", entry.Name()))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var saved Record
+			if e = json.Unmarshal(data, &saved); e != nil {
+				t.Fatal(e)
+			}
+			if saved.Readiness == nil {
+				a := saved.Atoms[0].Provenance.Actions
+				if len(a) != 1 || a[0].Observed != nil || a[0].ResolvedSource != "supplied-issue-reader" {
+					t.Fatal("reader intent not persisted")
+				}
+			}
+		}
+		return reader(ctx, repo, n, dir)
+	}
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		entries, e := os.ReadDir(filepath.Join(o.LabDir, "ledgers"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			data, e := os.ReadFile(filepath.Join(o.LabDir, "ledgers", entry.Name()))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var saved Record
+			if e = json.Unmarshal(data, &saved); e != nil {
+				t.Fatal(e)
+			}
+			actions := saved.Atoms[0].Provenance.Actions
+			if len(actions) != 2 || actions[1].PlannedAction != "analyze-ticket" || actions[1].Observed != nil {
+				t.Fatal("analysis intent not persisted")
+			}
+		}
+		a, err := analyze(ctx, b, i, s)
+		// The checker observes the ledger while executing, before its own result
+		// can be recorded. This fails if verification intent persistence is removed.
+		a.Checks[0].Argv[2] = fmt.Sprintf("grep -q '\"resolvedSource\": \"lab-independent-verification\"' %q/ledgers/*.json && ", o.LabDir) + a.Checks[0].Argv[2]
+		return a, err
+	}
+	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
+	body, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := fmt.Sprintf("grep -q '\"resolvedSource\": \"bound-harness:custom\"' %q/ledgers/*.json || exit 23\n", o.LabDir)
+	if err = os.WriteFile(script, []byte(strings.Replace(string(body), "cat > request.json", guard+"cat > request.json", 1)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	r, err := runApprovedFixture(t, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding := r.Atoms[2]
+	p := coding.Provenance
+	if coding.ID != "coding-custom" || p.DeclaredSource != "declared-context" || p.DeclaredBinding != "declared-binding" || !reflect.DeepEqual(p.DeclaredWorkflows, []string{"declared-workflow"}) {
+		t.Fatalf("declarations lost: %+v", p)
+	}
+	actions := p.Actions
+	if len(actions) != 1 || actions[0].AttemptID != r.HarnessAttempts[0].ID || actions[0].ResolvedSource != "bound-harness:custom" || actions[0].Observed == nil || actions[0].Observed.Result != "process-succeeded" || actions[0].Observed.ExternalAction != "" || actions[0].Observed.ExternalResult != "" || len(actions[0].Observed.Evidence) != 2 {
+		t.Fatalf("incorrect provenance: %+v", actions)
+	}
+	for _, a := range r.Atoms[5:] {
+		if a.Provenance.Execution != "skipped" || a.Provenance.SkipReason == "" || len(a.Provenance.Actions) != 0 {
+			t.Fatal("missing explicit skip")
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(o.LabDir, "ledgers", r.ID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored Record
+	if err = json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(r.Atoms, restored.Atoms) {
+		t.Fatal("atom round trip changed")
+	}
+}
+func TestAnalysisFailureRetainsIntentWithoutClaimingExternalAction(t *testing.T) {
+	o, _ := fixture(t)
+	o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		return readiness.Analysis{}, fmt.Errorf("synthetic failure")
+	}
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := r.Atoms[0].Provenance.Actions[1]
+	if a.AttemptID != "analysis-1" || a.Observed == nil || a.Observed.Result != "analysis-failed" || a.Observed.ExternalResult != "" {
+		t.Fatalf("failure provenance: %+v", a)
+	}
+}
+func TestInterruptedAnalysisRetainsUnknownObservation(t *testing.T) {
+	o, _ := fixture(t)
+	o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		panic("interrupted")
+	}
+	func() {
+		defer func() {
+			if recover() != "interrupted" {
+				t.Fatal("expected interruption")
+			}
+		}()
+		_, _ = Run(context.Background(), o)
+	}()
+	entries, err := os.ReadDir(filepath.Join(o.LabDir, "ledgers"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(o.LabDir, "ledgers", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r Record
+		if err = json.Unmarshal(raw, &r); err != nil {
+			t.Fatal(err)
+		}
+		actions := r.Atoms[0].Provenance.Actions
+		if len(actions) != 2 || actions[1].Observed != nil || actions[1].AttemptID != "analysis-1" || r.AnalysisAttempts[0].Status != "started" {
+			t.Fatal("interrupted observation inferred")
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("missing ledger")
+	}
+}
+func TestFailedProcessProvenanceSurvivesRecoveryAndAmendment(t *testing.T) {
+	o, _ := fixture(t)
+	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	r, err := runApprovedFixture(t, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := json.Marshal(r.Atoms[2].Provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := r.Atoms[2].Provenance.Actions[0]
+	if action.AttemptID != r.HarnessAttempts[0].ID || action.Observed == nil || action.Observed.Result != "process-failed" || action.Observed.ExternalAction != "" {
+		t.Fatal("failure lost")
+	}
+	parent := r.Readiness.Plans[0]
+	r, err = Recover(context.Background(), o.LabDir, r.ID, parent.Digest, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, _ := json.Marshal(r.Atoms[2].Provenance)
+	if !bytes.Equal(original, recovered) {
+		t.Fatal("recovery rewrote provenance")
+	}
+	next := copyPlan(t, parent.Plan)
+	next.Analysis.Summary = "Reviewed failed local attempt"
+	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	amended, _ := json.Marshal(r.Atoms[2].Provenance)
+	if !bytes.Equal(original, amended) {
+		t.Fatal("amendment rewrote provenance")
+	}
+}
+func TestChecksOnlyRetainsOriginalCodingActionIdentity(t *testing.T) {
+	o, _ := fixture(t)
+	r, err := runApprovedFixture(t, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := json.Marshal(r.Atoms[2].Provenance)
+	parent := r.Readiness.Plans[0]
+	next := copyPlan(t, parent.Plan)
+	next.Continuation = "checks-only"
+	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Approve = r.Readiness.Plans[1].Digest
+	r, err = Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := json.Marshal(r.Atoms[2].Provenance)
+	if !bytes.Equal(original, after) || len(r.HarnessAttempts) != 1 {
+		t.Fatal("checks-only reassigned coding")
+	}
+	actions := r.Atoms[3].Provenance.Actions
+	if len(actions) != 2 || actions[0].AttemptID == actions[1].AttemptID || actions[0].PlanDigest == actions[1].PlanDigest || len(actions[0].Observed.Evidence) == 0 || len(actions[1].Observed.Evidence) == 0 {
+		t.Fatal("verification attempts not separated")
+	}
+}
+func TestInterruptedHarnessRetainsProcessObservation(t *testing.T) {
+	o, _ := fixture(t)
+	signal := filepath.Join(t.TempDir(), "started")
+	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nsleep 10\n", signal)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Approve = r.Readiness.Plans[0].Digest
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := os.Stat(signal); err == nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	r, err = Run(ctx, o)
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := r.Atoms[2].Provenance.Actions[0]
+	if !r.HarnessAttempts[0].Result.Interrupted || action.Observed == nil || action.Observed.Result != "process-interrupted" || action.AttemptID != r.HarnessAttempts[0].ID || len(action.Observed.Evidence) != 2 || action.Observed.ExternalResult != "" {
+		t.Fatal("interruption lost")
+	}
+}
+func TestVerificationFailureRetainsIndependentEvidence(t *testing.T) {
+	o, _ := fixture(t)
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		a, err := analyze(ctx, b, i, s)
+		a.Checks[0].Argv = []string{"/bin/sh", "-c", "exit 9"}
+		return a, err
+	}
+	r, err := runApprovedFixture(t, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := r.Atoms[3].Provenance.Actions
+	if len(actions) != 1 || actions[0].Observed == nil || actions[0].Observed.Result != "checks-failed" || len(actions[0].Observed.Evidence) == 0 || actions[0].PlanDigest != r.VerificationAttempts[0].PlanDigest {
+		t.Fatal("verification failure lost")
+	}
+	for _, a := range r.Atoms[5:] {
+		if a.Provenance.Execution != "skipped" {
+			t.Fatal("failed checks claimed publication")
+		}
+	}
+	if err := ValidateVerificationHistory(r); err != nil {
+		t.Fatal(err)
 	}
 }

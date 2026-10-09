@@ -33,10 +33,71 @@ func bindingHash(b formula.Binding) (string, error) {
 func issueInput(i Issue) readiness.Issue {
 	return readiness.Issue{Repository: i.Repo, Number: i.Number, URL: i.URL, State: i.State, Title: i.Title, Body: i.Body, UpdatedAt: i.UpdatedAt}
 }
+
+// Lookup uses approved identity and never fills historical absence.
+func atomProvenance(r *Record, id string) *AtomProvenance {
+	for i := range r.Atoms {
+		if r.Atoms[i].ID == id {
+			return r.Atoms[i].Provenance
+		}
+	}
+	return nil
+}
+func startAtomAction(r *Record, id, attempt, digest, source, action string) {
+	if p := atomProvenance(r, id); p != nil {
+		p.Actions = append(p.Actions, AtomAction{AttemptID: attempt, PlanDigest: digest, ResolvedSource: source, PlannedAction: action, StartedAt: stamp()})
+		p.Execution = "started"
+		p.SkipReason = ""
+	}
+}
+func observeAtomAction(r *Record, id, attempt, action, result string, evidence ...ProvenanceEvidence) {
+	if p := atomProvenance(r, id); p != nil {
+		for i := range p.Actions {
+			a := &p.Actions[i]
+			if a.AttemptID == attempt {
+				a.Observed = &AtomObservation{Action: action, Result: result, FinishedAt: stamp(), Evidence: evidence}
+				p.Execution = "observed"
+				return
+			}
+		}
+	}
+}
+func fileProvenance(ref VerificationFile) ProvenanceEvidence {
+	return ProvenanceEvidence{Path: ref.Path, SHA256: ref.SHA256}
+}
+func plannedAtomAction(a formula.Atom) string {
+	switch a.Type {
+	case "intake":
+		return "read-and-analyze-ticket"
+	case "gate":
+		return "await-" + a.Purpose + "-approval"
+	case "harness":
+		return "invoke-coding-harness"
+	case "check":
+		return "run-approved-checks"
+	case "ship":
+		return "separate-approved-publication"
+	case "document":
+		return "separate-approved-documentation"
+	case "learn":
+		return "separate-approved-learning"
+	}
+	return ""
+}
 func atom(r *Record, index int, status, detail string) {
 	a := &r.Atoms[index]
 	a.Status = status
 	a.Detail = detail
+	if status == "skipped" && a.Provenance != nil {
+		a.Provenance.Execution = "skipped"
+		if len(a.Provenance.Actions) > 0 {
+			a.Provenance.Execution = "stopped"
+		}
+		a.Provenance.SkipReason = "Execution stopped before this action."
+		if a.Type == "ship" || a.Type == "document" || a.Type == "learn" {
+			a.Provenance.SkipReason = "Requires a separate approved action."
+		}
+	}
 	if a.StartedAt == "" {
 		a.StartedAt = stamp()
 	}
@@ -99,8 +160,13 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		return r, err
 	}
 	for _, a := range f.Atoms {
-		r.Atoms = append(r.Atoms, Atom{ID: a.ID, Type: a.Type, Status: "pending", Detail: "Not started"})
+		r.Atoms = append(r.Atoms, Atom{ID: a.ID, Type: a.Type, Status: "pending", Detail: "Not started", Provenance: &AtomProvenance{DeclaredSource: a.Source, DeclaredBinding: a.Binding, DeclaredWorkflows: append([]string(nil), a.Workflows...), DeclaredPurpose: a.Purpose, PlannedAction: plannedAtomAction(a)}})
 	}
+	intakeSource := "github-issues"
+	if o.ReadIssue != nil {
+		intakeSource = "supplied-issue-reader"
+	}
+	startAtomAction(&r, f.Atoms[0].ID, "intake", "", intakeSource, "read-ticket")
 	if err = save(r); err != nil {
 		return r, err
 	}
@@ -110,12 +176,15 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	}
 	issue, err := reader(ctx, w.Repo, ref.Number, w.SourceRoot)
 	if err != nil {
+		observeAtomAction(&r, f.Atoms[0].ID, "intake", "read-ticket", "read-failed")
 		return stopIntake(r, err.Error())
 	}
 	if issue.Number != ref.Number || issue.Repo != w.Repo || issue.URL != fmt.Sprintf("https://github.com/%s/issues/%d", w.Repo, ref.Number) || issue.State != "OPEN" {
+		observeAtomAction(&r, f.Atoms[0].ID, "intake", "read-ticket", "response-rejected")
 		return stopIntake(r, "Issue is closed or does not match the requested repository and number.")
 	}
 	r.Issue = issue
+	observeAtomAction(&r, f.Atoms[0].ID, "intake", "read-ticket", "read-completed", ProvenanceEvidence{Pointer: "/issue"})
 	snapshot, err := readiness.CollectForTicket(ctx, w.SourceRoot, w.BaseCommit, issue.Title+"\n"+issue.Body)
 	if err != nil {
 		return stopIntake(r, err.Error())
@@ -157,6 +226,12 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		}
 		r.RepositoryEvidence = &snapshot
 		r.AnalysisAttempts = append(r.AnalysisAttempts, AnalysisAttempt{Ordinal: ordinal, SnapshotSHA256: digest, StartedAt: stamp(), Status: "started"})
+		analysisID := fmt.Sprintf("analysis-%d", ordinal)
+		analysisSource := "bound-harness:" + f.Harness.Binding
+		if o.Analyze != nil {
+			analysisSource = "supplied-analysis-function"
+		}
+		startAtomAction(&r, f.Atoms[0].ID, analysisID, "", analysisSource, "analyze-ticket")
 		if err = save(r); err != nil {
 			return r, err
 		}
@@ -172,6 +247,11 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			attempt.Response = &response
 			r.Analysis = &a
 		}
+		analysisResult := "analysis-completed"
+		if err != nil {
+			analysisResult = "analysis-failed"
+		}
+		observeAtomAction(&r, f.Atoms[0].ID, analysisID, "analyze-ticket", analysisResult, ProvenanceEvidence{Pointer: fmt.Sprintf("/analysisAttempts/%d", len(r.AnalysisAttempts)-1)})
 		if e = save(r); e != nil {
 			return r, e
 		}
@@ -443,6 +523,8 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	r.Readiness = &state
+	startAtomAction(&r, f.Atoms[1].ID, "scope-"+o.Approve, o.Approve, "readiness-approval", "record-exact-scope-approval")
+	observeAtomAction(&r, f.Atoms[1].ID, "scope-"+o.Approve, "record-exact-scope-approval", "approved", ProvenanceEvidence{Pointer: "/readiness/events"})
 	atom(&r, 1, "done", "Exact readiness plan approved; no publication authorized.")
 	if p.Continuation == "" {
 		atom(&r, 2, "active", "Coding approved scope")
@@ -473,6 +555,7 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve})
+	startAtomAction(&r, f.Atoms[2].ID, attemptID, o.Approve, "bound-harness:"+f.Harness.Binding, "invoke-coding-harness")
 	if err = save(r); err != nil {
 		return r, err
 	}
@@ -494,6 +577,16 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	a.Result = result
 	a.Result.Stdout, a.Result.Stderr, a.Result.RawStdout = "", "", ""
 	a.Evidence = &ref
+	processOutcome := "process-failed"
+	if result.OK {
+		processOutcome = "process-succeeded"
+	}
+	if result.Interrupted {
+		processOutcome = "process-interrupted"
+	} else if result.TimedOut {
+		processOutcome = "process-timed-out"
+	}
+	observeAtomAction(&r, f.Atoms[2].ID, attemptID, "invoke-coding-harness", processOutcome, fileProvenance(ref))
 	if err = save(r); err != nil {
 		return r, err
 	}
@@ -511,6 +604,14 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	a.CaptureEvidence = append(a.CaptureEvidence, captureRef)
+	if provenance := atomProvenance(&r, f.Atoms[2].ID); provenance != nil {
+		for i := range provenance.Actions {
+			action := &provenance.Actions[i]
+			if action.AttemptID == attemptID && action.Observed != nil {
+				action.Observed.Evidence = append(action.Observed.Evidence, fileProvenance(captureRef))
+			}
+		}
+	}
 	a.Capture = &capture
 	r.Capture = &capture
 	r.Captures = append(r.Captures, capture)
@@ -582,15 +683,42 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	if err := beginVerification(&r, p, capture.Tree); err != nil {
 		return r, err
 	}
+	checkID := r.Atoms[3].ID
+	attemptID := fmt.Sprintf("verification-%d", len(r.VerificationAttempts))
+	digest := r.VerificationAttempts[len(r.VerificationAttempts)-1].PlanDigest
+	startAtomAction(&r, checkID, attemptID, digest, "lab-independent-verification", "run-approved-checks")
 	atom(&r, 3, "active", "Running approved checks in a fresh checkout")
 	if err := save(r); err != nil {
 		return r, err
 	}
 	destination := filepath.Join(o.LabDir, "verification", fmt.Sprintf("%s-r%d", r.ID, p.Revision))
-	verified := verification.RunObserved(ctx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error { return recordObservation(&r, obs) })
+	verified := verification.RunObserved(ctx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error {
+		if err := recordObservation(&r, obs); err != nil {
+			return err
+		}
+		refs := []ProvenanceEvidence{}
+		for _, ref := range r.VerificationAttempts[len(r.VerificationAttempts)-1].Observations {
+			refs = append(refs, fileProvenance(ref))
+		}
+		observeAtomAction(&r, checkID, attemptID, "observe-verification", "partial-observations", refs...)
+		return save(r)
+	})
 	if err := completeVerification(&r, verified); err != nil {
 		return r, err
 	}
+	attempt := r.VerificationAttempts[len(r.VerificationAttempts)-1]
+	refs := []ProvenanceEvidence{}
+	for _, ref := range attempt.Observations {
+		refs = append(refs, fileProvenance(ref))
+	}
+	if attempt.Result != nil {
+		refs = append(refs, fileProvenance(*attempt.Result))
+	}
+	outcome := "checks-failed"
+	if verified.RequiredChecksPassed {
+		outcome = "required-checks-passed"
+	}
+	observeAtomAction(&r, checkID, attemptID, "run-approved-checks", outcome, refs...)
 	projection := compactVerification(verified)
 	r.Verification = &projection
 	state, err := r.Readiness.RecordVerification(verified.RequiredChecksPassed, verified.Error, stamp())

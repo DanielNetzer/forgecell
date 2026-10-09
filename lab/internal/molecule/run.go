@@ -39,15 +39,52 @@ type Snapshot struct {
 	YAML   string `json:"yaml"`
 	SHA256 string `json:"sha256"`
 }
+
+// AtomProvenance keeps declarations separate from observations. Empty fields
+// mean unknown; a successful process does not establish an external outcome.
+type AtomProvenance struct {
+	DeclaredSource    string       `json:"declaredSource,omitempty"`
+	DeclaredBinding   string       `json:"declaredBinding,omitempty"`
+	DeclaredWorkflows []string     `json:"declaredWorkflows,omitempty"`
+	DeclaredPurpose   string       `json:"declaredPurpose,omitempty"`
+	PlannedAction     string       `json:"plannedAction,omitempty"`
+	Execution         string       `json:"execution,omitempty"`
+	SkipReason        string       `json:"skipReason,omitempty"`
+	Actions           []AtomAction `json:"actions,omitempty"`
+}
+type AtomAction struct {
+	AttemptID      string           `json:"attemptId"`
+	PlanDigest     string           `json:"planDigest,omitempty"`
+	ResolvedSource string           `json:"resolvedSource,omitempty"`
+	PlannedAction  string           `json:"plannedAction"`
+	StartedAt      string           `json:"startedAt"`
+	Observed       *AtomObservation `json:"observed,omitempty"`
+}
+type AtomObservation struct {
+	Action         string               `json:"action"`
+	Result         string               `json:"result"`
+	FinishedAt     string               `json:"finishedAt"`
+	Evidence       []ProvenanceEvidence `json:"evidence,omitempty"`
+	ExternalAction string               `json:"externalAction,omitempty"`
+	ExternalResult string               `json:"externalResult,omitempty"`
+}
+
+// Evidence references ledger data or immutable files, never process streams.
+type ProvenanceEvidence struct {
+	Pointer string `json:"pointer,omitempty"`
+	Path    string `json:"path,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
+}
 type Atom struct {
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	Status     string `json:"status"`
-	Detail     string `json:"detail"`
-	StartedAt  string `json:"startedAt,omitempty"`
-	FinishedAt string `json:"finishedAt,omitempty"`
-	ExitCode   *int   `json:"exitCode,omitempty"`
-	ElapsedMS  int64  `json:"elapsedMs,omitempty"`
+	Provenance *AtomProvenance `json:"provenance,omitempty"`
+	ID         string          `json:"id"`
+	Type       string          `json:"type"`
+	Status     string          `json:"status"`
+	Detail     string          `json:"detail"`
+	StartedAt  string          `json:"startedAt,omitempty"`
+	FinishedAt string          `json:"finishedAt,omitempty"`
+	ExitCode   *int            `json:"exitCode,omitempty"`
+	ElapsedMS  int64           `json:"elapsedMs,omitempty"`
 }
 type HarnessAttempt struct {
 	Coding          *harness.CodingOutcome      `json:"coding,omitempty"`

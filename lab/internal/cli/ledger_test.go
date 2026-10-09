@@ -20,6 +20,8 @@ func TestLedgerInspectionBoundaries(t *testing.T) {
 		wantError string
 	}{
 		{name: "extensions", raw: valid},
+		{name: "historical atom", raw: strings.Replace(valid, `"extra":"preserve"`, `"atoms":[{"id":"old","type":"ship","status":"done"}]`, 1)},
+		{name: "atom provenance", raw: strings.Replace(valid, `"extra":"preserve"`, `"atoms":[{"id":"custom","provenance":{"declaredSource":"recipe","actions":[{"attemptId":"a1","resolvedSource":"bound-harness:custom","plannedAction":"invoke-coding-harness","observed":{"action":"invoke-coding-harness","result":"process-succeeded","evidence":[{"path":"result.json","sha256":"hash"}],"extension":true}}]}}]`, 1)},
 		{name: "below limit", raw: valid, size: 4_999_999},
 		{name: "inclusive limit", raw: valid, size: 5_000_000},
 		{name: "over limit", raw: valid, size: 5_000_001, wantError: "exceeds"},
