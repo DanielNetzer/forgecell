@@ -33,7 +33,7 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--meta-harness ID | --meta-command JSON_ARGV] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -320,6 +320,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		preferred := flags.String("harness", "", "Explicit default harness")
 		metaHarness := flags.String("meta-harness", "", "Explicit separate native meta binding")
 		metaArgv := flags.String("meta-command", "", "BYO meta argv as JSON; containment unknown")
+		timeoutMS := flags.Int("harness-timeout-ms", 0, "Reviewed coding attempt budget in ms (default 900000)")
+		maxTimeoutMS := flags.Int("max-timeout-ms", 0, "Ceiling for reviewed per-Molecule timeouts in ms (default 3600000)")
 		review := flags.String("review", "", "Inspect exact saved proposal without activation")
 		approve := flags.String("approve", "", "Approve exact saved proposal")
 		dismiss := flags.String("dismiss", "", "Dismiss exact saved proposal")
@@ -423,7 +425,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		for _, key := range []string{"CODEX_THREAD_ID", "CLAUDECODE", "CURSOR_AGENT", "TERM_PROGRAM"} {
 			env[key] = os.Getenv(key)
 		}
-		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand})
+		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand, HarnessTimeoutMS: *timeoutMS, MaxTimeoutMS: *maxTimeoutMS})
 		if err != nil {
 			return fail(err)
 		}
