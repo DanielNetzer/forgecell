@@ -32,7 +32,7 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\n--version\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\n--version\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -51,6 +51,12 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		jsonMode := flags.Bool("json", false, "Structured review output")
 		approve := flags.Bool("approve", false, "Apply this exact saved Formula suggestion")
 		dismiss := flags.Bool("dismiss", false, "Dismiss this suggestion")
+		linkEvaluation := flags.String("link-evaluation", "", "Link local evaluation evidence without activating a Formula")
+		baselineLedger := flags.String("baseline-ledger", "", "Manual comparison baseline Molecule")
+		candidateLedger := flags.String("candidate-ledger", "", "Manual comparison candidate Molecule")
+		basis := flags.String("comparability-basis", "", "Human assertion of manual comparability and uncertainty")
+		var parents []string
+		flags.Func("evaluation-parent", "Recheck parent directory, nearest first; repeat for a bounded chain", func(dir string) error { parents = append(parents, dir); return nil })
 		ids := []string{}
 		i := 1
 		for i < len(args) && !strings.HasPrefix(args[i], "-") {
@@ -62,6 +68,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		if flags.NArg() != 0 || len(ids) == 0 || (*approve && *dismiss) {
 			return fail(fmt.Errorf("provide Molecule ids before flags, or one suggestion id and one decision"))
+		}
+		linking := *linkEvaluation != "" || *baselineLedger != "" || *candidateLedger != "" || *basis != "" || len(parents) != 0
+		if linking && (args[0] != "suggestion" || *approve || *dismiss || (*linkEvaluation == "" && len(parents) != 0)) {
+			return fail(fmt.Errorf("evidence linkage requires suggestion and cannot be combined with an approval or dismissal; parents require an evaluation"))
 		}
 		var p learning.Suggestion
 		var err error
@@ -78,7 +88,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if len(ids) != 1 {
 				return fail(fmt.Errorf("suggestion requires one id"))
 			}
-			if *approve || *dismiss {
+			if linking {
+				p, err = learning.LinkComparison(*lab, ids[0], learning.LinkOptions{Evaluation: *linkEvaluation, Parents: parents, Baseline: *baselineLedger, Candidate: *candidateLedger, Basis: *basis})
+			} else if *approve || *dismiss {
 				decision := "dismiss"
 				if *approve {
 					decision = "approve"
@@ -99,6 +111,43 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			summary = "Legacy suggestion: inspect reasoning and exact YAML before deciding."
 		}
 		fmt.Fprintf(out, "Formula suggestion %s · %s\nFormula: %s · Meta harness\n\nProcess change: %s\nEvidence: %s\nReasoning: %s\nExpected impact (not verified): %s\nEvaluate on a comparable run: %s\n\n%s\n", p.ID, p.Status, p.FormulaID, summary, strings.Join(p.MoleculeIDs, ", "), p.Rationale, p.ExpectedImpact, p.Evaluation, p.Diff)
+
+		fmt.Fprintf(out, "Baseline Formula SHA-256: %s\nCandidate Formula SHA-256: %s\nComparison: %s\nIntervention: %s\n", p.OriginalHash, p.ProposedHash, p.Comparison.Status, p.Comparison.Support)
+		if p.Comparison.Reason != "" {
+			fmt.Fprintf(out, "Comparison limitation: %s\n", p.Comparison.Reason)
+		}
+		for _, m := range p.MotivatingEvidence {
+			fmt.Fprintf(out, "Motivating Molecule %s · ledger SHA-256 %s\n", m.MoleculeID, m.SHA256)
+		}
+		for _, outcome := range p.EvidenceOutcomes {
+			fmt.Fprintf(out, "Motivating outcome %s: %s (independent acceptance: %t)\n", outcome.MoleculeID, outcome.Outcome, outcome.IndependentAcceptance)
+		}
+		for _, link := range p.Comparison.Links {
+			fmt.Fprintf(out, "Evidence link %s · %s · %s\n%s\n", link.ID, link.Kind, link.Status, link.Reason)
+			if link.Basis != "" {
+				fmt.Fprintf(out, "Human comparability basis: %s\nDifferences: %s\n", link.Basis, strings.Join(link.Differences, "; "))
+			}
+			if link.Evaluation != nil {
+				details, _ := json.MarshalIndent(struct {
+					Plan    *evaluation.Plan    `json:"frozenPlan"`
+					Reports []evaluation.Report `json:"reports"`
+				}{link.Evaluation.Plan, link.Evaluation.Reports}, "", "  ")
+				fmt.Fprintf(out, "Frozen inputs and recorded observations:\n%s\n", details)
+				for _, limitation := range link.Evaluation.Limitations {
+					fmt.Fprintln(out, limitation)
+				}
+			}
+			for i, r := range link.Ledgers {
+				details, _ := json.MarshalIndent(r, "", "  ")
+				fmt.Fprintf(out, "Manual %s ledger (exact task/check and verification history):\n%s\n", []string{"baseline", "candidate"}[i], details)
+			}
+			for _, outcome := range link.Outcomes {
+				fmt.Fprintf(out, "Manual outcome %s: %s (independent acceptance: %t)\n", outcome.MoleculeID, outcome.Outcome, outcome.IndependentAcceptance)
+			}
+		}
+		for _, limitation := range p.Comparison.Limitations {
+			fmt.Fprintln(out, limitation)
+		}
 
 		if p.ProposedReady {
 			fmt.Fprintln(out, "Proposed Formula readiness: ready")

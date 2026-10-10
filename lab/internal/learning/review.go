@@ -15,6 +15,8 @@ import (
 )
 
 type Suggestion struct {
+	MotivatingEvidence []MotivatingEvidence `json:"motivatingEvidence,omitempty"`
+	Comparison         Comparison           `json:"comparison"`
 	// Readiness is recomputed from exact proposed bytes under current rules.
 	ProposedReady    bool              `json:"proposedReady"`
 	ReadinessError   string            `json:"readinessError,omitempty"`
@@ -73,15 +75,41 @@ func write(file string, data []byte) error {
 	defer d.Close()
 	return d.Sync()
 }
-func save(dir string, p Suggestion) error {
+func suggestionBytes(p Suggestion) ([]byte, error) {
 	if !validID.MatchString(p.ID) {
-		return fmt.Errorf("invalid suggestion id")
+		return nil, fmt.Errorf("invalid suggestion id")
 	}
+	// Comparison is a read-time view of append-only records, never part of the mutable review record.
+	p.Comparison = Comparison{}
 	b, e := json.MarshalIndent(p, "", "  ")
 	if e != nil {
-		return e
+		return nil, e
 	}
-	return write(filepath.Join(dir, "suggestions", p.ID+".json"), append(b, '\n'))
+	if len(b)+1 > 8_000_000 {
+		return nil, fmt.Errorf("suggestion exceeds bounded record limit")
+	}
+	return append(b, '\n'), nil
+}
+
+// Reserve the largest future review fields before persisting a pending record
+// or beginning activation. Recovery must remain writable within the read bound.
+func reserveReview(p Suggestion) error {
+	p.Status = "dismissed"
+	p.ApplyingAt = "9999-12-31T23:59:59.999999999Z"
+	p.ReviewedAt = p.ApplyingAt
+	p.ConfigBefore = strings.Repeat("f", 64)
+	_, err := suggestionBytes(p)
+	return err
+}
+func save(dir string, p Suggestion) error {
+	if err := reserveReview(p); err != nil {
+		return err
+	}
+	b, err := suggestionBytes(p)
+	if err != nil {
+		return err
+	}
+	return write(filepath.Join(dir, "suggestions", p.ID+".json"), b)
 }
 func bounded(file string) ([]byte, error) {
 	info, e := os.Lstat(file)
@@ -119,6 +147,7 @@ func Read(dir, id string) (Suggestion, error) {
 	if e != nil {
 		return p, e
 	}
+	p.Comparison = inspectComparisons(dir, p)
 	return p, nil
 }
 func (p *Suggestion) assessReadiness() {
@@ -147,6 +176,10 @@ func Review(dir, id, decision string) (Suggestion, error) {
 	defer os.Remove(lock)
 	p, e := Read(dir, id)
 	if e != nil {
+		return p, e
+	}
+
+	if e = reserveReview(p); e != nil {
 		return p, e
 	}
 

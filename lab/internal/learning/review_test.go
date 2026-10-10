@@ -1,6 +1,7 @@
 package learning
 
 import (
+	"encoding/json"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"os"
 	"path/filepath"
@@ -335,5 +336,81 @@ func TestSuggestionReadinessVariants(t *testing.T) {
 		if _, e = Review(d, p.ID, "approve"); e == nil {
 			t.Fatal("invalid activated")
 		}
+	}
+}
+
+func TestComparisonViewDoesNotChangeApprovalOrPersistDerivedEvidence(t *testing.T) {
+	d, p := manualFixture(t)
+	if _, err := LinkComparison(d, p.ID, LinkOptions{Baseline: "mol-before", Candidate: "mol-after", Basis: "Related stopped tasks; no causality claimed"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Review(d, p.ID, "approve")
+	if err != nil || got.Status != "approved" {
+		t.Fatalf("approval: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(d, "suggestions", p.ID+".json"))
+	var saved Suggestion
+	if json.Unmarshal(raw, &saved) != nil || len(saved.Comparison.Links) != 0 {
+		t.Fatal("derived comparisons copied into mutable review record")
+	}
+	got, err = Read(d, p.ID)
+	if err != nil || got.Comparison.Status != "manual" {
+		t.Fatalf("approval invalidated historical link: %s %v", got.Comparison.Status, err)
+	}
+	current, _ := os.ReadFile(filepath.Join(d, "formulas/default.yaml"))
+	if string(current) != p.ProposedYAML {
+		t.Fatal("human approval did not preserve exact bytes")
+	}
+}
+
+func TestNearLimitReviewRefusesBeforeActivation(t *testing.T) {
+	d, p := fixture(t)
+	p.Diff = ""
+	p.Rationale = ""
+	raw, _ := json.MarshalIndent(p, "", "  ")
+	p.Rationale = strings.Repeat("x", 8_000_000-len(raw)-2)
+	raw, _ = json.MarshalIndent(p, "", "  ")
+	if len(raw)+1 > 8_000_000 {
+		t.Fatal("fixture exceeds read limit")
+	}
+	if err := os.WriteFile(filepath.Join(d, "suggestions", p.ID+".json"), append(raw, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(d, "formulas/default.yaml"))
+	if _, err := Review(d, p.ID, "approve"); err == nil {
+		t.Fatal("near-limit approval accepted")
+	}
+	a := formula.Approval{FormulaID: p.FormulaID, SHA256: p.ProposedHash, DecisionID: p.ID, SourceKind: "learning-suggestion", SourceID: p.ID}
+	started, err := formula.ActivationStarted(d, a)
+	if err != nil || started {
+		t.Fatalf("activation stranded: %v %v", started, err)
+	}
+	after, _ := os.ReadFile(filepath.Join(d, "formulas/default.yaml"))
+	if string(before) != string(after) {
+		t.Fatal("Formula changed")
+	}
+}
+
+func TestReservedNearLimitRecordRecoversActivation(t *testing.T) {
+	d, p := fixture(t)
+	p.Rationale = strings.Repeat("x", 7_990_000)
+	if err := save(d, p); err != nil {
+		t.Fatal(err)
+	}
+	p.ConfigBefore, _ = formula.FileHash(filepath.Join(d, "lab.json"))
+	a := formula.Approval{FormulaID: p.FormulaID, SHA256: p.ProposedHash, DecisionID: p.ID, SourceKind: "learning-suggestion", SourceID: p.ID}
+	if err := formula.BeginActivation(d, p.ProposedYAML, a, p.ConfigBefore, p.OriginalHash); err != nil {
+		t.Fatal(err)
+	}
+	p.ApplyingAt = stamp()
+	if err := save(d, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Review(d, p.ID, "approve")
+	if err != nil || got.Status != "approved" {
+		t.Fatalf("recovery: %v", err)
+	}
+	if _, err := Read(d, p.ID); err != nil {
+		t.Fatal(err)
 	}
 }

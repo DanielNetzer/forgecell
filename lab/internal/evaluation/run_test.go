@@ -3,6 +3,7 @@ package evaluation
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"os"
@@ -219,4 +220,173 @@ func approveEvaluation(t *testing.T, o *RunOptions) {
 		t.Fatal(e)
 	}
 	o.Approve = ActivationDigest(raw, pair, source, output)
+}
+
+func TestEvidenceInspectionValidatesFrozenObservationsAndRecheckChain(t *testing.T) {
+	o, repo := evaluationFixture(t)
+	approveEvaluation(t, &o)
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := ReadEvidence(o.Output, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Status != "comparable" || len(evidence.Reports) != 1 {
+		t.Fatalf("%s %s", evidence.Status, evidence.Reason)
+	}
+	before, _ := os.ReadFile(filepath.Join(o.Output, "report.json"))
+	for _, scenario := range []string{"check", "issue", "formula", "tree", "observation", "role", "correct-only", "frozen-readiness", "activation", "unreconciled", "uncertain", "preflight"} {
+		t.Run(scenario, func(t *testing.T) {
+			var modified Report
+			json.Unmarshal(before, &modified)
+			switch scenario {
+			case "preflight":
+				modified.Attempts[0].Preflight[0].Result.Code = 0
+			case "unreconciled":
+				modified.Attempts[0].Checks[0].Result.Reconciled = false
+				modified.Attempts[0].Verification.Checks = modified.Attempts[0].Checks
+			case "uncertain":
+				modified.Attempts[0].Checks[0].Result.Uncertainty = "descendants unknown"
+				modified.Attempts[0].Verification.Checks = modified.Attempts[0].Checks
+			case "check":
+				modified.Attempts[0].Checks[0].Command.Argv = []string{"true"}
+			case "issue":
+				modified.Attempts[0].Molecule.Issue.Body = "different"
+			case "formula":
+				modified.Attempts[0].Molecule.FormulaSnapshot.YAML += "# changed"
+			case "tree":
+				modified.Attempts[0].Verification.SourceTree = strings.Repeat("a", 40)
+			case "observation":
+				modified.Attempts[0].Verification.Checks[0].Result.OK = false
+			case "role":
+				modified.Attempts[0].Variant = "candidate"
+			case "frozen-readiness":
+				modified.Attempts[0].Molecule.Readiness.Plans[0].Plan.CheckInputs[0].Content = "changed"
+			case "activation":
+				modified.ActivationDigest = strings.Repeat("a", 64)
+			case "correct-only":
+				modified.Attempts[0].Checks = nil
+				modified.Attempts[0].Verification.Checks = nil
+			}
+			b, _ := json.Marshal(modified)
+			os.WriteFile(filepath.Join(o.Output, "report.json"), b, 0600)
+			got, e := ReadEvidence(o.Output, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if got.Status == "comparable" {
+				t.Fatalf("tampered %s accepted: %s %s", scenario, got.Status, got.Reason)
+			}
+		})
+	}
+	os.WriteFile(filepath.Join(o.Output, "report.json"), before, 0600)
+	out := o.Output + "-recheck"
+	if _, err = Recheck(context.Background(), repo, o.Output, out, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadEvidence(out, []string{o.Output})
+	if err != nil || got.Status != "comparable" || len(got.Reports) != 2 {
+		t.Fatalf("%s %s %v", got.Status, got.Reason, err)
+	}
+	got, err = ReadEvidence(out, nil)
+	if err != nil || got.Status != "incomplete" {
+		t.Fatalf("missing parent: %+v %v", got, err)
+	}
+	after, _ := os.ReadFile(filepath.Join(o.Output, "report.json"))
+	if string(after) != string(before) {
+		t.Fatal("inspection changed evidence")
+	}
+	_ = r
+}
+
+func TestEvidenceBoundsAndAncestorSymlinks(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	os.MkdirAll(filepath.Join(real, "nested"), 0700)
+	os.WriteFile(filepath.Join(real, "nested", "file"), []byte("evidence"), 0600)
+	if raw, err := ReadLocal(real, "nested/file"); err != nil || string(raw) != "evidence" {
+		t.Fatalf("normal read failed: %s %v", raw, err)
+	}
+	alias := filepath.Join(root, "alias")
+	os.Symlink(real, alias)
+	if _, err := ReadLocal(filepath.Join(alias, "nested"), "file"); err == nil {
+		t.Fatal("ancestor symlink accepted")
+	}
+	if _, err := ReadLocal(real, "../escape"); err == nil {
+		t.Fatal("path escape accepted")
+	}
+	for _, scenario := range []string{"file", "total", "references", "depth"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := Snapshot{Files: map[string][]byte{}}
+			switch scenario {
+			case "file":
+				s.Files["large"] = make([]byte, EvidenceFileLimit+1)
+			case "total":
+				for i := 0; i < 4; i++ {
+					s.Files[fmt.Sprint(i)] = make([]byte, EvidenceFileLimit)
+				}
+			case "references":
+				for i := 0; i <= EvidenceReferenceLimit; i++ {
+					s.Files[fmt.Sprint(i)] = nil
+				}
+			case "depth":
+				s.Files[strings.Repeat("directory/", EvidenceDepthLimit)+"file"] = nil
+			}
+			if ValidateSnapshots([]Snapshot{s}) == nil {
+				t.Fatal("budget accepted")
+			}
+		})
+	}
+}
+
+func TestEvidenceStandardSystemAliases(t *testing.T) {
+	for _, alias := range []string{"/tmp", "/var"} {
+		target, err := os.Readlink(alias)
+		if err != nil || target != "private"+alias {
+			continue
+		}
+		t.Run(alias, func(t *testing.T) {
+			base := "/private/tmp"
+			if alias == "/var" {
+				base, err = filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.HasPrefix(base, "/private/var/") {
+					t.Skip("temporary directory does not use the /var system alias")
+				}
+			}
+			root, err := os.MkdirTemp(base, "forgecell-evidence-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(root)
+			if err := os.WriteFile(filepath.Join(root, "file"), []byte("evidence"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{root, strings.TrimPrefix(root, "/private")} {
+				raw, err := ReadLocal(path, "file")
+				if err != nil || string(raw) != "evidence" {
+					t.Fatalf("supported root %s: %s %v", path, raw, err)
+				}
+			}
+			if _, err := ReadLocal(alias, "file"); err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("symlink root accepted: %v", err)
+			}
+			link := filepath.Join(root, "linked")
+			if err := os.Symlink(root, link); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{link, strings.TrimPrefix(link, "/private")} {
+				if _, err := ReadLocal(path, "file"); err == nil {
+					t.Fatal("arbitrary root symlink accepted")
+				}
+			}
+			if _, err := ReadLocal(root, "linked/file"); err == nil {
+				t.Fatal("descendant symlink accepted")
+			}
+		})
+	}
 }
