@@ -7,7 +7,6 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"path"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -62,12 +61,11 @@ func ReadRepository(ctx context.Context, cwd string, runner Runner) (Repository,
 	if err != nil {
 		return repo, err
 	}
-	pattern := regexp.MustCompile(`(?i)^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([a-z0-9_.-]+/[a-z0-9_.-]+?)/?$`)
-	m := pattern.FindStringSubmatch(origin)
-	if m == nil {
+	identity, ok := GitHubRepoFromRemote(origin)
+	if !ok {
 		return repo, fmt.Errorf("origin must identify a GitHub repository")
 	}
-	repo.Repo = strings.TrimSuffix(m[1], ".git")
+	repo.Repo = identity
 	raw, err := call("gh", "repo", "view", repo.Repo, "--json", "nameWithOwner,defaultBranchRef")
 	if err != nil {
 		return repo, err
