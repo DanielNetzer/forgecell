@@ -86,3 +86,42 @@ func TestCIReferenceExtensionsRoundTrip(t *testing.T) {
 		t.Fatal("CI references changed during ledger round trip")
 	}
 }
+
+func TestIssueQueueHistoricalProjection(t *testing.T) {
+	for _, raw := range []string{
+		`{"schemaVersion":"v0","kind":"molecule","id":"old","formulaId":"f","status":"future","extra":{"retain":true}}`,
+		`{"schemaVersion":"v0","kind":"molecule","id":"old","formulaId":"f","status":"waiting","issue":{"repo":"o/r","number":1},"startedAt":"bad","readiness":{"phase":"new-phase"}}`,
+	} {
+		l, err := Decode([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := l.QueueProjection()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Status == "future" && (p.Issue.Number != 0 || p.Readiness != nil) {
+			t.Fatal(p)
+		}
+		if l.Status == "waiting" && (p.StartedAt != "bad" || p.Readiness.Phase != "new-phase") {
+			t.Fatal(p)
+		}
+		encoded, err := l.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var before, after any
+		json.Unmarshal([]byte(raw), &before)
+		json.Unmarshal(encoded, &after)
+		if !reflect.DeepEqual(before, after) {
+			t.Fatal("projection mutated evidence")
+		}
+	}
+	l, err := Decode([]byte(`{"schemaVersion":"v0","kind":"molecule","id":"old","formulaId":"f","status":"waiting","issue":{"number":"bad"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = l.QueueProjection(); err == nil {
+		t.Fatal("malformed projection")
+	}
+}
