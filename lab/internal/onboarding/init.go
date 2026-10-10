@@ -15,8 +15,11 @@ type InitOptions struct {
 	Env                              map[string]string
 	Candidates                       []Candidate
 	Runner                           Runner
+	MetaHarness                      string
+	MetaCommand                      []string
 }
 type Outcome struct {
+	Meta       *MetaReport    `json:"metaBinding"`
 	Binding    *BindingReport `json:"bindingCapabilities,omitempty"`
 	Status     string         `json:"status"`
 	Repository Repository     `json:"repository"`
@@ -28,6 +31,19 @@ type Outcome struct {
 }
 
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
+	if o.MetaHarness != "" && o.MetaCommand != nil {
+		return out, fmt.Errorf("choose meta-harness or meta-command")
+	}
+	if o.MetaCommand != nil {
+		if len(o.MetaCommand) == 0 {
+			return out, fmt.Errorf("meta-command must be non-empty")
+		}
+		for _, arg := range o.MetaCommand {
+			if strings.TrimSpace(arg) == "" || strings.ContainsRune(arg, 0) {
+				return out, fmt.Errorf("invalid meta-command argument")
+			}
+		}
+	}
 	out.Repository, err = ReadRepository(ctx, o.Cwd, o.Runner)
 	if err != nil {
 		return out, err
@@ -40,6 +56,43 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, fmt.Errorf("approved Formula belongs to another repository; use a separate Lab")
 	}
 
+	meta := InspectMeta(ctx, active.Formula, out.Repository.Root, o.Runner)
+	out.Meta = &meta
+	if pending, e := pendingProposal(o.LabDir); e != nil {
+		return out, e
+	} else if pending != nil {
+		f, e := formula.Parse([]byte(pending.YAML))
+		if e != nil {
+			return out, e
+		}
+		if f.Intake.Repo != "" && !strings.EqualFold(f.Intake.Repo, out.Repository.Repo) {
+			return out, fmt.Errorf("pending Formula belongs to another repository; use a separate Lab")
+		}
+		out.Status = "pending"
+		out.Proposal = pending
+		out.Binding = pending.CapabilityEvidence
+		if out.Binding != nil && out.Binding.Meta != nil {
+			out.Meta = out.Binding.Meta
+			out.BeforeYAML = out.Meta.BeforeYAML
+		} else {
+			// Historical proposals carry no current capability observations.
+			report := DescribeMeta(nil, "", 0, Candidate{})
+			for _, atom := range f.Atoms {
+				if atom.Type == "learn" {
+					report = DescribeMeta(atom.Command, atom.Binding, atom.TimeoutMS, Candidate{})
+					break
+				}
+			}
+			out.Meta = &report
+		}
+		out.Note = "Preserved pending proposal. Review or dismiss before proposing another binding; no model invoked. Stale approval remains refused."
+		if incomplete, e := ProposalActivationIncomplete(o.LabDir, *pending); e != nil {
+			return out, e
+		} else if incomplete {
+			out.Note = "Preserved interrupted activation; resume its exact saved approval; no model invoked."
+		}
+		return out, nil
+	}
 	if active.Formula.ID != "" {
 		approved, e := formula.Load(o.LabDir, "")
 		if e != nil || !approved.Approved {
@@ -69,13 +122,16 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		existing = active.Formula.Harness.Binding
 	}
 	out.Selection = Select(out.Candidates, o.Preferred, existing, o.Env)
-	if active.Approved && o.Preferred == "" {
+	if active.Approved && o.Preferred == "" && (o.MetaHarness == "" && o.MetaCommand == nil || LearnBound(active.Formula)) {
 		checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 		out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
 		out.Status = "unchanged"
 		out.BeforeYAML = active.Formula.YAML
 		out.Note = "Preserved existing approved Formula and exact command bindings. Explicitly choose --harness to propose a rebind."
 		return out, nil
+	}
+	if active.Approved && o.Preferred == "" {
+		out.Selection = Selection{ID: existing, Status: "ready", Reason: "Preserving coding binding; explicit meta opt-in."}
 	}
 	out.Status = out.Selection.Status
 	if out.Status != "ready" {
@@ -88,7 +144,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			selected = c
 		}
 	}
-	if selected.Executable == "" || o.Launcher == "" {
+	if (!active.Approved || o.Preferred != "") && (selected.Executable == "" || o.Launcher == "") {
 		return out, fmt.Errorf("verified harness executable and Forgecell launcher are required")
 	}
 	command := []string{o.Launcher, "__adapter", selected.ID, selected.Executable}
@@ -102,11 +158,16 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if !ok {
 			return out, fmt.Errorf("existing harness is not a mapping")
 		}
-		binding["binding"] = selected.ID
-		binding["command"] = command
+		if o.Preferred != "" {
+			binding["binding"] = selected.ID
+			binding["command"] = command
+		} else {
+			command = active.Formula.Harness.Command
+			selected = ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
+		}
 		if atoms, ok := recipe["atoms"].([]any); ok {
 			for _, value := range atoms {
-				if atom, ok := value.(map[string]any); ok && atom["type"] == "harness" {
+				if atom, ok := value.(map[string]any); ok && atom["type"] == "harness" && o.Preferred != "" {
 					atom["binding"] = selected.ID
 				}
 			}
@@ -116,6 +177,56 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		name := strings.ToLower(strings.Split(out.Repository.Repo, "/")[1]) + "-github-issue"
 		recipe = map[string]any{"schemaVersion": "v0", "kind": "formula", "id": name, "name": out.Repository.Repo + " issue workflow", "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "bootstrap-assay", "intake": map[string]any{"source": "github-issues", "repo": out.Repository.Repo}, "harness": map[string]any{"binding": selected.ID, "command": command, "invoke": "byo", "timeoutMs": 900000}, "lab": map[string]any{"dir": o.LabDir, "observe": false}, "repositoryContext": out.Repository.Compact(), "atoms": []map[string]any{{"id": "intake", "type": "intake", "source": "github-issues"}, {"id": "scope", "type": "gate", "purpose": "scope", "mode": "human"}, {"id": "harness", "type": "harness", "binding": selected.ID}, {"id": "check", "type": "check", "workflows": out.Repository.Workflows}, {"id": "gate", "type": "gate", "purpose": "review", "mode": "human"}, {"id": "ship", "type": "ship", "via": "github"}, {"id": "document", "type": "document", "target": "github-issue"}}}
 		out.Note = "Bootstrap Assay is read-only. Proposed checks are evidence, not executed commands. Approving binds the coding harness; runs still stop at human review."
+	}
+	if o.MetaHarness != "" || o.MetaCommand != nil {
+		if LearnBound(active.Formula) {
+			return out, fmt.Errorf("existing learn binding preserved; review an explicit Formula change")
+		}
+		before := out.BeforeYAML
+		if before == "" {
+			b, e := yaml.Marshal(recipe)
+			if e != nil {
+				return out, e
+			}
+			before = string(b)
+		}
+		command := o.MetaCommand
+		binding := "byo"
+		candidate := Candidate{}
+		if o.MetaHarness != "" {
+			binding = o.MetaHarness
+			for _, c := range out.Candidates {
+				if c.ID == binding {
+					candidate = c
+				}
+			}
+			if candidate.Readiness != "ready" || candidate.Capabilities.Meta.State != "supported" || candidate.Executable == "" || o.Launcher == "" {
+				r := DescribeMeta(nil, binding, 900000, candidate)
+				out.Meta = &r
+				out.Status = "meta-unavailable"
+				out.Note = "Meta capability unavailable or unknown. Resolve observations or explicitly configure --meta-command JSON_ARGV; BYO containment remains unknown. No proposal saved."
+				return out, nil
+			}
+			command = []string{o.Launcher, "__adapter", binding, candidate.Executable}
+		}
+		r := DescribeMeta(command, binding, 900000, candidate)
+		r.BeforeYAML = before
+		out.Meta = &r
+		b, e := yaml.Marshal(recipe["atoms"])
+		if e != nil {
+			return out, e
+		}
+		var atoms []any
+		if e = yaml.Unmarshal(b, &atoms); e != nil {
+			return out, e
+		}
+		for _, v := range atoms {
+			if a, ok := v.(map[string]any); ok && a["type"] == "learn" {
+				return out, fmt.Errorf("existing learn Atom preserved; review its configuration explicitly")
+			}
+		}
+		recipe["atoms"] = append(atoms, map[string]any{"id": "learn", "type": "learn", "binding": binding, "command": command, "timeoutMs": 900000})
+		out.Note = "Explicit opt-in proposes a separate meta binding. Activation invokes no model. Later learn saves a pending suggestion; Formula mutation requires separate human approval."
 	}
 	encoded, err := yaml.Marshal(recipe)
 	if err != nil {
@@ -142,6 +253,13 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		}
 	}
 	out.Binding = &BindingReport{Command: command, Candidate: selected, Workflow: selected.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
+	if o.MetaHarness != "" || o.MetaCommand != nil || LearnBound(active.Formula) {
+		out.Binding.Meta = out.Meta
+		out.Binding.LearnBound = true
+		if out.BeforeYAML != "" {
+			out.Meta.BeforeYAML = out.BeforeYAML
+		}
+	}
 	p, err := saveWithEvidence(o.LabDir, string(encoded), evidence, out.Binding)
 	if err != nil {
 		return out, err

@@ -22,6 +22,7 @@ type BindingReport struct {
 	Command    []string           `json:"command"`
 	Candidate  Candidate          `json:"candidate"`
 	LearnBound bool               `json:"learnBound"`
+	Meta       *MetaReport        `json:"meta,omitempty"`
 }
 type Proposal struct {
 	CapabilityVersion  string         `json:"capabilityVersion,omitempty"`
@@ -193,12 +194,18 @@ func saveWithEvidence(dir, yaml string, evidence *Repository, reports ...*Bindin
 	}
 	if len(reports) > 0 && reports[0] != nil {
 		p.CapabilityVersion = "v1"
+		if reports[0].Meta != nil {
+			p.CapabilityVersion = "v2"
+		}
 		p.CapabilityEvidence = reports[0]
 		p.CapabilityEvidence.Candidate = p.CapabilityEvidence.Candidate.CompleteUnknowns()
 		p.CapabilityEvidence.Workflow = p.CapabilityEvidence.Candidate.WorkflowCapability()
 		if !reflect.DeepEqual(p.CapabilityEvidence.Command, f.Harness.Command) || p.CapabilityEvidence.Candidate.ID != f.Harness.Binding {
 			return Proposal{}, fmt.Errorf("capability binding mismatch")
 		}
+	}
+	if err := validateMetaReport(f, p); err != nil {
+		return Proposal{}, err
 	}
 	p.ID = proposalID(p)
 	if err = safeParents(dir, "assays/"+p.ID+".json", true); err != nil {
@@ -383,9 +390,13 @@ func InspectProposal(dir, id string) (p Proposal, err error) {
 	}
 	if p.CapabilityVersion != "" || p.CapabilityEvidence != nil {
 		f, e := formula.Parse([]byte(p.YAML))
-		if e != nil || p.CapabilityVersion != "v1" || p.CapabilityEvidence == nil || !reflect.DeepEqual(p.CapabilityEvidence.Command, f.Harness.Command) || p.CapabilityEvidence.Candidate.ID != f.Harness.Binding {
+		if e != nil || (p.CapabilityVersion != "v1" && p.CapabilityVersion != "v2") || p.CapabilityEvidence == nil || !reflect.DeepEqual(p.CapabilityEvidence.Command, f.Harness.Command) || p.CapabilityEvidence.Candidate.ID != f.Harness.Binding {
 			return p, fmt.Errorf("invalid saved capability binding")
 		}
+	}
+	f, _ := formula.Parse([]byte(p.YAML))
+	if err = validateMetaReport(f, p); err != nil {
+		return p, err
 	}
 	if p.Version == "" && p.EvidencePath == "" && p.EvidenceHash == "" {
 		return p, nil
@@ -473,4 +484,75 @@ func ProposalActivationIncomplete(dir string, p Proposal) (bool, error) {
 		return false, err
 	}
 	return !progress.Complete, nil
+}
+
+func validateMetaReport(f formula.Formula, p Proposal) error {
+	if p.CapabilityVersion == "v2" && (p.CapabilityEvidence == nil || p.CapabilityEvidence.Meta == nil) {
+		return fmt.Errorf("missing saved meta evidence")
+	}
+	if p.CapabilityEvidence == nil || p.CapabilityEvidence.Meta == nil {
+		return nil
+	}
+	if p.CapabilityVersion != "v2" {
+		return fmt.Errorf("invalid meta capability version")
+	}
+	r := p.CapabilityEvidence.Meta
+	count := 0
+	for _, a := range f.Atoms {
+		if a.Type == "learn" {
+			count++
+			if !reflect.DeepEqual(a.Command, r.Command) || a.Binding != r.Binding || a.TimeoutMS != r.TimeoutMS || len(a.Command) == 0 || a.TimeoutMS < 0 || a.TimeoutMS > 3600000 {
+				return fmt.Errorf("meta capability binding mismatch")
+			}
+		}
+	}
+	if count != 1 {
+		return fmt.Errorf("meta evidence requires one learn Atom")
+	}
+	if r.BeforeYAML != "" {
+		if _, err := formula.Parse([]byte(r.BeforeYAML)); err != nil {
+			return err
+		}
+		if p.ActiveHashBefore != "" && hash([]byte(r.BeforeYAML)) != p.ActiveHashBefore {
+			return fmt.Errorf("original YAML mismatch")
+		}
+	}
+	return nil
+}
+
+func pendingProposal(dir string) (*Proposal, error) {
+	entries, err := os.ReadDir(filepath.Join(dir, "assays"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var pending, recovery *Proposal
+	for _, entry := range entries {
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if !regexp.MustCompile(`^assay-[a-f0-9]{64}$`).MatchString(id) {
+			continue
+		}
+		p, err := InspectProposal(dir, id)
+		if err != nil {
+			return nil, err
+		}
+		incomplete, err := ProposalActivationIncomplete(dir, p)
+		if err != nil {
+			return nil, err
+		}
+		if incomplete {
+			saved := p
+			recovery = &saved
+		}
+		if p.Status == "pending" && pending == nil {
+			saved := p
+			pending = &saved
+		}
+	}
+	if recovery != nil {
+		return recovery, nil
+	}
+	return pending, nil
 }

@@ -92,9 +92,45 @@ expected impact and a comparable-run evaluation plan. Approval is a separate hum
 decision and does not establish that the change improved anything.
 
 The Go onboarding proposal does not silently configure a meta harness. An explicit
-`learn` Atom command is required. Native adapters retain their provider-specific
-read-only meta restrictions; arbitrary custom commands retain the permissions of the
-local process that invokes them. A prompt alone is not a sandbox.
+`learn` Atom command is required. Current-source functionality offers proposal-only
+opt-in; these flags are not included in published v0.2.0-preview.2:
+
+```sh
+forgecell init --meta-harness codex --json
+# Or a BYO argv array; capability and containment remain unknown:
+forgecell init --meta-command '["/absolute/meta-command","arg"]' --json
+forgecell init --lab LAB_DIR --review PROPOSAL_ID
+# After human review of exact YAML and binding limits:
+forgecell init --lab LAB_DIR --approve PROPOSAL_ID
+# Separate invocation; activation does not run learning:
+forgecell learn MOLECULE_ID --lab LAB_DIR
+```
+
+Native choices are `codex`, `claude-code` and `cursor`. Native opt-in requires observed
+installation/authentication readiness and supported meta capability. Unsupported or
+unknown support saves no proposal and supplies BYO configuration guidance. BYO commands
+are never probed. Default init binds coding only. Opt-in proposes exactly one trailing
+learn Atom with a separate command and bounded 900000 ms timeout. Saved review displays
+argv, permission limits, evidence inputs and exact before/after YAML.
+Re-init preserves pending proposals, interrupted approval recovery, approved coding and
+learning bindings, learned instructions and custom Atom order. Opt-in does not migrate
+an existing learn binding; coding rebinding preserves it.
+
+Eligible inputs are finished ticket Molecule ledgers from the same intact, currently
+approved Formula snapshot, including Atom outcomes, verification evidence and limitations.
+Pending attempts, mixed snapshots, damaged evidence and uncertain publication are rejected
+before invoking the meta command. Learning saves only a pending suggestion; Formula
+mutation needs a separate human approval of that suggestion.
+
+Native adapters request provider controls: Codex read-only sandbox with approval policy
+never, Claude built-in tools disabled and strict empty MCP configuration, Cursor sandbox
+enabled with ask mode. Installed enforcement remains unverified. Codex meta lacks ticket
+analysis's additional tool/MCP/plugin isolation; Claude lacks analysis safe-mode controls;
+Cursor MCP/plugin isolation is unverified, so ask mode is not verified read-only containment.
+Meta retains the supplied working directory rather than analysis's temporary directory.
+No-edit, supplied-evidence-only and binding/gate preservation prompts are declarations,
+not enforced diff limits. Arbitrary custom commands retain the permissions of the local
+process that invokes them. A prompt alone is not a sandbox.
 
 Review recomputes the diff from the exact hashed YAML, rather than trusting stored
 diff text. A shared Formula-write lock prevents competing approvals. Approval refuses

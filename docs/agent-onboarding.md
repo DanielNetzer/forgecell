@@ -21,7 +21,16 @@ The same Bootstrap Assay and Formula approval govern terminal and agent onboardi
    explicitly chooses a harness or the environment is ambiguous.
 4. Explain the selected harness, why it was selected, the proposed coding binding,
    and what a future run can do. Fresh init binds coding only: no learn Atom command is
-   created. A meta harness requires an explicit learn Atom command; see [Learning](learning.md).
+   created by default. Current-source functionality offers explicit opt-in with
+   `forgecell init --meta-harness codex --json` (also `claude-code` or `cursor`),
+   or `forgecell init --meta-command '["/absolute/meta-command","arg"]' --json`.
+   These flags are not included in published v0.2.0-preview.2.
+   Native opt-in requires observed installation/authentication readiness and supported
+   meta operation; unavailable or unknown support saves no proposal and provides BYO guidance.
+   BYO commands are never probed; their capability and containment remain unknown.
+   Opt-in proposes one trailing learn Atom with separate argv and a 900000 ms timeout.
+   Review command, permission limits, ledger inputs and exact before/after YAML before
+   deciding. See [Learning](learning.md).
    Show the saved Formula with `forgecell init --lab <same-lab> --review <proposal-id>`
    (add `--json` for structured review). Ask for a decision if the user
    has not already explicitly authorized this binding. “Install” alone is not permission to
@@ -41,13 +50,18 @@ The same Bootstrap Assay and Formula approval govern terminal and agent onboardi
 ## Output and saved review contract
 
 Preparation (`init --json`) returns `status`, `repository`, `candidates`, `selection`
-and `note`, with optional `bindingCapabilities`, `proposal` and `beforeYaml`.
+and `note`, plus `metaBinding`, with optional `bindingCapabilities`, `proposal` and `beforeYaml`.
 Initial init output has no `nextAction`. A proposal contains the exact `yaml`,
 `yamlHash`, ID, status and saved provenance; it is not an active Formula.
 
 Saved review (`init --lab <same-lab> --review <proposal-id> --json`) returns
 `proposal`, `verified`, `repository`, `harness`, `atoms`, `repositoryContext`,
-`reviewCommand`, `nextAction`, `capabilityEvidence` and `capabilityEvidenceSource`.
+`reviewCommand`, `nextAction`, `capabilityEvidence`, `capabilityEvidenceSource`,
+`metaBinding` and `beforeYaml`. Meta reporting separates adapter support, observed
+installation/authentication, unknown model access and unverified containment.
+New meta observations and exact original YAML are bound into proposal identities;
+altered, removed or downgraded metadata is rejected before approval and recovery.
+Historical proposals remain readable without rewriting.
 `nextAction` is a descriptive string, not a command/argv object. `reviewCommand`
 is also display text, not an argv execution contract. Construct arguments explicitly
 from the documented commands and replace placeholders with the person's choices.
@@ -103,7 +117,9 @@ then prefer an identified current harness environment, a single project configur
 one uniquely ready installation. Multiple candidates are not resolved by catalog order.
 Environment markers are hints about context, not a universal operating-system default.
 
-Re-init preserves the full approved recipe. Explicit rebinding changes the coding binding
+Re-init preserves pending proposals; review or dismiss before preparing another.
+Interrupted activation retains its exact saved recovery decision. Stale approvals are
+refused. Re-init preserves the full approved recipe. Explicit rebinding changes the coding binding
 while retaining learned instructions, custom Atom order and the separately configured learn
 binding. It does not silently migrate an existing meta harness.
 
@@ -134,3 +150,16 @@ CLI references checked for this implementation:
 [Cursor authentication](https://cursor.com/docs/cli/reference/authentication),
 [Claude programmatic use](https://code.claude.com/docs/en/headless),
 and the installed Codex `exec --help` / `login status` commands.
+
+Meta provider controls are requests, not verified containment. Codex meta requests a
+read-only sandbox and approval policy never but lacks ticket analysis's additional
+tool/MCP/plugin isolation and temporary working directory. Claude meta disables
+built-in tools and uses strict empty MCP configuration, but lacks analysis safe-mode
+controls. Cursor meta requests sandbox-enabled ask mode; MCP/plugin isolation remains
+unverified and ask mode is not verified read-only containment. Meta retains the supplied
+working directory. No-edit and supplied-evidence-only prompts are declarations.
+Arbitrary BYO commands run with the invoking local process's permissions.
+
+Activation alone invokes no model. A later `learn MOLECULE_ID` selects eligible finished
+same-snapshot ledgers and saves only a pending suggestion. Formula mutation requires a
+separate human suggestion approval.
