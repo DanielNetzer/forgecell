@@ -155,6 +155,11 @@ see #36); Cursor uses print mode with
 its sandbox enabled. These permission modes provide different guarantees;
 arbitrary adapters retain their process permissions.
 
+Bootstrap Formulas set `harness.timeoutMs` (default 900000) and a reviewed ceiling
+`harness.maxTimeoutMs` (default 3600000); override them with `init --harness-timeout-ms MS`
+and `--max-timeout-ms MS`. Intake may then propose a longer per-Molecule `harnessTimeoutMs`
+for larger approved scopes, shown at the scope gate and bounded by the ceiling.
+
 The Claude Code coding allowlist is derived from reviewed evidence, never a constant.
 It holds `Read`, `Glob`, `Grep`, `Edit`, `Write` and the read-only `Bash(git status)`
 and `Bash(git diff)`; the argv of each approved plan check; and each

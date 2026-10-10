@@ -17,7 +17,33 @@ type InitOptions struct {
 	Runner                           Runner
 	MetaHarness                      string
 	MetaCommand                      []string
+	// HarnessTimeoutMS and MaxTimeoutMS set the reviewed coding budget and the
+	// ceiling for per-Molecule timeouts; zero selects the defaults below.
+	HarnessTimeoutMS, MaxTimeoutMS int
 }
+
+// Bootstrap budgets: a 15-minute default coding attempt that intake may raise,
+// for larger approved scopes, up to a 60-minute reviewed ceiling.
+const (
+	DefaultHarnessTimeoutMS = 900000
+	DefaultMaxTimeoutMS     = 3600000
+)
+
+// harnessBudget resolves and validates the bootstrap timeout and ceiling.
+func harnessBudget(o InitOptions) (int, int, error) {
+	timeout, ceiling := o.HarnessTimeoutMS, o.MaxTimeoutMS
+	if timeout == 0 {
+		timeout = DefaultHarnessTimeoutMS
+	}
+	if ceiling == 0 {
+		ceiling = max(DefaultMaxTimeoutMS, timeout)
+	}
+	if timeout < 1 || timeout > DefaultMaxTimeoutMS || ceiling < timeout || ceiling > DefaultMaxTimeoutMS {
+		return 0, 0, fmt.Errorf("harness timeout must be 1-%d ms and the maximum timeout must be at least the timeout and at most %d ms", DefaultMaxTimeoutMS, DefaultMaxTimeoutMS)
+	}
+	return timeout, ceiling, nil
+}
+
 type Outcome struct {
 	Meta       *MetaReport    `json:"metaBinding"`
 	Binding    *BindingReport `json:"bindingCapabilities,omitempty"`
@@ -31,6 +57,12 @@ type Outcome struct {
 }
 
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
+	budgetRequested := o.HarnessTimeoutMS != 0 || o.MaxTimeoutMS != 0
+	if budgetRequested {
+		if _, _, err = harnessBudget(o); err != nil {
+			return out, err
+		}
+	}
 	if o.MetaHarness != "" && o.MetaCommand != nil {
 		return out, fmt.Errorf("choose meta-harness or meta-command")
 	}
@@ -61,6 +93,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if pending, e := pendingProposal(o.LabDir); e != nil {
 		return out, e
 	} else if pending != nil {
+		if budgetRequested {
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it before proposing a new harness timeout budget")
+		}
 		f, e := formula.Parse([]byte(pending.YAML))
 		if e != nil {
 			return out, e
@@ -122,6 +157,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		existing = active.Formula.Harness.Binding
 	}
 	out.Selection = Select(out.Candidates, o.Preferred, existing, o.Env)
+	if active.Approved && o.Preferred == "" && budgetRequested {
+		return out, fmt.Errorf("timeout budget flags change an approved Formula only with an explicit --harness rebind proposal")
+	}
 	if active.Approved && o.Preferred == "" && (o.MetaHarness == "" && o.MetaCommand == nil || LearnBound(active.Formula)) {
 		checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 		out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
@@ -161,6 +199,17 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if o.Preferred != "" {
 			binding["binding"] = selected.ID
 			binding["command"] = command
+			if budgetRequested {
+				current := o
+				if current.HarnessTimeoutMS == 0 {
+					current.HarnessTimeoutMS = active.Formula.Harness.TimeoutMS
+				}
+				timeoutMS, maxTimeoutMS, e := harnessBudget(current)
+				if e != nil {
+					return out, e
+				}
+				binding["timeoutMs"], binding["maxTimeoutMs"] = timeoutMS, maxTimeoutMS
+			}
 		} else {
 			command = active.Formula.Harness.Command
 			selected = ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
@@ -172,10 +221,14 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 				}
 			}
 		}
-		out.Note = "Proposes only a coding-harness rebind; existing instructions, timeouts, workflow and meta-harness configuration are preserved. Review the complete YAML before approval."
+		out.Note = "Proposes only a coding-harness rebind (plus any explicitly requested timeout budget); existing instructions, workflow and meta-harness configuration are preserved. Review the complete YAML before approval."
 	} else {
 		name := strings.ToLower(strings.Split(out.Repository.Repo, "/")[1]) + "-github-issue"
-		recipe = map[string]any{"schemaVersion": "v0", "kind": "formula", "id": name, "name": out.Repository.Repo + " issue workflow", "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "bootstrap-assay", "intake": map[string]any{"source": "github-issues", "repo": out.Repository.Repo}, "harness": map[string]any{"binding": selected.ID, "command": command, "invoke": "byo", "timeoutMs": 900000}, "lab": map[string]any{"dir": o.LabDir, "observe": false}, "repositoryContext": out.Repository.Compact(), "atoms": []map[string]any{{"id": "intake", "type": "intake", "source": "github-issues"}, {"id": "scope", "type": "gate", "purpose": "scope", "mode": "human"}, {"id": "harness", "type": "harness", "binding": selected.ID}, {"id": "check", "type": "check", "workflows": out.Repository.Workflows}, {"id": "gate", "type": "gate", "purpose": "review", "mode": "human"}, {"id": "ship", "type": "ship", "via": "github"}, {"id": "document", "type": "document", "target": "github-issue"}}}
+		timeoutMS, maxTimeoutMS, err := harnessBudget(o)
+		if err != nil {
+			return out, err
+		}
+		recipe = map[string]any{"schemaVersion": "v0", "kind": "formula", "id": name, "name": out.Repository.Repo + " issue workflow", "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "bootstrap-assay", "intake": map[string]any{"source": "github-issues", "repo": out.Repository.Repo}, "harness": map[string]any{"binding": selected.ID, "command": command, "invoke": "byo", "timeoutMs": timeoutMS, "maxTimeoutMs": maxTimeoutMS}, "lab": map[string]any{"dir": o.LabDir, "observe": false}, "repositoryContext": out.Repository.Compact(), "atoms": []map[string]any{{"id": "intake", "type": "intake", "source": "github-issues"}, {"id": "scope", "type": "gate", "purpose": "scope", "mode": "human"}, {"id": "harness", "type": "harness", "binding": selected.ID}, {"id": "check", "type": "check", "workflows": out.Repository.Workflows}, {"id": "gate", "type": "gate", "purpose": "review", "mode": "human"}, {"id": "ship", "type": "ship", "via": "github"}, {"id": "document", "type": "document", "target": "github-issue"}}}
 		out.Note = "Bootstrap Assay is read-only. Proposed checks are evidence, not executed commands. Approving binds the coding harness; runs still stop at human review."
 	}
 	if o.MetaHarness != "" || o.MetaCommand != nil {
