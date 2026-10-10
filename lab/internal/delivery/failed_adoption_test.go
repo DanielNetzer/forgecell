@@ -91,7 +91,11 @@ func failedAdoptionFixture(t *testing.T) (Options, molecule.Record) {
 	}
 	r.Readiness = &s
 	r.Capture = &c
-	r.Atoms = []molecule.Atom{{Type: "intake", Status: "done"}, {Type: "gate", Status: "done"}, {Type: "harness", Status: "failed"}}
+	for i := range r.Atoms {
+		if r.Atoms[i].ID == "coding" {
+			r.Atoms[i].Status = "failed"
+		}
+	}
 	outcome.Stderr = "" // Ledger projection omits streams retained in the immutable result.
 	r.HarnessAttempts = []molecule.HarnessAttempt{{ID: next.AdoptAttempt, PlanDigest: d, Result: outcome, Evidence: &ref, Capture: &c, CaptureEvidence: []molecule.VerificationFile{store("capture.json", c)}, Recovered: true}}
 	return o, r
