@@ -95,7 +95,9 @@ refuses to start if the stored list differs from one rederived from the Formula 
 checks. Amendments always rederive the list from their checks, so a payload can neither
 add nor drop entries. A plan with no stored list was approved by an earlier Lab and keeps
 the allowance it was approved under: the previous fixed Node entries plus the read-only
-base. The scope gate prints the exact list. Each harness attempt records the list the provider received
+base. Amending such a plan rederives its list from the Formula, which can drop that Node
+allowance when the Formula has no `package.json` component; the scope gate prints the exact
+list either way. Each harness attempt records the list the provider received
 in the ledger as `codingAllowlist`; a historical attempt without the field is
 unrecorded, not empty.
 

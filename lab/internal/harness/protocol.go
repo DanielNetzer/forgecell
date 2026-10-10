@@ -187,7 +187,7 @@ func ReadCodingResult(id, output string) (string, []string, error) {
 	var subtype string
 	if raw := value["subtype"]; len(raw) > 0 && string(raw) != "null" {
 		if json.Unmarshal(raw, &subtype) != nil || strings.HasPrefix(subtype, "error") {
-			return "", nil, fmt.Errorf("%s reported a failure: %s", id, boundedDenial("subtype", raw))
+			return "", nil, fmt.Errorf("%s reported a failure: subtype %q", id, boundedText(subtype, 80))
 		}
 	}
 	var denials []string
@@ -218,16 +218,27 @@ func ReadCodingResult(id, output string) (string, []string, error) {
 
 const maxPermissionDenials = 50
 
+func boundedText(text string, limit int) string {
+	if len(text) > limit {
+		return strings.ToValidUTF8(text[:limit], "") + "…"
+	}
+	return text
+}
+
 // Denied commands are echoed into durable evidence, so values that look like
 // credentials are replaced. This is defence in depth; raw provider output is
 // retained separately under the same local-only protections.
-var secretAssignment = regexp.MustCompile(`(?i)(\b[a-z0-9_]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|credentials?)["']?\s*[:=]\s*["']?)[^\s"'&;|]+`)
-var secretScheme = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+)[^\s"']+`)
-var secretFlag = regexp.MustCompile(`(?i)(--?(?:token|password|passwd|secret|api-key|apikey|access-key)\s+)[^\s"'-][^\s"']*`)
-var secretLiteral = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b`)
+var secretAssignment = regexp.MustCompile(`(?i)(\b[a-z0-9_]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|credentials?)["']?\s*[:=]\s*(?:\\?["'])?)[^\s"'\\&;|]+`)
+var secretAuthorization = regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|token)\s+(?:\\?["'])?)?)[^\s"'\\]+`)
+var secretScheme = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+(?:\\?["'])?)[^\s"'\\]+`)
+var secretFlag = regexp.MustCompile(`(?i)((?:^|\s)--?(?:token|password|passwd|secret|api-key|apikey|access-key)\s+(?:\\?["'])?)[^\s"'\\-][^\s"'\\]*`)
+var secretUserinfo = regexp.MustCompile(`(://[^/\s:@]+:)[^@\s/]+@`)
+var secretBasicFlag = regexp.MustCompile(`((?:^|\s)(?:-u|--user)\s+["']?[^\s:"']+:)[^\s"']+`)
+var secretLiteral = regexp.MustCompile(`(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|\bsk-[A-Za-z0-9_-]{20,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
 
 func redactSecrets(text string) string {
-	for _, rule := range []*regexp.Regexp{secretAssignment, secretScheme, secretFlag} {
+	text = secretUserinfo.ReplaceAllString(text, "${1}[REDACTED]@")
+	for _, rule := range []*regexp.Regexp{secretAuthorization, secretAssignment, secretScheme, secretFlag, secretBasicFlag} {
 		text = rule.ReplaceAllString(text, "${1}[REDACTED]")
 	}
 	return secretLiteral.ReplaceAllString(text, "[REDACTED]")

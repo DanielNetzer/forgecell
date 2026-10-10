@@ -90,6 +90,14 @@ func TestDenialSummariesRedactCredentials(t *testing.T) {
 		`deploy --token s3cr3tvalue --env prod`:                       "s3cr3tvalue",
 		`psql "password=hunter2 host=db"`:                             "hunter2",
 		`aws s3 ls # AKIAABCDEFGHIJKLMNOP`:                            "AKIAABCDEFGHIJKLMNOP",
+		`login --password "hunter2quoted"`:                            "hunter2quoted",
+		`login --token 'abcquoted'`:                                   "abcquoted",
+		`curl -H "Authorization: Bearer \"tokq\"" x`:                  "tokq",
+		`curl -H "Authorization: token plainvalue" x`:                 "plainvalue",
+		`psql postgres://admin:s3cretpw@db.internal/app`:              "s3cretpw",
+		`git clone https://bot:patvalue@github.com/x/y`:               "patvalue",
+		`curl -u alice:wonderland https://x`:                          "wonderland",
+		`env KEY_AKIAABCDEFGHIJKLMNOP=1`:                              "AKIAABCDEFGHIJKLMNOP",
 	}
 	for command, secret := range cases {
 		input, _ := json.Marshal(map[string]string{"command": command})
@@ -98,7 +106,7 @@ func TestDenialSummariesRedactCredentials(t *testing.T) {
 			t.Fatalf("%q -> %q still exposes %q", command, got, secret)
 		}
 	}
-	for _, command := range []string{"go test ./internal/cli -run TestAuthTokenRefreshKeepsSessionStaysVerifiable", "go -C lab test ./...", "git diff --stat"} {
+	for _, command := range []string{"go test ./internal/cli -run TestAuthTokenRefreshKeepsSessionStaysVerifiable", "go -C lab test ./...", "git diff --stat", "go test -p 1 ./...", "mkdir -p lab/out", "npm test -- --runInBand"} {
 		input, _ := json.Marshal(map[string]string{"command": command})
 		if got := boundedDenial("Bash", input); got != "Bash: "+command {
 			t.Fatalf("benign command altered: %q -> %q", command, got)
@@ -110,5 +118,12 @@ func TestDenialSummariesStripInvisibleSeparators(t *testing.T) {
 	input, _ := json.Marshal(map[string]string{"command": "a\u2028b\u0085c\ufeffd"})
 	if got := boundedDenial("Bash", input); got != "Bash: a b c d" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCodingFailureNamesSubtype(t *testing.T) {
+	_, _, err := ReadCodingResult("claude-code", `{"subtype":"error_max_turns","is_error":false,"result":"{}"}`)
+	if err == nil || !strings.Contains(err.Error(), "error_max_turns") {
+		t.Fatalf("subtype missing from %v", err)
 	}
 }
