@@ -69,7 +69,9 @@ for delivery, checks, amendments, recovery and execution limits.
 Native bindings support Codex, Claude Code and Cursor, retaining the harness's
 configured model. Choose explicitly with `init --harness codex`, `claude-code` or
 `cursor`. Codex coding uses workspace-write and learning uses read-only mode;
-Claude Code uses print mode with an exact tool allowlist; Cursor uses print mode with
+Claude Code uses print mode with an exact tool allowlist, user-level settings only, no MCP
+servers and edits under the checkout's `.claude/` denied (personal user hooks still apply;
+see #36); Cursor uses print mode with
 its sandbox enabled. These permission modes provide different guarantees;
 arbitrary adapters retain their process permissions.
 
@@ -90,8 +92,10 @@ just written, so approving a check approves arbitrary execution with your user's
 permissions. Review derived entries at the scope gate accordingly. The sorted, de-duplicated list is stored
 in the plan, so it joins the approval digest and a change needs re-approval. Coding
 refuses to start if the stored list differs from one rederived from the Formula and plan
-checks. A plan with no stored list (including a hand-written amendment that omits it)
-gets only the base entries. Each harness attempt records the list the provider received
+checks. Amendments always rederive the list from their checks, so a payload can neither
+add nor drop entries. A plan with no stored list was approved by an earlier Lab and keeps
+the allowance it was approved under: the previous fixed Node entries plus the read-only
+base. The scope gate prints the exact list. Each harness attempt records the list the provider received
 in the ledger as `codingAllowlist`; a historical attempt without the field is
 unrecorded, not empty.
 

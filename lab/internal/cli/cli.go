@@ -649,6 +649,16 @@ func presentRun(out io.Writer, r molecule.Record) {
 			args, _ := json.Marshal(c.Argv)
 			fmt.Fprintf(out, "  %s · %s · cwd %s · timeout %dms · argv %s\n", c.ID, c.Category, c.Dir, c.TimeoutMS, args)
 		}
+		if p.Continuation == "" {
+			if len(p.CodingAllowlist) == 0 {
+				fmt.Fprintln(out, "Claude Code coding allowlist: none stored (plan predates derivation); the earlier fixed Node allowance applies.")
+			} else {
+				fmt.Fprintln(out, "Claude Code coding allowlist (approved with this plan; each Bash entry runs repository code):")
+				for _, entry := range p.CodingAllowlist {
+					fmt.Fprintf(out, "  %s\n", entry)
+				}
+			}
+		}
 		for _, i := range p.Analysis.Impacts {
 			fmt.Fprintf(out, "Impact assessment: %s\n", i.Description)
 		}

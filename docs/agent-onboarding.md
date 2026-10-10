@@ -112,7 +112,9 @@ binding. It does not silently migrate an existing meta harness.
 Native adapters are compiled into the Go CLI and preserve the harness's configured model.
 
 - Codex: non-interactive `exec`, workspace-write for coding and read-only for learning.
-- Claude Code: print mode, `dontAsk`, and an exact tool allowlist for coding: file/read tools,
+- Claude Code: print mode, `dontAsk`, user-level settings only (`--setting-sources user`), no MCP
+  servers (`--strict-mcp-config`), edits under the checkout's `.claude/` denied (Claude Code
+  hot-reloads settings, so a run cannot widen its own permissions), and an exact tool allowlist for coding: file/read tools,
   `git status`/`git diff`, plus the approved plan's check commands and the Formula's
   `repositoryContext` suggested checks (see the [lab README](../lab/README.md#harnesses-and-learning)).
   Commit, push and publishing commands are never added. A denied tool call is never

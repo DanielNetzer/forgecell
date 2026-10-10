@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"os"
@@ -211,14 +212,11 @@ func TestApprovedAllowlistMustMatchRederivation(t *testing.T) {
 	if err != nil || r.Readiness == nil {
 		t.Fatalf("%+v %v", r, err)
 	}
-	old := r.Readiness.Plans[0]
-	next := old.Plan
-	next.CodingAllowlist = append(append([]string{}, old.Plan.CodingAllowlist...), "Bash(make test)")
-	amended, err := Amend(context.Background(), r.LabDir, r.ID, old.Digest, next, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.Approve = amended.Readiness.Plans[1].Digest
+	// Amendment rederives the list, so only a tampered or foreign ledger can
+	// carry a stored list that differs from its derivation.
+	o.Approve = rewriteStoredPlan(t, r, func(p *readiness.Plan) {
+		p.CodingAllowlist = append(append([]string{}, p.CodingAllowlist...), "Bash(make test)")
+	})
 	if _, err = Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Fatalf("a plan allowlist that differs from its derivation reached coding: %v", err)
 	}
@@ -231,28 +229,51 @@ func TestApprovedAllowlistMustMatchRederivation(t *testing.T) {
 	}
 }
 
-func TestPlanWithoutStoredAllowlistGetsOnlyTheBaseList(t *testing.T) {
+func TestPlanWithoutStoredAllowlistKeepsTheLegacyAllowance(t *testing.T) {
 	o, argv := claudeAllowlistFixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil || r.Readiness == nil {
 		t.Fatalf("%+v %v", r, err)
 	}
-	old := r.Readiness.Plans[0]
-	next := old.Plan
-	next.CodingAllowlist = nil
-	amended, err := Amend(context.Background(), r.LabDir, r.ID, old.Digest, next, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.Approve = amended.Readiness.Plans[1].Digest
+	// A plan approved by a Lab that predates derivation has no stored list.
+	o.Approve = rewriteStoredPlan(t, r, func(p *readiness.Plan) { p.CodingAllowlist = nil })
 	done, err := Run(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(done.HarnessAttempts) != 1 || !reflect.DeepEqual(done.HarnessAttempts[0].CodingAllowlist, codingBase) {
-		t.Fatalf("legacy plan did not fail closed to the base list: %+v", done.HarnessAttempts)
+	legacy, err := harness.LegacyCodingAllowlist()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := echoedAllowedTools(t, argv); got != strings.Join(codingBase, ",") {
+	if len(done.HarnessAttempts) != 1 || !reflect.DeepEqual(done.HarnessAttempts[0].CodingAllowlist, legacy) {
+		t.Fatalf("legacy plan did not keep its approved allowance: %+v", done.HarnessAttempts)
+	}
+	if got := echoedAllowedTools(t, argv); got != strings.Join(legacy, ",") {
 		t.Fatalf("provider received %q", got)
 	}
+}
+
+// rewriteStoredPlan edits the only stored plan in place and refreshes its
+// digest, simulating a ledger written by an older or tampered Lab.
+func rewriteStoredPlan(t *testing.T, r Record, mutate func(*readiness.Plan)) string {
+	t.Helper()
+	if len(r.Readiness.Plans) != 1 {
+		t.Fatalf("expected one plan, got %d", len(r.Readiness.Plans))
+	}
+	old := r.Readiness.Plans[0].Digest
+	mutate(&r.Readiness.Plans[0].Plan)
+	digest, err := r.Readiness.Plans[0].Plan.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Readiness.Plans[0].Digest = digest
+	for i := range r.Readiness.Events {
+		if r.Readiness.Events[i].Digest == old {
+			r.Readiness.Events[i].Digest = digest
+		}
+	}
+	if err = save(r); err != nil {
+		t.Fatal(err)
+	}
+	return digest
 }

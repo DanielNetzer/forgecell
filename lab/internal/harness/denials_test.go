@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -79,5 +80,35 @@ func TestCodingOutcomeFromProcessKeepsPreciseReason(t *testing.T) {
 	}
 	if out := CodingOutcomeFromProcess(process.Result{}); !strings.Contains(out.Reason, "EOF") {
 		t.Fatalf("empty result without error should keep decoder reason: %+v", out)
+	}
+}
+
+func TestDenialSummariesRedactCredentials(t *testing.T) {
+	cases := map[string]string{
+		`curl -H "Authorization: Bearer abc.def.ghi" https://x`:       "abc.def.ghi",
+		`GITHUB_TOKEN=ghp_` + strings.Repeat("a", 36) + ` gh pr list`: strings.Repeat("a", 36),
+		`deploy --token s3cr3tvalue --env prod`:                       "s3cr3tvalue",
+		`psql "password=hunter2 host=db"`:                             "hunter2",
+		`aws s3 ls # AKIAABCDEFGHIJKLMNOP`:                            "AKIAABCDEFGHIJKLMNOP",
+	}
+	for command, secret := range cases {
+		input, _ := json.Marshal(map[string]string{"command": command})
+		got := boundedDenial("Bash", input)
+		if strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {
+			t.Fatalf("%q -> %q still exposes %q", command, got, secret)
+		}
+	}
+	for _, command := range []string{"go test ./internal/cli -run TestAuthTokenRefreshKeepsSessionStaysVerifiable", "go -C lab test ./...", "git diff --stat"} {
+		input, _ := json.Marshal(map[string]string{"command": command})
+		if got := boundedDenial("Bash", input); got != "Bash: "+command {
+			t.Fatalf("benign command altered: %q -> %q", command, got)
+		}
+	}
+}
+
+func TestDenialSummariesStripInvisibleSeparators(t *testing.T) {
+	input, _ := json.Marshal(map[string]string{"command": "a\u2028b\u0085c\ufeffd"})
+	if got := boundedDenial("Bash", input); got != "Bash: a b c d" {
+		t.Fatalf("got %q", got)
 	}
 }

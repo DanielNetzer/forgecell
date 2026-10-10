@@ -51,9 +51,9 @@ learning still proposes separately reviewed changes to the reusable process.
 
 Export the latest plan from the JSON ledger and edit its proposed scope, evidence,
 checks or assessment. Keep original input identities. The engine supplies the new
-revision, parent digest and paused workspace tree. Keep `codingAllowlist` as exported
-unless the checks it derives from change; amending checks without updating it makes
-coding refuse to start, and omitting it leaves coding with only the base allowlist.
+revision, parent digest, paused workspace tree and `codingAllowlist`: the allowlist is
+rederived from the amended checks and the Formula snapshot, so any submitted value is
+replaced and shown at the scope gate for approval.
 
 ```sh
 forgecell amend MOLECULE_ID --parent OLD_DIGEST --plan revised-plan.json

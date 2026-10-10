@@ -8,6 +8,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -106,7 +107,11 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			if err != nil {
 				return Invocation{}, err
 			}
-			result.Args = append(result.Args, "--json-schema", schema, "--allowedTools", strings.Join(tools, ","))
+			// Workspace .claude settings are hot-reloaded by Claude Code, so a coding
+			// run must not be able to widen its own permissions or add hooks: load user
+			// settings only, ignore project MCP servers, and deny edits under the
+			// checkout's .claude (an Edit deny also covers Write).
+			result.Args = append(result.Args, "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--disallowedTools", "Edit(/.claude/**)", "--json-schema", schema, "--allowedTools", strings.Join(tools, ","))
 		}
 		if analysis {
 			result.Args = append(result.Args, "--safe-mode", "--no-chrome", "--disable-slash-commands")
@@ -213,6 +218,21 @@ func ReadCodingResult(id, output string) (string, []string, error) {
 
 const maxPermissionDenials = 50
 
+// Denied commands are echoed into durable evidence, so values that look like
+// credentials are replaced. This is defence in depth; raw provider output is
+// retained separately under the same local-only protections.
+var secretAssignment = regexp.MustCompile(`(?i)(\b[a-z0-9_]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|credentials?)["']?\s*[:=]\s*["']?)[^\s"'&;|]+`)
+var secretScheme = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+)[^\s"']+`)
+var secretFlag = regexp.MustCompile(`(?i)(--?(?:token|password|passwd|secret|api-key|apikey|access-key)\s+)[^\s"'-][^\s"']*`)
+var secretLiteral = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b`)
+
+func redactSecrets(text string) string {
+	for _, rule := range []*regexp.Regexp{secretAssignment, secretScheme, secretFlag} {
+		text = rule.ReplaceAllString(text, "${1}[REDACTED]")
+	}
+	return secretLiteral.ReplaceAllString(text, "[REDACTED]")
+}
+
 func boundedDenial(tool string, input json.RawMessage) string {
 	var fields struct {
 		Command  string `json:"command"`
@@ -227,11 +247,11 @@ func boundedDenial(tool string, input json.RawMessage) string {
 		tool = "unknown"
 	}
 	summary := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == 0x2028 || r == 0x2029 || r == 0xfeff {
 			return ' '
 		}
 		return r
-	}, strings.TrimSpace(tool+": "+detail))
+	}, strings.TrimSpace(tool+": "+redactSecrets(detail)))
 	if len(summary) > 200 {
 		summary = strings.ToValidUTF8(summary[:200], "") + "…"
 	}

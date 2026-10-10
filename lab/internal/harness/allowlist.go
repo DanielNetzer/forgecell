@@ -105,6 +105,12 @@ func DeriveCodingAllowlist(formulaYAML string, checks []readiness.Check) ([]stri
 // EffectiveCodingAllowlist validates entries and returns the canonical list the
 // provider receives: base entries, then Node preset entries, then the rest sorted.
 // The result is idempotent. Nil input yields the base list.
+// LegacyCodingAllowlist is the allowance plans approved before derivation ran
+// under: the previous fixed Node entries, plus the read-only base.
+func LegacyCodingAllowlist() ([]string, error) {
+	return EffectiveCodingAllowlist(nodeAllowlist)
+}
+
 func EffectiveCodingAllowlist(entries []string) ([]string, error) {
 	seen := map[string]bool{}
 	for _, entry := range entries {

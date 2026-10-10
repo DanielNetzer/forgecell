@@ -388,3 +388,13 @@ func TestAllowlistLeavesOtherInvocationsUnchanged(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyCodingAllowlistKeepsApprovedNodeAllowance(t *testing.T) {
+	got, err := LegacyCodingAllowlist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, joinEntries(wantBase, nodeAllowlist)) {
+		t.Fatalf("legacy allowance changed: %q", got)
+	}
+}

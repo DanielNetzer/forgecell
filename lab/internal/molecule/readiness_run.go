@@ -32,12 +32,14 @@ func bindingHash(b formula.Binding) (string, error) {
 }
 
 // approvedCodingAllowlist returns the exact tool allowance for a coding attempt.
-// A plan that stores none predates allowlist derivation and gets only the base
-// list. A stored list must equal the one rederived from the approved Formula and
-// the plan's checks, so rule or input drift cannot widen what coding may run.
+// Intake and amendment always store a derived list, so a plan without one was
+// approved by an earlier Lab under the fixed Node allowance; it keeps that
+// allowance (plus read-only git status/diff) rather than silently losing it. A
+// stored list must equal the one rederived from the approved Formula and the
+// plan's checks, so rule or input drift cannot widen what coding may run.
 func approvedCodingAllowlist(f formula.Formula, p readiness.Plan) ([]string, error) {
 	if len(p.CodingAllowlist) == 0 {
-		return harness.EffectiveCodingAllowlist(nil)
+		return harness.LegacyCodingAllowlist()
 	}
 	derived, err := harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks)
 	if err != nil {
