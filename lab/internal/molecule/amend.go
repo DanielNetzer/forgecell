@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"os"
@@ -66,6 +67,11 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	next.MoleculeID = id
 	next.Revision = previous.Revision + 1
 	next.ParentDigest = parent
+	// The coding allowlist is runtime-owned like the lifecycle fields: derive it
+	// from the amended checks so a submitted payload can neither smuggle nor drop it.
+	if next.CodingAllowlist, err = harness.DeriveCodingAllowlist(r.FormulaSnapshot.YAML, next.Analysis.Checks); err != nil {
+		return r, err
+	}
 	if r.RepositoryEvidence == nil {
 		return r, fmt.Errorf("missing frozen repository evidence")
 	}

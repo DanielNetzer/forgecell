@@ -313,11 +313,13 @@ func ValidateVerificationHistory(r Record) error {
 				if json.Unmarshal(raw, &saved) != nil || saved.AttemptID != a.ID || saved.PlanDigest != a.PlanDigest {
 					return fmt.Errorf("harness outcome identity changed")
 				}
-				if a.Coding != nil && !reflect.DeepEqual(*a.Coding, harness.CodingOutcomeFromResult(saved.Result.Stdout)) {
+				// Ledgers written before CodingOutcomeFromProcess projected stdout only;
+				// accept either projection so historical attempts stay verifiable.
+				if a.Coding != nil && !reflect.DeepEqual(*a.Coding, harness.CodingOutcomeFromProcess(saved.Result)) && !reflect.DeepEqual(*a.Coding, harness.CodingOutcomeFromResult(saved.Result.Stdout)) {
 					return fmt.Errorf("coding outcome projection changed")
 				}
 				saved.Result.Stdout, saved.Result.Stderr, saved.Result.RawStdout = "", "", ""
-				if saved.Result != a.Result {
+				if !reflect.DeepEqual(saved.Result, a.Result) {
 					return fmt.Errorf("harness outcome projection changed")
 				}
 			}

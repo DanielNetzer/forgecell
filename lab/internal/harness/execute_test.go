@@ -35,6 +35,51 @@ printf '{"structured_output":{"schemaVersion":"v1","outcome":"completed","reason
 		t.Fatal("provider prompt was JSON quoted")
 	}
 }
+func TestExecuteAllowlistReachesClaudeArgv(t *testing.T) {
+	for _, c := range allowlistCases() {
+		t.Run(c.name, func(t *testing.T) {
+			list, err := DeriveCodingAllowlist(contextFormula(t, c.components...), c.checks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			executable := fake(t, `printf '%s\n' "$@" > argv.txt
+cat > /dev/null
+printf '{"structured_output":{"schemaVersion":"v1","outcome":"completed","reason":"implemented","paths":[]}}'
+`)
+			r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule", "codingAllowlist": list}, Timeout: 30 * time.Second})
+			if !r.Process.OK || r.Coding == nil || r.Coding.Outcome != "completed" {
+				t.Fatalf("%+v", r)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "argv.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+			if got := allowedTools(t, args); got != strings.Join(c.want, ",") {
+				t.Fatalf("fake claude received %q, want %q", got, strings.Join(c.want, ","))
+			}
+			if !strings.Contains(strings.Join(args, " "), "--permission-mode dontAsk") {
+				t.Fatal("dontAsk permission mode lost")
+			}
+		})
+	}
+}
+
+func TestExecuteRefusesUnsafeAllowlistBeforeStartingProvider(t *testing.T) {
+	for _, entry := range []string{"Bash(git push)", "Bash(sh -c x)", "Bash(*)", "Bash"} {
+		dir := t.TempDir()
+		executable := fake(t, "touch started\ncat > /dev/null\n")
+		r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule", "codingAllowlist": []string{entry}}, Timeout: 30 * time.Second})
+		if r.Process.OK || r.Coding != nil || r.Process.Error == "" {
+			t.Fatalf("%s: %+v", entry, r)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "started")); !os.IsNotExist(err) {
+			t.Fatalf("%s: provider started under an unsafe allowlist", entry)
+		}
+	}
+}
+
 func TestCodexOutputFile(t *testing.T) {
 	executable := fake(t, `while [ "$#" -gt 0 ]; do
  if [ "$1" = "--output-last-message" ]; then shift; out="$1"; fi

@@ -88,6 +88,7 @@ type Atom struct {
 }
 type HarnessAttempt struct {
 	Coding          *harness.CodingOutcome      `json:"coding,omitempty"`
+	CodingAllowlist []string                    `json:"codingAllowlist,omitempty"`
 	ID              string                      `json:"id"`
 	PlanDigest      string                      `json:"planDigest"`
 	Result          process.Result              `json:"result"`

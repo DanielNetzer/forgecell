@@ -23,6 +23,9 @@ func InvokeBinding(ctx context.Context, command []string, dir string, timeout ti
 					result.Process.Stdout = result.Text
 					if result.Coding != nil && result.Coding.Outcome == "unknown" {
 						result.Process.Stdout = ""
+						if result.Process.Error == "" {
+							result.Process.Error = result.Coding.Reason
+						}
 					}
 				} else if result.Process.OK {
 					result.Process.Stdout = result.Text

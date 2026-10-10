@@ -52,9 +52,9 @@ func TestLedgerInspectionIsReadOnly(t *testing.T) {
 func TestDoctorPreservesSavedBinding(t *testing.T) {
 	bin := t.TempDir()
 	for _, name := range []string{"git", "gh", "codex", "claude", "cursor-agent"} {
-		body := "#!/bin/sh\nprintf '%s\\n' 'Codex Claude Code Cursor Agent logged in --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence --mode --trust'\n"
+		body := "#!/bin/sh\nprintf '%s\\n' 'Codex Claude Code Cursor Agent logged in --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence --setting-sources --strict-mcp-config --mcp-config --allowedTools --disallowedTools --mode --trust'\n"
 		if name == "claude" {
-			body = "#!/bin/sh\ncase \"$1\" in auth) printf '%s\\n' '{\"loggedIn\":true}' ;; *) printf '%s\\n' 'Claude Code --print --output-format --permission-mode --tools --json-schema --no-session-persistence' ;; esac\n"
+			body = "#!/bin/sh\ncase \"$1\" in auth) printf '%s\\n' '{\"loggedIn\":true}' ;; *) printf '%s\\n' 'Claude Code --print --output-format --permission-mode --tools --json-schema --no-session-persistence --setting-sources --strict-mcp-config --mcp-config --allowedTools --disallowedTools' ;; esac\n"
 		}
 		if e := os.WriteFile(filepath.Join(bin, name), []byte(body), 0700); e != nil {
 			t.Fatal(e)

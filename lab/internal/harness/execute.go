@@ -102,7 +102,11 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 		}
 	}
 	result.Process.RawStdout = result.Raw
-	result.Text, err = ReadResult(o.ID, result.Raw, true)
+	if coding {
+		result.Text, result.Process.PermissionDenials, err = ReadCodingResult(o.ID, result.Raw)
+	} else {
+		result.Text, err = ReadResult(o.ID, result.Raw, true)
+	}
 	if err != nil {
 		return fail(err.Error())
 	}

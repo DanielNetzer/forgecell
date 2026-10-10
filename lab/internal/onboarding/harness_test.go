@@ -35,7 +35,7 @@ func TestProbeOnlyUsesStatusAndHelp(t *testing.T) {
 			run := func(_ context.Context, o process.Options) process.Result {
 				args := o.Argv[1:]
 				calls = append(calls, args)
-				text := "-c --disable --color --strict-config --skip-git-repo-check --ignore-rules Codex Claude Code Cursor Agent --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence --mode --trust"
+				text := "-c --disable --color --strict-config --skip-git-repo-check --ignore-rules Codex Claude Code Cursor Agent --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence --setting-sources --strict-mcp-config --mcp-config --allowedTools --disallowedTools --mode --trust"
 				if reflect.DeepEqual(args, []string{"login", "status"}) {
 					text = "Logged in using private-account"
 				}
@@ -70,7 +70,7 @@ func TestCapabilitiesSeparateProbeFromWorkflow(t *testing.T) {
 	for _, id := range []string{"cursor", "claude-code", "codex"} {
 		t.Run(id, func(t *testing.T) {
 			run := func(_ context.Context, o process.Options) process.Result {
-				text := "-c --disable --color --strict-config --skip-git-repo-check --ignore-rules Codex Claude Code Cursor Agent --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence --mode --trust --safe-mode --strict-mcp-config --no-chrome --disable-slash-commands"
+				text := "-c --disable --color --strict-config --skip-git-repo-check --ignore-rules Codex Claude Code Cursor Agent --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence --setting-sources --strict-mcp-config --mcp-config --allowedTools --disallowedTools --mode --trust --safe-mode --strict-mcp-config --no-chrome --disable-slash-commands"
 				args := strings.Join(o.Argv[1:], " ")
 				if args == "login status" {
 					text = "Logged in"
@@ -119,7 +119,7 @@ func TestAnalysisControlBlockersAndFailedProbe(t *testing.T) {
 				if strings.Contains(args, "mcp list") {
 					return process.Result{OK: false, Stdout: "private configuration"}
 				}
-				text := "-c --disable --color --strict-config --skip-git-repo-check --ignore-rules Codex Claude Code --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence logged in"
+				text := "-c --disable --color --strict-config --skip-git-repo-check --ignore-rules Codex Claude Code --sandbox --output-last-message --output-schema --ephemeral --print --output-format --permission-mode --tools --json-schema --no-session-persistence --setting-sources --strict-mcp-config --mcp-config --allowedTools --disallowedTools logged in"
 				if args == "auth status --json" {
 					text = `{"loggedIn":true}`
 				}
@@ -163,6 +163,25 @@ func TestCodexAnalysisFlagsBlockWorkflowWithoutChangingSelection(t *testing.T) {
 			selection := Select([]Candidate{c, {ID: "claude-code", Readiness: "ready"}}, "codex", "", nil)
 			if selection.ID != "codex" {
 				t.Fatalf("silently substituted provider: %+v", selection)
+			}
+		})
+	}
+}
+
+// A Claude Code CLI without the coding isolation flags cannot run the hardened
+// coding invocation, so readiness must not report it as ready.
+func TestClaudeProbeRequiresCodingIsolationFlags(t *testing.T) {
+	for _, missing := range []string{"--setting-sources", "--strict-mcp-config", "--mcp-config", "--allowedTools", "--disallowedTools"} {
+		t.Run(missing, func(t *testing.T) {
+			help := strings.Replace("Claude Code --print --output-format --permission-mode --tools --json-schema --no-session-persistence --setting-sources --strict-mcp-config --mcp-config --allowedTools --disallowedTools", " "+missing, "", 1)
+			run := func(_ context.Context, o process.Options) process.Result {
+				if reflect.DeepEqual(o.Argv[1:], []string{"auth", "status", "--json"}) {
+					return process.Result{OK: true, Stdout: `{"loggedIn":true}`}
+				}
+				return process.Result{OK: true, Stdout: help}
+			}
+			if c := Probe(context.Background(), "claude-code", "/fake/claude", "/repo", run); c.Readiness == "ready" {
+				t.Fatalf("CLI without %s reported ready: %+v", missing, c)
 			}
 		})
 	}

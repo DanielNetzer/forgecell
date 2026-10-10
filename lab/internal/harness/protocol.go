@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -101,7 +103,15 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 		if meta || analysis {
 			result.Args = append(result.Args, "--tools", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--json-schema", schema)
 		} else {
-			result.Args = append(result.Args, "--json-schema", schema, "--allowedTools", "Read,Glob,Grep,Edit,Write,Bash(npm test),Bash(npm run test *),Bash(npm run typecheck),Bash(npm run build),Bash(node --test *)")
+			tools, err := requestAllowlist(request)
+			if err != nil {
+				return Invocation{}, err
+			}
+			// Workspace .claude settings are hot-reloaded by Claude Code, so a coding
+			// run must not be able to widen its own permissions or add hooks: load user
+			// settings only, ignore project MCP servers, and deny edits under the
+			// checkout's .claude (an Edit deny also covers Write).
+			result.Args = append(result.Args, "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--disallowedTools", "Edit(/.claude/**)", "--json-schema", schema, "--allowedTools", strings.Join(tools, ","))
 		}
 		if analysis {
 			result.Args = append(result.Args, "--safe-mode", "--no-chrome", "--disable-slash-commands")
@@ -160,6 +170,103 @@ type CodingOutcome struct {
 	Outcome       string   `json:"outcome"`
 	Reason        string   `json:"reason"`
 	Paths         []string `json:"paths"`
+}
+
+// ReadCodingResult reads a coding result. Unlike ReadResult, a permission
+// denial is the boundary working, so it is returned as bounded evidence instead
+// of discarding an otherwise valid outcome.
+func ReadCodingResult(id, output string) (string, []string, error) {
+	if id != "claude-code" {
+		text, err := ReadResult(id, output, true)
+		return text, nil, err
+	}
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &value); err != nil || value == nil {
+		return "", nil, fmt.Errorf("%s returned invalid JSON output", id)
+	}
+	var subtype string
+	if raw := value["subtype"]; len(raw) > 0 && string(raw) != "null" {
+		if json.Unmarshal(raw, &subtype) != nil || strings.HasPrefix(subtype, "error") {
+			return "", nil, fmt.Errorf("%s reported a failure: subtype %q", id, boundedText(subtype, 80))
+		}
+	}
+	var denials []string
+	if raw := value["permission_denials"]; len(raw) > 0 && string(raw) != "null" {
+		var denied []struct {
+			Tool  string          `json:"tool_name"`
+			Input json.RawMessage `json:"tool_input"`
+		}
+		if err := json.Unmarshal(raw, &denied); err != nil {
+			return "", nil, fmt.Errorf("%s returned unreadable permission denials", id)
+		}
+		for i, d := range denied {
+			if i == maxPermissionDenials {
+				denials = append(denials, fmt.Sprintf("%d more denials omitted", len(denied)-i))
+				break
+			}
+			denials = append(denials, boundedDenial(d.Tool, d.Input))
+		}
+		delete(value, "permission_denials")
+	}
+	stripped, err := json.Marshal(value)
+	if err != nil {
+		return "", nil, err
+	}
+	text, err := ReadResult(id, string(stripped), true)
+	return text, denials, err
+}
+
+const maxPermissionDenials = 50
+
+func boundedText(text string, limit int) string {
+	if len(text) > limit {
+		return strings.ToValidUTF8(text[:limit], "") + "…"
+	}
+	return text
+}
+
+// Denied commands are echoed into durable evidence, so values that look like
+// credentials are replaced. This is defence in depth; raw provider output is
+// retained separately under the same local-only protections.
+var secretAssignment = regexp.MustCompile(`(?i)(\b[a-z0-9_]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|credentials?)["']?\s*[:=]\s*(?:\\?["'])?)[^\s"'\\&;|]+`)
+var secretAuthorization = regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|token)\s+(?:\\?["'])?)?)[^\s"'\\]+`)
+var secretScheme = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+(?:\\?["'])?)[^\s"'\\]+`)
+var secretFlag = regexp.MustCompile(`(?i)((?:^|\s)--?(?:token|password|passwd|secret|api-key|apikey|access-key)\s+(?:\\?["'])?)[^\s"'\\-][^\s"'\\]*`)
+var secretUserinfo = regexp.MustCompile(`(://[^/\s:@]+:)[^@\s/]+@`)
+var secretBasicFlag = regexp.MustCompile(`((?:^|\s)(?:-u|--user)\s+["']?[^\s:"']+:)[^\s"']+`)
+var secretLiteral = regexp.MustCompile(`(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|\bsk-[A-Za-z0-9_-]{20,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
+
+func redactSecrets(text string) string {
+	text = secretUserinfo.ReplaceAllString(text, "${1}[REDACTED]@")
+	for _, rule := range []*regexp.Regexp{secretAuthorization, secretAssignment, secretScheme, secretFlag, secretBasicFlag} {
+		text = rule.ReplaceAllString(text, "${1}[REDACTED]")
+	}
+	return secretLiteral.ReplaceAllString(text, "[REDACTED]")
+}
+
+func boundedDenial(tool string, input json.RawMessage) string {
+	var fields struct {
+		Command  string `json:"command"`
+		FilePath string `json:"file_path"`
+	}
+	_ = json.Unmarshal(input, &fields)
+	detail := fields.Command
+	if detail == "" {
+		detail = fields.FilePath
+	}
+	if tool == "" {
+		tool = "unknown"
+	}
+	summary := strings.Map(func(r rune) rune {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == 0x2028 || r == 0x2029 || r == 0xfeff {
+			return ' '
+		}
+		return r
+	}, strings.TrimSpace(tool+": "+redactSecrets(detail)))
+	if len(summary) > 200 {
+		summary = strings.ToValidUTF8(summary[:200], "") + "…"
+	}
+	return summary
 }
 
 func CodingOutcomeSchema() string {
@@ -257,6 +364,15 @@ func DecodeCodingOutcome(raw []byte) (CodingOutcome, error) {
 	return out, nil
 }
 
+// CodingOutcomeFromProcess decodes stdout and keeps the adapter's precise
+// failure reason when stdout was withheld for an unknown outcome.
+func CodingOutcomeFromProcess(result process.Result) CodingOutcome {
+	out := CodingOutcomeFromResult(result.Stdout)
+	if out.Outcome == "unknown" && strings.TrimSpace(result.Stdout) == "" && strings.TrimSpace(result.Error) != "" {
+		out.Reason = "Invalid or missing coding outcome: " + boundedCodingError(fmt.Errorf("%s", result.Error))
+	}
+	return out
+}
 func CodingOutcomeFromResult(text string) CodingOutcome {
 	out, err := DecodeCodingOutcome([]byte(text))
 	if err != nil {

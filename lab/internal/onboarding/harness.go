@@ -128,7 +128,7 @@ func Probe(ctx context.Context, id, executable, cwd string, run Runner) (c Candi
 		required = []string{"--sandbox", "--output-last-message", "--output-schema", "--ephemeral"}
 		authArgs = []string{"login", "status"}
 	case "claude-code":
-		required = []string{"--print", "--output-format", "--permission-mode", "--tools", "--json-schema", "--no-session-persistence"}
+		required = []string{"--print", "--output-format", "--permission-mode", "--tools", "--json-schema", "--no-session-persistence", "--setting-sources", "--strict-mcp-config", "--mcp-config", "--allowedTools", "--disallowedTools"}
 		authArgs = []string{"auth", "status", "--json"}
 	case "cursor":
 		required = []string{"--print", "--output-format", "--sandbox", "--mode", "--trust"}
