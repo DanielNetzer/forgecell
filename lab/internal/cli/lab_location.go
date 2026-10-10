@@ -8,12 +8,28 @@ import (
 	"strings"
 )
 
-// defaultLabDir gives each local checkout its own private Lab without writing
-// runtime evidence into the repository. Explicit overrides remain authoritative.
+// defaultLabDir is the legacy path-keyed default: each local checkout gets its
+// own private Lab without writing runtime evidence into the repository. It is
+// the fallback when no repository identity is available. Explicit overrides
+// remain authoritative.
 func defaultLabDir() (string, error) {
 	if override := os.Getenv("FORGECELL_LAB"); override != "" {
 		return override, nil
 	}
+	root, err := resolvedCheckoutRoot()
+	if err != nil {
+		return "", err
+	}
+	home, err := forgecellHome(root)
+	if err != nil {
+		return "", err
+	}
+	name := labName(filepath.Base(root))
+	digest := sha256.Sum256([]byte(root))
+	return filepath.Join(home, "labs", name+"-"+hex.EncodeToString(digest[:8])), nil
+}
+
+func resolvedCheckoutRoot() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -22,6 +38,13 @@ func defaultLabDir() (string, error) {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved
 	}
+	return root, nil
+}
+
+// forgecellHome is FORGECELL_HOME, or ~/.forgecell. A relative custom home is
+// relative to the checkout, not the invoking subdirectory, so every command
+// finds the same Lab.
+func forgecellHome(root string) (string, error) {
 	home := os.Getenv("FORGECELL_HOME")
 	if home == "" {
 		user, err := os.UserHomeDir()
@@ -31,17 +54,9 @@ func defaultLabDir() (string, error) {
 		home = filepath.Join(user, ".forgecell")
 	}
 	if !filepath.IsAbs(home) {
-		// A relative custom home is relative to the checkout, not the
-		// invoking subdirectory, so every command finds the same Lab.
 		home = filepath.Join(root, home)
 	}
-	home, err = filepath.Abs(home)
-	if err != nil {
-		return "", err
-	}
-	name := labName(filepath.Base(root))
-	digest := sha256.Sum256([]byte(root))
-	return filepath.Join(home, "labs", name+"-"+hex.EncodeToString(digest[:8])), nil
+	return filepath.Abs(home)
 }
 
 func checkoutRoot(start string) string {

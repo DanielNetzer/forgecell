@@ -86,8 +86,9 @@ The first run analyzes the issue and waits before coding. Approval binds the exa
 plan; execution uses an isolated checkout, and required checks run in a fresh
 checkout before final review. The ledger preserves the Molecule, exact Formula
 snapshot and check provenance. Use the same `--lab DIR` throughout when overriding
-the default Lab. In the development CLI, each checkout has a private Lab under
-`~/.forgecell/labs/`; `doctor --json` reports its exact path. Existing checkout
+the default Lab. In the development CLI the default Lab belongs to the repository,
+not to the checkout path (see [Labs and repository identity](#labs-and-repository-identity));
+`doctor --json` reports its exact path. Existing checkout
 `.forgecell` data is never moved or deleted automatically. Pass `--lab .forgecell`
 to inspect an older Lab deliberately.
 
@@ -98,6 +99,50 @@ replace exact-commit GitHub CI.
 Merge, deployment and issue closure are not automatic; scope approval does not
 authorize them or publication. See [ticket readiness](../docs/ticket-readiness.md)
 for delivery, checks, amendments, recovery and execution limits.
+
+## Labs and repository identity
+
+Development build. A fresh clone, a renamed directory or a `git worktree` of the
+same repository finds the same default Lab, because the default is keyed by
+`OWNER/REPO` from the checkout's `origin` remote (https, `git@` and `ssh://` GitHub
+URLs are normalized), not by its path. Resolution reads local git configuration
+only: no network, no `gh`, no model.
+
+- **Default directory:** `~/.forgecell/labs/<owner>-<repo>` (lowercase), or
+  `FORGECELL_HOME/labs/…` when set. `--lab-name NAME` appends `-<name>` and is
+  accepted by every command that takes a Lab (`init`, `doctor`, `run`, `ledger`,
+  `amend`, `recover`, `issues`, `learn`, `suggestion`, `deliver`, `checks`). A name is
+  1–32 letters, digits, `-` or `_` and is lowercased; anything else exits 1 before
+  any filesystem access.
+- **Reusing an existing Lab:** if exactly one Lab under `FORGECELL_HOME/labs` has an
+  active Formula whose `intake.repo` matches the checkout's repository
+  (case-insensitive), it is used even when its directory has another name, such as
+  an older path-keyed `forgecell-core-<hash>`. The chosen directory is printed on
+  stderr; stdout (a `ledger` dump, `doctor --json`) is unchanged.
+- **Ambiguity is never guessed:** with more than one match, including a legacy
+  path-keyed Lab plus an identity Lab, the command exits 1 before any side effect,
+  lists every candidate and asks for `--lab DIR` (or `--lab-name NAME`).
+- **Name collisions:** `foo-bar/baz` and `foo/bar-baz` both map to `foo-bar-baz`. If
+  the default directory exists for a different repository, the CLI refuses and
+  points to `--lab-name` or `--lab`; it never reuses another repository's Lab.
+- **Fallback:** with no `origin`, a non-GitHub remote, an unreadable remote or no git
+  executable, the legacy path-keyed default is used and stderr says so;
+  `--lab-name` is refused there because there is no identity to name. Repository
+  renames and transfers are not tracked.
+- **Explicit choices win:** `--lab DIR` (and `FORGECELL_LAB`) skip the remote lookup,
+  the Lab scan and the notice.
+
+`forgecell labs [--json]` lists every directory under `FORGECELL_HOME/labs`, legacy
+path-keyed Labs included, sorted by name. Each entry shows the repository, active
+Formula and binding identifiers, the last Molecule (id, status, start time) and a
+count per raw ledger status. The last Molecule is the latest start time among valid
+ledgers (ties go to the smaller id) and is shown as unknown when a start time is
+unusable or the scan was truncated; records that fail validation are counted as
+invalid. A Lab with an unreadable `lab.json` or Formula is listed with an error
+instead of stopping the list, symbolic links are listed but not followed, and
+ledger reads are bounded. The command is read-only and never prints harness
+commands, credentials, ledger bodies or traces. Portable Lab export and import are
+tracked separately in #54.
 
 ## Harnesses and learning
 
