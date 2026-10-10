@@ -1,0 +1,322 @@
+package molecule
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+)
+
+const policyMessage = "analysis cannot assert independent acceptance review; retain as a candidate check for separate human review"
+
+// policyRejected is what a harness-validated response with a mislabelled check
+// yields: the fully decoded analysis plus the typed validator error.
+func policyRejected(t *testing.T, valid readiness.Analysis) (readiness.Analysis, error) {
+	t.Helper()
+	valid.Checks = append([]readiness.Check(nil), valid.Checks...)
+	valid.Checks[0].Category = "independent-acceptance"
+	raw, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := readiness.DecodeAnalysis(raw)
+	if !readiness.IsPolicyViolation(err) {
+		t.Fatalf("fixture is not a policy violation: %v", err)
+	}
+	return a, err
+}
+
+func evidenceRequest() readiness.Analysis {
+	return readiness.Analysis{Summary: "Need named committed content", EvidenceRequests: []readiness.EvidenceRequest{{Path: "code.txt", Reason: "Inspect implementation", Evidence: []string{"issue"}}}}
+}
+
+func intakeActions(t *testing.T, r Record) []AtomAction {
+	t.Helper()
+	for _, a := range r.Atoms {
+		if a.Type == "intake" && a.Provenance != nil {
+			return a.Provenance.Actions
+		}
+	}
+	t.Fatal("no intake provenance")
+	return nil
+}
+
+// scripted drives the fake analysis function through a fixed sequence and records
+// the corrective context each invocation received.
+func scripted(t *testing.T, o *Options, steps ...string) (calls *int, corrections *[]analysisCorrection) {
+	t.Helper()
+	valid := o.Analyze
+	n := 0
+	var seen []analysisCorrection
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		if n >= len(steps) {
+			t.Fatalf("unexpected analysis invocation %d", n+1)
+		}
+		step := steps[n]
+		n++
+		c, _ := analysisCorrectionFrom(ctx)
+		seen = append(seen, c)
+		a, err := valid(ctx, b, i, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch step {
+		case "policy":
+			return policyRejected(t, a)
+		case "evidence":
+			return evidenceRequest(), nil
+		}
+		return a, nil
+	}
+	return &n, &seen
+}
+
+func TestAnalysisCorrectiveRetryPolicyViolationThenValidYieldsPlan(t *testing.T) {
+	o, _ := fixture(t)
+	calls, corrections := scripted(t, &o, "policy", "valid")
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 2 || r.Status != "waiting" || r.Readiness == nil || r.Readiness.Phase != "scope-waiting" {
+		t.Fatalf("calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
+	}
+	first, second := (*corrections)[0], (*corrections)[1]
+	if first != (analysisCorrection{}) {
+		t.Fatalf("the first analysis must not carry a correction: %+v", first)
+	}
+	if second.ValidatorMessage != policyMessage {
+		t.Fatalf("corrective call did not receive the exact validator message: %q", second.ValidatorMessage)
+	}
+	if !strings.Contains(second.PreviousResponse, `"independent-acceptance"`) || !strings.Contains(second.PreviousResponse, `"summary":"Change code"`) {
+		t.Fatalf("corrective call did not receive the previous response: %q", second.PreviousResponse)
+	}
+	if len(r.AnalysisAttempts) != 2 || r.AnalysisAttempts[0].Status != "failed" || r.AnalysisAttempts[0].Error != policyMessage || r.AnalysisAttempts[1].Status != "completed" || r.AnalysisAttempts[1].Response == nil {
+		t.Fatalf("both attempts must be recorded: %+v", r.AnalysisAttempts)
+	}
+	if r.AnalysisAttempts[0].Ordinal != 1 || r.AnalysisAttempts[1].Ordinal != 2 {
+		t.Fatalf("ordinals: %+v", r.AnalysisAttempts)
+	}
+	if rejected := r.AnalysisAttempts[0].Response; rejected == nil || rejected.Checks[0].Category != "independent-acceptance" {
+		t.Fatalf("the rejected response must stay in the ledger for audit: %+v", rejected)
+	}
+	if !strings.Contains(strings.Join(r.Notes, "\n"), "corrective analysis retry") {
+		t.Fatalf("retry not recorded in notes: %v", r.Notes)
+	}
+	// The accepted analysis passed the unchanged validator: no independent acceptance.
+	for _, c := range r.Readiness.Plans[0].Plan.Analysis.Checks {
+		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" {
+			t.Fatalf("plan retained a model-asserted independent acceptance: %+v", c)
+		}
+	}
+}
+
+func TestAnalysisCorrectiveRetryBoundedSequences(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		steps    []string
+		blocked  bool
+		attempts []string
+	}{
+		{"violation twice blocks", []string{"policy", "policy"}, true, []string{"failed", "failed"}},
+		{"violation then evidence then valid", []string{"policy", "evidence", "valid"}, false, []string{"failed", "completed", "completed"}},
+		{"violation then evidence then violation", []string{"policy", "evidence", "policy"}, true, []string{"failed", "completed", "failed"}},
+		{"violation then evidence twice is exhausted", []string{"policy", "evidence", "evidence"}, true, []string{"failed", "completed", "completed"}},
+		{"evidence then violation then valid", []string{"evidence", "policy", "valid"}, false, []string{"completed", "failed", "completed"}},
+		{"evidence then violation twice blocks", []string{"evidence", "policy", "policy"}, true, []string{"completed", "failed", "failed"}},
+		{"evidence twice is exhausted", []string{"evidence", "evidence"}, true, []string{"completed", "completed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _ := fixture(t)
+			calls, _ := scripted(t, &o, tc.steps...)
+			r, err := Run(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if *calls != len(tc.steps) {
+				t.Fatalf("calls=%d want %d", *calls, len(tc.steps))
+			}
+			if tc.blocked != (r.Status == "blocked") || tc.blocked != (r.Readiness == nil) {
+				t.Fatalf("blocked=%t status=%s notes=%v", tc.blocked, r.Status, r.Notes)
+			}
+			if len(r.AnalysisAttempts) != len(tc.attempts) {
+				t.Fatalf("attempts: %+v", r.AnalysisAttempts)
+			}
+			actions := intakeActions(t, r)
+			seen := map[string]bool{}
+			analysisActions := 0
+			for i, want := range tc.attempts {
+				if r.AnalysisAttempts[i].Status != want || r.AnalysisAttempts[i].Ordinal != i+1 {
+					t.Fatalf("attempt %d: %+v want %s", i, r.AnalysisAttempts[i], want)
+				}
+				if want == "failed" && r.AnalysisAttempts[i].Error != policyMessage {
+					t.Fatalf("attempt %d lost its own validator error: %q", i, r.AnalysisAttempts[i].Error)
+				}
+			}
+			for _, a := range actions {
+				if !strings.HasPrefix(a.AttemptID, "analysis-") {
+					continue
+				}
+				analysisActions++
+				if seen[a.AttemptID] || a.Observed == nil {
+					t.Fatalf("analysis action ids must be unique and each observed: %+v", actions)
+				}
+				seen[a.AttemptID] = true
+			}
+			if analysisActions != len(tc.steps) {
+				t.Fatalf("expected %d analysis actions, got %+v", len(tc.steps), actions)
+			}
+			if tc.blocked && len(r.HarnessAttempts) != 0 {
+				t.Fatal("coding harness invoked after a blocked intake")
+			}
+		})
+	}
+}
+
+func TestAnalysisCorrectiveRetryNeverRepeatsOtherErrors(t *testing.T) {
+	_, decodeErr := readiness.DecodeAnalysis([]byte(`{"summary":"x","surprise":1}`))
+	harnessErr := fmt.Errorf("analysis failed: %w", errors.New("timed out"))
+	badPath := readiness.Analysis{Summary: "x", EvidenceRequests: []readiness.EvidenceRequest{{Path: "../escape", Reason: "needs content", Evidence: []string{"issue"}}}}
+	badCitation := readiness.Analysis{Summary: "x", EvidenceRequests: []readiness.EvidenceRequest{{Path: "code.txt", Reason: "needs content", Evidence: []string{"unknown-evidence"}}}}
+	for _, tc := range []struct {
+		name     string
+		analysis readiness.Analysis
+		err      error
+	}{
+		{"harness failure", readiness.Analysis{}, harnessErr},
+		{"decode failure", readiness.Analysis{}, decodeErr},
+		{"evidence request path validation", badPath, nil},
+		{"evidence request citation validation", badCitation, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _ := fixture(t)
+			calls := 0
+			o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
+				calls++
+				return tc.analysis, tc.err
+			}
+			r, err := Run(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || len(r.AnalysisAttempts) != 1 || r.Status != "blocked" || r.Readiness != nil {
+				t.Fatalf("calls=%d status=%s attempts=%+v", calls, r.Status, r.AnalysisAttempts)
+			}
+			if strings.Contains(strings.Join(r.Notes, "\n"), "corrective analysis retry") {
+				t.Fatalf("non-policy error was treated as a retry: %v", r.Notes)
+			}
+		})
+	}
+}
+
+func TestAnalysisCorrectiveRetryNeverRelaxesValidator(t *testing.T) {
+	o, _ := fixture(t)
+	valid := o.Analyze
+	calls := 0
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		calls++
+		a, err := valid(ctx, b, i, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The corrective response keeps asserting acceptance: the validator is not relaxed.
+		a.Checks[0].IndependentProvenance = "model says reviewed"
+		raw, _ := json.Marshal(a)
+		return readiness.DecodeAnalysis(raw)
+	}
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || r.Status != "blocked" || r.Readiness != nil {
+		t.Fatalf("calls=%d status=%s", calls, r.Status)
+	}
+	if !strings.Contains(strings.Join(r.Notes, "\n"), policyMessage) {
+		t.Fatalf("blocked reason lost the validator message: %v", r.Notes)
+	}
+}
+
+func TestAnalysisCorrectiveRetryDefaultAnalysisOnlyClassifiesValidatedRejections(t *testing.T) {
+	rejected, err := json.Marshal(readiness.Analysis{Summary: "Change code", Checks: []readiness.Check{{ID: "check", Category: "independent-acceptance", Argv: []string{"true"}, Dir: ".", TimeoutMS: 1000, Required: true, Reason: "r"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyResult := process.Result{Error: harness.InvalidAnalysisPrefix + policyMessage, Stdout: string(rejected)}
+	a, err := decodeAnalysisResult(policyResult)
+	if !readiness.IsPolicyViolation(err) || a.Summary != "Change code" || !strings.HasPrefix(err.Error(), "analysis failed: invalid readiness analysis: "+policyMessage) {
+		t.Fatalf("validated rejection not classified: %v %+v", err, a)
+	}
+	for _, tc := range []struct {
+		name   string
+		result process.Result
+	}{
+		{"timeout", process.Result{Error: "context deadline exceeded", TimedOut: true, Stdout: string(rejected)}},
+		{"no preserved text", process.Result{Error: harness.InvalidAnalysisPrefix + policyMessage}},
+		{"other validation", process.Result{Error: harness.InvalidAnalysisPrefix + "analysis needs a bounded summary", Stdout: string(rejected)}},
+		{"raw envelope", process.Result{Error: harness.InvalidAnalysisPrefix + policyMessage, Stdout: `{"result":"x"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeAnalysisResult(tc.result); err == nil || readiness.IsPolicyViolation(err) {
+				t.Fatalf("must not be retryable: %v", err)
+			}
+		})
+	}
+	ok, err := decodeAnalysisResult(process.Result{OK: true, Stdout: `{"summary":"fine"}`})
+	if err != nil || ok.Summary != "fine" {
+		t.Fatalf("%v %+v", err, ok)
+	}
+}
+
+// A fake provider drives the real Execute path: the rejected text must survive the
+// harness boundary, and the correction must reach the provider prompt.
+func TestAnalysisCorrectiveRetryReachesProviderPrompt(t *testing.T) {
+	dir := t.TempDir()
+	rejected, err := json.Marshal(readiness.Analysis{Summary: "Change code", Checks: []readiness.Check{{ID: "check", Category: "independent-acceptance", Argv: []string{"true"}, Dir: ".", TimeoutMS: 1000, Required: true, Reason: "r"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := json.Marshal(map[string]any{"structured_output": json.RawMessage(rejected)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, out := filepath.Join(dir, "stdin.txt"), filepath.Join(dir, "envelope.json")
+	if err = os.WriteFile(out, envelope, 0600); err != nil {
+		t.Fatal(err)
+	}
+	provider := filepath.Join(dir, "provider")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in --help) printf '%%s' '--safe-mode --tools --strict-mcp-config --json-schema --no-chrome --disable-slash-commands'; exit 0;; esac\ncat > '%s'\ncat '%s'\n", stdin, out)
+	if err = os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: policyMessage, PreviousResponse: "PREVIOUS-RESPONSE-MARKER"})
+	request := analysisRequest(ctx, Issue{Number: 1, Title: "t"}, readiness.RepositorySnapshot{}, readiness.VerificationInputs{})
+	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: t.TempDir(), Request: request, Timeout: 30 * time.Second})
+	_, err = decodeAnalysisResult(result.Process)
+	if !readiness.IsPolicyViolation(err) {
+		t.Fatalf("the rejected response did not survive the harness boundary: %v %+v", err, result.Process)
+	}
+	raw, err := os.ReadFile(stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(raw)
+	for _, want := range []string{`"correction"`, "PREVIOUS-RESPONSE-MARKER", `"validatorMessage":"analysis cannot assert independent acceptance review`, "rejected by the Lab validator"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("provider prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	plain := analysisRequest(context.Background(), Issue{Number: 1, Title: "t"}, readiness.RepositorySnapshot{}, readiness.VerificationInputs{})
+	if _, ok := plain["correction"]; ok {
+		t.Fatal("first analysis request must not carry a correction")
+	}
+}
