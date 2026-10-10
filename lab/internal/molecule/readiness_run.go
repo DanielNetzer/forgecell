@@ -106,10 +106,14 @@ func atom(r *Record, index int, status, detail string) {
 	}
 }
 func stopIntake(r Record, reason string) (Record, error) {
-	atom(&r, 0, "blocked", reason)
+	roles, roleErr := resolveExecutionRoles(r)
+	if roleErr != nil {
+		return r, roleErr
+	}
+	atom(&r, roles.atoms[formula.IntakeRole], "blocked", reason)
 	r.Status = "blocked"
 	r.FinishedAt = stamp()
-	for i := 1; i < len(r.Atoms); i++ {
+	for _, i := range roles.after(formula.IntakeRole) {
 		atom(&r, i, "skipped", "Intake stopped before coding.")
 	}
 	r.Notes = append(r.Notes, reason)
@@ -162,11 +166,15 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	for _, a := range f.Atoms {
 		r.Atoms = append(r.Atoms, Atom{ID: a.ID, Type: a.Type, Status: "pending", Detail: "Not started", Provenance: &AtomProvenance{DeclaredSource: a.Source, DeclaredBinding: a.Binding, DeclaredWorkflows: append([]string(nil), a.Workflows...), DeclaredPurpose: a.Purpose, PlannedAction: plannedAtomAction(a)}})
 	}
+	roles, err := resolveExecutionRoles(r)
+	if err != nil {
+		return r, err
+	}
 	intakeSource := "github-issues"
 	if o.ReadIssue != nil {
 		intakeSource = "supplied-issue-reader"
 	}
-	startAtomAction(&r, f.Atoms[0].ID, "intake", "", intakeSource, "read-ticket")
+	startAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "", intakeSource, "read-ticket")
 	if err = save(r); err != nil {
 		return r, err
 	}
@@ -176,15 +184,15 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	}
 	issue, err := reader(ctx, w.Repo, ref.Number, w.SourceRoot)
 	if err != nil {
-		observeAtomAction(&r, f.Atoms[0].ID, "intake", "read-ticket", "read-failed")
+		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "read-failed")
 		return stopIntake(r, err.Error())
 	}
 	if issue.Number != ref.Number || issue.Repo != w.Repo || issue.URL != fmt.Sprintf("https://github.com/%s/issues/%d", w.Repo, ref.Number) || issue.State != "OPEN" {
-		observeAtomAction(&r, f.Atoms[0].ID, "intake", "read-ticket", "response-rejected")
+		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "response-rejected")
 		return stopIntake(r, "Issue is closed or does not match the requested repository and number.")
 	}
 	r.Issue = issue
-	observeAtomAction(&r, f.Atoms[0].ID, "intake", "read-ticket", "read-completed", ProvenanceEvidence{Pointer: "/issue"})
+	observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "read-completed", ProvenanceEvidence{Pointer: "/issue"})
 	snapshot, err := readiness.CollectForTicket(ctx, w.SourceRoot, w.BaseCommit, issue.Title+"\n"+issue.Body)
 	if err != nil {
 		return stopIntake(r, err.Error())
@@ -231,7 +239,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if o.Analyze != nil {
 			analysisSource = "supplied-analysis-function"
 		}
-		startAtomAction(&r, f.Atoms[0].ID, analysisID, "", analysisSource, "analyze-ticket")
+		startAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, analysisID, "", analysisSource, "analyze-ticket")
 		if err = save(r); err != nil {
 			return r, err
 		}
@@ -251,7 +259,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if err != nil {
 			analysisResult = "analysis-failed"
 		}
-		observeAtomAction(&r, f.Atoms[0].ID, analysisID, "analyze-ticket", analysisResult, ProvenanceEvidence{Pointer: fmt.Sprintf("/analysisAttempts/%d", len(r.AnalysisAttempts)-1)})
+		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, analysisID, "analyze-ticket", analysisResult, ProvenanceEvidence{Pointer: fmt.Sprintf("/analysisAttempts/%d", len(r.AnalysisAttempts)-1)})
 		if e = save(r); e != nil {
 			return r, e
 		}
@@ -312,8 +320,8 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	for _, overlap := range p.DefinitionOverlaps() {
 		r.Notes = append(r.Notes, fmt.Sprintf("Scope/check overlap %s [%s] checks %s: %s", overlap.Path, overlap.Kind, strings.Join(overlap.CheckIDs, ", "), overlap.Detail))
 	}
-	atom(&r, 0, "done", a.Summary)
-	atom(&r, 1, "waiting", "Review exact scope, checks and process limits before approving the digest.")
+	atom(&r, roles.atoms[formula.IntakeRole], "done", a.Summary)
+	atom(&r, roles.atoms[formula.ScopeApproval], "waiting", "Review exact scope, checks and process limits before approving the digest.")
 	return allocateRecord(ctx, o, r, allocateWorkspace, save)
 }
 
@@ -403,6 +411,9 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	if err != nil {
 		return r, err
 	}
+	if _, err = resolveExecutionRoles(r); err != nil {
+		return r, err
+	}
 	lock := filepath.Join(o.LabDir, "ledgers", r.ID+".lock")
 	if err = os.Mkdir(lock, 0700); err != nil {
 		return r, fmt.Errorf("Molecule is locked; inspect an interrupted attempt before recovery: %w", err)
@@ -414,6 +425,10 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	}
 	defer os.Remove(owner)
 	r, err = findPending(o.LabDir, o.Approve)
+	if err != nil {
+		return r, err
+	}
+	roles, err := resolveExecutionRoles(r)
 	if err != nil {
 		return r, err
 	}
@@ -523,11 +538,11 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	r.Readiness = &state
-	startAtomAction(&r, f.Atoms[1].ID, "scope-"+o.Approve, o.Approve, "readiness-approval", "record-exact-scope-approval")
-	observeAtomAction(&r, f.Atoms[1].ID, "scope-"+o.Approve, "record-exact-scope-approval", "approved", ProvenanceEvidence{Pointer: "/readiness/events"})
-	atom(&r, 1, "done", "Exact readiness plan approved; no publication authorized.")
+	startAtomAction(&r, r.Atoms[roles.atoms[formula.ScopeApproval]].ID, "scope-"+o.Approve, o.Approve, "readiness-approval", "record-exact-scope-approval")
+	observeAtomAction(&r, r.Atoms[roles.atoms[formula.ScopeApproval]].ID, "scope-"+o.Approve, "record-exact-scope-approval", "approved", ProvenanceEvidence{Pointer: "/readiness/events"})
+	atom(&r, roles.atoms[formula.ScopeApproval], "done", "Exact readiness plan approved; no publication authorized.")
 	if p.Continuation == "" {
-		atom(&r, 2, "active", "Coding approved scope")
+		atom(&r, roles.atoms[formula.Coding], "active", "Coding approved scope")
 	}
 	r.Status = "running"
 	if err = save(r); err != nil {
@@ -555,13 +570,13 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve})
-	startAtomAction(&r, f.Atoms[2].ID, attemptID, o.Approve, "bound-harness:"+f.Harness.Binding, "invoke-coding-harness")
+	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+f.Harness.Binding, "invoke-coding-harness")
 	if err = save(r); err != nil {
 		return r, err
 	}
 	result := invokeHarness(ctx, f.Harness.Command, r.Workspace.Path, time.Duration(f.Harness.TimeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": f.Harness.Instructions, "issue": r.Issue, "approvedPlan": p, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
-	r.Atoms[2].ExitCode = &result.Code
-	r.Atoms[2].ElapsedMS = result.ElapsedMS
+	r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
+	r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
 
 	a := &r.HarnessAttempts[len(r.HarnessAttempts)-1]
 	coding := harness.CodingOutcomeFromResult(result.Stdout)
@@ -586,7 +601,7 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	} else if result.TimedOut {
 		processOutcome = "process-timed-out"
 	}
-	observeAtomAction(&r, f.Atoms[2].ID, attemptID, "invoke-coding-harness", processOutcome, fileProvenance(ref))
+	observeAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, "invoke-coding-harness", processOutcome, fileProvenance(ref))
 	if err = save(r); err != nil {
 		return r, err
 	}
@@ -604,7 +619,7 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	a.CaptureEvidence = append(a.CaptureEvidence, captureRef)
-	if provenance := atomProvenance(&r, f.Atoms[2].ID); provenance != nil {
+	if provenance := atomProvenance(&r, r.Atoms[roles.atoms[formula.Coding]].ID); provenance != nil {
 		for i := range provenance.Actions {
 			action := &provenance.Actions[i]
 			if action.AttemptID == attemptID && action.Observed != nil {
@@ -639,7 +654,7 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 			state.Phase = "scope-violation"
 			state.Events = append(state.Events, readiness.Event{Kind: "attempt-scope-violation", Digest: o.Approve, At: stamp(), Tree: capture.Tree, Detail: detail})
 			r.Readiness = &state
-			atom(&r, 2, "failed", coding.Outcome+": "+coding.Reason+"; "+detail)
+			atom(&r, roles.atoms[formula.Coding], "failed", coding.Outcome+": "+coding.Reason+"; "+detail)
 			return finishStopped(r, detail)
 		}
 		state, e := r.Readiness.FinishAttempt("scope-violation", detail, stamp())
@@ -648,7 +663,7 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		}
 		state.Events[len(state.Events)-1].Tree = capture.Tree
 		r.Readiness = &state
-		atom(&r, 2, "failed", detail)
+		atom(&r, roles.atoms[formula.Coding], "failed", detail)
 		return finishStopped(r, detail)
 	}
 	// Preserve the validated report independently of capture/policy decisions.
@@ -667,10 +682,10 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 			return r, e
 		}
 		r.Readiness = &state
-		atom(&r, 2, "failed", phase+": "+detail)
+		atom(&r, roles.atoms[formula.Coding], "failed", phase+": "+detail)
 		return finishStopped(r, phase+": "+detail+" Retained tree: "+capture.Tree)
 	}
-	atom(&r, 2, "done", coding.Outcome+": "+coding.Reason)
+	atom(&r, roles.atoms[formula.Coding], "done", coding.Outcome+": "+coding.Reason)
 	state, err = r.Readiness.FinishAttempt("check-pending", "Coding output captured: "+capture.Tree, stamp())
 	if err != nil {
 		return r, err
@@ -680,14 +695,18 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 }
 
 func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, capture verification.CaptureResult) (Record, error) {
+	roles, roleErr := resolveExecutionRoles(r)
+	if roleErr != nil {
+		return r, roleErr
+	}
 	if err := beginVerification(&r, p, capture.Tree); err != nil {
 		return r, err
 	}
-	checkID := r.Atoms[3].ID
+	checkID := r.Atoms[roles.atoms[formula.Verification]].ID
 	attemptID := fmt.Sprintf("verification-%d", len(r.VerificationAttempts))
 	digest := r.VerificationAttempts[len(r.VerificationAttempts)-1].PlanDigest
 	startAtomAction(&r, checkID, attemptID, digest, "lab-independent-verification", "run-approved-checks")
-	atom(&r, 3, "active", "Running approved checks in a fresh checkout")
+	atom(&r, roles.atoms[formula.Verification], "active", "Running approved checks in a fresh checkout")
 	if err := save(r); err != nil {
 		return r, err
 	}
@@ -727,12 +746,12 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	}
 	r.Readiness = &state
 	if !verified.RequiredChecksPassed {
-		atom(&r, 3, "failed", verified.Error)
+		atom(&r, roles.atoms[formula.Verification], "failed", verified.Error)
 		return finishStopped(r, "Required verification did not pass.")
 	}
-	atom(&r, 3, "done", "Required checks passed on "+verified.SourceTree+". Independent acceptance verified: "+fmt.Sprint(verified.IndependentAcceptanceVerified))
-	atom(&r, 4, "waiting", "Human review required before explicit delivery approval.")
-	for i := 5; i < len(r.Atoms); i++ {
+	atom(&r, roles.atoms[formula.Verification], "done", "Required checks passed on "+verified.SourceTree+". Independent acceptance verified: "+fmt.Sprint(verified.IndependentAcceptanceVerified))
+	atom(&r, roles.atoms[formula.ReviewApproval], "waiting", "Human review required before explicit delivery approval.")
+	for _, i := range roles.after(formula.ReviewApproval) {
 		atom(&r, i, "skipped", "Publication is a separate approved action.")
 	}
 	r.Status = "waiting"
@@ -741,10 +760,14 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	return r, err
 }
 func finishStopped(r Record, detail string) (Record, error) {
+	roles, roleErr := resolveExecutionRoles(r)
+	if roleErr != nil {
+		return r, roleErr
+	}
 	r.Status = "blocked"
 	r.FinishedAt = stamp()
 	r.Notes = append(r.Notes, detail)
-	for i := 3; i < len(r.Atoms); i++ {
+	for _, i := range roles.after(formula.Coding) {
 		if r.Atoms[i].Status == "pending" || r.Atoms[i].Status == "active" {
 			atom(&r, i, "skipped", detail)
 		}
@@ -752,12 +775,16 @@ func finishStopped(r Record, detail string) (Record, error) {
 	return r, save(r)
 }
 func finishFailed(r Record, detail string) (Record, error) {
+	roles, roleErr := resolveExecutionRoles(r)
+	if roleErr != nil {
+		return r, roleErr
+	}
 	state, err := r.Readiness.FinishAttempt("failed", detail, stamp())
 	if err != nil {
 		return r, err
 	}
 	r.Readiness = &state
-	atom(&r, 2, "failed", detail)
+	atom(&r, roles.atoms[formula.Coding], "failed", detail)
 	r, err = finishStopped(r, detail)
 	if err != nil {
 		return r, err

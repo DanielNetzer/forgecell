@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"os"
 	"path/filepath"
@@ -38,7 +39,12 @@ func statePhase(r Record) string {
 	return r.Readiness.Phase
 }
 func completedCoding(r Record) bool {
-	if r.Readiness == nil || len(r.Atoms) < 3 || r.Atoms[2].Status != "done" || r.Capture == nil || len(r.Capture.Violations) > 0 || (r.Atoms[2].ExitCode != nil && *r.Atoms[2].ExitCode != 0) {
+	roles, err := resolveExecutionRoles(r)
+	if err != nil {
+		return false
+	}
+	coding := r.Atoms[roles.atoms[formula.Coding]]
+	if r.Readiness == nil || coding.Status != "done" || r.Capture == nil || len(r.Capture.Violations) > 0 || (coding.ExitCode != nil && *coding.ExitCode != 0) {
 		return false
 	}
 	if len(r.HarnessAttempts) == 0 || ValidateVerificationHistory(r) != nil {
@@ -359,7 +365,12 @@ func LearningVerificationEvidence(r Record, remaining int) ([]json.RawMessage, i
 // failedTreeEligible keeps failed coding distinct from completedCoding. Missing
 // durable outcome evidence (including legacy interrupted ledgers) fails closed.
 func failedTreeEligible(r Record, attempt string) bool {
-	if r.Readiness == nil || len(r.HarnessAttempts) == 0 || len(r.Atoms) < 3 || r.Atoms[2].Status != "failed" {
+	roles, err := resolveExecutionRoles(r)
+	if err != nil {
+		return false
+	}
+	coding := r.Atoms[roles.atoms[formula.Coding]]
+	if r.Readiness == nil || len(r.HarnessAttempts) == 0 || coding.Status != "failed" {
 		return false
 	}
 	a := r.HarnessAttempts[len(r.HarnessAttempts)-1]

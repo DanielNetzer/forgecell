@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"os"
@@ -24,6 +25,9 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if err != nil {
 		return r, err
 	}
+	if _, err = resolveExecutionRoles(r); err != nil {
+		return r, err
+	}
 	if r.ID != id {
 		return r, fmt.Errorf("Molecule and parent plan mismatch")
 	}
@@ -33,6 +37,10 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	}
 	defer os.Remove(lock)
 	r, err = findPending(lab, parent)
+	if err != nil {
+		return r, err
+	}
+	roles, err := resolveExecutionRoles(r)
 	if err != nil {
 		return r, err
 	}
@@ -164,7 +172,7 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	r.Captures = append(r.Captures, capture)
 	r.Status = "waiting"
 	r.FinishedAt = ""
-	atom(&r, 1, "waiting", "Amended scope requires exact approval; retained work has not been rerun.")
+	atom(&r, roles.atoms[formula.ScopeApproval], "waiting", "Amended scope requires exact approval; retained work has not been rerun.")
 	r.Notes = append(r.Notes, fmt.Sprintf("Amendment r%d retains tree %s. Compare immutable plans in the ledger before approval.", next.Revision, capture.Tree))
 	return r, save(r)
 }
