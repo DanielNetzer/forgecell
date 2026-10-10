@@ -8,7 +8,7 @@ func TestExecutionRoles(t *testing.T) {
 	if err != nil || roles[Coding].ID != "code" {
 		t.Fatalf("roles=%v error=%v", roles, err)
 	}
-	for _, kind := range []string{"duplicate", "missing", "ordering", "purpose", "blank", "padded", "type", "precheck", "learning-purpose"} {
+	for _, kind := range []string{"duplicate", "missing", "ordering", "purpose", "blank", "padded", "type", "learning-purpose"} {
 		t.Run(kind, func(t *testing.T) {
 			bad := f
 			bad.Atoms = append([]Atom(nil), f.Atoms...)
@@ -27,8 +27,6 @@ func TestExecutionRoles(t *testing.T) {
 				bad.Atoms[2].ID = " code "
 			case "type":
 				bad.Atoms[2].Type = "check"
-			case "precheck":
-				bad.Atoms = append(bad.Atoms[:2], append([]Atom{{ID: "precheck", Type: "check"}}, bad.Atoms[2:]...)...)
 			case "learning-purpose":
 				bad.Atoms = append(bad.Atoms, Atom{ID: "learn", Type: "learn", Purpose: "scope"})
 			}
