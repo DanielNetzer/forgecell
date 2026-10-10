@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -126,6 +127,26 @@ type Plan struct {
 	// derived from the checks and Formula snapshot above. It joins the plan digest,
 	// so a change needs re-approval. Absent means no allowance beyond the base list.
 	CodingAllowlist []string `json:"codingAllowlist,omitempty"`
+	// HarnessTimeoutMS is a reviewed per-Molecule coding timeout. Zero keeps the
+	// Formula timeout and leaves the digest of every earlier plan unchanged. The
+	// Formula-declared maximum is enforced where the Formula is known.
+	HarnessTimeoutMS int `json:"harnessTimeoutMs,omitempty"`
+}
+
+// MaxHarnessTimeoutMS is the same hard cap the Formula and checks use.
+const MaxHarnessTimeoutMS = 3600000
+
+// PolicyViolation marks a complete, well-formed analysis that was rejected for a
+// policy or labelling reason, as opposed to missing evidence or malformed output.
+type PolicyViolation struct{ Reason string }
+
+func (e *PolicyViolation) Error() string { return e.Reason }
+
+// IsPolicyViolation reports whether err is a rejection that a corrective analysis
+// pass may address. It never reflects a relaxed validator.
+func IsPolicyViolation(err error) bool {
+	var violation *PolicyViolation
+	return errors.As(err, &violation)
 }
 
 var hex256 = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -192,7 +213,7 @@ func DecodeAnalysis(raw []byte) (Analysis, error) {
 	}
 	for _, c := range a.Checks {
 		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" || c.ReviewedAcceptance != "" {
-			return a, fmt.Errorf("analysis cannot assert independent acceptance review; retain as a candidate check for separate human review")
+			return a, &PolicyViolation{Reason: "analysis cannot assert independent acceptance review; retain as a candidate check for separate human review"}
 		}
 	}
 	if err := ValidateEvidenceRequests(a.EvidenceRequests, nil); err != nil {
@@ -432,6 +453,9 @@ func (p Plan) Validate() error {
 	}
 	if err := validateCodingAllowlist(p.CodingAllowlist); err != nil {
 		return err
+	}
+	if p.HarnessTimeoutMS < 0 || p.HarnessTimeoutMS > MaxHarnessTimeoutMS {
+		return fmt.Errorf("harnessTimeoutMs must be an integer from 1 to %d", MaxHarnessTimeoutMS)
 	}
 	if !required {
 		return fmt.Errorf("at least one required check is necessary")

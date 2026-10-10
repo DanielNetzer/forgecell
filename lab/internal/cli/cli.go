@@ -743,6 +743,7 @@ func presentRun(out io.Writer, r molecule.Record) {
 			fmt.Fprintf(out, "  %s · %s · cwd %s · timeout %dms · argv %s\n", c.ID, c.Category, c.Dir, c.TimeoutMS, args)
 		}
 		if p.Continuation == "" {
+			fmt.Fprintln(out, codingTimeoutLine(r.FormulaSnapshot.YAML, p.HarnessTimeoutMS))
 			if len(p.CodingAllowlist) == 0 {
 				fmt.Fprintln(out, "Claude Code coding allowlist: none stored (plan predates derivation); the earlier fixed Node allowance applies.")
 			} else {
@@ -772,6 +773,28 @@ func presentRun(out io.Writer, r molecule.Record) {
 		fmt.Fprintf(out, "Required checks passed: %t · independent acceptance verified: %t\n", r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified)
 	}
 	fmt.Fprintf(out, "Ledger: %s\n", filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
+}
+
+// codingTimeoutLine states the timeout the approved plan will use, so a reviewed
+// per-Molecule value is visible at the gate next to the Formula default and maximum.
+func codingTimeoutLine(snapshot string, planMS int) string {
+	f, err := formula.Parse([]byte(snapshot))
+	if err != nil {
+		if planMS > 0 {
+			return fmt.Sprintf("Coding harness timeout: %dms (reviewed per-Molecule harnessTimeoutMs)", planMS)
+		}
+		return "Coding harness timeout: Formula timeoutMs unset (process default applies)"
+	}
+	b := f.Harness
+	switch {
+	case planMS > 0:
+		return fmt.Sprintf("Coding harness timeout: %dms (reviewed per-Molecule harnessTimeoutMs; Formula timeoutMs %d, maximum %d)", planMS, b.TimeoutMS, b.TimeoutCeilingMS())
+	case b.TimeoutMS == 0:
+		return "Coding harness timeout: Formula timeoutMs unset (process default applies)"
+	case b.TimeoutCeilingMS() > b.TimeoutMS:
+		return fmt.Sprintf("Coding harness timeout: %dms (Formula timeoutMs; maximum %d, no per-Molecule extension proposed)", b.TimeoutMS, b.TimeoutCeilingMS())
+	}
+	return fmt.Sprintf("Coding harness timeout: %dms (Formula timeoutMs; the Formula declares no maximum, so no extension is possible)", b.TimeoutMS)
 }
 
 func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, jsonMode bool) int {

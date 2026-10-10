@@ -50,3 +50,14 @@ func TestLiveManagedDescendantMakesResultUncertain(t *testing.T) {
 		t.Fatalf("live descendant accepted: %+v", r)
 	}
 }
+
+// A shell whose child is killed with the group leaves a zombie until init
+// reaps it; reconciliation must wait for that instead of reporting a live group.
+func TestKilledGroupWithChildReconcilesAfterTimeout(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		r := Run(context.Background(), Options{Argv: []string{"/bin/sh", "-c", "sleep 10"}, Timeout: 50 * time.Millisecond})
+		if !r.TimedOut || !r.Reconciled || r.Uncertainty != "" {
+			t.Fatalf("run %d: killed group not reconciled: %+v", i, r)
+		}
+	}
+}

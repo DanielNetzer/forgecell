@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,89 @@ func bindingHash(b formula.Binding) (string, error) {
 		Fingerprint string
 	}{b, fingerprint})
 	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
+}
+
+// analysisCorrection travels in the context so Options.Analyze keeps its signature.
+type analysisCorrection struct {
+	ValidatorMessage string
+	PreviousResponse string
+}
+type analysisCorrectionKey struct{}
+
+func withAnalysisCorrection(ctx context.Context, c analysisCorrection) context.Context {
+	return context.WithValue(ctx, analysisCorrectionKey{}, c)
+}
+func analysisCorrectionFrom(ctx context.Context) (analysisCorrection, bool) {
+	c, ok := ctx.Value(analysisCorrectionKey{}).(analysisCorrection)
+	return c, ok
+}
+
+// analysisRequest is the ticket-analysis payload. A corrective pass adds the exact
+// validator message and the rejected response; the first pass never carries one.
+func analysisRequest(ctx context.Context, i Issue, s readiness.RepositorySnapshot, inputs readiness.VerificationInputs) map[string]any {
+	request := map[string]any{"kind": "ticket-analysis", "issue": i, "repository": s, "humanVerification": inputs}
+	if c, ok := analysisCorrectionFrom(ctx); ok {
+		request["correction"] = map[string]string{"validatorMessage": c.ValidatorMessage, "previousResponse": c.PreviousResponse}
+	}
+	return request
+}
+
+// policyRejection keeps the established failure text while exposing the typed
+// validator error, but only when the preserved response really produced it.
+type policyRejection struct {
+	message   string
+	violation error
+}
+
+func (e *policyRejection) Error() string { return e.message }
+func (e *policyRejection) Unwrap() error { return e.violation }
+
+func decodeAnalysisResult(result process.Result) (readiness.Analysis, error) {
+	if result.OK {
+		return readiness.DecodeAnalysis([]byte(result.Stdout))
+	}
+	err := fmt.Errorf("analysis failed: %s %s", result.Error, result.Stderr)
+	if result.Stdout != "" && strings.HasPrefix(result.Error, harness.InvalidAnalysisPrefix) {
+		a, decodeErr := readiness.DecodeAnalysis([]byte(result.Stdout))
+		if readiness.IsPolicyViolation(decodeErr) && result.Error == harness.InvalidAnalysisPrefix+decodeErr.Error() {
+			return a, &policyRejection{message: err.Error(), violation: decodeErr}
+		}
+	}
+	return readiness.Analysis{}, err
+}
+
+const (
+	timeoutFreeScopePaths = 8
+	timeoutRoundMS        = 60000
+)
+
+// proposeHarnessTimeoutMS is a deterministic function of scope size alone, so the
+// model cannot influence it. Each path past the free threshold adds an eighth of
+// the Formula timeout, rounded up to a minute and clamped to the Formula maximum.
+// Zero means no extension, which keeps the plan encoding and digest unchanged.
+func proposeHarnessTimeoutMS(b formula.Binding, scopePaths int) int {
+	ceiling := b.TimeoutCeilingMS()
+	if b.TimeoutMS < 1 || ceiling <= b.TimeoutMS || scopePaths <= timeoutFreeScopePaths {
+		return 0
+	}
+	proposed := b.TimeoutMS + (scopePaths-timeoutFreeScopePaths)*(b.TimeoutMS/8)
+	proposed = (proposed + timeoutRoundMS - 1) / timeoutRoundMS * timeoutRoundMS
+	if proposed = min(proposed, ceiling); proposed <= b.TimeoutMS {
+		return 0
+	}
+	return proposed
+}
+
+// codingTimeout is the reviewed per-Molecule value when the plan carries one,
+// otherwise the Formula timeout. Zero lets the process layer apply its default.
+func codingTimeout(b formula.Binding, p readiness.Plan) (int, string) {
+	if p.HarnessTimeoutMS > 0 {
+		return p.HarnessTimeoutMS, "plan harnessTimeoutMs"
+	}
+	if b.TimeoutMS == 0 {
+		return 0, "Formula timeoutMs unset; process default applies"
+	}
+	return b.TimeoutMS, "Formula timeoutMs"
 }
 
 // approvedCodingAllowlist returns the exact tool allowance for a coding attempt.
@@ -235,16 +319,18 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		analysis = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 			// Resolve configuration from the source checkout, then Execute constrains the
 			// provider and moves analysis to a temporary directory before the model runs.
-			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, map[string]any{"kind": "ticket-analysis", "issue": i, "repository": s, "humanVerification": readiness.VerificationInputs{CheckInputs: o.CheckInputs, Checks: o.Checks, Setup: o.Setup, Artifacts: o.Artifacts, Policy: o.Policy}})
-			if !result.OK {
-				return readiness.Analysis{}, fmt.Errorf("analysis failed: %s %s", result.Error, result.Stderr)
-			}
-			return readiness.DecodeAnalysis([]byte(result.Stdout))
+			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, analysisRequest(ctx, i, s, readiness.VerificationInputs{CheckInputs: o.CheckInputs, Checks: o.Checks, Setup: o.Setup, Artifacts: o.Artifacts, Policy: o.Policy}))
+			return decodeAnalysisResult(result)
 		}
 	}
 
+	// At most one supplemental evidence pass and one corrective retry per intake,
+	// so three analysis invocations is the hard bound. Every invocation has its own
+	// ordinal and therefore its own provenance action id.
 	var a readiness.Analysis
-	for ordinal := 1; ordinal <= 2; ordinal++ {
+	var correction *analysisCorrection
+	retried, supplemented := false, false
+	for ordinal := 1; ordinal <= 3; ordinal++ {
 		if err = formula.Revalidate(o.LabDir, loaded); err != nil {
 			return stopIntake(r, err.Error())
 		}
@@ -263,12 +349,20 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if err = save(r); err != nil {
 			return r, err
 		}
-		a, err = analysis(ctx, f.Harness, issue, snapshot)
+		callCtx := ctx
+		if correction != nil {
+			callCtx = withAnalysisCorrection(ctx, *correction)
+		}
+		a, err = analysis(callCtx, f.Harness, issue, snapshot)
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
 		if err != nil {
 			attempt.Status = "failed"
 			attempt.Error = err.Error()
+			if readiness.IsPolicyViolation(err) {
+				rejected := a
+				attempt.Response = &rejected
+			}
 		} else {
 			attempt.Status = "completed"
 			response := a
@@ -284,8 +378,23 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			return r, e
 		}
 		if err != nil {
-			return stopIntake(r, err.Error())
+			var violation *readiness.PolicyViolation
+			if !errors.As(err, &violation) {
+				return stopIntake(r, err.Error())
+			}
+			if retried {
+				return stopIntake(r, err.Error()+" (the corrective analysis retry was also rejected; no coding harness was invoked)")
+			}
+			previous, e := json.Marshal(a)
+			if e != nil {
+				return stopIntake(r, e.Error())
+			}
+			retried = true
+			correction = &analysisCorrection{ValidatorMessage: violation.Reason, PreviousResponse: string(previous)}
+			r.Notes = append(r.Notes, fmt.Sprintf("Analysis attempt %d was rejected by the unchanged policy validator (%s); one corrective analysis retry receives that message and the rejected response.", ordinal, violation.Reason))
+			continue
 		}
+		correction = nil
 		if err = formula.Revalidate(o.LabDir, loaded); err != nil {
 			return stopIntake(r, err.Error())
 		}
@@ -295,9 +404,10 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if len(a.EvidenceRequests) == 0 {
 			break
 		}
-		if ordinal == 2 {
+		if supplemented {
 			return stopIntake(r, "Supplemental evidence pass exhausted; unresolved evidence requests remain. No coding harness was invoked.")
 		}
+		supplemented = true
 		snapshot, err = readiness.CollectSupplemental(ctx, w.SourceRoot, snapshot, a.EvidenceRequests)
 		if err != nil {
 			return stopIntake(r, err.Error())
@@ -320,6 +430,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	}
 	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: w.Repo, TargetBranch: target, BaseCommit: w.BaseCommit, FormulaSHA256: f.SHA256, EvidenceSHA256: evidenceHash, BindingSHA256: bindingDigest, Issue: issueInput(issue), MandatoryConstraints: o.MandatoryConstraints}, Evidence: snapshot.References(), Analysis: a, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
 	p.Analysis.Checks = append(p.Analysis.Checks, o.Checks...)
+	p.HarnessTimeoutMS = proposeHarnessTimeoutMS(f.Harness, len(p.Analysis.Scope))
 	if o.Policy != nil {
 		p.Policy = *o.Policy
 	}
@@ -468,6 +579,9 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	if err = p.ValidateForCoding(); err != nil {
 		return r, err
 	}
+	if err = f.Harness.CheckTimeout(p.HarnessTimeoutMS); err != nil {
+		return r, err
+	}
 	var allowlist []string
 	if p.Continuation == "" {
 		if allowlist, err = approvedCodingAllowlist(f, p); err != nil {
@@ -600,10 +714,14 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	}
 	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist})
 	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+f.Harness.Binding, "invoke-coding-harness")
+	timeoutMS, timeoutSource := codingTimeout(f.Harness, p)
+	if p.HarnessTimeoutMS > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("Coding harness timeout: plan harnessTimeoutMs %d applies to attempt %s (Formula timeoutMs %d, maxTimeoutMs ceiling %d).", p.HarnessTimeoutMS, attemptID, f.Harness.TimeoutMS, f.Harness.TimeoutCeilingMS()))
+	}
 	if err = save(r); err != nil {
 		return r, err
 	}
-	result := invokeHarness(ctx, f.Harness.Command, r.Workspace.Path, time.Duration(f.Harness.TimeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": f.Harness.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
+	result := invokeHarness(ctx, f.Harness.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": f.Harness.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
 	r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
 	r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
 
@@ -663,7 +781,11 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	if !result.OK {
-		r, err = finishFailed(r, harnessOutcomeSummary(result, ref))
+		summary := harnessOutcomeSummary(result, ref)
+		if result.TimedOut {
+			summary = harnessTimeoutSummary(timeoutGate{Molecule: r.ID, Lab: r.LabDir, Digest: o.Approve, Attempt: attemptID, TimeoutMS: timeoutMS, Source: timeoutSource, CeilingMS: f.Harness.TimeoutCeilingMS()}, result, ref, capture, captureErr)
+		}
+		r, err = finishFailed(r, summary)
 		if err != nil {
 			return r, err
 		}
@@ -830,6 +952,39 @@ func harnessOutcomeSummary(result process.Result, ref VerificationFile) string {
 		message = message[:512] + " (truncated; see evidence)"
 	}
 	return fmt.Sprintf("Harness failed: exit=%d elapsedMs=%d timeout=%t interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s).", result.Code, result.ElapsedMS, result.TimedOut, result.Interrupted, result.Overflow, result.Reconciled, message, ref.Path, ref.SHA256)
+}
+
+type timeoutGate struct {
+	Molecule, Lab, Digest, Attempt, Source string
+	TimeoutMS, CeilingMS                   int
+}
+
+// harnessTimeoutSummary is the scope-gate message for a timed-out coding attempt:
+// what ran, what was retained, and the exact commands that keep the retained work.
+// Other failures keep harnessOutcomeSummary unchanged.
+func harnessTimeoutSummary(g timeoutGate, result process.Result, ref VerificationFile, capture verification.CaptureResult, captureErr error) string {
+	tree := fmt.Sprintf("tree capture failed: %v", captureErr)
+	review := ""
+	if captureErr == nil {
+		violations := "none"
+		if len(capture.Violations) > 0 {
+			violations = strings.Join(capture.Violations, ", ")
+			review = fmt.Sprintf(" Out-of-scope writes need exact-diff review: add --accept-existing-tree %s to amend after inspecting the diff.", capture.Tree)
+		}
+		tree = fmt.Sprintf("retained tree %s: %d changed path(s), violations: %s", capture.Tree, len(capture.Changes), violations)
+	}
+	extend := "The Formula declares no maxTimeoutMs above timeoutMs, so a longer coding timeout needs a reviewed Formula change."
+	if g.CeilingMS > g.TimeoutMS {
+		extend = fmt.Sprintf("To continue coding instead, omit continuation and set harnessTimeoutMs up to %d.", g.CeilingMS)
+	}
+	return fmt.Sprintf("Harness timed out: elapsedMs=%d timeoutMs=%d (%s) interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s).\n"+
+		"Nothing is retried automatically. To keep the retained work, run in order:\n"+
+		"  recover: forgecell recover %s --plan %s --confirm-stopped --lab %q\n"+
+		"  export:  forgecell ledger %s --lab %q   (copy readiness.plans[last].plan into FILE and set \"continuation\":\"adopt-failed-tree\" and \"adoptAttempt\":%q)\n"+
+		"  amend:   forgecell amend %s --parent %s --plan FILE --lab %q\n"+
+		"Then review and approve the new digest.%s %s",
+		result.ElapsedMS, g.TimeoutMS, g.Source, result.Interrupted, result.Overflow, result.Reconciled, tree, ref.Path, ref.SHA256,
+		g.Molecule, g.Digest, g.Lab, g.Molecule, g.Lab, g.Attempt, g.Molecule, g.Digest, g.Lab, review, extend)
 }
 
 // An explicit checker repair cannot shed earlier protected gates or rebind their

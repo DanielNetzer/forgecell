@@ -72,6 +72,13 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if next.CodingAllowlist, err = harness.DeriveCodingAllowlist(r.FormulaSnapshot.YAML, next.Analysis.Checks); err != nil {
 		return r, err
 	}
+	approvedFormula, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))
+	if err != nil {
+		return r, err
+	}
+	if err = approvedFormula.Harness.CheckTimeout(next.HarnessTimeoutMS); err != nil {
+		return r, err
+	}
 	if r.RepositoryEvidence == nil {
 		return r, fmt.Errorf("missing frozen repository evidence")
 	}

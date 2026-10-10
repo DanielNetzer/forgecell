@@ -20,7 +20,30 @@ type Binding struct {
 	Command      []string `yaml:"command"`
 	TimeoutMS    int      `yaml:"timeoutMs"`
 	Instructions string   `yaml:"instructions"`
+	// MaxTimeoutMS bounds a reviewed per-Molecule coding timeout. The Binding is
+	// JSON-hashed untagged, so omitempty keeps existing binding hashes unchanged.
+	MaxTimeoutMS int `yaml:"maxTimeoutMs" json:"maxTimeoutMs,omitempty"`
 }
+
+const maxFormulaTimeoutMS = 3600000
+
+// TimeoutCeilingMS is the largest coding timeout a plan may carry: the declared
+// maximum, or the Formula timeout itself when no extension is granted.
+func (b Binding) TimeoutCeilingMS() int {
+	if b.MaxTimeoutMS > 0 {
+		return max(b.MaxTimeoutMS, b.TimeoutMS)
+	}
+	return b.TimeoutMS
+}
+
+// CheckTimeout validates a plan's per-Molecule timeout; zero means "use the Formula timeout".
+func (b Binding) CheckTimeout(ms int) error {
+	if ms == 0 || ms <= b.TimeoutCeilingMS() {
+		return nil
+	}
+	return fmt.Errorf("harnessTimeoutMs %d exceeds the Formula maximum of %d ms (timeoutMs %d, maxTimeoutMs %d)", ms, b.TimeoutCeilingMS(), b.TimeoutMS, b.MaxTimeoutMS)
+}
+
 type Atom struct {
 	Purpose   string   `yaml:"purpose"`
 	ID        string   `yaml:"id"`
@@ -125,6 +148,15 @@ func Parse(data []byte) (Formula, error) {
 		}
 		if err := validateCommand(m); err != nil {
 			return f, err
+		}
+		if value, ok := m["maxTimeoutMs"]; ok {
+			n, ok := value.(int)
+			if !ok || n < 1 || n > maxFormulaTimeoutMS {
+				return f, fmt.Errorf("maxTimeoutMs must be an integer from 1 to %d", maxFormulaTimeoutMS)
+			}
+			if timeout, _ := m["timeoutMs"].(int); n < timeout {
+				return f, fmt.Errorf("maxTimeoutMs must not be below timeoutMs")
+			}
 		}
 		if value, ok := m["instructions"]; ok {
 			s, ok := value.(string)

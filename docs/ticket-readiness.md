@@ -29,6 +29,55 @@ not approve its commands. Each independent check must identify its substantive
 human-review provenance. New inputs cannot be substituted during `--approve`;
 use an amendment and a new digest.
 
+### Corrective analysis retry
+
+The analysis validator is never relaxed. If a response is rejected only because it
+asserts independent acceptance (`independent-acceptance`, `independentProvenance` or
+`reviewedAcceptance`), intake makes **one** corrective analysis call. It receives the
+exact validator message and the rejected response, under a `correction` key; the
+rejected response is also kept on its failed attempt in the ledger. The corrective
+response must pass the same validation. A second violation blocks intake, and no
+coding harness runs. The budget is one retry per intake, whichever pass it occurs
+in, so there are at most three analysis invocations (one supplemental evidence pass
+plus one retry). Every invocation is its own attempt with its own provenance action.
+
+Missing evidence, invalid or unresolved evidence requests, malformed or oversize
+output, a failed or timed-out analysis harness and every other error never retry.
+
+### Per-Molecule coding timeout
+
+A Formula's harness `timeoutMs` stays the default. A Formula may also declare
+`maxTimeoutMs` (an integer from 1 to 3600000, not below `timeoutMs`). That is the
+ceiling for a reviewed, per-Molecule `harnessTimeoutMs` in the scope plan. Without
+`maxTimeoutMs` the ceiling equals `timeoutMs`, so existing Formulas gain no extension.
+Adding it changes the Formula's hash, so it needs one Formula approval; after that a
+larger scope needs only the scope gate.
+
+```yaml
+harness:
+  timeoutMs: 900000
+  maxTimeoutMs: 1800000
+```
+
+Intake proposes the value from scope size alone, never from the model: up to 8 scope
+paths keep the Formula timeout; each further path adds an eighth of it, rounded up to
+a minute and clamped to the ceiling. The scope gate prints the effective value, the
+Formula default and the ceiling. `harnessTimeoutMs` is part of the plan digest, so it
+needs exact approval, and a plan without it keeps its earlier digest. A proposal
+is clamped to the ceiling, and a value above it is rejected at `amend` and again at
+approval, before any coding process starts, with an error naming both numbers. When used, the value is recorded in
+the immutable plan, in the ledger notes and in a timeout's failure detail.
+
+When the coding harness times out, the gate message reports the elapsed time, the
+configured timeout and its source, the retained tree with its changed-path count and
+any violations, and the exact commands to keep the work: `forgecell recover MOLECULE
+--plan DIGEST --confirm-stopped --lab LAB`, then export the latest plan with
+`forgecell ledger MOLECULE --lab LAB`, set `"continuation":"adopt-failed-tree"` and
+`"adoptAttempt"` to the failed attempt, and run `forgecell amend MOLECULE --parent
+DIGEST --plan FILE --lab LAB`. Leaving `continuation` out instead authorizes another
+coding attempt against the retained tree, with `harnessTimeoutMs` up to the ceiling.
+Nothing is retried automatically.
+
 Analysis uses frozen GitHub Issue title/body and committed repository evidence.
 Clarifications belong in the Issue body. Forgecell does not post questions or read
 comments in this milestone. Named Go/JS/TS/Python/Rust/shell source paths in the

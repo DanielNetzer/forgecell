@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// InvalidAnalysisPrefix starts the failure message of a rejected ticket analysis.
+const InvalidAnalysisPrefix = "invalid readiness analysis: "
+
 type ExecuteOptions struct {
 	ID         string
 	Executable string
@@ -115,7 +118,11 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 	}
 	if o.Request["kind"] == "ticket-analysis" {
 		if _, err = readiness.DecodeAnalysis([]byte(result.Text)); err != nil {
-			return fail("invalid readiness analysis: " + err.Error())
+			if readiness.IsPolicyViolation(err) {
+				// Keep the rejected text so one bounded corrective analysis can quote it.
+				result.Process.Stdout = result.Text
+			}
+			return fail(InvalidAnalysisPrefix + err.Error())
 		}
 	}
 	if coding {
