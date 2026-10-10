@@ -56,3 +56,57 @@ func TestHarnessBudgetRejectsInvalidValues(t *testing.T) {
 		}
 	}
 }
+
+func approvedBootstrapLab(t *testing.T) (string, string, Runner) {
+	t.Helper()
+	root, runner := repoFixture(t)
+	dir := filepath.Join(t.TempDir(), "lab")
+	out, err := Prepare(context.Background(), InitOptions{Cwd: root, LabDir: dir, Launcher: "/installed/forgecell", Candidates: []Candidate{{ID: "codex", Executable: "/codex", Readiness: "ready"}}, Runner: runner, HarnessTimeoutMS: 900000, MaxTimeoutMS: 900000})
+	if err != nil || out.Proposal == nil {
+		t.Fatalf("%+v %v", out, err)
+	}
+	if _, err = Review(dir, out.Proposal.ID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	return root, dir, runner
+}
+
+// An explicit rebind may carry a timeout budget and must preserve everything else.
+func TestRebindAppliesExplicitBudgetAndPreservesFormula(t *testing.T) {
+	root, dir, runner := approvedBootstrapLab(t)
+	out, err := Prepare(context.Background(), InitOptions{Cwd: root, LabDir: dir, Launcher: "/new/forgecell", Preferred: "codex", Candidates: []Candidate{{ID: "codex", Executable: "/codex", Readiness: "ready"}}, Runner: runner, MaxTimeoutMS: 3600000})
+	if err != nil || out.Proposal == nil {
+		t.Fatalf("%+v %v", out, err)
+	}
+	f, err := formula.Parse([]byte(out.Proposal.YAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Harness.TimeoutMS != 900000 || f.Harness.MaxTimeoutMS != 3600000 || f.Harness.Command[0] != "/new/forgecell" {
+		t.Fatalf("rebind budget not applied: %+v", f.Harness)
+	}
+	before, err := formula.Parse([]byte(out.BeforeYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Atoms) != len(f.Atoms) || f.ID != before.ID {
+		t.Fatalf("rebind changed more than the binding and budget")
+	}
+}
+
+func TestBudgetFlagsAreRefusedWhereTheyWouldBeIgnored(t *testing.T) {
+	root, dir, runner := approvedBootstrapLab(t)
+	cands := []Candidate{{ID: "codex", Executable: "/codex", Readiness: "ready"}}
+	if _, err := Prepare(context.Background(), InitOptions{Cwd: root, LabDir: dir, Launcher: "/installed/forgecell", Candidates: cands, Runner: runner, MaxTimeoutMS: 3600000}); err == nil {
+		t.Fatal("budget flags without --harness were silently ignored on an approved Formula")
+	}
+	if _, err := Prepare(context.Background(), InitOptions{Cwd: root, LabDir: dir, Launcher: "/new/forgecell", Preferred: "codex", Candidates: cands, Runner: runner}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(context.Background(), InitOptions{Cwd: root, LabDir: dir, Launcher: "/new/forgecell", Preferred: "codex", Candidates: cands, Runner: runner, MaxTimeoutMS: 3600000}); err == nil {
+		t.Fatal("budget flags were silently ignored while a proposal is pending")
+	}
+	if _, err := Prepare(context.Background(), InitOptions{Cwd: root, LabDir: dir, Launcher: "/new/forgecell", Preferred: "codex", Candidates: cands, Runner: runner, MaxTimeoutMS: -5}); err == nil {
+		t.Fatal("invalid budget accepted")
+	}
+}

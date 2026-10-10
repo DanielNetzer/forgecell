@@ -57,6 +57,12 @@ type Outcome struct {
 }
 
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
+	budgetRequested := o.HarnessTimeoutMS != 0 || o.MaxTimeoutMS != 0
+	if budgetRequested {
+		if _, _, err = harnessBudget(o); err != nil {
+			return out, err
+		}
+	}
 	if o.MetaHarness != "" && o.MetaCommand != nil {
 		return out, fmt.Errorf("choose meta-harness or meta-command")
 	}
@@ -87,6 +93,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if pending, e := pendingProposal(o.LabDir); e != nil {
 		return out, e
 	} else if pending != nil {
+		if budgetRequested {
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it before proposing a new harness timeout budget")
+		}
 		f, e := formula.Parse([]byte(pending.YAML))
 		if e != nil {
 			return out, e
@@ -148,6 +157,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		existing = active.Formula.Harness.Binding
 	}
 	out.Selection = Select(out.Candidates, o.Preferred, existing, o.Env)
+	if active.Approved && o.Preferred == "" && budgetRequested {
+		return out, fmt.Errorf("timeout budget flags change an approved Formula only with an explicit --harness rebind proposal")
+	}
 	if active.Approved && o.Preferred == "" && (o.MetaHarness == "" && o.MetaCommand == nil || LearnBound(active.Formula)) {
 		checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 		out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
@@ -187,6 +199,17 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if o.Preferred != "" {
 			binding["binding"] = selected.ID
 			binding["command"] = command
+			if budgetRequested {
+				current := o
+				if current.HarnessTimeoutMS == 0 {
+					current.HarnessTimeoutMS = active.Formula.Harness.TimeoutMS
+				}
+				timeoutMS, maxTimeoutMS, e := harnessBudget(current)
+				if e != nil {
+					return out, e
+				}
+				binding["timeoutMs"], binding["maxTimeoutMs"] = timeoutMS, maxTimeoutMS
+			}
 		} else {
 			command = active.Formula.Harness.Command
 			selected = ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
@@ -198,7 +221,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 				}
 			}
 		}
-		out.Note = "Proposes only a coding-harness rebind; existing instructions, timeouts, workflow and meta-harness configuration are preserved. Review the complete YAML before approval."
+		out.Note = "Proposes only a coding-harness rebind (plus any explicitly requested timeout budget); existing instructions, workflow and meta-harness configuration are preserved. Review the complete YAML before approval."
 	} else {
 		name := strings.ToLower(strings.Split(out.Repository.Repo, "/")[1]) + "-github-issue"
 		timeoutMS, maxTimeoutMS, err := harnessBudget(o)

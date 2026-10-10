@@ -342,6 +342,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if metaRequested && (*review != "" || *approve != "" || *dismiss != "") {
 			return fail(fmt.Errorf("meta opt-in cannot accompany saved review or decisions"))
 		}
+		if (*timeoutMS != 0 || *maxTimeoutMS != 0) && (*review != "" || *approve != "" || *dismiss != "") {
+			return fail(fmt.Errorf("timeout budget flags cannot accompany saved review or decisions"))
+		}
 		if *metaHarness != "" && *metaArgv != "" {
 			return fail(fmt.Errorf("choose meta-harness or meta-command"))
 		}
