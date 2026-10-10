@@ -32,7 +32,7 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\n--version\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--meta-harness ID | --meta-command JSON_ARGV] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\n--version\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -300,6 +300,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		flags.SetOutput(stderr)
 		lab := flags.String("lab", defaultLab, "Lab directory")
 		preferred := flags.String("harness", "", "Explicit default harness")
+		metaHarness := flags.String("meta-harness", "", "Explicit separate native meta binding")
+		metaArgv := flags.String("meta-command", "", "BYO meta argv as JSON; containment unknown")
 		review := flags.String("review", "", "Inspect exact saved proposal without activation")
 		approve := flags.String("approve", "", "Approve exact saved proposal")
 		dismiss := flags.String("dismiss", "", "Dismiss exact saved proposal")
@@ -309,6 +311,32 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		if flags.NArg() != 0 {
 			return fail(fmt.Errorf("unexpected init arguments"))
+		}
+		var metaCommand []string
+		metaRequested := false
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "meta-harness" || f.Name == "meta-command" {
+				metaRequested = true
+			}
+		})
+		if metaRequested && (*review != "" || *approve != "" || *dismiss != "") {
+			return fail(fmt.Errorf("meta opt-in cannot accompany saved review or decisions"))
+		}
+		if *metaHarness != "" && *metaArgv != "" {
+			return fail(fmt.Errorf("choose meta-harness or meta-command"))
+		}
+		if metaRequested && *metaHarness == "" && *metaArgv == "" {
+			return fail(fmt.Errorf("meta opt-in requires harness ID or non-empty JSON argv"))
+		}
+		if *metaArgv != "" {
+			if err := json.Unmarshal([]byte(*metaArgv), &metaCommand); err != nil || len(metaCommand) == 0 {
+				return fail(fmt.Errorf("meta-command must be a non-empty JSON argv array"))
+			}
+			for _, arg := range metaCommand {
+				if strings.TrimSpace(arg) == "" || strings.ContainsRune(arg, 0) {
+					return fail(fmt.Errorf("meta-command arguments must be non-empty strings"))
+				}
+			}
 		}
 		if *approve != "" && *dismiss != "" {
 			return fail(fmt.Errorf("choose approve or dismiss"))
@@ -377,7 +405,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		for _, key := range []string{"CODEX_THREAD_ID", "CLAUDECODE", "CURSOR_AGENT", "TERM_PROGRAM"} {
 			env[key] = os.Getenv(key)
 		}
-		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Env: env})
+		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand})
 		if err != nil {
 			return fail(err)
 		}
@@ -387,8 +415,15 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			}
 		} else {
 			fmt.Fprintf(out, "Bootstrap Assay: %s\nRepository: %s\n%s\n%s\n", result.Status, result.Repository.Repo, result.Selection.Reason, result.Note)
+			source := "current observation; containment unverified"
+			if result.Proposal != nil {
+				source = "saved observation; not current verification"
+			}
 			if result.Binding != nil {
-				renderCapabilities(out, result.Binding.Candidate, result.Binding.LearnBound, "current observation")
+				renderCapabilities(out, result.Binding.Candidate, result.Binding.LearnBound, source)
+			}
+			if result.Meta != nil {
+				renderMeta(out, *result.Meta, source)
 			}
 			if result.Proposal != nil {
 				p, err := onboarding.InspectProposal(dir, result.Proposal.ID)
@@ -448,7 +483,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		selection := onboarding.Select(candidates, *preferred, existing, env)
 		git := process.Run(ctx, process.Options{Argv: []string{"git", "--version"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
 		gh := process.Run(ctx, process.Options{Argv: []string{"gh", "auth", "status"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
-		report := map[string]any{"activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": saved, "learnBound": onboarding.LearnBound(active.Formula), "workflow": selectedWorkflow(candidates, selection.ID), "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": candidates, "selection": selection, "note": "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."}
+		meta := onboarding.InspectMeta(ctx, active.Formula, cwd, nil)
+		report := map[string]any{"metaBinding": meta, "metaCandidates": candidates, "activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": saved, "learnBound": onboarding.LearnBound(active.Formula), "workflow": selectedWorkflow(candidates, selection.ID), "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": candidates, "selection": selection, "note": "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."}
 		if err = json.NewEncoder(out).Encode(report); err != nil {
 			return fail(err)
 		}
@@ -699,11 +735,16 @@ func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, js
 	}
 	command := fmt.Sprintf("forgecell init --lab %q --review %s", dir, p.ID)
 	if jsonMode {
-		return encode(out, stderr, map[string]any{"proposal": p, "verified": true, "repository": f.Intake.Repo, "harness": f.Harness.Binding, "atoms": process["atoms"], "repositoryContext": process["repositoryContext"], "reviewCommand": command, "nextAction": next, "capabilityEvidence": proposalCapabilities(p), "capabilityEvidenceSource": "saved observation; not current verification"})
+		return encode(out, stderr, map[string]any{"proposal": p, "verified": true, "repository": f.Intake.Repo, "harness": f.Harness.Binding, "atoms": process["atoms"], "repositoryContext": process["repositoryContext"], "reviewCommand": command, "nextAction": next, "metaBinding": proposalMeta(p), "beforeYaml": proposalMeta(p).BeforeYAML, "capabilityEvidence": proposalCapabilities(p), "capabilityEvidenceSource": "saved observation; not current verification"})
 	}
 	fmt.Fprintf(out, "Formula proposal %s: %s\nRepository: %s\nCoding harness: %s\nVerified SHA-256: %s\nReview: %s\nEvidence: %s · %s\nOrdered Atoms (gates and check identities):\n", p.ID, p.Status, f.Intake.Repo, f.Harness.Binding, p.YAMLHash, command, p.EvidencePath, p.EvidenceHash)
 	report := proposalCapabilities(p)
 	renderCapabilities(out, report.Candidate, report.LearnBound, "saved observation; not current verification")
+	meta := proposalMeta(p)
+	renderMeta(out, meta, "saved observation; not current verification")
+	if meta.BeforeYAML != "" {
+		fmt.Fprintf(out, "Exact YAML before proposed change:\n%s\n", meta.BeforeYAML)
+	}
 	atoms, _ := yaml.Marshal(process["atoms"])
 	fmt.Fprintln(out, string(atoms))
 	if c, ok := process["repositoryContext"].(map[string]any); ok {
@@ -744,4 +785,21 @@ func renderCapabilities(out io.Writer, c onboarding.Candidate, learn bool, sourc
 		fmt.Fprintf(out, "%s: %s — %s\n", item.name, item.value.State, item.value.Reason)
 	}
 	fmt.Fprintf(out, "Learn command bound: %t\n", learn)
+}
+
+func proposalMeta(p onboarding.Proposal) onboarding.MetaReport {
+	if p.CapabilityEvidence != nil && p.CapabilityEvidence.Meta != nil {
+		return *p.CapabilityEvidence.Meta
+	}
+	f, _ := formula.Parse([]byte(p.YAML))
+	for _, a := range f.Atoms {
+		if a.Type == "learn" {
+			return onboarding.DescribeMeta(a.Command, a.Binding, a.TimeoutMS, onboarding.Candidate{})
+		}
+	}
+	return onboarding.DescribeMeta(nil, "", 0, onboarding.Candidate{})
+}
+func renderMeta(out io.Writer, r onboarding.MetaReport, source string) {
+	argv, _ := json.Marshal(r.Command)
+	fmt.Fprintf(out, "Meta harness (%s): %s — %s\nCommand argv: %s\nTimeout: %d ms\nInstalled CLI: %s — %s\nAuthentication: %s — %s\nModel access: %s — %s\nMeta containment: %s — %s\nPermission limits: %s\nEvidence inputs: %s\nLearning consent: %s\n", source, r.Capability.State, r.Capability.Reason, argv, r.TimeoutMS, r.Candidate.Installed.State, r.Candidate.Installed.Reason, r.Candidate.Authentication.State, r.Candidate.Authentication.Reason, r.Candidate.Capabilities.ModelAccess.State, r.Candidate.Capabilities.ModelAccess.Reason, r.Containment.State, r.Containment.Reason, r.Restrictions, r.EvidenceInputs, r.NextAction)
 }
