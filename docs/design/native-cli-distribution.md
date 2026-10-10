@@ -1,6 +1,6 @@
 # Native CLI distribution
 
-Status: core source is [MIT licensed](../../LICENSE); public CLI downloads remain unchanged. Preview packages are distributed from the separate public `DanielNetzer/forgecell-releases` repository.
+Status: core source is [MIT licensed](../../LICENSE); the published `0.2.0-preview.2` prerelease is distributed from the public `DanielNetzer/forgecell` repository.
 
 Users install the CLI with one shell command. Compiled-package users do not need to clone the repository, build source, or install Go/Node. Maintainers produce architecture-specific executables; that packaging detail does not turn Forgecell into a desktop application.
 
@@ -21,7 +21,7 @@ The bootstrap accepts only HTTPS and HTTPS redirects, bounds downloads and verif
 
 The native installer stages a version, smoke-checks `--version`, writes installed metadata/notices and switches the `current` symlink. A stable launcher sets `FORGECELL_LAUNCHER` to the native executable through `current`, preserving Formula bindings across upgrades. `previous` supports `forgecell rollback`, which verifies the retained artifact checksum and smoke-checks it before activation.
 
-Defaults: `~/.forgecell/releases/<version>`, `~/.forgecell/bin/forgecell`, and `~/.local/bin/forgecell`. `FORGECELL_HOME` and `FORGECELL_BIN` override installation paths. The development CLI stores each checkout's Formulas and ledgers under `~/.forgecell/labs/`; the published `0.2.0-preview.1` still uses a project `.forgecell` unless `--lab` is supplied. Installation leaves either location untouched. The installer refuses unrelated commands, unmanaged launchers, conflicting version contents and concurrent installation. It does not delete retained releases or change shell profiles.
+Defaults: `~/.forgecell/releases/<version>`, `~/.forgecell/bin/forgecell`, and `~/.local/bin/forgecell`. `FORGECELL_HOME` and `FORGECELL_BIN` override installation paths. The `0.2.0-preview.2` prerelease stores each checkout's Formulas and ledgers in a distinct directory under `~/.forgecell/labs/`; `forgecell doctor --json` reports the exact location. Legacy `0.2.0-preview.1` defaults to a project `.forgecell` unless `--lab` is supplied. Continue using an existing Lab with the same explicit `--lab` path on every command. Installation leaves either location untouched and does not automatically migrate Labs or rebind saved Formulas. The installer refuses unrelated commands, unmanaged launchers, conflicting version contents and concurrent installation. It does not delete retained releases or change shell profiles.
 
 The TypeScript/source installer has been retired. The native installer still refuses to
 replace unmanaged launchers. Existing prototype installations need a separately
@@ -39,13 +39,23 @@ Tagged release automation prepares a draft release after verification. Publishin
 
 ## Public GitHub release mapping
 
-For the public preview, release base is `https://github.com/DanielNetzer/forgecell-releases/releases/download`. The tag is the exact version, without a `v` prefix. The published `install.sh` replaces the release-base placeholder and defaults `FORGECELL_VERSION` to that exact version, so it does not request `latest.txt` from GitHub's release API. The one-line command uses the versioned installer asset. This keeps the preview explicit rather than relying on GitHub's stable-only latest-release redirect.
+The published [v0.2.0-preview.2 prerelease](https://github.com/DanielNetzer/forgecell/releases/tag/v0.2.0-preview.2)
+was freshly built from public-core source `801a9846fc9066dde985bb678348cac2bc89a249`.
+Release base is `https://github.com/DanielNetzer/forgecell/releases/download`, with
+`v<version>` tags. The rendered installer pins its exact version and tag, without
+requesting `latest.txt` or GitHub's stable-only latest-release redirect.
 
-The bundle includes four freshly built executables, their checksum files, MIT LICENSE, third-party notices and the rendered bootstrap. The download repository contains distribution documentation only. MIT permits core source distribution with the copyright and permission notice retained; source publication and repository visibility remain separate reviewed decisions. Keep local Lab files, ledgers, credentials, environment files and raw harness/evaluation traces private. The GitHub-generated archive of the download repository contains its public documentation, not Forgecell source.
+Legacy `0.2.0-preview.1` came from the separate public
+`DanielNetzer/forgecell-releases` download repository, using the exact version tag
+without a `v` prefix. Its installer, assets, checksums and source provenance remain
+unchanged. That repository contains distribution documentation; its GitHub-generated
+archive is not Forgecell source.
 
-Source-tag automation still prepares only a draft. Public promotion is a separate reviewed maintainer action; the source repository token is not assumed to have access to the download repository. Verify published asset hashes and anonymous installation before announcing each version. Retain previous version assets for upgrades and rollback.
+The bundle includes four freshly built executables, their checksum files, MIT LICENSE, third-party notices and the rendered bootstrap. MIT permits core source distribution with the copyright and permission notice retained; source publication and repository visibility remain separate reviewed decisions. Keep local Lab files, ledgers, credentials, environment files and raw harness/evaluation traces private.
 
-## Prepared public core mapping and publication gates
+Source-tag automation still prepares only a draft. Public promotion is a separate reviewed maintainer action. Verify published asset hashes and anonymous installation before announcing each version. Retain previous version assets for upgrades and rollback.
+
+## Public core mapping and publication gates
 
 New builds default to
 `https://github.com/DanielNetzer/forgecell/releases/download/v<version>/<artifact>`.
@@ -58,12 +68,13 @@ all four artifacts and license/notices. Lifecycle checks include missing/invalid
 checksums, corruption, partial downloads, checksum-valid version mismatch, upgrade,
 repeat install, rollback, temporary-file cleanup and preserved Lab data.
 
-Keep the existing preview command and legacy endpoint provenance above until a new
-release is anonymously downloadable. Required sequence: local source verification,
-independent review, reviewed clean snapshot import, public visibility approval,
-exact-head Actions passes, draft review, approved publication, anonymous installation,
-upgrade and rollback validation, then an identical pinned command in README and
-install docs. No tag push authorizes public publication or backlog merges.
+The preview.2 release has completed source review, release Actions verification,
+approved publication and anonymous install/upgrade/rollback validation. Operator
+release evidence is separate from local source tests. Future releases retain local
+verification, independent exact-source review, exact-head Linux/macOS CI, draft review,
+approved publication and anonymous lifecycle validation before documentation switches.
+This documentation patch requires independent exact-source review and exact-head
+Linux/macOS CI before merge. No tag push authorizes publication or backlog merges.
 
 Prefer a new release freshly built from the final reviewed public source commit.
 Never copy an old binary under a new version or imply different source provenance.

@@ -27,8 +27,8 @@ proposed improvements to the durable recipe that guides the next run.
 **Start on your machine. Keep the evidence. Improve the process.**
 
 > **Early preview.** The current Go source supports ticket analysis, approved execution,
-> verification and separately approved draft PRs. The downloadable `0.2.0-preview.1`
-> is older and does not include ticket readiness. Merge, deployment and issue closure
+> verification and separately approved draft PRs, also available in the downloadable
+> `0.2.0-preview.2` prerelease. Merge, deployment and issue closure
 > remain manual. The Lab is terminal-first; there is no local GUI yet.
 
 ## How it works
@@ -65,21 +65,21 @@ No Node, Go or source checkout is required to install it.
 **[Installation guide →](docs/install.md)** — prerequisites, PATH, upgrades and rollback.
 
 <details>
-<summary>One-line installer · pinned to 0.2.0-preview.1</summary>
+<summary>One-line installer · pinned to 0.2.0-preview.2</summary>
 
 ```sh
-sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell-releases/releases/download/0.2.0-preview.1/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
+sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.2.0-preview.2/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
 ```
 
 The installer verifies the executable checksum and version before activation and
-preserves local Lab data. This command uses the existing release endpoint; a release
-from the current core source has not been published yet.
+preserves local Lab data. This command pins the published public-core prerelease.
+Checksums share the binaries’ GitHub HTTPS endpoint; they are not independent signatures.
 
 </details>
 
 After installing, open the repository you want Forgecell to work on. Ticket execution
 requires Git, authenticated GitHub CLI (`gh`), and an authenticated coding harness.
-Choose a distinct Lab directory and use it throughout:
+You can choose an explicit Lab directory and use it throughout:
 
 ```sh
 lab_dir="$HOME/.forgecell/labs/YOUR_REPOSITORY"
@@ -91,9 +91,11 @@ forgecell init --lab "$lab_dir" --approve PROPOSAL_ID
 forgecell run ISSUE_NUMBER --lab "$lab_dir"
 ```
 
-The published preview needs this explicit `--lab` path to keep its records outside the
-checkout. The development CLI defaults to a private Lab under `~/.forgecell/labs/`.
-See the **[CLI guide](lab/README.md)** to build the current Go source and use ticket readiness.
+The `0.2.0-preview.2` prerelease defaults to a distinct private Lab for each checkout
+under `~/.forgecell/labs/`; `forgecell doctor --json` reports the exact location.
+Existing preview.1 checkout Labs remain intact: use the same `--lab .forgecell` path
+for every command to keep using one. Labs and saved bindings are not automatically
+migrated or rebound. See the **[CLI guide](lab/README.md)** for ticket readiness.
 
 ### Bring your harness
 
