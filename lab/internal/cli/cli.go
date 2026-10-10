@@ -21,6 +21,7 @@ import (
 	"go.yaml.in/yaml/v4"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -32,7 +33,7 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--meta-harness ID | --meta-command JSON_ARGV] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--meta-harness ID | --meta-command JSON_ARGV] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -460,13 +461,17 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		flags.SetOutput(stderr)
 		lab := flags.String("lab", defaultLab, "Lab directory")
 		preferred := flags.String("harness", "", "Preferred harness")
-		flags.Bool("json", true, "Structured output")
+		jsonFlag := flags.Bool("json", true, "Structured output (the default)")
+		verbose := flags.Bool("verbose", false, "Human-readable probe steps; with --json adds steps to the structured output")
 		if err := flags.Parse(args[1:]); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 {
 			return fail(fmt.Errorf("unexpected doctor arguments"))
 		}
+		explicitJSON := false
+		flags.Visit(func(f *flag.Flag) { explicitJSON = explicitJSON || f.Name == "json" })
+		structured := !*verbose || explicitJSON && *jsonFlag
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fail(err)
@@ -476,11 +481,18 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			return fail(err)
 		}
 		candidates := onboarding.Discover(ctx, cwd, nil)
+		pathReady := map[string]bool{}
+		for _, c := range candidates {
+			pathReady[c.ID] = c.Readiness == "ready"
+		}
 		existing := ""
 		var saved *onboarding.Candidate
 		if active.Formula.ID != "" {
 			existing = active.Formula.Harness.Binding
 			checked := onboarding.ProbeBinding(ctx, active.Formula.Harness, cwd, nil)
+			if checked.Binding != nil {
+				checked.Binding.WithRunningVersion(version)
+			}
 			saved = &checked
 			replaced := false
 			for i := range candidates {
@@ -501,12 +513,40 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		git := process.Run(ctx, process.Options{Argv: []string{"git", "--version"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
 		gh := process.Run(ctx, process.Options{Argv: []string{"gh", "auth", "status"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
 		meta := onboarding.InspectMeta(ctx, active.Formula, cwd, nil)
-		report := map[string]any{"metaBinding": meta, "metaCandidates": candidates, "activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": saved, "learnBound": onboarding.LearnBound(active.Formula), "workflow": selectedWorkflow(candidates, selection.ID), "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": candidates, "selection": selection, "note": "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."}
-		if err = json.NewEncoder(out).Encode(report); err != nil {
-			return fail(err)
-		}
 		workflow := selectedWorkflow(candidates, selection.ID)
-		if workflow.State != "conditional" || !git.OK || !gh.OK || selection.Status != "ready" || (saved != nil && saved.Readiness != "ready") {
+		ready := workflow.State == "conditional" && git.OK && gh.OK && selection.Status == "ready" && (saved == nil || saved.Readiness == "ready")
+		labDir := *lab
+		if abs, e := filepath.Abs(labDir); e == nil {
+			labDir = abs
+		}
+		commands := doctorCommands{lab: labDir, pathReady: pathReady}
+		withSteps := *verbose && structured
+		views := make([]doctorCandidate, len(candidates))
+		for i, c := range candidates {
+			views[i] = commands.view(c, withSteps)
+		}
+		var savedView *doctorCandidate
+		if saved != nil {
+			v := commands.view(*saved, withSteps)
+			savedView = &v
+		}
+		next := ""
+		if !ready {
+			next = commands.overall(savedView, views, selection)
+		}
+		note := "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."
+		if structured {
+			report := map[string]any{"schemaVersion": doctorSchemaVersion, "metaBinding": meta, "metaCandidates": views, "activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": savedView, "learnBound": onboarding.LearnBound(active.Formula), "workflow": workflow, "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": views, "selection": selection, "note": note}
+			if next != "" {
+				report["nextCommand"] = next
+			}
+			if err = json.NewEncoder(out).Encode(report); err != nil {
+				return fail(err)
+			}
+		} else {
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Next: next, Note: note})
+		}
+		if !ready {
 			return 2
 		}
 		return 0
@@ -800,6 +840,193 @@ func selectedWorkflow(candidates []onboarding.Candidate, id string) harness.Capa
 	}
 	return harness.Capability{State: "unknown", Reason: "No binding selected."}
 }
+
+const doctorSchemaVersion = "v1"
+
+// doctorCandidate adds guidance to a probed candidate. Steps appear only when the
+// caller asks for them with --verbose --json.
+type doctorCandidate struct {
+	onboarding.Candidate
+	NextCommand string            `json:"nextCommand,omitempty"`
+	StepDetail  []onboarding.Step `json:"steps,omitempty"`
+}
+
+type doctorView struct {
+	Meta                       *onboarding.MetaReport
+	Lab, FormulaID, Next, Note string
+	Git, GitHub                bool
+	Selection                  onboarding.Selection
+	Workflow                   harness.Capability
+	Saved                      *doctorCandidate
+	Candidates                 []doctorCandidate
+}
+
+// doctorCommands chooses the one next command for a non-ready state, using only
+// commands that exist today. pathReady records which harnesses init would find
+// ready through PATH, because init discovery does not read saved bindings.
+type doctorCommands struct {
+	lab       string
+	pathReady map[string]bool
+}
+
+func (x doctorCommands) view(c onboarding.Candidate, steps bool) doctorCandidate {
+	v := doctorCandidate{Candidate: c, NextCommand: x.candidate(c)}
+	if steps {
+		v.StepDetail = c.Steps
+	}
+	return v
+}
+
+func (x doctorCommands) recheck(id string) string {
+	command := fmt.Sprintf("forgecell doctor --lab %q", x.lab)
+	if id != "" {
+		command += " --harness " + harnessArg(id)
+	}
+	return command
+}
+
+func harnessArg(id string) string {
+	if safeID.MatchString(id) {
+		return id
+	}
+	return fmt.Sprintf("%q", id)
+}
+
+func shellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+func providerOnPath(provider string) bool {
+	found, err := exec.LookPath(filepath.Base(provider))
+	if err != nil {
+		return false
+	}
+	a, ae := os.Stat(found)
+	b, be := os.Stat(provider)
+	return ae == nil && be == nil && os.SameFile(a, b)
+}
+
+func loginCommand(id string) string {
+	return map[string]string{"codex": "codex login", "claude-code": "claude auth login", "cursor": "agent login"}[id]
+}
+
+func authFailed(c onboarding.Candidate) bool {
+	for _, s := range c.Failures {
+		if s.Step == "auth" {
+			return true
+		}
+	}
+	return false
+}
+
+// candidate returns the single next command for a candidate that is not ready.
+// A failing provider outranks binding states: init proposes a rebind only for a
+// ready provider.
+func (x doctorCommands) candidate(c onboarding.Candidate) string {
+	if c.Readiness == "ready" {
+		return ""
+	}
+	if c.Executable != "" {
+		if c.Installed.State == "verified" && c.Authentication.State == "verified" {
+			init := fmt.Sprintf("forgecell init --lab %q --harness %s", x.lab, harnessArg(c.ID))
+			if !providerOnPath(c.Executable) {
+				init = "PATH=" + shellWord(filepath.Dir(c.Executable)) + `:"$PATH" ` + init
+			}
+			return init
+		}
+		if login := loginCommand(c.ID); login != "" && c.Installed.State == "verified" && authFailed(c) {
+			return login
+		}
+		return x.recheck(c.ID)
+	}
+	if c.Readiness == "blocked" && x.pathReady[c.ID] {
+		return fmt.Sprintf("forgecell init --lab %q --harness %s", x.lab, harnessArg(c.ID))
+	}
+	return x.recheck(c.ID)
+}
+
+// overall picks the command for the first thing blocking the doctor result.
+func (x doctorCommands) overall(saved *doctorCandidate, views []doctorCandidate, selection onboarding.Selection) string {
+	if saved != nil && saved.Readiness != "ready" {
+		return saved.NextCommand
+	}
+	id := selection.ID
+	if selection.Status == "blocked" {
+		for _, v := range views {
+			if v.ID == id && v.Readiness != "ready" {
+				return v.NextCommand
+			}
+		}
+	}
+	if id == "" {
+		for _, v := range views {
+			if v.Readiness == "ready" {
+				id = v.ID
+				break
+			}
+		}
+	}
+	return x.recheck(id)
+}
+
+func renderDoctor(out io.Writer, v doctorView) {
+	fmt.Fprintf(out, "Forgecell doctor (schemaVersion %s)\nLab: %s\nActive Formula: %s\nGit ready: %t · GitHub CLI authenticated: %t\nSelection: %s %s — %s\nGitHub Issue workflow: %s — %s\n", doctorSchemaVersion, v.Lab, orNone(v.FormulaID), v.Git, v.GitHub, v.Selection.Status, v.Selection.ID, v.Selection.Reason, v.Workflow.State, v.Workflow.Reason)
+	if v.Saved != nil {
+		renderDoctorCandidate(out, "Saved binding", *v.Saved)
+	}
+	for _, c := range v.Candidates {
+		if v.Saved == nil || c.ID != v.Saved.ID {
+			renderDoctorCandidate(out, "Candidate", c)
+		}
+	}
+	if v.Meta != nil && v.Meta.Binding != "" {
+		fmt.Fprintf(out, "\nMeta harness: %s — %s: %s\n", v.Meta.Binding, v.Meta.Capability.State, v.Meta.Capability.Reason)
+		if v.Meta.NextAction != "" {
+			fmt.Fprintf(out, "  Next: %s\n", v.Meta.NextAction)
+		}
+	}
+	if v.Next != "" {
+		fmt.Fprintf(out, "\nNext: %s\n", v.Next)
+	}
+	fmt.Fprintf(out, "\n%s\n", v.Note)
+}
+
+func renderDoctorCandidate(out io.Writer, title string, c doctorCandidate) {
+	fmt.Fprintf(out, "\n%s: %s — %s\n", title, c.ID, c.Readiness)
+	// Binding states are listed below; an unprobed provider leaves nothing else to say.
+	if c.Binding == nil || len(c.Binding.States) == 0 || c.Executable != "" {
+		fmt.Fprintf(out, "  %s\n", c.Detail)
+	}
+	if b := c.Binding; b != nil {
+		fmt.Fprintf(out, "  Formula binding: %s · adapter: %s\n  Launcher (saved): %s — version %s (%s)\n", b.FormulaBinding, b.Adapter, b.Launcher, b.LauncherVersion, b.LauncherVersionSource)
+		if b.RunningLauncher != "" {
+			fmt.Fprintf(out, "  Launcher (running): %s — version %s\n", b.RunningLauncher, b.RunningVersion)
+		}
+		provider := b.Provider
+		if b.ResolvedProvider != "" && b.ResolvedProvider != b.Provider {
+			provider += " (resolved " + b.ResolvedProvider + ")"
+		}
+		fmt.Fprintf(out, "  Provider (bound): %s\n", provider)
+		for _, s := range b.States {
+			fmt.Fprintf(out, "  State %s: %s\n", s.State, s.Detail)
+		}
+	}
+	for _, s := range c.Steps {
+		var evidence []string
+		for _, e := range []struct{ name, value string }{{"result", s.Result}, {"expected", s.Expected}, {"state", s.State}, {"argv", strings.Join(s.Argv, " ")}} {
+			if e.value != "" {
+				evidence = append(evidence, e.name+" "+e.value)
+			}
+		}
+		line := fmt.Sprintf("  Step %s: %s — %s", s.Step, s.Status, s.Reason)
+		if len(evidence) > 0 {
+			line += " (" + strings.Join(evidence, "; ") + ")"
+		}
+		fmt.Fprintln(out, line)
+	}
+	if c.NextCommand != "" {
+		fmt.Fprintf(out, "  Next: %s\n", c.NextCommand)
+	}
+}
+
 func renderCapabilities(out io.Writer, c onboarding.Candidate, learn bool, source string) {
 	fmt.Fprintf(out, "Capabilities (%s):\nCLI probe: %s — %s\n", source, c.Readiness, c.Detail)
 	for _, item := range []struct {

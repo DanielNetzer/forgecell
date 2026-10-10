@@ -2,11 +2,54 @@ package onboarding
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 )
+
+// BindingState is one precise reason the saved native binding cannot run as saved:
+// launcher-missing, launcher-different, adapter-mismatch or provider-missing.
+type BindingState struct {
+	State  string `json:"state"`
+	Path   string `json:"path,omitempty"`
+	Detail string `json:"detail"`
+}
+
+// BindingDiagnostics reports the saved native command by path. The launcher is
+// inspected but never executed.
+type BindingDiagnostics struct {
+	FormulaBinding        string         `json:"formulaBinding"`
+	Adapter               string         `json:"adapter"`
+	Launcher              string         `json:"launcher"`
+	LauncherVersion       string         `json:"launcherVersion"`
+	LauncherVersionSource string         `json:"launcherVersionSource"`
+	RunningLauncher       string         `json:"runningLauncher,omitempty"`
+	RunningVersion        string         `json:"runningVersion,omitempty"`
+	Provider              string         `json:"provider"`
+	ResolvedProvider      string         `json:"resolvedProvider,omitempty"`
+	States                []BindingState `json:"states"`
+}
+
+// WithRunningVersion records the running release. When the saved launcher is the
+// running executable, its version is the running version.
+func (d *BindingDiagnostics) WithRunningVersion(version string) {
+	d.RunningVersion = version
+	for _, s := range d.States {
+		if s.State == "launcher-missing" || s.State == "launcher-different" {
+			return
+		}
+	}
+	if version != "" {
+		d.LauncherVersion, d.LauncherVersionSource = version, "running executable"
+	}
+}
 
 // ProbeBinding checks the saved native adapter and provider, never an arbitrary command.
 // Custom bindings remain valid execution choices, but readiness cannot be inferred safely.
@@ -22,21 +65,97 @@ func ProbeBinding(ctx context.Context, b formula.Binding, cwd string, run Runner
 		c.Detail = "Custom command preserved and not executed. Readiness requires a reviewed run; doctor cannot safely probe arbitrary commands."
 		return c
 	}
-	if b.Command[2] != b.Binding {
-		c.Detail = "Saved adapter identity differs from the Formula binding. Review a rebind through init."
-		return c
+	d := &BindingDiagnostics{FormulaBinding: b.Binding, Adapter: b.Command[2], Launcher: b.Command[0], LauncherVersion: "unknown", LauncherVersionSource: "unavailable", Provider: b.Command[3], States: []BindingState{}}
+	c.Binding = d
+	current, currentErr := os.Executable()
+	if currentErr == nil {
+		d.RunningLauncher = current
 	}
-	current, e := os.Executable()
-	bound, be := exec.LookPath(b.Command[0])
-	if e == nil && be == nil {
+	launcher, launcherErr := exec.LookPath(b.Command[0])
+	manifestDir := ""
+	if launcherErr == nil {
+		manifestDir = filepath.Dir(launcher)
+	} else if strings.ContainsRune(b.Command[0], filepath.Separator) {
+		manifestDir = filepath.Dir(b.Command[0])
+	}
+	if manifestDir != "" {
+		d.LauncherVersion, d.LauncherVersionSource = launcherVersion(manifestDir)
+	}
+	launcherOK := false
+	switch {
+	case launcherErr != nil:
+		d.States = append(d.States, BindingState{State: "launcher-missing", Path: b.Command[0], Detail: fmt.Sprintf("Saved launcher %s was not found or is not executable.", b.Command[0])})
+	case currentErr != nil:
+		d.States = append(d.States, BindingState{State: "launcher-different", Path: launcher, Detail: fmt.Sprintf("Saved launcher %s cannot be compared because the running executable could not be determined; it was not executed.", launcher)})
+	default:
 		a, ae := os.Stat(current)
-		other, oe := os.Stat(bound)
+		other, oe := os.Stat(launcher)
 		if ae == nil && oe == nil && os.SameFile(a, other) {
-			return Probe(ctx, b.Binding, b.Command[3], cwd, run)
+			launcherOK = true
+		} else {
+			d.States = append(d.States, BindingState{State: "launcher-different", Path: launcher, Detail: fmt.Sprintf("Saved launcher %s is a different Forgecell executable than the running %s; it was not executed.", launcher, current)})
 		}
 	}
-	c.Detail = "Saved adapter is missing or belongs to a different Forgecell executable. Propose a rebind through init --harness before running."
+	mismatch := b.Command[2] != b.Binding
+	if mismatch {
+		d.States = append(d.States, BindingState{State: "adapter-mismatch", Detail: fmt.Sprintf("Saved adapter %q differs from the Formula binding %q (launcher %s, provider %s).", b.Command[2], b.Binding, b.Command[0], b.Command[3])})
+	}
+	provider, providerErr := exec.LookPath(b.Command[3])
+	if providerErr != nil {
+		d.States = append(d.States, BindingState{State: "provider-missing", Path: b.Command[3], Detail: fmt.Sprintf("Bound provider %s was not found or is not an executable file.", b.Command[3])})
+		c.Installed = harness.Capability{State: "missing", Reason: fmt.Sprintf("Bound provider %s was not found or is not an executable file.", b.Command[3])}
+	} else {
+		d.ResolvedProvider = provider
+	}
+	if !mismatch && providerErr == nil {
+		probed := Probe(ctx, b.Binding, provider, cwd, run)
+		if launcherOK {
+			probed.Binding = d
+			return probed
+		}
+		c.Executable, c.Installed, c.Authentication, c.Capabilities = probed.Executable, probed.Installed, probed.Authentication, probed.Capabilities
+		c.Failures, c.Steps = probed.Failures, probed.Steps
+		c.Detail = bindingDetail(d.States) + fmt.Sprintf(" The bound provider was probed at its own path: %s — %s", probed.Readiness, probed.Detail)
+		return c
+	}
+	c.Detail = bindingDetail(d.States)
 	return c
+}
+
+func bindingDetail(states []BindingState) string {
+	var parts []string
+	for _, s := range states {
+		parts = append(parts, s.State+": "+s.Detail)
+	}
+	return strings.Join(parts, " ")
+}
+
+const maxManifestBytes = 4096
+
+var releaseVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$`)
+
+// launcherVersion reads the release manifest beside a saved launcher. It never
+// executes the launcher and reports "unknown" unless the manifest is a small
+// regular file with a release version.
+func launcherVersion(dir string) (version, source string) {
+	file := filepath.Join(dir, "manifest.json")
+	st, err := os.Lstat(file)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxManifestBytes {
+		return "unknown", "unavailable"
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		return "unknown", "unavailable"
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
+	var m struct {
+		Version string `json:"version"`
+	}
+	if err != nil || len(raw) > maxManifestBytes || json.Unmarshal(raw, &m) != nil || !releaseVersion.MatchString(m.Version) {
+		return "unknown", "unavailable"
+	}
+	return m.Version, "manifest.json"
 }
 
 // WorkflowCapability describes whether intake can start, never end-to-end success.
