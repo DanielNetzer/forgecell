@@ -12,6 +12,8 @@ import (
 
 // These are evidence labels, not new primitives or correctness claims.
 type EvidenceOutcome struct {
+	CIClassification      string                         `json:"ciClassification"`
+	CIObservations        []delivery.CIObservation       `json:"ciObservations"`
 	Lifecycle             *delivery.LifecycleObservation `json:"lifecycle,omitempty"`
 	MoleculeID            string                         `json:"moleculeId"`
 	Outcome               string                         `json:"outcome"`
@@ -24,7 +26,7 @@ func classifyEvidence(lab string, r molecule.Record) (EvidenceOutcome, error) {
 	if err := molecule.ValidateVerificationHistory(r); err != nil {
 		return EvidenceOutcome{}, err
 	}
-	e := EvidenceOutcome{MoleculeID: r.ID, Outcome: "historical-unknown"}
+	e := EvidenceOutcome{MoleculeID: r.ID, Outcome: "historical-unknown", CIClassification: "unknown", CIObservations: []delivery.CIObservation{}}
 	if r.Readiness != nil {
 		switch r.Readiness.Phase {
 		case "scope-waiting", "approved", "coding", "check-pending":
@@ -78,5 +80,10 @@ func classifyEvidence(lab string, r molecule.Record) (EvidenceOutcome, error) {
 	e.Lifecycle = receipt.Lifecycle
 	e.Commit = receipt.Commit
 	e.URL = receipt.URL
+	e.CIObservations, err = delivery.ReadCI(delivery.Options{LabDir: lab, MoleculeID: r.ID})
+	if err != nil {
+		return e, err
+	}
+	e.CIClassification = delivery.CIClassification(e.CIObservations)
 	return e, nil
 }
