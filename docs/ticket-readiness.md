@@ -36,8 +36,12 @@ Issue are included within bounded evidence; other implementation behavior stays
 unknown. Unsupported or insufficient evidence yields questions, not coding.
 
 Approval is single-use and bound to the Molecule, revision, Issue content, Formula,
-base, target, repository, scope, checks and binding. Changing consequential inputs
-stops execution. Issue retrieval/update timestamps alone are not semantic changes.
+base, target, repository, scope, checks, binding and, for Claude Code, the exact
+coding allowlist derived from those checks and the Formula's suggested checks.
+The allowlist is part of the plan, so a changed allowlist changes the digest; coding
+refuses to start if the stored list differs from the one rederived. It never includes
+commit, push or publishing commands, and each attempt records it in the ledger. Changing
+consequential inputs stops execution. Issue retrieval/update timestamps alone are not semantic changes.
 Approval never authorizes a push, merge, deployment, or Issue comment.
 
 A scope plan is not a Formula mutation. It describes this ticket's work. Formula
@@ -47,7 +51,9 @@ learning still proposes separately reviewed changes to the reusable process.
 
 Export the latest plan from the JSON ledger and edit its proposed scope, evidence,
 checks or assessment. Keep original input identities. The engine supplies the new
-revision, parent digest and paused workspace tree.
+revision, parent digest and paused workspace tree. Keep `codingAllowlist` as exported
+unless the checks it derives from change; amending checks without updating it makes
+coding refuse to start, and omitting it leaves coding with only the base allowlist.
 
 ```sh
 forgecell amend MOLECULE_ID --parent OLD_DIGEST --plan revised-plan.json

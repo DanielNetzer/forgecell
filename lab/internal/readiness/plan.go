@@ -122,11 +122,32 @@ type Plan struct {
 	Setup                 []Check         `json:"setup"`
 	Artifacts             []ArtifactRoot  `json:"artifacts"`
 	Policy                ExecutionPolicy `json:"policy"`
+	// CodingAllowlist is the exact tool allowance for a Claude Code coding attempt,
+	// derived from the checks and Formula snapshot above. It joins the plan digest,
+	// so a change needs re-approval. Absent means no allowance beyond the base list.
+	CodingAllowlist []string `json:"codingAllowlist,omitempty"`
 }
 
 var hex256 = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var gitHash = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
 var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+var codingAllowlistEntry = regexp.MustCompile(`^(?:Read|Glob|Grep|Edit|Write|Bash\([A-Za-z0-9][A-Za-z0-9_./=:@% +*-]*\))$`)
+
+// validateCodingAllowlist is syntactic and bounded; the harness package owns the
+// command policy and rederives the exact list before coding starts.
+func validateCodingAllowlist(entries []string) error {
+	if len(entries) > 512 {
+		return fmt.Errorf("too many coding allowlist entries")
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		if len(entry) > 512 || !codingAllowlistEntry.MatchString(entry) || seen[entry] {
+			return fmt.Errorf("invalid or duplicate coding allowlist entry")
+		}
+		seen[entry] = true
+	}
+	return nil
+}
 
 func textOK(s string) bool {
 	return strings.TrimSpace(s) != "" && len(s) <= 16000 && !strings.ContainsRune(s, 0)
@@ -407,6 +428,9 @@ func (p Plan) Validate() error {
 		}
 	}
 	if err := p.validateDefinitionRepairs(); err != nil {
+		return err
+	}
+	if err := validateCodingAllowlist(p.CodingAllowlist); err != nil {
 		return err
 	}
 	if !required {

@@ -69,9 +69,28 @@ for delivery, checks, amendments, recovery and execution limits.
 Native bindings support Codex, Claude Code and Cursor, retaining the harness's
 configured model. Choose explicitly with `init --harness codex`, `claude-code` or
 `cursor`. Codex coding uses workspace-write and learning uses read-only mode;
-Claude Code uses print mode with explicit allowances; Cursor uses print mode with
+Claude Code uses print mode with an exact tool allowlist; Cursor uses print mode with
 its sandbox enabled. These permission modes provide different guarantees;
 arbitrary adapters retain their process permissions.
+
+The Claude Code coding allowlist is derived from reviewed evidence, never a constant.
+It holds `Read`, `Glob`, `Grep`, `Edit`, `Write` and the read-only `Bash(git status)`
+and `Bash(git diff)`; the argv of each approved plan check; and each
+`repositoryContext.components[].suggestedChecks` entry in the approved Formula
+snapshot. Entries render as `Bash(<argv>)` with no wildcard added. A component outside
+the checkout root gets a directory flag (`go -C lab test ./...`, `npm --prefix web run
+test`) so the command runs from the root. A `package.json` component also keeps the
+earlier Node preset (`npm test`, `npm run test *`, `npm run typecheck`, `npm run build`,
+`node --test *`). An argv is omitted, not escaped, if it contains shell syntax or
+whitespace inside an argument, names a shell, `git` beyond status and diff, `gh`,
+`curl`, a publish, push, deploy or login word, or a directory with no known flag.
+Commit, push and publication are never added. The sorted, de-duplicated list is stored
+in the plan, so it joins the approval digest and a change needs re-approval. Coding
+refuses to start if the stored list differs from one rederived from the Formula and plan
+checks. A plan with no stored list (including a hand-written amendment that omits it)
+gets only the base entries. Each harness attempt records the list the provider received
+in the ledger as `codingAllowlist`; a historical attempt without the field is
+unrecorded, not empty.
 
 Binding availability does not imply ticket-analysis support. Codex analysis has
 been verified; Claude Code's live analysis probe remains outstanding. Cursor and

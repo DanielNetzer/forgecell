@@ -112,9 +112,14 @@ binding. It does not silently migrate an existing meta harness.
 Native adapters are compiled into the Go CLI and preserve the harness's configured model.
 
 - Codex: non-interactive `exec`, workspace-write for coding and read-only for learning.
-- Claude Code: print mode, `dontAsk`, explicit file/read and common test-command allowances;
-  denied permissions are failures rather than automatic escalation. Learning disables built-in
-  tools and project MCP servers for that invocation.
+- Claude Code: print mode, `dontAsk`, and an exact tool allowlist for coding: file/read tools,
+  `git status`/`git diff`, plus the approved plan's check commands and the Formula's
+  `repositoryContext` suggested checks (see the [lab README](../lab/README.md#harnesses-and-learning)).
+  Commit, push and publishing commands are never added. A denied tool call is never
+  escalated or retried with broader permissions. During coding it is recorded as evidence
+  (`permissionDenials` on the attempt result) and does not discard an otherwise valid
+  outcome; ticket analysis and learning still treat any denial as a failure. Learning
+  disables built-in tools and project MCP servers for that invocation.
 - Cursor: print mode with sandbox enabled, preserving the configured approval mode; ask mode for learning.
   No `--auto-review`, `--force`, `--yolo`, approval bypass or automatic MCP approval is added.
 

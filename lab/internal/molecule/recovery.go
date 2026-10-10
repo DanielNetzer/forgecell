@@ -113,7 +113,7 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 		if e = json.Unmarshal(raw, &outcome); e != nil {
 			return r, e
 		}
-		coding := harness.CodingOutcomeFromResult(outcome.Stdout)
+		coding := harness.CodingOutcomeFromProcess(outcome)
 		if a.Coding != nil {
 			coding = *a.Coding
 		}

@@ -35,6 +35,9 @@ type Result struct {
 	Overflow    bool   `json:"overflow"`
 	ElapsedMS   int64  `json:"elapsedMs"`
 	Error       string `json:"error,omitempty"`
+	// PermissionDenials records bounded summaries of tool calls the harness
+	// denied during an otherwise valid run; they are evidence, not failure.
+	PermissionDenials []string `json:"permissionDenials,omitempty"`
 }
 type capture struct {
 	sync.Mutex

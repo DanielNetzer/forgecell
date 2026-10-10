@@ -181,6 +181,68 @@ func TestNoChangePermissionPreservesHistoricalDigest(t *testing.T) {
 	}
 }
 
+func TestCodingAllowlistJoinsPlanDigest(t *testing.T) {
+	p := fixture()
+	absent, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(p)
+	if strings.Contains(string(raw), "codingAllowlist") {
+		t.Fatal("absent allowlist changed historical serialization")
+	}
+	digests := map[string]string{"absent": absent}
+	for name, entries := range map[string][]string{
+		"base":     {"Read", "Bash(git status)"},
+		"extended": {"Read", "Bash(git status)", "Bash(go -C lab test ./...)"},
+		"other":    {"Read", "Bash(git status)", "Bash(go -C lab vet ./...)"},
+	} {
+		p := fixture()
+		p.CodingAllowlist = entries
+		d, err := p.Digest()
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		for seen, digest := range digests {
+			if d == digest {
+				t.Fatalf("%s allowlist retained the %s digest", name, seen)
+			}
+		}
+		digests[name] = d
+	}
+}
+
+func TestCodingAllowlistValidation(t *testing.T) {
+	valid := [][]string{
+		{"Read", "Glob", "Grep", "Edit", "Write", "Bash(git status)", "Bash(git diff)"},
+		{"Bash(go -C lab test ./...)", "Bash(npm run test *)", "Bash(node --test *)", "Bash(go test ./internal/harness/ -run Allowlist -count=1)"},
+	}
+	for _, entries := range valid {
+		p := fixture()
+		p.CodingAllowlist = entries
+		if err := p.Validate(); err != nil {
+			t.Fatalf("%v: %v", entries, err)
+		}
+	}
+	invalid := [][]string{
+		{""}, {"Bash"}, {"Bash()"}, {"Bash(*)"}, {"Bash( go test)"}, {"Bash(go test)\n"}, {"WebFetch"}, {"Read(*)"},
+		{"Bash(a,b)"}, {"Bash(a;b)"}, {"Bash(a|b)"}, {"Bash(a&b)"}, {"Bash($(x))"}, {"Bash(`x`)"}, {"Bash(a b > c)"}, {`Bash("x")`}, {"Bash(a\nb)"}, {"Bash({input:x})"},
+		{"Read", "Read"},
+		{"Bash(" + strings.Repeat("a", 600) + ")"},
+		make([]string, 513),
+	}
+	for i := range invalid[len(invalid)-1] {
+		invalid[len(invalid)-1][i] = fmt.Sprintf("Bash(cmd%d)", i)
+	}
+	for _, entries := range invalid {
+		p := fixture()
+		p.CodingAllowlist = entries
+		if p.Validate() == nil {
+			t.Fatalf("accepted %q", entries)
+		}
+	}
+}
+
 func reviewedRepairPlan() Plan {
 	p := fixture()
 	p.Analysis.Scope[0].Path = "lab/go.mod"

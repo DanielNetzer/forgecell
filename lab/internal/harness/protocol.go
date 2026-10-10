@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
 	"strings"
@@ -101,7 +102,11 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 		if meta || analysis {
 			result.Args = append(result.Args, "--tools", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--json-schema", schema)
 		} else {
-			result.Args = append(result.Args, "--json-schema", schema, "--allowedTools", "Read,Glob,Grep,Edit,Write,Bash(npm test),Bash(npm run test *),Bash(npm run typecheck),Bash(npm run build),Bash(node --test *)")
+			tools, err := requestAllowlist(request)
+			if err != nil {
+				return Invocation{}, err
+			}
+			result.Args = append(result.Args, "--json-schema", schema, "--allowedTools", strings.Join(tools, ","))
 		}
 		if analysis {
 			result.Args = append(result.Args, "--safe-mode", "--no-chrome", "--disable-slash-commands")
@@ -160,6 +165,71 @@ type CodingOutcome struct {
 	Outcome       string   `json:"outcome"`
 	Reason        string   `json:"reason"`
 	Paths         []string `json:"paths"`
+}
+
+// ReadCodingResult reads a coding result. Unlike ReadResult, a permission
+// denial is the boundary working, so it is returned as bounded evidence instead
+// of discarding an otherwise valid outcome.
+func ReadCodingResult(id, output string) (string, []string, error) {
+	if id != "claude-code" {
+		text, err := ReadResult(id, output, true)
+		return text, nil, err
+	}
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &value); err != nil || value == nil {
+		return "", nil, fmt.Errorf("%s returned invalid JSON output", id)
+	}
+	var denials []string
+	if raw := value["permission_denials"]; len(raw) > 0 && string(raw) != "null" {
+		var denied []struct {
+			Tool  string          `json:"tool_name"`
+			Input json.RawMessage `json:"tool_input"`
+		}
+		if err := json.Unmarshal(raw, &denied); err != nil {
+			return "", nil, fmt.Errorf("%s returned unreadable permission denials", id)
+		}
+		for i, d := range denied {
+			if i == maxPermissionDenials {
+				denials = append(denials, fmt.Sprintf("%d more denials omitted", len(denied)-i))
+				break
+			}
+			denials = append(denials, boundedDenial(d.Tool, d.Input))
+		}
+		delete(value, "permission_denials")
+	}
+	stripped, err := json.Marshal(value)
+	if err != nil {
+		return "", nil, err
+	}
+	text, err := ReadResult(id, string(stripped), true)
+	return text, denials, err
+}
+
+const maxPermissionDenials = 50
+
+func boundedDenial(tool string, input json.RawMessage) string {
+	var fields struct {
+		Command  string `json:"command"`
+		FilePath string `json:"file_path"`
+	}
+	_ = json.Unmarshal(input, &fields)
+	detail := fields.Command
+	if detail == "" {
+		detail = fields.FilePath
+	}
+	if tool == "" {
+		tool = "unknown"
+	}
+	summary := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, strings.TrimSpace(tool+": "+detail))
+	if len(summary) > 200 {
+		summary = strings.ToValidUTF8(summary[:200], "") + "…"
+	}
+	return summary
 }
 
 func CodingOutcomeSchema() string {
@@ -257,6 +327,15 @@ func DecodeCodingOutcome(raw []byte) (CodingOutcome, error) {
 	return out, nil
 }
 
+// CodingOutcomeFromProcess decodes stdout and keeps the adapter's precise
+// failure reason when stdout was withheld for an unknown outcome.
+func CodingOutcomeFromProcess(result process.Result) CodingOutcome {
+	out := CodingOutcomeFromResult(result.Stdout)
+	if out.Outcome == "unknown" && strings.TrimSpace(result.Stdout) == "" && strings.TrimSpace(result.Error) != "" {
+		out.Reason = "Invalid or missing coding outcome: " + boundedCodingError(fmt.Errorf("%s", result.Error))
+	}
+	return out
+}
 func CodingOutcomeFromResult(text string) CodingOutcome {
 	out, err := DecodeCodingOutcome([]byte(text))
 	if err != nil {

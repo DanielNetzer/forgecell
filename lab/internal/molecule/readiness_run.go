@@ -30,6 +30,24 @@ func bindingHash(b formula.Binding) (string, error) {
 	}{b, fingerprint})
 	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }
+
+// approvedCodingAllowlist returns the exact tool allowance for a coding attempt.
+// A plan that stores none predates allowlist derivation and gets only the base
+// list. A stored list must equal the one rederived from the approved Formula and
+// the plan's checks, so rule or input drift cannot widen what coding may run.
+func approvedCodingAllowlist(f formula.Formula, p readiness.Plan) ([]string, error) {
+	if len(p.CodingAllowlist) == 0 {
+		return harness.EffectiveCodingAllowlist(nil)
+	}
+	derived, err := harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks)
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(derived, p.CodingAllowlist) {
+		return nil, fmt.Errorf("approved coding allowlist differs from the one derived from the plan checks and Formula; refresh intake")
+	}
+	return derived, nil
+}
 func issueInput(i Issue) readiness.Issue {
 	return readiness.Issue{Repository: i.Repo, Number: i.Number, URL: i.URL, State: i.State, Title: i.Title, Body: i.Body, UpdatedAt: i.UpdatedAt}
 }
@@ -309,6 +327,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	for _, input := range o.CheckInputs {
 		p.Evidence = append(p.Evidence, input.Evidence)
 	}
+	if p.CodingAllowlist, err = harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks); err != nil {
+		return stopIntake(r, err.Error())
+	}
 	if err = snapshot.ValidateScope(a.Scope); err != nil {
 		return stopIntake(r, err.Error())
 	}
@@ -445,6 +466,12 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	if err = p.ValidateForCoding(); err != nil {
 		return r, err
 	}
+	var allowlist []string
+	if p.Continuation == "" {
+		if allowlist, err = approvedCodingAllowlist(f, p); err != nil {
+			return r, err
+		}
+	}
 	if err = validateRepairHistory(r.Readiness.Plans); err != nil {
 		return r, err
 	}
@@ -569,17 +596,17 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	if err != nil {
 		return r, err
 	}
-	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve})
+	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist})
 	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+f.Harness.Binding, "invoke-coding-harness")
 	if err = save(r); err != nil {
 		return r, err
 	}
-	result := invokeHarness(ctx, f.Harness.Command, r.Workspace.Path, time.Duration(f.Harness.TimeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": f.Harness.Instructions, "issue": r.Issue, "approvedPlan": p, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
+	result := invokeHarness(ctx, f.Harness.Command, r.Workspace.Path, time.Duration(f.Harness.TimeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": f.Harness.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
 	r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
 	r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
 
 	a := &r.HarnessAttempts[len(r.HarnessAttempts)-1]
-	coding := harness.CodingOutcomeFromResult(result.Stdout)
+	coding := harness.CodingOutcomeFromProcess(result)
 	a.Coding = &coding
 	ref, err := historyFile(r, "harness-"+attemptID+"-result.json", struct {
 		process.Result
