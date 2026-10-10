@@ -43,6 +43,7 @@ func (b Binding) CheckTimeout(ms int) error {
 	}
 	return fmt.Errorf("harnessTimeoutMs %d exceeds the Formula maximum of %d ms (timeoutMs %d, maxTimeoutMs %d)", ms, b.TimeoutCeilingMS(), b.TimeoutMS, b.MaxTimeoutMS)
 }
+
 type Atom struct {
 	Purpose   string   `yaml:"purpose"`
 	ID        string   `yaml:"id"`
