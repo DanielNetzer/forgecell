@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 func configureProcess(cmd *exec.Cmd) {
@@ -26,10 +27,24 @@ func configureProcess(cmd *exec.Cmd) {
 // Probe only the group created for this invocation. Never signal a group after
 // Wait: its leader identity may already have been reused. Detached descendants
 // are outside this managed-group observation, not a claim of host containment.
+//
+// A SIGKILLed group member stays a zombie until its new parent (init) reaps
+// it, and zombies still count as group members, so an immediate probe can
+// report a group that is already dead. Re-probe briefly before concluding.
 func reconcileProcess(cmd *exec.Cmd) (bool, string) {
-	err := syscall.Kill(-cmd.Process.Pid, 0)
-	if errors.Is(err, syscall.ESRCH) {
-		return true, ""
+	deadline := time.Now().Add(reconcileGrace)
+	for {
+		err := syscall.Kill(-cmd.Process.Pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return true, ""
+		}
+		if time.Now().After(deadline) {
+			return false, "managed process group remains active or cannot be verified stopped"
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	return false, "managed process group remains active or cannot be verified stopped"
 }
+
+// reconcileGrace bounds how long reconciliation waits for killed group members
+// to be reaped. It never signals the group, so leader-PID reuse is not a risk.
+var reconcileGrace = 500 * time.Millisecond
