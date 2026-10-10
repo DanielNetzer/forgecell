@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
@@ -28,6 +29,9 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 	lab = absolute
 	r, err := findPending(lab, digest)
 	if err != nil {
+		return r, err
+	}
+	if _, err = resolveExecutionRoles(r); err != nil {
 		return r, err
 	}
 	if r.ID != id {
@@ -65,6 +69,10 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 		return r, fmt.Errorf("ownerless execution lock cannot be safely recovered; an approval may still be starting")
 	}
 	r, err = findPending(lab, digest)
+	if err != nil {
+		return r, err
+	}
+	roles, err := resolveExecutionRoles(r)
 	if err != nil {
 		return r, err
 	}
@@ -126,12 +134,12 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 				return r, e
 			}
 			r.Readiness = &state
-			atom(&r, 2, "failed", "Recovered "+phase+" coding outcome: "+detail+" Original output retained in immutable evidence.")
+			atom(&r, roles.atoms[formula.Coding], "failed", "Recovered "+phase+" coding outcome: "+detail+" Original output retained in immutable evidence.")
 			if phase == "check-pending" {
-				atom(&r, 2, "done", coding.Outcome+": "+coding.Reason)
+				atom(&r, roles.atoms[formula.Coding], "done", coding.Outcome+": "+coding.Reason)
 			}
-			r.Atoms[2].ExitCode = &outcome.Code
-			r.Atoms[2].ElapsedMS = outcome.ElapsedMS
+			r.Atoms[roles.atoms[formula.Coding]].ExitCode = &outcome.Code
+			r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = outcome.ElapsedMS
 		}
 	}
 	state, err := r.Readiness.Interrupt(digest, "Human confirmed all processes stopped. Retained observed tree: "+capture.Tree+"; violations: "+strings.Join(capture.Violations, ", ")+". Original known harness outcome retained; no automatic retry or publication.", stamp())
