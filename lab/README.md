@@ -30,6 +30,41 @@ model access or repository policy readiness. Init's Bootstrap Assay proposes a
 Formula without running a model and preserves existing approved Formulas.
 For structured onboarding and harness selection, see [agent onboarding](../docs/agent-onboarding.md).
 
+### Reading doctor output
+
+`doctor` prints JSON by default, as before, with a top-level `schemaVersion` of
+`"v1"`. Within `v1`, changes only add fields. `doctor --verbose` prints a human
+view with every probe step, the bound paths and versions, and the next command.
+`doctor --verbose --json` prints the same JSON plus a `steps` list on each probed
+candidate and on `savedBinding`. Exit codes are unchanged: 0 only when ready, 2
+when not ready, 1 on error.
+
+Each harness probe names the step that failed, with bounded evidence (the fixed
+argument list, an error class such as `timeout` or `exit-code-2`, the expected
+marker or flag, or the authentication state). Provider output is never echoed.
+The steps are `version`, `help` (Codex also checks `exec --help`), `identity`
+(version and help ran, but the product was not recognized),
+`required-flag:<flag>` (one entry for every missing flag), `auth` and `isolation`.
+A failed `isolation` step blocks the ticket workflow without changing the
+harness's `readiness`.
+
+A saved binding is reported by state, each with its paths: `launcher-missing`,
+`launcher-different` (the saved launcher is not the running executable),
+`adapter-mismatch` (the saved adapter differs from the Formula binding) and
+`provider-missing` (the bound provider is absent or not an executable file). The
+launcher is never executed; its version is read from the adjacent release
+`manifest.json` when present, otherwise it is `unknown`. When the adapter matches
+and the provider exists, doctor still probes the provider at its own absolute path
+with the same fixed read-only calls, so a harness installed outside `PATH` is
+checked where it is bound. The binding stays `blocked` until the launcher matches.
+
+Every result that is not ready carries one `nextCommand`: the provider's login
+command (`codex login`, `claude auth login` or `agent login`) when authentication
+failed; `forgecell init --lab DIR --harness ID` when a ready provider is available
+to rebind (prefixed with the provider's directory on `PATH` when it is bound
+outside `PATH`, because init discovers harnesses through `PATH`); otherwise
+`forgecell doctor --lab DIR --harness ID` to re-check.
+
 ## Review a ticket (development build)
 
 Ticket readiness on this branch is **not in the published `0.2.0-preview.1`**.
