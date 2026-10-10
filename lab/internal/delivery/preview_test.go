@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
@@ -24,6 +25,49 @@ func fixture(t *testing.T) Options {
 
 func fixtureWithRepair(t *testing.T, repair bool) Options {
 	t.Helper()
+	f, err := formula.Parse([]byte(`schemaVersion: v0
+kind: formula
+id: delivery-fixture
+intake:
+  source: github-issues
+  repo: owner/repo
+harness:
+  binding: unbound
+atoms:
+  - id: intake
+    type: intake
+  - id: scope
+    type: gate
+    purpose: scope
+  - id: coding
+    type: harness
+  - id: checks
+    type: check
+  - id: review
+    type: gate
+    purpose: review
+  - id: publication
+    type: ship
+  - id: documentation
+    type: document
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ValidateReadiness(); err != nil {
+		t.Fatal(err)
+	}
+	atoms := make([]molecule.Atom, len(f.Atoms))
+	for i, a := range f.Atoms {
+		status := "done"
+		switch a.ID {
+		case "review":
+			status = "waiting"
+		case "publication", "documentation":
+			status = "skipped"
+		}
+		atoms[i] = molecule.Atom{ID: a.ID, Type: a.Type, Status: status}
+	}
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
@@ -47,9 +91,9 @@ func fixtureWithRepair(t *testing.T, repair bool) Options {
 	lab := t.TempDir()
 	workspace := filepath.Join(lab, "workspaces", "fixture")
 	git("worktree", "add", "-b", "forgecell/fixture", workspace, sha)
-	r := molecule.Record{SchemaVersion: "v0", Kind: "molecule", ID: "mol-fixture", Status: "waiting", FormulaApproved: true, FinishedAt: "2026-09-29T00:00:00Z", Workspace: molecule.Workspace{SourceRoot: root, Path: workspace, Repo: "owner/repo", Branch: "forgecell/fixture", BaseCommit: sha}, Issue: molecule.Issue{Repo: "owner/repo", Number: 9}, Atoms: []molecule.Atom{{Type: "harness", Status: "done"}}}
+	r := molecule.Record{SchemaVersion: "v0", Kind: "molecule", ID: "mol-fixture", Status: "waiting", FormulaApproved: true, FormulaID: f.ID, FormulaSnapshot: molecule.Snapshot{YAML: f.YAML, SHA256: f.SHA256}, FinishedAt: "2026-09-29T00:00:00Z", Workspace: molecule.Workspace{SourceRoot: root, Path: workspace, Repo: "owner/repo", Branch: "forgecell/fixture", BaseCommit: sha}, Issue: molecule.Issue{Repo: "owner/repo", Number: 9}, Atoms: atoms}
 	os.WriteFile(filepath.Join(workspace, "a.txt"), []byte("after\n"), 0600)
-	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: "owner/repo", TargetBranch: "main", BaseCommit: sha, FormulaSHA256: strings.Repeat("a", 64), EvidenceSHA256: strings.Repeat("b", 64), BindingSHA256: strings.Repeat("c", 64), Issue: readiness.Issue{Repository: "owner/repo", Number: 9, Title: "Change a", URL: "https://github.com/owner/repo/issues/9", State: "OPEN"}}, Evidence: []readiness.Evidence{{ID: "source", Path: "a.txt", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("before\n")))}}, Analysis: readiness.Analysis{Summary: "Change a", Scope: []readiness.ScopedPath{{Path: "a.txt", Reason: "Requested change", Evidence: []string{"issue"}}}, Acceptance: []readiness.Criterion{{Description: "a contains after", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "acceptance", Category: "independent-acceptance", IndependentProvenance: "Explicit delivery test fixture", Argv: []string{"test", "ok"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"source"}, Reason: "Fixture", Evidence: []string{"issue"}}}}}
+	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: "owner/repo", TargetBranch: "main", BaseCommit: sha, FormulaSHA256: f.SHA256, EvidenceSHA256: strings.Repeat("b", 64), BindingSHA256: strings.Repeat("c", 64), Issue: readiness.Issue{Repository: "owner/repo", Number: 9, Title: "Change a", URL: "https://github.com/owner/repo/issues/9", State: "OPEN"}}, Evidence: []readiness.Evidence{{ID: "source", Path: "a.txt", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("before\n")))}}, Analysis: readiness.Analysis{Summary: "Change a", Scope: []readiness.ScopedPath{{Path: "a.txt", Reason: "Requested change", Evidence: []string{"issue"}}}, Acceptance: []readiness.Criterion{{Description: "a contains after", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "acceptance", Category: "independent-acceptance", IndependentProvenance: "Explicit delivery test fixture", Argv: []string{"test", "ok"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"source"}, Reason: "Fixture", Evidence: []string{"issue"}}}}}
 	if repair {
 		input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human", Path: "acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("test -f a.txt\n")))}, Content: "test -f a.txt\n"}
 		p.CheckInputs = []readiness.FileEvidence{input}
@@ -76,14 +120,12 @@ func fixtureWithRepair(t *testing.T, repair bool) Options {
 	s, _ = s.FinishAttempt("check-pending", "captured", "end")
 	s, _ = s.RecordVerification(true, "fixture verified", "checked")
 	r.Readiness = &s
-	r.FormulaSnapshot.SHA256 = p.Inputs.FormulaSHA256
 	c, e := verification.Capture(context.Background(), workspace, sha, []string{"a.txt"}, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
 	r.LabDir = lab
 	r.Capture = &c
-	r.Atoms = []molecule.Atom{{Type: "intake", Status: "done"}, {Type: "gate", Status: "done"}, {Type: "harness", Status: "done"}}
 	report := `{"schemaVersion":"v1","outcome":"completed","reason":"Implemented and tested","paths":[]}`
 	coding := harness.CodingOutcomeFromResult(report)
 	result := process.Result{OK: true, Reconciled: true, Stdout: report}
