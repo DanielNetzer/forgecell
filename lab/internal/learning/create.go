@@ -53,8 +53,10 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 	}
 	var records []json.RawMessage
 	var outcomes []EvidenceOutcome
+	var motivating []MotivatingEvidence
 	var verificationEvidence []json.RawMessage
 	evidenceBudget := 4_000_000
+	motivatingBudget := 4_000_000
 	var first molecule.Record
 	for i, id := range o.MoleculeIDs {
 		if !validID.MatchString(id) {
@@ -63,6 +65,10 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 		b, e := bounded(filepath.Join(o.LabDir, "ledgers", id+".json"))
 		if e != nil {
 			return p, e
+		}
+		motivatingBudget -= len(b)
+		if motivatingBudget < 0 {
+			return p, fmt.Errorf("aggregate motivating evidence exceeds 4 MB limit")
 		}
 		var r molecule.Record
 		if e = json.Unmarshal(b, &r); e != nil {
@@ -88,6 +94,7 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 			return p, fmt.Errorf("select Molecules from the same Formula snapshot")
 		}
 		records = append(records, json.RawMessage(b))
+		motivating = append(motivating, MotivatingEvidence{MoleculeID: id, SHA256: hash(string(b)), Ledger: append([]byte(nil), b...)})
 	}
 	loaded, e := formula.Load(o.LabDir, first.FormulaID)
 	if e != nil {
@@ -158,6 +165,8 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 	p = Suggestion{OriginApproval: loaded.Approval, ID: "suggestion-" + hex.EncodeToString(token[:]), FormulaID: first.FormulaID, MoleculeIDs: append([]string(nil), o.MoleculeIDs...), CreatedAt: stamp(), Status: "pending", Summary: value.Summary, Rationale: value.Rationale, ExpectedImpact: value.ExpectedImpact, Evaluation: value.Evaluation, OriginalYAML: loaded.Formula.YAML, OriginalHash: loaded.Formula.SHA256, ProposedYAML: value.YAML, ProposedHash: hash(value.YAML)}
 	p.assessReadiness()
 	p.EvidenceOutcomes = outcomes
+	p.MotivatingEvidence = motivating
+	p.Comparison = inspectComparisons(o.LabDir, p)
 	p.Diff, e = yamlDiff(ctx, p.OriginalYAML, p.ProposedYAML)
 	if e != nil {
 		return p, e

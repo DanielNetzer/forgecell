@@ -67,6 +67,12 @@ func TestCreateProposal(t *testing.T) {
 				if e != nil || p.Status != "pending" {
 					t.Fatalf("%+v %v", p, e)
 				}
+				if len(p.MotivatingEvidence) != 1 || p.MotivatingEvidence[0].MoleculeID != "mol-1" || p.MotivatingEvidence[0].SHA256 != hash(string(p.MotivatingEvidence[0].Ledger)) || p.Comparison.Status != "missing" {
+					t.Fatal("missing motivating identities or initial comparison state")
+				}
+				if scenario == "check change" && !strings.HasPrefix(p.Comparison.Support, "unsupported:") {
+					t.Fatal("unsupported intervention hidden")
+				}
 				if scenario == "pending" && !strings.Contains(p.Diff, "+  instructions:") {
 					t.Fatal("missing instruction diff")
 				}
@@ -97,5 +103,20 @@ func TestCreateProposal(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAggregateMotivatingEvidenceBoundBeforeInvocation(t *testing.T) {
+	d, _ := fixture(t)
+	r := molecule.Record{ID: "mol-large", SchemaVersion: "v0", Kind: "molecule", Mode: "ticket", FinishedAt: stamp(), Status: "failed", FormulaApproved: true, FormulaID: "default", FormulaSnapshot: molecule.Snapshot{YAML: recipe, SHA256: hash(recipe)}, Issue: molecule.Issue{Body: strings.Repeat("x", 2_100_000)}}
+	raw, _ := json.Marshal(r)
+	os.MkdirAll(filepath.Join(d, "ledgers"), 0700)
+	os.WriteFile(filepath.Join(d, "ledgers", r.ID+".json"), raw, 0600)
+	_, err := create(context.Background(), Options{LabDir: d, MoleculeIDs: []string{r.ID, r.ID}}, func(context.Context, []string, string, time.Duration, map[string]any) process.Result {
+		t.Fatal("invoked oversized evidence")
+		return process.Result{}
+	})
+	if err == nil || !strings.Contains(err.Error(), "aggregate motivating") {
+		t.Fatalf("%v", err)
 	}
 }

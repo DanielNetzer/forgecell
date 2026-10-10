@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/evaluation"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/learning"
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
 	"os"
 	"path/filepath"
@@ -336,5 +338,42 @@ func TestOnboardingDocumentationConsistency(t *testing.T) {
 	}
 	if strings.Contains(atoms, "Reads recent GitHub Actions runs as context") || strings.Contains(atoms, "Unbound runs remain record-only") {
 		t.Error("obsolete Atom behavior")
+	}
+}
+
+func TestSuggestionComparisonRenderingAndDecisionIsolation(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "suggestions"), 0700)
+	yaml := "kind: formula\nid: sample\nharness: {command: [echo], instructions: Check tests.}\natoms: [{type: gate}]\n"
+	candidate := strings.Replace(yaml, "Check tests.", "Check targeted tests.", 1)
+	p := learning.Suggestion{ID: "suggestion-cli", FormulaID: "sample", Status: "pending", OriginalYAML: yaml, OriginalHash: evaluation.Hash([]byte(yaml)), ProposedYAML: candidate, ProposedHash: evaluation.Hash([]byte(candidate))}
+	raw, _ := json.Marshal(p)
+	file := filepath.Join(dir, "suggestions", p.ID+".json")
+	os.WriteFile(file, raw, 0600)
+	for _, jsonMode := range []bool{false, true} {
+		var out, stderr bytes.Buffer
+		args := []string{"suggestion", p.ID, "--lab", dir}
+		if jsonMode {
+			args = append(args, "--json")
+		}
+		if code := Run(context.Background(), args, strings.NewReader(""), &out, &stderr, "dev"); code != 0 {
+			t.Fatalf("%d %s", code, stderr.String())
+		}
+		for _, want := range []string{p.OriginalHash, p.ProposedHash, "missing", "instruction-only"} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("missing %q: %s", want, out.String())
+			}
+		}
+	}
+	for _, extra := range [][]string{{"--link-evaluation", dir, "--approve"}, {"--link-evaluation", dir, "--dismiss"}, {"--baseline-ledger", "one", "--candidate-ledger", "two", "--comparability-basis", "Human basis", "--approve"}, {"--evaluation-parent", dir}, {"--comparability-basis", "unused"}} {
+		var out, stderr bytes.Buffer
+		args := append([]string{"suggestion", p.ID, "--lab", dir}, extra...)
+		if Run(context.Background(), args, strings.NewReader(""), &out, &stderr, "dev") == 0 {
+			t.Fatal("incompatible linkage flags accepted")
+		}
+	}
+	after, _ := os.ReadFile(file)
+	if !bytes.Equal(raw, after) {
+		t.Fatal("inspection/invalid options rewrote suggestion")
 	}
 }
