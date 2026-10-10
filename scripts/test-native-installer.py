@@ -37,7 +37,7 @@ for version in versions:
             assert binary.with_name(binary.name + '.sha256').read_text().strip() == hashlib.sha256(binary.read_bytes()).hexdigest()
 assert (release_root / 'install.sh').read_bytes() == (release_root / versions[-1] / 'install.sh').read_bytes()
 print('PASS: all four packages, license, notices and rendered version/tag pins')
-public_url = 'https://github.com/DanielNetzer/forgecell-releases/releases/download/0.2.0-preview.1/install.sh'
+public_url = 'https://github.com/DanielNetzer/forgecell/releases/download/v0.2.0-preview.2/install.sh'
 def documented_command(path):
     commands = [block.strip() for block in re.findall(r'```sh\n(.*?)\n```', path.read_text(), re.S) if public_url in block]
     assert len(commands) == 1, f'{path}: expected one public install command'
