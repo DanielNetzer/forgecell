@@ -34,20 +34,7 @@ func TestLearningDoesNotInferOutcomeFromFinishedAt(t *testing.T) {
 }
 
 func TestVerifiedAndPublicationEvidenceRemainDistinct(t *testing.T) {
-	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: "mol-1", Revision: 1, Inputs: readiness.Inputs{Repository: "owner/repo", TargetBranch: "main", BaseCommit: strings.Repeat("a", 40), FormulaSHA256: strings.Repeat("b", 64), EvidenceSHA256: strings.Repeat("c", 64), BindingSHA256: strings.Repeat("d", 64), Issue: readiness.Issue{Repository: "owner/repo", Number: 1, URL: "https://github.com/owner/repo/issues/1", State: "OPEN", Title: "Fix"}}, Evidence: []readiness.Evidence{{ID: "source", Path: "a.go", SHA256: strings.Repeat("e", 64)}}, Analysis: readiness.Analysis{Summary: "Fix", Scope: []readiness.ScopedPath{{Path: "a.go", Reason: "Fix", Evidence: []string{"issue"}}}, Acceptance: []readiness.Criterion{{Description: "Works", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "test", Category: "candidate", Argv: []string{"true"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"source"}, Reason: "Test", Evidence: []string{"issue"}}}}}
-	s, err := readiness.NewState(p, "start")
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, _ := p.Digest()
-	s, err = s.Approve(d, p.Inputs, "approve")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, _ = s.StartAttempt("code")
-	s, _ = s.FinishAttempt("check-pending", "captured", "end")
-	s, _ = s.RecordVerification(true, "passed", "verified")
-	r := molecule.Record{ID: "mol-1", Readiness: &s, Status: "waiting", FinishedAt: "done", Issue: molecule.Issue{Repo: "owner/repo"}, Workspace: molecule.Workspace{BaseCommit: p.Inputs.BaseCommit, Branch: "forgecell/test"}, Verification: &verification.Result{RequiredChecksPassed: true, SourceTree: strings.Repeat("f", 40)}}
+	r := verifiedCIRecord(t)
 	dir := t.TempDir()
 	e, err := classifyEvidence(dir, r)
 	if err != nil || e.Outcome != "verified-undelivered" {
@@ -96,4 +83,23 @@ func TestVerifiedAndPublicationEvidenceRemainDistinct(t *testing.T) {
 	if _, err = classifyEvidence(dir, r); err == nil {
 		t.Fatal("mismatched receipt accepted")
 	}
+}
+
+func verifiedCIRecord(t *testing.T) molecule.Record {
+	t.Helper()
+	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: "mol-1", Revision: 1, Inputs: readiness.Inputs{Repository: "owner/repo", TargetBranch: "main", BaseCommit: strings.Repeat("a", 40), FormulaSHA256: strings.Repeat("b", 64), EvidenceSHA256: strings.Repeat("c", 64), BindingSHA256: strings.Repeat("d", 64), Issue: readiness.Issue{Repository: "owner/repo", Number: 1, URL: "https://github.com/owner/repo/issues/1", State: "OPEN", Title: "Fix"}}, Evidence: []readiness.Evidence{{ID: "source", Path: "a.go", SHA256: strings.Repeat("e", 64)}}, Analysis: readiness.Analysis{Summary: "Fix", Scope: []readiness.ScopedPath{{Path: "a.go", Reason: "Fix", Evidence: []string{"issue"}}}, Acceptance: []readiness.Criterion{{Description: "Works", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "test", Category: "candidate", Argv: []string{"true"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"source"}, Reason: "Test", Evidence: []string{"issue"}}}}}
+	s, err := readiness.NewState(p, "start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := p.Digest()
+	s, err = s.Approve(d, p.Inputs, "approve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ = s.StartAttempt("code")
+	s, _ = s.FinishAttempt("check-pending", "captured", "end")
+	s, _ = s.RecordVerification(true, "passed", "verified")
+	r := molecule.Record{ID: "mol-1", Readiness: &s, Status: "waiting", FinishedAt: "done", Issue: molecule.Issue{Repo: "owner/repo"}, Workspace: molecule.Workspace{BaseCommit: p.Inputs.BaseCommit, Branch: "forgecell/test"}, Verification: &verification.Result{RequiredChecksPassed: true, SourceTree: strings.Repeat("f", 40)}}
+	return r
 }

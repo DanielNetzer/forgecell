@@ -3,13 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
 	"github.com/DanielNetzer/forgecell/lab/internal/evaluation"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/learning"
+	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
+	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"os"
 	"path/filepath"
 	"strings"
@@ -375,5 +379,91 @@ func TestSuggestionComparisonRenderingAndDecisionIsolation(t *testing.T) {
 	after, _ := os.ReadFile(file)
 	if !bytes.Equal(raw, after) {
 		t.Fatal("inspection/invalid options rewrote suggestion")
+	}
+}
+
+func TestChecksPersistsNonpassingEvidenceWithoutSideEffects(t *testing.T) {
+	for _, status := range []string{"passed", "failed", "missing", "pending", "unknown", "stale"} {
+		t.Run(status, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := t.TempDir()
+			head := strings.Repeat("a", 40)
+			p := delivery.PreviewResult{MoleculeID: "mol-ci", Repo: "owner/repo"}
+			raw, _ := json.Marshal(p)
+			p.Digest = fmt.Sprintf("%x", sha256.Sum256(raw))
+			receipt := delivery.Receipt{State: "published", Preview: p, Commit: head, URL: "https://github.com/owner/repo/pull/9"}
+			record := molecule.Record{ID: "mol-ci", Issue: molecule.Issue{Repo: p.Repo}, Verification: &verification.Result{}}
+			os.MkdirAll(filepath.Join(dir, "deliveries"), 0700)
+			os.MkdirAll(filepath.Join(dir, "ledgers"), 0700)
+			os.MkdirAll(filepath.Join(dir, "formulas"), 0700)
+			receiptRaw, _ := json.Marshal(receipt)
+			ledgerRaw, _ := json.Marshal(record)
+			os.WriteFile(filepath.Join(dir, "deliveries/mol-ci.json"), receiptRaw, 0600)
+			os.WriteFile(filepath.Join(dir, "ledgers/mol-ci.json"), ledgerRaw, 0600)
+			os.WriteFile(filepath.Join(dir, "formulas/default.yaml"), []byte("original formula"), 0600)
+			entries := `{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}`
+			observed := head
+			switch status {
+			case "failed":
+				entries = strings.Replace(entries, "SUCCESS", "FAILURE", 1)
+			case "missing":
+				entries = ""
+			case "pending":
+				entries = strings.Replace(entries, "COMPLETED", "IN_PROGRESS", 1)
+			case "stale":
+				observed = strings.Repeat("b", 40)
+			}
+			response := fmt.Sprintf(`{"headRefOid":%q,"statusCheckRollup":[%s]}`, observed, entries)
+			if status == "unknown" {
+				response = "null"
+			}
+			script := "#!/bin/sh\nif [ \"$*\" != 'pr view 9 --repo owner/repo --json headRefOid,statusCheckRollup' ]; then exit 99; fi\nprintf '%s' '" + response + "'\n"
+			os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0700)
+			t.Setenv("PATH", bin)
+			var out, stderr bytes.Buffer
+			args := []string{"checks", "--lab", dir, "--molecule", "mol-ci", "--repo", p.Repo, "--pr", "9", "--commit", head, "--required", "test"}
+			code := Run(context.Background(), args, strings.NewReader(""), &out, &stderr, "test")
+			want := 2
+			if status == "passed" {
+				want = 0
+			}
+			if code != want {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, &out, &stderr)
+			}
+			history, err := delivery.ReadCI(delivery.Options{LabDir: dir, MoleculeID: "mol-ci"})
+			if err != nil || len(history) != 1 || history[0].Snapshot.Status != status {
+				t.Fatalf("%+v %v", history, err)
+			}
+			for path, original := range map[string]string{"deliveries/mol-ci.json": string(receiptRaw), "ledgers/mol-ci.json": string(ledgerRaw), "formulas/default.yaml": "original formula"} {
+				after, _ := os.ReadFile(filepath.Join(dir, path))
+				if string(after) != original {
+					t.Fatalf("rewrote %s", path)
+				}
+			}
+			// A mismatched target must fail before collecting or appending another observation.
+			args[6] = "other/repo"
+			out.Reset()
+			stderr.Reset()
+			if code := Run(context.Background(), args, strings.NewReader(""), &out, &stderr, "test"); code != 1 {
+				t.Fatalf("mismatch accepted: %d", code)
+			}
+			history, err = delivery.ReadCI(delivery.Options{LabDir: dir, MoleculeID: "mol-ci"})
+			if err != nil || len(history) != 1 {
+				t.Fatal("mismatch changed history")
+			}
+			args[6] = p.Repo
+			if err := os.Mkdir(filepath.Join(dir, ".delivery-lock"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			out.Reset()
+			stderr.Reset()
+			if code := Run(context.Background(), args, strings.NewReader(""), &out, &stderr, "test"); code != 1 || out.Len() != 0 {
+				t.Fatalf("failed persistence reported saved evidence: code=%d output=%s", code, &out)
+			}
+			history, err = delivery.ReadCI(delivery.Options{LabDir: dir, MoleculeID: "mol-ci"})
+			if err != nil || len(history) != 1 {
+				t.Fatal("failed persistence changed history")
+			}
+		})
 	}
 }

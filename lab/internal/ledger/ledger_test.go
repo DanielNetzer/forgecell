@@ -68,3 +68,21 @@ func TestAtomProvenanceRoundTripPreservesUnknownAndExtensions(t *testing.T) {
 		}
 	}
 }
+
+func TestCIReferenceExtensionsRoundTrip(t *testing.T) {
+	raw := []byte(`{"schemaVersion":"v0","kind":"molecule","id":"mol-ci","formulaId":"f","status":"waiting","ciReferences":[{"sequence":1,"sha256":"original","status":"failed","commit":"original-head"},{"sequence":2,"sha256":"later","previous":"original","status":"stale"}]}`)
+	l, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := l.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after any
+	json.Unmarshal(raw, &before)
+	json.Unmarshal(encoded, &after)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("CI references changed during ledger round trip")
+	}
+}

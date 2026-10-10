@@ -32,7 +32,7 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\n--version\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\n--version\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -264,6 +264,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	if args[0] == "checks" {
 		flags := flag.NewFlagSet("checks", flag.ContinueOnError)
 		flags.SetOutput(stderr)
+		lab := flags.String("lab", defaultLab, "Lab directory")
+		mol := flags.String("molecule", "", "Molecule delivery identity")
 		repo := flags.String("repo", "", "GitHub repository")
 		pr := flags.Int("pr", 0, "Pull request number")
 		sha := flags.String("commit", "", "Exact expected commit")
@@ -275,14 +277,15 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if flags.NArg() != 0 {
 			return fail(fmt.Errorf("unexpected checks arguments"))
 		}
-		r, err := checks.Collect(ctx, checks.Options{Repo: *repo, PR: *pr, Commit: *sha, Required: required})
+		link := delivery.Options{LabDir: *lab, MoleculeID: *mol}
+		observation, err := delivery.CollectCI(ctx, link, checks.Options{Repo: *repo, PR: *pr, Commit: *sha, Required: required})
 		if err != nil {
 			return fail(err)
 		}
-		if code := encode(out, stderr, r); code != 0 {
+		if code := encode(out, stderr, observation); code != 0 {
 			return code
 		}
-		if r.Status != "passed" {
+		if observation.Snapshot.Status != "passed" {
 			return 2
 		}
 		return 0
