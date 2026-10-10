@@ -47,3 +47,39 @@ func (l Ledger) Encode() ([]byte, error) {
 	}
 	return json.MarshalIndent(l.fields, "", "  ")
 }
+
+// QueueProjection is optional historical evidence; all extension fields remain intact.
+type QueueProjection struct {
+	Issue struct {
+		URL    string `json:"url"`
+		Repo   string `json:"repo"`
+		Number int64  `json:"number"`
+	} `json:"issue"`
+	Workspace *struct {
+		Repo string `json:"repo"`
+	} `json:"workspace"`
+	StartedAt string `json:"startedAt"`
+	Readiness *struct {
+		Phase string `json:"phase"`
+	} `json:"readiness"`
+}
+
+func (l Ledger) QueueProjection() (QueueProjection, error) {
+	var p QueueProjection
+	if l.fields == nil {
+		return p, fmt.Errorf("ledger was not decoded")
+	}
+	// Decode only queue fields: indentation of arbitrary historical extensions
+	// could expand them far beyond the bounded file size.
+	for _, field := range []struct {
+		name   string
+		target any
+	}{{"issue", &p.Issue}, {"workspace", &p.Workspace}, {"startedAt", &p.StartedAt}, {"readiness", &p.Readiness}} {
+		if raw, ok := l.fields[field.name]; ok {
+			if err := json.Unmarshal(raw, field.target); err != nil {
+				return p, fmt.Errorf("%s: %w", field.name, err)
+			}
+		}
+	}
+	return p, nil
+}
