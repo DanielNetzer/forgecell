@@ -179,6 +179,12 @@ func ReadCodingResult(id, output string) (string, []string, error) {
 	if err := json.Unmarshal([]byte(output), &value); err != nil || value == nil {
 		return "", nil, fmt.Errorf("%s returned invalid JSON output", id)
 	}
+	var subtype string
+	if raw := value["subtype"]; len(raw) > 0 && string(raw) != "null" {
+		if json.Unmarshal(raw, &subtype) != nil || strings.HasPrefix(subtype, "error") {
+			return "", nil, fmt.Errorf("%s reported a failure: %s", id, boundedDenial("subtype", raw))
+		}
+	}
 	var denials []string
 	if raw := value["permission_denials"]; len(raw) > 0 && string(raw) != "null" {
 		var denied []struct {

@@ -84,7 +84,10 @@ earlier Node preset (`npm test`, `npm run test *`, `npm run typecheck`, `npm run
 `node --test *`). An argv is omitted, not escaped, if it contains shell syntax or
 whitespace inside an argument, names a shell, `git` beyond status and diff, `gh`,
 `curl`, a publish, push, deploy or login word, or a directory with no known flag.
-Commit, push and publication are never added. The sorted, de-duplicated list is stored
+Commit, push and publication are never added. The omission rules are a best-effort lint,
+not a sandbox: every allowed check runs repository code, including tests the harness has
+just written, so approving a check approves arbitrary execution with your user's
+permissions. Review derived entries at the scope gate accordingly. The sorted, de-duplicated list is stored
 in the plan, so it joins the approval digest and a change needs re-approval. Coding
 refuses to start if the stored list differs from one rederived from the Formula and plan
 checks. A plan with no stored list (including a hand-written amendment that omits it)

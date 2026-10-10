@@ -37,9 +37,16 @@ var deniedCommands = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "csh": true, "tcsh": true, "fish": true,
 	"env": true, "xargs": true, "sudo": true, "su": true, "doas": true, "eval": true, "exec": true, "command": true, "nohup": true,
 	"git": true, "gh": true, "curl": true, "wget": true, "ssh": true, "scp": true, "sftp": true, "rsync": true, "nc": true, "ncat": true, "telnet": true, "ftp": true,
+	"npx": true, "pnpx": true, "bunx": true, "uvx": true, "pipx": true, "python": true, "python3": true, "perl": true, "ruby": true, "awk": true,
+	"find": true, "timeout": true, "nice": true, "busybox": true, "docker": true, "socat": true, "openssl": true,
 }
+
+// deniedWords is a best-effort lint over argument words, not a security
+// boundary: every derived entry still runs repository code. It removes common
+// publishing, installation and execution-delegation forms from derived checks.
 var deniedWords = map[string]bool{
 	"publish": true, "unpublish": true, "push": true, "deploy": true, "release": true, "login": true, "logout": true, "adduser": true, "upload": true,
+	"install": true, "get": true, "add": true, "link": true, "version": true, "exec": true, "toolexec": true,
 }
 
 type formulaComponent struct {
@@ -157,12 +164,19 @@ func safeArgv(argv []string) bool {
 		return false
 	}
 	for _, arg := range argv[1:] {
-		if !safeArgument.MatchString(arg) || strings.HasPrefix(arg, "/") {
+		if !safeArgument.MatchString(arg) {
 			return false
 		}
-		for _, segment := range strings.Split(arg, "/") {
-			if segment == ".." {
+		// Flag values (-o=/x, --out=../y, -C:..) are paths too, so check every
+		// "=" or ":" separated part, not only the start of the argument.
+		for _, part := range strings.FieldsFunc(arg, func(r rune) bool { return r == '=' || r == ':' }) {
+			if strings.HasPrefix(part, "/") {
 				return false
+			}
+			for _, segment := range strings.Split(part, "/") {
+				if segment == ".." {
+					return false
+				}
 			}
 		}
 		for _, word := range wordSplit.Split(strings.ToLower(arg), -1) {

@@ -27,7 +27,7 @@ func TestCodingResultKeepsOutcomeAndRecordsDenials(t *testing.T) {
 }
 
 func TestCodingResultStillRejectsFailures(t *testing.T) {
-	for _, raw := range []string{`not json`, `null`, `{"is_error":true,"result":"failed","permission_denials":[]}`, `{"result":"","permission_denials":[{"tool_name":"Bash"}]}`, `{"result":"done","permission_denials":"bad"}`} {
+	for _, raw := range []string{`not json`, `null`, `{"is_error":true,"result":"failed","permission_denials":[]}`, `{"result":"","permission_denials":[{"tool_name":"Bash"}]}`, `{"result":"done","permission_denials":"bad"}`, `{"subtype":"error_max_turns","is_error":false,"result":"{}"}`, `{"subtype":"error_during_execution","result":"{}","permission_denials":[]}`} {
 		if _, _, err := ReadCodingResult("claude-code", raw); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}

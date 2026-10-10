@@ -215,6 +215,21 @@ func TestAllowlistOmitsUnsafeAndPublishingCommands(t *testing.T) {
 		{"go", "test", "../outside"},
 		{"go", "test", "/abs/path"},
 		{"go test ./..."},
+		{"go", "test", "-exec=/bin/sh", "./..."},
+		{"go", "test", "-toolexec=x", "./..."},
+		{"go", "test", "--out=../x"},
+		{"go", "test", "-o=/tmp/x"},
+		{"go", "test", "-coverprofile:../c.out"},
+		{"go", "install", "example.test/x@latest"},
+		{"go", "get", "example.test/x"},
+		{"npm", "version", "patch"},
+		{"npm", "install"},
+		{"pnpm", "add", "left-pad"},
+		{"npm", "exec", "x"},
+		{"npx", "jest"},
+		{"python3", "-m", "pytest"},
+		{"find", ".", "-delete"},
+		{"docker", "run", "x"},
 	}
 	for _, argv := range unsafe {
 		formula := contextFormula(t, testComponent{".", "go.mod", [][]string{argv}})
