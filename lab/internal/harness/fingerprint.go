@@ -10,10 +10,17 @@ import (
 	"path/filepath"
 )
 
-// Fingerprint binds approval to the local executable and provider configuration.
-// It hashes configuration, never copies its credentials into the ledger. This is
-// deliberately conservative: unrelated config edits may require refreshed intake.
+// Fingerprint binds approval to the provider executable and configuration, and for
+// native adapters to the adapter protocol version and argv contract. The Forgecell
+// build that serves a native adapter is provenance, not approval: upgrades within
+// one protocol keep the approval. It hashes configuration, never copies its
+// credentials into the ledger. This is deliberately conservative: unrelated config
+// edits may require refreshed intake.
 func Fingerprint(command []string) (string, error) {
+	return fingerprint(command, AdapterProtocolVersion)
+}
+
+func fingerprint(command []string, protocol string) (string, error) {
 	if len(command) == 0 {
 		return "", fmt.Errorf("missing harness command")
 	}
@@ -27,10 +34,14 @@ func Fingerprint(command []string) (string, error) {
 		files = append(files, file)
 		return nil
 	}
-	if err := addExecutable(command[0]); err != nil {
+	contract := command
+	native := len(command) == 4 && command[1] == "__adapter"
+	if native {
+		contract = command[1:]
+	} else if err := addExecutable(command[0]); err != nil {
 		return "", err
 	}
-	if len(command) == 4 && command[1] == "__adapter" {
+	if native {
 		if err := addExecutable(command[3]); err != nil {
 			return "", err
 		}
@@ -63,8 +74,9 @@ func Fingerprint(command []string) (string, error) {
 	raw, _ := json.Marshal(struct {
 		Files       string
 		Command     []string
+		Protocol    string
 		Environment map[string]string
-	}{digest, command, environment})
+	}{digest, contract, protocol, environment})
 	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }
 func fingerprintFiles(files []string) (string, error) {

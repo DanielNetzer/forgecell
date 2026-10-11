@@ -294,7 +294,7 @@ func TestDoctorVerboseHumanViewNamesStepsPathsVersionsAndNextCommand(t *testing.
 		t.Fatalf("verbose without --json must print a human view: %d %s", code, out)
 	}
 	for _, want := range []string{
-		"Saved binding: codex — blocked", "launcher-different", launcher, provider, "0.3.0", "unknown",
+		"Saved binding: codex — blocked", "launcher-unknown", "adapter protocol unknown", launcher, provider, "0.3.0", "unknown",
 		"Step version: passed", "Step required-flag:--sandbox: failed", "Step required-flag:--trust: failed",
 		"Candidate: cursor — unsupported", "required-flag:--sandbox", "Next: ", "forgecell init --lab",
 	} {
@@ -325,7 +325,7 @@ func TestDoctorProbesCodexBoundOutsidePathAtItsBoundPathAndNeverRunsTheForeignLa
 			}
 			diagnostics := saved["binding"].(map[string]any)
 			states := diagnostics["states"].([]any)
-			if len(states) != 1 || states[0].(map[string]any)["state"] != "launcher-different" || diagnostics["launcher"] != launcher || diagnostics["launcherVersion"] != "0.2.0-preview.1" || diagnostics["runningVersion"] != "0.3.0" || diagnostics["provider"] != provider {
+			if len(states) != 1 || states[0].(map[string]any)["state"] != "launcher-unknown" || diagnostics["launcherProtocol"] != "unknown" || diagnostics["launcher"] != launcher || diagnostics["launcherVersion"] != "0.2.0-preview.1" || diagnostics["runningVersion"] != "0.3.0" || diagnostics["provider"] != provider {
 				t.Fatalf("%v", diagnostics)
 			}
 			if len(saved["steps"].([]any)) == 0 || candidateByID(t, report, "codex")["executable"] != provider {

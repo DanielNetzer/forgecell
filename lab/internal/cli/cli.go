@@ -32,6 +32,7 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
+	harness.SetRunningVersion(version)
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
 		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
@@ -433,7 +434,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if err != nil {
 			return fail(err)
 		}
-		launcher := os.Getenv("FORGECELL_LAUNCHER")
+		launcher := initLauncher()
 		if launcher == "" {
 			launcher, err = os.Executable()
 			if err != nil {
@@ -754,6 +755,23 @@ func encode(out, stderr io.Writer, value any) int {
 		return 1
 	}
 	return 0
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
+}
+
+// initLauncher names the launcher a new binding should save. The managed launcher
+// (FORGECELL_BIN/forgecell) stays valid across upgrades because it resolves to the
+// active release at run time; otherwise the installer's current-release path is used.
+func initLauncher() string {
+	if managed, ok := harness.ManagedLauncher(os.Getenv("FORGECELL_BIN")); ok {
+		return managed
+	}
+	return os.Getenv("FORGECELL_LAUNCHER")
 }
 
 func presentRun(out io.Writer, r molecule.Record) {
@@ -1080,9 +1098,12 @@ func renderDoctorCandidate(out io.Writer, title string, c doctorCandidate) {
 		fmt.Fprintf(out, "  %s\n", c.Detail)
 	}
 	if b := c.Binding; b != nil {
-		fmt.Fprintf(out, "  Formula binding: %s · adapter: %s\n  Launcher (saved): %s — version %s (%s)\n", b.FormulaBinding, b.Adapter, b.Launcher, b.LauncherVersion, b.LauncherVersionSource)
+		fmt.Fprintf(out, "  Formula binding: %s · adapter: %s\n  Launcher (saved): %s — version %s (%s) · adapter protocol %s\n", b.FormulaBinding, b.Adapter, b.Launcher, b.LauncherVersion, b.LauncherVersionSource, orUnknown(b.LauncherProtocol))
+		if b.ResolvedLauncher != "" {
+			fmt.Fprintf(out, "  Launcher (resolved at run time): %s\n", b.ResolvedLauncher)
+		}
 		if b.RunningLauncher != "" {
-			fmt.Fprintf(out, "  Launcher (running): %s — version %s\n", b.RunningLauncher, b.RunningVersion)
+			fmt.Fprintf(out, "  Launcher (running): %s — version %s · adapter protocol %s\n", b.RunningLauncher, b.RunningVersion, orUnknown(b.RunningProtocol))
 		}
 		provider := b.Provider
 		if b.ResolvedProvider != "" && b.ResolvedProvider != b.Provider {
