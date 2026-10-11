@@ -179,6 +179,89 @@ itself never retries the uncertain attempt. Out-of-scope writes also require
 review of their exact existing tree. An ownerless execution lock is refused because
 an approval process may still be starting.
 
+## Stalled harness attempts
+
+### Behavior that was already supported
+
+These limits existed before the diagnostics below and are unchanged by them.
+
+- **Bounded run.** Every harness call goes through `process.Run`. It applies
+  `Options.Timeout` and uses 10 minutes when that is unset or not positive. It also
+  caps captured output at 1,000,000 bytes unless a different positive cap is given.
+- **Three distinct stops.** Deadline expiry sets `timedOut`. Cancellation of the
+  parent context sets `interrupted`. Reaching the output cap sets `overflow` and
+  neither of the other two. On Linux and macOS the managed process group is killed
+  and then reconciled, and a process that cannot be shown stopped is never `ok`.
+- **Analysis timeout.** Analysis, through the bound harness or an approved analysis
+  wrapper, uses the bound binding's `timeoutMs`. `0` means the process default.
+- **Coding timeout.** Coding uses the plan's `harnessTimeoutMs` when it has one,
+  otherwise the Formula `timeoutMs`. A coding timeout produces the recover and amend
+  guidance above and nothing is retried automatically.
+- **Retries.** The only automatic retry is the single corrective analysis retry after
+  a policy violation, within three analysis invocations. A timeout, interruption,
+  stall or any other analysis error never retries. A consumed approval digest never
+  starts another coding process.
+- **What analysis attempts kept.** Before the diagnostics, an analysis attempt kept
+  only a status and an error string, so a timeout and an interruption could be told
+  apart only by reading that text.
+
+### Diagnostics
+
+Each run now records what the Lab observed. Nothing here is a progress claim.
+
+- **Activity.** `activity` holds `stdoutBytes`, `stderrBytes` and `lastOutputMs`, the
+  offset from process start of the last observed output byte. Bytes dropped past the
+  output cap are still counted. `lastOutputMs` is absent when no byte was observed.
+  An `activity` object with zero bytes is a recorded silent run. A record with no
+  `activity` at all, such as an older ledger, a supplied analysis function or a
+  process that never started, is *not recorded*, which is different from silent.
+- **Terminal state.** One of `succeeded`, `timeout`, `interrupted`, `output-limit`,
+  `unreconciled`, `failed` (a non-zero exit, a start failure or a recorded error) or
+  `unknown` (no discriminating evidence). It is derived only from the flags above.
+  An unreconciled process outranks the cause that stopped it, because it may still be
+  running. A timeout or interruption outranks the output cap, since the cap can also be
+  reached while a process is being stopped.
+- **Elapsed time.** The existing `elapsedMs`.
+- **Reconnect evidence.** Always `unknown`. No provider-neutral reconnect signal
+  exists, so none is invented. Binding-supplied reconnect markers are deferred to a
+  follow-up.
+
+Analysis attempts persist these as a `diagnostics` object (`elapsedMs`, `activity`,
+`terminalState`, `reconnect`) for completed and failed attempts, and the Markdown
+ledger shows it in the attempt's JSON block. An attempt that came from a supplied
+analysis function, or that stopped before any process result existed, has no
+`diagnostics`, which reads as unknown. Coding attempts carry `activity` in
+`result` and in the immutable `harness-ATTEMPT-result.json`. The Markdown ledger adds
+one `Diagnostics:` line per harness attempt, with the terminal state derived from the
+stored flags. Existing lines are unchanged, and `forgecell ledger` prints the stored
+JSON as before.
+
+Activity is the number of bytes seen on the child's stdout and stderr pipes. It never
+comes from PID liveness, reconciliation results, argv, environment or output content,
+so the diagnostics cannot carry a secret. Absence of output is not proof of a stall,
+since some providers write their final answer to a file after the run. Presence of
+output is not proof of progress.
+
+An original attempt is never merged, rewritten or relabelled. A later successful
+availability probe is a separate observation. It does not reclassify the earlier
+attempt and it authorizes nothing: continuing still needs `recover`, `amend` and a
+new approved digest.
+
+### What an operator can determine now
+
+| Question, without opening the process or provider output | Before | After | Deterministic test |
+| --- | --- | --- | --- |
+| Was an analysis attempt a timeout or an interruption? | Only by reading the error text | `diagnostics.terminalState` is `timeout` or `interrupted` | `TestAnalysisAttemptsRecordStallInterruptionAndSuccessDiagnostics` |
+| Was any output ever observed? | Not recorded for analysis; coding needed the immutable result file | `activity` byte counts, with recorded silence distinct from no record | `TestSilentStallTimesOutWithRecordedSilence`, `TestSilentCodingStallIsDiagnosableAndNeverReplayed`, `TestRecordedSilenceIsDistinguishableFromNoRecord` |
+| When was the last output? | Not recorded | `lastOutputMs`, never later than `elapsedMs` | `TestPartialOutputThenStallRecordsLastOutput`, `TestPartialOutputThenCodingTimeoutKeepsOutputOutOfDiagnostics` |
+| Timeout, interruption or output cap? | Three flags to compare | One `terminalState` | `TestTerminalStateClassifierUsesOnlyExistingFlags`, `TestOutputLimitCountsDroppedBytesAndIsNotATimeout`, `TestCancellationAfterPartialOutputIsInterruptedNotTimeout`, `TestCancelledCodingAttemptIsInterruptedNotTimeoutAndNotReplayed` |
+| Was there reconnect evidence? | No signal | Always `unknown` | `TestTerminalStateClassifierUsesOnlyExistingFlags` |
+| Is the harness available after a stall? | A new probe, read by hand | A new probe is a separate observation and leaves the stalled one unchanged | `TestHealthyProbeAfterStalledProbeIsASeparateObservation` |
+| Can output leak into the diagnostics? | Not applicable | Only states, byte counts and offsets are stored | `TestDiagnosticsNeverContainOutputText` |
+
+This compares what can be read from the ledger. Cost and reliability gains are not
+measured, and no claim is made about either.
+
 ## What check results mean
 
 - **Regression:** previously covered behavior. When conventional test files or

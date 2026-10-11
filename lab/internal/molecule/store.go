@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,6 +44,20 @@ func atomicWrite(file string, data []byte) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// renderHarnessDiagnostics is the single additive ledger line for one attempt. It
+// carries only an enumerated state, byte counts and millisecond offsets, never
+// output text. A nil Activity reads as not recorded, which differs from silent.
+func renderHarnessDiagnostics(r process.Result) string {
+	output := "not recorded"
+	if a := r.Activity; a != nil {
+		output = fmt.Sprintf("stdout %d B, stderr %d B, last output at: none", a.StdoutBytes, a.StderrBytes)
+		if a.LastOutputMS != nil {
+			output = fmt.Sprintf("stdout %d B, stderr %d B, last output at: %d ms", a.StdoutBytes, a.StderrBytes, *a.LastOutputMS)
+		}
+	}
+	return fmt.Sprintf("Diagnostics: elapsedMs=%d; terminal state: %s; output observed: %s; reconnect evidence: %s. Observed pipe bytes only: no output is not proof of a stall and output is not proof of progress.\n", r.ElapsedMS, r.TerminalState(), output, process.ReconnectUnknown)
 }
 func known(value string) string {
 	if value == "" {
@@ -143,6 +158,7 @@ func save(r Record) error {
 			fmt.Fprintln(&b, "\nImplementation outcome: unknown (historical evidence missing)")
 		}
 		fmt.Fprintf(&b, "\n## Harness attempt %s\n\nPlan: `%s`\nProvider process OK: %t; exit: %d; timeout: %t; interruption: %t; overflow: %t\nReconciled: %t; uncertainty: %s\nCapture error: %s\nHuman recovery: %t\n", a.ID, a.PlanDigest, a.Result.OK, a.Result.Code, a.Result.TimedOut, a.Result.Interrupted, a.Result.Overflow, a.Result.Reconciled, a.Result.Uncertainty, a.CaptureError, a.Recovered)
+		fmt.Fprint(&b, renderHarnessDiagnostics(a.Result))
 		if a.Evidence != nil {
 			fmt.Fprintf(&b, "Complete bounded result: `%s` (SHA-256 `%s`)\n", a.Evidence.Path, a.Evidence.SHA256)
 		}

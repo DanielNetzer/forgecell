@@ -110,6 +110,10 @@ type AnalysisAttempt struct {
 	Status         string              `json:"status"`
 	Response       *readiness.Analysis `json:"response,omitempty"`
 	Error          string              `json:"error,omitempty"`
+	// Diagnostics describes the process that ran for this attempt. It is absent when
+	// no process result was observed (supplied analysis function, or an earlier
+	// ledger), which reads as unknown rather than as a clean run.
+	Diagnostics *process.Diagnostics `json:"diagnostics,omitempty"`
 }
 
 // PolicyEvidence points at the ledger value a policy decision relied on.
