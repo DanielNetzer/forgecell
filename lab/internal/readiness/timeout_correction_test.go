@@ -3,6 +3,7 @@ package readiness
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -67,6 +68,77 @@ func TestAnalysisCorrectiveRetryDoesNotClassifyOtherErrors(t *testing.T) {
 			}
 			if IsPolicyViolation(err) {
 				t.Fatalf("non-policy error classified as retryable: %v", err)
+			}
+		})
+	}
+}
+
+const evidenceRequestCapText = "at most 16 evidence requests permitted"
+
+func analysisWithEvidenceRequests(t *testing.T, n int) []byte {
+	t.Helper()
+	a := fixture().Analysis
+	for i := 0; i < n; i++ {
+		a.EvidenceRequests = append(a.EvidenceRequests, EvidenceRequest{Path: fmt.Sprintf("src/file%02d.go", i), Reason: "needs content", Evidence: []string{"issue"}})
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestAnalysisCorrectiveRetryClassifiesEvidenceRequestCapAsPolicy(t *testing.T) {
+	if EvidenceRequestCapMessage() != evidenceRequestCapText || MaxEvidenceRequests != 16 {
+		t.Fatalf("the cap or its message changed: %d %q", MaxEvidenceRequests, EvidenceRequestCapMessage())
+	}
+	for _, n := range []int{17, 20} {
+		t.Run(fmt.Sprintf("%d requests", n), func(t *testing.T) {
+			a, err := DecodeAnalysis(analysisWithEvidenceRequests(t, n))
+			var violation *PolicyViolation
+			if err == nil || !errors.As(err, &violation) || !IsPolicyViolation(err) {
+				t.Fatalf("not classified as a policy violation: %v", err)
+			}
+			if err.Error() != evidenceRequestCapText || violation.Reason != evidenceRequestCapText {
+				t.Fatalf("validator message changed: %q", err.Error())
+			}
+			if a.Summary == "" || len(a.EvidenceRequests) != n {
+				t.Fatalf("the rejected response was not returned for the corrective prompt: %+v", a)
+			}
+		})
+	}
+	for _, n := range []int{0, 1, 16} {
+		if _, err := DecodeAnalysis(analysisWithEvidenceRequests(t, n)); err != nil {
+			t.Fatalf("%d requests rejected: %v", n, err)
+		}
+	}
+}
+
+func TestAnalysisCorrectiveRetryEvidenceRequestCapKeepsOtherRequestErrorsPlain(t *testing.T) {
+	requests := func(n int) []EvidenceRequest {
+		out := make([]EvidenceRequest, n)
+		for i := range out {
+			out[i] = EvidenceRequest{Path: fmt.Sprintf("src/file%02d.go", i), Reason: "needs content", Evidence: []string{"issue"}}
+		}
+		return out
+	}
+	if err := ValidateEvidenceRequests(requests(16), nil); err != nil {
+		t.Fatalf("16 requests rejected: %v", err)
+	}
+	if err := ValidateEvidenceRequests(requests(17), nil); err == nil || !IsPolicyViolation(err) || err.Error() != evidenceRequestCapText {
+		t.Fatalf("17 requests: %v", err)
+	}
+	badPath := requests(16)
+	badPath[3].Path = "../escape"
+	duplicate := requests(16)
+	duplicate[3].Path = duplicate[2].Path
+	badCitation := requests(16)
+	badCitation[3].Evidence = []string{"unknown-evidence"}
+	for name, rs := range map[string][]EvidenceRequest{"path": badPath, "duplicate": duplicate, "citation": badCitation} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateEvidenceRequests(rs, []Evidence{})
+			if err == nil || IsPolicyViolation(err) {
+				t.Fatalf("must be rejected and not retryable: %v", err)
 			}
 		})
 	}

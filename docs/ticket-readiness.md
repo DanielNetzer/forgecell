@@ -31,18 +31,28 @@ use an amendment and a new digest.
 
 ### Corrective analysis retry
 
-The analysis validator is never relaxed. If a response is rejected only because it
-asserts independent acceptance (`independent-acceptance`, `independentProvenance` or
-`reviewedAcceptance`), intake makes **one** corrective analysis call. It receives the
-exact validator message and the rejected response, under a `correction` key; the
-rejected response is also kept on its failed attempt in the ledger. The corrective
-response must pass the same validation. A second violation blocks intake, and no
-coding harness runs. The budget is one retry per intake, whichever pass it occurs
-in, so there are at most three analysis invocations (one supplemental evidence pass
-plus one retry). Every invocation is its own attempt with its own provenance action.
+The analysis validator is never relaxed. Two rejections of an otherwise complete
+response are retryable: the response asserts independent acceptance
+(`independent-acceptance`, `independentProvenance` or `reviewedAcceptance`), or it
+carries more than 16 evidence requests (`at most 16 evidence requests permitted`).
+For either, intake makes **one** corrective analysis call. It receives the exact
+validator message and the rejected response, under a `correction` key; the rejected
+response is also kept on its failed attempt in the ledger. For the evidence-request
+cap the correction also carries an `instruction` to return at most 16
+`evidenceRequests`, ordered by importance to the ticket scope. The corrective
+response must pass the same validation: 16 requests are accepted, 17 are not, and a
+response that is still over the cap is rejected, never accepted. A second rejection
+blocks intake, and no coding harness runs. The over-cap response never becomes the
+plan's analysis, so none of its requests is collected or approved.
 
-Missing evidence, invalid or unresolved evidence requests, malformed or oversize
-output, a failed or timed-out analysis harness and every other error never retry.
+The two cases share one budget: one retry per intake, whichever pass it occurs in
+and whichever rejection uses it. So there are at most three analysis invocations
+(one supplemental evidence pass plus one retry). Every invocation is its own attempt
+with its own provenance action.
+
+Missing evidence, invalid or unresolved evidence requests (a bad path, a duplicate
+or an unknown citation), malformed or oversize output, a failed or timed-out
+analysis harness and every other error never retry.
 
 ### Per-Molecule coding timeout
 
