@@ -204,6 +204,68 @@ func TestProtectedDeltaAdvisoryIsLabelledAndNeverDeclares(t *testing.T) {
 	}
 }
 
+func TestProtectedDeltaAdvisoryNamesTheFailingTestsItWasGiven(t *testing.T) {
+	p := fixture()
+	p.Analysis.Scope = append(p.Analysis.Scope, ScopedPath{Path: deltaFixturePath, Reason: "Pinned contract fixture", Evidence: []string{"manifest"}})
+	before, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := []FailingTest{{Package: deltaPackage, Test: "TestSecond"}, {Package: deltaPackage, Test: deltaTest}, {Package: deltaPackage, Test: deltaTest}}
+	advisory := p.ProtectedDeltaAdvisory(seen...)
+	for _, want := range []string{"proposed for review; never auto-approved", deltaFixturePath, "expectedProtectedDeltas", deltaPackage + " " + deltaTest, deltaPackage + " TestSecond", "failing parent"} {
+		if !strings.Contains(advisory, want) {
+			t.Fatalf("advisory missing %q: %s", want, advisory)
+		}
+	}
+	if strings.Count(advisory, deltaPackage+" "+deltaTest) != 1 || strings.Index(advisory, deltaTest) > strings.Index(advisory, "TestSecond") {
+		t.Fatalf("advisory must list each failing test once, in package and test order: %s", advisory)
+	}
+	if len(p.ExpectedProtectedDeltas) != 0 {
+		t.Fatal("advisory declared a delta")
+	}
+	if after, err := p.Digest(); err != nil || after != before {
+		t.Fatalf("advisory changed the plan digest: %v", err)
+	}
+	if plain := p.ProtectedDeltaAdvisory(); strings.Contains(plain, "failed these tests") || !strings.Contains(plain, deltaFixturePath) {
+		t.Fatalf("without failing tests the advisory keeps its fixture-only wording: %s", plain)
+	}
+	if got := fixture().ProtectedDeltaAdvisory(seen...); got != "" {
+		t.Fatalf("advisory without a fixture path: %s", got)
+	}
+	if got := protectedDeltaPlan().ProtectedDeltaAdvisory(seen...); got != "" {
+		t.Fatalf("advisory shown although deltas are declared: %s", got)
+	}
+	p.Analysis.Checks[0].Category = "candidate"
+	if got := p.ProtectedDeltaAdvisory(seen...); got != "" {
+		t.Fatalf("advisory without a protected regression check: %s", got)
+	}
+}
+
+func TestProtectedDeltaAdvisoryBoundsTheTestsItNames(t *testing.T) {
+	p := fixture()
+	p.Analysis.Scope = append(p.Analysis.Scope, ScopedPath{Path: deltaFixturePath, Reason: "Pinned contract fixture", Evidence: []string{"manifest"}})
+	var seen []FailingTest
+	for i := 0; i < 30; i++ {
+		seen = append(seen, FailingTest{Package: deltaPackage, Test: fmt.Sprintf("TestMany%02d", i)})
+	}
+	advisory := p.ProtectedDeltaAdvisory(seen...)
+	if strings.Count(advisory, "TestMany") != 20 || !strings.Contains(advisory, "and 10 more") || !strings.Contains(advisory, "TestMany19") || strings.Contains(advisory, "TestMany20") {
+		t.Fatalf("the advisory must name the first 20 failing tests and count the rest: %s", advisory)
+	}
+}
+
+func TestRequestsGoTestJSONIsTheSharedPredicate(t *testing.T) {
+	for argv, want := range map[string]bool{"go test -json ./...": true, "go test ./...": false, "go test -json=true ./...": true, "go test -json=false ./...": false} {
+		if got := RequestsGoTestJSON(strings.Fields(argv)); got != want {
+			t.Fatalf("%q: %t, want %t", argv, got, want)
+		}
+	}
+	if !RequestsGoTestJSON([]string{"/bin/sh", "-c", "go test -json ./internal/..."}) {
+		t.Fatal("a reviewed shell string that asks for -json must count")
+	}
+}
+
 func TestProtectedDeltaFixturePathsAndLookup(t *testing.T) {
 	for file, want := range map[string]bool{deltaFixturePath: true, "Fixtures/a.json": true, "lab/parser.go": false, "lab/testdata.go": false} {
 		if IsFixturePath(file) != want {

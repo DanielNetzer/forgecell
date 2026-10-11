@@ -730,3 +730,120 @@ func TestProposalWithoutRoleEvidenceStaysInspectable(t *testing.T) {
 		t.Fatalf("a proposal saved before role evidence existed no longer inspects: %v", err)
 	}
 }
+
+// switchHarness proposes init --harness ID, which is not a rebind.
+func switchHarness(t *testing.T, root string, runner Runner, dir, id string) (Outcome, error) {
+	t.Helper()
+	return rebind(t, root, runner, dir, id, func(o *InitOptions) { o.Rebind, o.Preferred = "", id })
+}
+
+func TestInitHarnessRejectsAnalysisFallbackToUnsupportedAdapter(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	count := assayCount(dir)
+	_, err := switchHarness(t, root, runner, dir, "cursor")
+	reason := harness.AdapterCapabilities("cursor").Analysis.Reason
+	if err == nil || reason == "" || !strings.Contains(err.Error(), reason) || !strings.Contains(err.Error(), "harnesses.analysis") {
+		t.Fatalf("error %v, want the adapter reason %q and the remedy", err, reason)
+	}
+	if assayCount(dir) != count {
+		t.Fatal("a refused init --harness saved a proposal")
+	}
+	if _, err = switchHarness(t, root, runner, dir, "claude-code"); err != nil {
+		t.Fatalf("an adapter that supports analysis is a safe default: %v", err)
+	}
+	if _, err = Review(dir, mustPending(t, dir), "dismiss"); err != nil {
+		t.Fatal(err)
+	}
+	approveEdited(t, dir, func(doc map[string]any) {
+		doc["harnesses"] = map[string]any{"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand("/cli", "claude-code")}}
+	})
+	next, err := switchHarness(t, root, runner, dir, "cursor")
+	if err != nil || next.Proposal == nil {
+		t.Fatalf("a declared analysis role makes init --harness safe: %+v %v", next, err)
+	}
+	parsed, _ := formula.Parse([]byte(next.Proposal.YAML))
+	if analysis, override := parsed.RoleBinding(formula.AnalysisHarness); !override || analysis.Binding != "claude-code" || parsed.Harness.Binding != "cursor" {
+		t.Fatalf("analysis %+v default %s", analysis, parsed.Harness.Binding)
+	}
+}
+
+func mustPending(t *testing.T, dir string) string {
+	t.Helper()
+	pending, err := pendingProposal(dir)
+	if err != nil || pending == nil {
+		t.Fatalf("no pending proposal: %v", err)
+	}
+	return pending.ID
+}
+
+func TestRebindNamesAnOverwrittenCodingOverrideSeparately(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		coding map[string]any
+		want   []string
+	}{
+		{"custom command", map[string]any{"binding": "custom", "command": []any{"/bin/custom-coder"}}, []string{"harnesses.coding override was overwritten", "custom command", "/bin/custom-coder"}},
+		{"another adapter than the old default", map[string]any{"binding": "cursor", "command": nativeCommand("/cli", "cursor")}, []string{"harnesses.coding override was overwritten", "bound to cursor", "old default codex"}},
+		{"the old default adapter", map[string]any{"binding": "codex", "command": nativeCommand("/cli", "codex")}, nil},
+		{"no override", nil, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, runner, dir, _ := approvedLab(t)
+			approved, err := formula.Inspect(dir, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.coding != nil {
+				approved = approveEdited(t, dir, func(doc map[string]any) {
+					doc["harnesses"] = map[string]any{"coding": c.coding}
+					harnessAtom(doc)["binding"] = c.coding["binding"]
+				})
+			}
+			next, err := rebind(t, root, runner, dir, "claude-code")
+			if err != nil || next.Proposal == nil {
+				t.Fatalf("an overwritten override is a note, never a refusal: %+v %v", next, err)
+			}
+			if got := strings.Contains(next.Note, "harnesses.coding override was overwritten"); got != (len(c.want) > 0) {
+				t.Fatalf("overwrite note present = %t:\n%s", got, next.Note)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(next.Note, want) {
+					t.Fatalf("the note omits %q:\n%s", want, next.Note)
+				}
+			}
+			if err = verifyRebindDiff(approved.Formula.YAML, next.Proposal.YAML); err != nil {
+				t.Fatal(err)
+			}
+			parsed, _ := formula.Parse([]byte(next.Proposal.YAML))
+			if coding, _ := parsed.RoleBinding(formula.CodingHarness); coding.Binding != "claude-code" {
+				t.Fatalf("coding role = %+v", coding)
+			}
+		})
+	}
+}
+
+// init --harness repoints only commands on the old default launcher, and a custom
+// default has none; --rebind is the way to move established Forgecell launchers.
+func TestInitHarnessWithACustomDefaultRepointsNoNativeCommand(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	older := forgecellBuild(t)
+	approved := approveEdited(t, dir, func(doc map[string]any) {
+		doc["harness"].(map[string]any)["command"] = []any{"/bin/custom"}
+		doc["harnesses"] = map[string]any{"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand(older, "claude-code")}}
+		learnAtomOf(t, doc)["command"] = nativeCommand(older, "codex")
+	})
+	next, err := switchHarness(t, root, runner, dir, "claude-code")
+	if err != nil || next.Proposal == nil {
+		t.Fatalf("%+v %v", next, err)
+	}
+	before, after := decodeYAML(t, approved.Formula.YAML), decodeYAML(t, next.Proposal.YAML)
+	if !reflect.DeepEqual(before["harnesses"], after["harnesses"]) || !reflect.DeepEqual(learnAtomOf(t, before), learnAtomOf(t, after)) {
+		t.Fatalf("init --harness repointed a native command although the default harness is custom:\n%s", next.Proposal.YAML)
+	}
+	if strings.Contains(next.Note, "command[0]") {
+		t.Fatalf("the note lists a launcher rewrite that did not happen: %s", next.Note)
+	}
+	if got := after["harness"].(map[string]any)["command"]; !reflect.DeepEqual(got, nativeCommand("/cli", "claude-code")) {
+		t.Fatalf("default command = %v", got)
+	}
+}

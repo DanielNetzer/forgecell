@@ -1,6 +1,7 @@
 package verification
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -122,7 +123,7 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 	if tree == c.Tree {
 		if candidate.RequiredChecksPassed {
 			for _, d := range p.ExpectedProtectedDeltas {
-				candidate.Warnings = append(candidate.Warnings, fmt.Sprintf("declared protected delta was not exercised, no protected regression run was needed: %s %s (check %s)", d.Package, d.Test, d.CheckID))
+				candidate.Warnings = append(candidate.Warnings, fmt.Sprintf("declared protected delta was not exercised, no protected regression run was needed: %s %s (check %s); amend the plan to remove it", d.Package, d.Test, d.CheckID))
 			}
 		}
 		return candidate
@@ -174,78 +175,80 @@ type goTestEvent struct {
 // be allowed to stand in for them.
 var abortMarkers = []string{"panic: ", "fatal error: ", "test timed out after", "[build failed]", "[setup failed]"}
 
-// parseFailedTests reads go test -json output. It fails closed: every non-blank
-// line must be a JSON event, a build failure or a failed package without any
-// failing test is an error, and an empty stream is an error.
-func parseFailedTests(stdout string) ([]TestID, error) {
-	failed := map[TestID]bool{}
-	failedPackages := map[string]bool{}
-	started := map[TestID]bool{}
-	aborted := map[string]string{}
-	events := 0
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var ev goTestEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Action == "" {
-			return nil, fmt.Errorf("protected regression output is not go test -json; no delta can be accepted")
-		}
-		events++
-		if ev.Action == "output" {
-			for _, marker := range abortMarkers {
-				if strings.Contains(ev.Output, marker) {
-					aborted[ev.Package] = strings.TrimSpace(marker)
-				}
+// maxStreamedFailures bounds the tests a streamed parse tracks as failed or
+// unfinished, so the parser's memory never follows an untrusted stream's size.
+const maxStreamedFailures = 200_000
+
+// failedTestParser reads go test -json output one line at a time. Its state holds
+// only the failing and unfinished tests, never the stream. It fails closed: a line
+// that is not a JSON event or a build failure is remembered and reported by Finish,
+// a failed package without any failing test is an error, and an empty stream is an
+// error.
+type failedTestParser struct {
+	failed         map[TestID]bool
+	failedPackages map[string]bool
+	started        map[TestID]bool
+	aborted        map[string]string
+	events         int
+	err            error
+}
+
+func newFailedTestParser() *failedTestParser {
+	return &failedTestParser{failed: map[TestID]bool{}, failedPackages: map[string]bool{}, started: map[TestID]bool{}, aborted: map[string]string{}}
+}
+
+// Line consumes one output line. It never returns an error, so a sink built on it
+// cannot stop a run that exits zero; the first refusal is reported by Finish.
+func (p *failedTestParser) Line(raw []byte) error {
+	if p.err != nil {
+		return nil
+	}
+	line := bytes.TrimSpace(raw)
+	if len(line) == 0 {
+		return nil
+	}
+	var ev goTestEvent
+	if err := json.Unmarshal(line, &ev); err != nil || ev.Action == "" {
+		p.err = fmt.Errorf("protected regression output is not go test -json; no delta can be accepted")
+		return nil
+	}
+	p.events++
+	if ev.Action == "output" {
+		for _, marker := range abortMarkers {
+			if strings.Contains(ev.Output, marker) {
+				p.aborted[ev.Package] = strings.TrimSpace(marker)
 			}
 		}
-		key := TestID{Package: ev.Package, Test: ev.Test}
-		switch ev.Action {
-		case "run":
-			if ev.Test != "" {
-				started[key] = true
-			}
-		case "pass", "skip":
-			delete(started, key)
-		}
-		switch ev.Action {
-		case "build-fail":
-			return nil, fmt.Errorf("build failure in %q; no delta can be accepted", ev.ImportPath)
-		case "fail":
-			if ev.Test != "" {
-				failed[key] = true
-				delete(started, key)
-			} else {
-				failedPackages[ev.Package] = true
-			}
-		}
 	}
-	if events == 0 {
-		return nil, fmt.Errorf("protected regression produced no go test -json events; no delta can be accepted")
-	}
-	for pkg, marker := range aborted {
-		if !failedPackages[pkg] {
-			continue
+	key := TestID{Package: ev.Package, Test: ev.Test}
+	switch ev.Action {
+	case "run":
+		if ev.Test != "" {
+			p.started[key] = true
 		}
-		return nil, fmt.Errorf("package %q stopped early (%q); tests after the abort never ran, so no delta can be accepted", pkg, marker)
+	case "pass", "skip":
+		delete(p.started, key)
 	}
-	for id := range started {
-		return nil, fmt.Errorf("test %s in %q started but never finished; no delta can be accepted", id.Test, id.Package)
-	}
-	for pkg := range failedPackages {
-		found := false
-		for id := range failed {
-			if id.Package == pkg {
-				found = true
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("package %q failed without a failing test (build, setup or panic failure); no delta can be accepted", pkg)
+	switch ev.Action {
+	case "build-fail":
+		p.err = fmt.Errorf("build failure in %q; no delta can be accepted", ev.ImportPath)
+	case "fail":
+		if ev.Test != "" {
+			p.failed[key] = true
+			delete(p.started, key)
+		} else {
+			p.failedPackages[ev.Package] = true
 		}
 	}
-	out := make([]TestID, 0, len(failed))
-	for id := range failed {
+	if len(p.failed)+len(p.started) > maxStreamedFailures {
+		p.err = fmt.Errorf("protected regression tracks more than %d failing or unfinished tests; no delta can be accepted", maxStreamedFailures)
+	}
+	return nil
+}
+
+func sortedTests(set map[TestID]bool) []TestID {
+	out := make([]TestID, 0, len(set))
+	for id := range set {
 		out = append(out, id)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -254,73 +257,117 @@ func parseFailedTests(stdout string) ([]TestID, error) {
 		}
 		return out[i].Test < out[j].Test
 	})
-	return out, nil
+	return out
 }
 
-// uncoveredFailures returns failing tests that no declared delta accounts for. A
-// failing ancestor of a declared failing subtest is accounted for, because go test
-// marks every parent failed; a parent that also fails for its own reason cannot be
-// told apart from that.
-func uncoveredFailures(declared []readiness.ProtectedDelta, failed []TestID) []TestID {
-	failedSet := map[TestID]bool{}
-	for _, id := range failed {
-		failedSet[id] = true
+func sortedPackages(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for pkg := range set {
+		out = append(out, pkg)
 	}
-	declaredSet := map[TestID]bool{}
-	declaredFailing := []TestID{}
-	for _, d := range declared {
-		id := TestID{Package: d.Package, Test: d.Test}
-		declaredSet[id] = true
-		if failedSet[id] {
-			declaredFailing = append(declaredFailing, id)
+	sort.Strings(out)
+	return out
+}
+
+// Finish returns the failing tests of the complete stream, or why none can be trusted.
+func (p *failedTestParser) Finish() ([]TestID, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	if p.events == 0 {
+		return nil, fmt.Errorf("protected regression produced no go test -json events; no delta can be accepted")
+	}
+	for _, pkg := range sortedPackages(p.failedPackages) {
+		if marker, ok := p.aborted[pkg]; ok {
+			return nil, fmt.Errorf("package %q stopped early (%q); tests after the abort never ran, so no delta can be accepted", pkg, marker)
 		}
+	}
+	if unfinished := sortedTests(p.started); len(unfinished) > 0 {
+		return nil, fmt.Errorf("test %s in %q started but never finished; no delta can be accepted", unfinished[0].Test, unfinished[0].Package)
+	}
+	for _, pkg := range sortedPackages(p.failedPackages) {
+		found := false
+		for id := range p.failed {
+			if id.Package == pkg {
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("package %q failed without a failing test (build, setup or panic failure); no delta can be accepted", pkg)
+		}
+	}
+	return sortedTests(p.failed), nil
+}
+
+// parseFailedTests reads a complete go test -json output held in memory.
+func parseFailedTests(stdout string) ([]TestID, error) {
+	p := newFailedTestParser()
+	for _, line := range strings.Split(stdout, "\n") {
+		p.Line([]byte(line))
+	}
+	return p.Finish()
+}
+
+// uncoveredFailures returns failing tests that no declared delta names. go test
+// fails every parent of a failing subtest, but a parent can also fail for its own
+// reason, so a parent is accounted for only when the plan declares it explicitly.
+func uncoveredFailures(declared []readiness.ProtectedDelta, failed []TestID) []TestID {
+	declaredSet := map[TestID]bool{}
+	for _, d := range declared {
+		declaredSet[TestID{Package: d.Package, Test: d.Test}] = true
 	}
 	var out []TestID
 	for _, id := range failed {
-		if declaredSet[id] {
-			continue
-		}
-		covered := false
-		for _, d := range declaredFailing {
-			if d.Package == id.Package && strings.HasPrefix(d.Test, id.Test+"/") {
-				covered = true
-			}
-		}
-		if !covered {
+		if !declaredSet[id] {
 			out = append(out, id)
 		}
 	}
 	return out
 }
 
-// EvaluateProtectedDeltas decides whether one protected regression check result is
-// acceptable under its declared deltas. A passing check is acceptable and yields a
-// warning per declared delta, which by definition did not fail. A failing check is
-// acceptable only when it exited normally with a failing status, its complete
-// go test -json stream parses, and every failing test is declared.
-func EvaluateProtectedDeltas(declared []readiness.ProtectedDelta, r process.Result) (DeltaEvaluation, error) {
-	var e DeltaEvaluation
+// describeUncovered names each undeclared failure and, for a parent of a declared
+// failing subtest, says that the parent must be declared explicitly.
+func describeUncovered(declared []readiness.ProtectedDelta, failed, uncovered []TestID) string {
+	failedSet := map[TestID]bool{}
+	for _, id := range failed {
+		failedSet[id] = true
+	}
+	names := make([]string, 0, len(uncovered))
+	for _, id := range uncovered {
+		name := id.Package + " " + id.Test
+		for _, d := range declared {
+			if d.Package == id.Package && strings.HasPrefix(d.Test, id.Test+"/") && failedSet[TestID{Package: d.Package, Test: d.Test}] {
+				name += " (parent of declared failing subtest " + d.Test + "; it must be declared explicitly)"
+				break
+			}
+		}
+		names = append(names, name)
+	}
+	return strings.Join(names, "; ")
+}
+
+// checkProtectedResult refuses a protected regression result whose process did not
+// run to a normal exit, whatever its output says.
+func checkProtectedResult(r process.Result) error {
 	if r.TimedOut || r.Interrupted || r.Overflow || !r.Reconciled {
-		return e, fmt.Errorf("protected regression output is incomplete (timed out, interrupted, over the capture limit or unreconciled); no delta can be accepted")
+		return fmt.Errorf("protected regression output is incomplete (timed out, interrupted, over the capture limit or unreconciled); no delta can be accepted")
 	}
 	if !r.OK && r.Code <= 0 {
-		return e, fmt.Errorf("protected regression did not exit with a failing status; no delta can be accepted")
+		return fmt.Errorf("protected regression did not exit with a failing status; no delta can be accepted")
 	}
-	var failed []TestID
-	if !r.OK {
-		var err error
-		if failed, err = parseFailedTests(r.Stdout); err != nil {
-			return e, err
-		}
+	return nil
+}
+
+// matchDeltas applies the declared deltas to the failing set of a failed check, or
+// reports every declared delta as not failing when the check passed.
+func matchDeltas(declared []readiness.ProtectedDelta, passed bool, failed []TestID) (DeltaEvaluation, error) {
+	var e DeltaEvaluation
+	if !passed {
 		if len(failed) == 0 {
 			return e, fmt.Errorf("protected regression exited non-zero without any failing test; no delta can be accepted")
 		}
 		if uncovered := uncoveredFailures(declared, failed); len(uncovered) > 0 {
-			names := make([]string, 0, len(uncovered))
-			for _, id := range uncovered {
-				names = append(names, id.Package+" "+id.Test)
-			}
-			return e, fmt.Errorf("undeclared protected regression failures: %s", strings.Join(names, "; "))
+			return e, fmt.Errorf("undeclared protected regression failures: %s", describeUncovered(declared, failed, uncovered))
 		}
 	}
 	failedSet := map[TestID]bool{}
@@ -332,16 +379,56 @@ func EvaluateProtectedDeltas(declared []readiness.ProtectedDelta, r process.Resu
 		if failedSet[TestID{Package: d.Package, Test: d.Test}] {
 			e.Accepted = append(e.Accepted, d)
 		} else {
-			e.Warnings = append(e.Warnings, fmt.Sprintf("declared protected delta did not fail: %s %s (check %s)", d.Package, d.Test, d.CheckID))
+			e.Warnings = append(e.Warnings, fmt.Sprintf("declared protected delta did not fail: %s %s (check %s); amend the plan to remove it", d.Package, d.Test, d.CheckID))
 		}
 	}
 	return e, nil
 }
 
+// EvaluateProtectedDeltas decides whether one protected regression check result is
+// acceptable under its declared deltas. A passing check is acceptable and yields a
+// warning per declared delta, which by definition did not fail. A failing check is
+// acceptable only when it exited normally with a failing status, its complete
+// go test -json stream parses, and every failing test is declared. A retained
+// stream that was truncated is not the complete stream and is refused.
+func EvaluateProtectedDeltas(declared []readiness.ProtectedDelta, r process.Result) (DeltaEvaluation, error) {
+	if err := checkProtectedResult(r); err != nil {
+		return DeltaEvaluation{}, err
+	}
+	var failed []TestID
+	if !r.OK {
+		if r.Truncated {
+			return DeltaEvaluation{}, fmt.Errorf("protected regression output was truncated and was not parsed as a stream; no delta can be accepted")
+		}
+		var err error
+		if failed, err = parseFailedTests(r.Stdout); err != nil {
+			return DeltaEvaluation{}, err
+		}
+	}
+	return matchDeltas(declared, r.OK, failed)
+}
+
+// evaluateStreamedDeltas is EvaluateProtectedDeltas for a result whose stdout was
+// fed line by line to parser while it ran, so its retained capture may be a prefix.
+func evaluateStreamedDeltas(declared []readiness.ProtectedDelta, r process.Result, parser *failedTestParser) (DeltaEvaluation, error) {
+	if err := checkProtectedResult(r); err != nil {
+		return DeltaEvaluation{}, err
+	}
+	var failed []TestID
+	if !r.OK {
+		var err error
+		if failed, err = parser.Finish(); err != nil {
+			return DeltaEvaluation{}, err
+		}
+	}
+	return matchDeltas(declared, r.OK, failed)
+}
+
 // acceptedProtectedFailure re-checks a recorded failing protected observation
 // against the approved plan. The compact ledger projection drops captured streams,
-// so the recorded failing set is checked for coverage; whenever the stream is still
-// present it is re-parsed and must yield the same failing set.
+// so the recorded failing set is checked for coverage; whenever the complete stream
+// is still present it is re-parsed and must yield the same failing set. A streamed
+// observation whose retained capture is only a prefix is judged by its recorded set.
 func acceptedProtectedFailure(p readiness.Plan, check readiness.Check, obs Observation) bool {
 	if check.Category != "regression" || !check.Required || p.Validate() != nil {
 		return false
@@ -351,7 +438,7 @@ func acceptedProtectedFailure(p readiness.Plan, check readiness.Check, obs Obser
 	if len(declared) == 0 || len(obs.FailedTests) == 0 || r.TimedOut || r.Interrupted || r.Overflow || !r.Reconciled || r.Code <= 0 {
 		return false
 	}
-	if r.Stdout != "" {
+	if r.Stdout != "" && !r.Truncated {
 		e, err := EvaluateProtectedDeltas(declared, r)
 		if err != nil || len(e.Failed) != len(obs.FailedTests) {
 			return false

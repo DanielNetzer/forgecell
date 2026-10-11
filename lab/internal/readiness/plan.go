@@ -12,6 +12,7 @@ import (
 	"path"
 	pathpkg "path"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -714,6 +715,10 @@ func requestsGoTestJSON(argv []string) bool {
 	return false
 }
 
+// RequestsGoTestJSON is requestsGoTestJSON for the verification runner, which
+// streams the output of checks that ask for it.
+func RequestsGoTestJSON(argv []string) bool { return requestsGoTestJSON(argv) }
+
 // protectedTestSource mirrors what the protected view restores from the base
 // commit: conventional test paths and every regression check definition.
 func (p Plan) protectedTestSource(file string) bool {
@@ -853,10 +858,52 @@ func (p Plan) FixtureScopePaths() []string {
 	return out
 }
 
+// FailingTest identifies one Go test, by package import path and test name, that
+// failed in a protected regression run. It is evidence for a reviewer, not a delta.
+type FailingTest struct {
+	Package string
+	Test    string
+}
+
+// maxAdvisoryTests bounds how many failing tests the advisory names.
+const maxAdvisoryTests = 20
+
+func failingTestsSentence(seen []FailingTest) string {
+	unique := map[FailingTest]bool{}
+	for _, t := range seen {
+		unique[t] = true
+	}
+	tests := make([]FailingTest, 0, len(unique))
+	for t := range unique {
+		tests = append(tests, t)
+	}
+	sort.Slice(tests, func(i, j int) bool {
+		if tests[i].Package != tests[j].Package {
+			return tests[i].Package < tests[j].Package
+		}
+		return tests[i].Test < tests[j].Test
+	})
+	if len(tests) == 0 {
+		return ""
+	}
+	more := ""
+	if len(tests) > maxAdvisoryTests {
+		more = fmt.Sprintf(" and %d more", len(tests)-maxAdvisoryTests)
+		tests = tests[:maxAdvisoryTests]
+	}
+	names := make([]string, len(tests))
+	for i, t := range tests {
+		names[i] = t.Package + " " + t.Test
+	}
+	return " The latest protected regression run failed these tests (package and test ID): " + strings.Join(names, "; ") + more + "."
+}
+
 // ProtectedDeltaAdvisory is a deterministic prompt for a human reviewer. It is
 // returned only when scope touches fixture paths, a regression check will run in
 // the protected view and no delta is declared. It never declares or approves one.
-func (p Plan) ProtectedDeltaAdvisory() string {
+// Failing tests recorded from an earlier protected run are named in the text, so a
+// reviewer can copy exact IDs; they change nothing else.
+func (p Plan) ProtectedDeltaAdvisory(seen ...FailingTest) string {
 	if len(p.ExpectedProtectedDeltas) > 0 {
 		return ""
 	}
@@ -870,7 +917,7 @@ func (p Plan) ProtectedDeltaAdvisory() string {
 	if !regression || len(fixtures) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("Protected-delta advisory (proposed for review; never auto-approved): scope touches fixture path(s) %s. The protected regression run restores base-commit test sources, so tests that pin these files may fail there and block the Molecule. If this change intentionally alters a pinned contract, a reviewer may amend the plan with expectedProtectedDeltas naming exact Go package and test IDs; nothing is declared or approved automatically.", strings.Join(fixtures, ", "))
+	return fmt.Sprintf("Protected-delta advisory (proposed for review; never auto-approved): scope touches fixture path(s) %s. The protected regression run restores base-commit test sources, so tests that pin these files may fail there and block the Molecule.%s If this change intentionally alters a pinned contract, a reviewer may amend the plan with expectedProtectedDeltas naming exact Go package and test IDs, declaring a failing parent test beside its failing subtest (an undeclared failing parent still fails the check); nothing is declared or approved automatically.", strings.Join(fixtures, ", "), failingTestsSentence(seen))
 }
 
 // ValidateForCoding leaves overlapping proposals digestible and reviewable, but

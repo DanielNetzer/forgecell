@@ -218,7 +218,11 @@ These limits existed before the diagnostics below and are unchanged by them.
   neither of the other two. On Linux and macOS the managed process group is killed
   and then reconciled, and a process that cannot be shown stopped is never `ok`.
 - **Analysis timeout.** Analysis, through the bound harness or an approved analysis
-  wrapper, uses the bound binding's `timeoutMs`. `0` means the process default.
+  wrapper, uses the bound binding's `timeoutMs`. An `analysis` or `meta` role
+  override that omits `timeoutMs` inherits the default harness `timeoutMs`; its own
+  value wins. `0` still means the process default, but only when the default harness
+  declares no `timeoutMs` either. Inheritance is part of the resolved view, so the
+  Formula bytes and SHA-256 are unchanged.
 - **Coding timeout.** Coding uses the plan's `harnessTimeoutMs` when it has one,
   otherwise the Formula `timeoutMs`. A coding timeout produces the recover and amend
   guidance above and nothing is retried automatically.
@@ -343,21 +347,43 @@ otherwise always fail there. A reviewed plan may declare `expectedProtectedDelta
   scope gate, which lists every delta with its package, test, scope path and
   reason. Intake never writes or approves a delta; when scope touches `testdata` or
   `fixtures` it only records a labelled advisory ("proposed for review; never
-  auto-approved"). Plans without the field keep their earlier digests.
+  auto-approved"). Once a protected regression run has failed, the advisory shown at
+  the scope gate also names the failing protected tests that run recorded (package
+  and test ID, at most 20), so a reviewer can copy exact IDs. It stays advisory: it
+  declares nothing, and the analysis output schema and adapter contract are
+  unchanged. Plans without the field keep their earlier digests.
 - Deltas apply to the protected view only. The candidate view still has to pass
   entirely. In the protected view the check passes if it exits non-zero, its
   complete `go test -json` stream parses, and every failing test is declared.
-  Package and test must both match. Failing parents of a declared failing subtest
-  are accounted for; a parent that also fails for an unrelated reason cannot be
-  told apart from that, so review declared subtests with care.
+  Package and test must both match. `go test` fails every parent of a failing
+  subtest, but a parent can also fail for its own reason, so a parent is never
+  assumed: declare the failing parent beside its failing subtest. An undeclared
+  failing parent fails the check, and the error names it and says it must be
+  declared explicitly. Plan validation still accepts a subtest-only declaration; the
+  run refuses it when the parent fails.
 - Any undeclared failing test fails the check, naming its package and test. So do
   a build or setup failure with no failing test, unparseable output, timeout,
-  interruption, output over the 256,000-byte capture limit, or a non-zero exit with
-  no failing test. For a large module, narrow the check argv to the affected
-  packages so the JSON stream fits the limit.
+  interruption, output over a stream bound (below), or a non-zero exit with no
+  failing test.
+- A check whose declared deltas apply is read as a stream while it runs. The
+  retained capture of its output stays capped at 256,000 bytes, but the whole
+  `go test -json` stream is parsed incrementally with bounded memory, so a large
+  suite is evaluated from its complete output. The same fail-closed rules apply to
+  the stream: a non-JSON line, build failure, abort marker, started-but-unfinished
+  test, failed package without a failing test, or empty stream is refused, and so
+  are timeout and interruption. The stream is bounded by a hard limit of 64 MiB and
+  1 MiB per line; exceeding either stops the process and fails the check. A result
+  whose retained output is only a prefix is marked `truncated`, and delivery judges
+  it by its recorded failing set. The 256,000-byte capture limit and its overflow
+  failure are unchanged for every check that does not declare deltas and for every
+  other command: for those, narrow the check argv or reduce its output.
 - A declared test that does not fail is reported as a warning and does not fail
-  the check. The final review output lists the accepted deltas and warnings next to
+  the check. Each warning says to amend the plan to remove the delta, and so does
+  the scope gate. The final review output lists the accepted deltas and warnings next to
   the required-check result, and the compact ledger keeps them.
+- A failing protected `go test -json` check without declared deltas records its
+  failing set when it parses cleanly. That is evidence for the advisory above and
+  never changes the verdict.
 - Delivery accepts a protected observation with failures only when the approved
   plan's declared deltas still cover its recorded failing set.
 - Only Go tests are supported. Matching is exact equality, never a pattern.
@@ -496,6 +522,36 @@ rejected when the proposal is saved or inspected, with the adapter's own reason.
 The default `harness` is not judged this way, so existing Formulas are unchanged.
 Adding or changing `harnesses` changes the Formula bytes and therefore needs a new
 exact approval.
+
+An `analysis` or `meta` entry that omits `timeoutMs` uses the default harness
+`timeoutMs`, as the `coding` entry already did; an explicit value wins. Only
+`coding` also inherits the default `instructions` and `maxTimeoutMs`.
+
+The `meta` role is the meta binding even when the learn Atom carries no `command`:
+`LearnBound`, doctor's `metaBinding` and `learnBound`, the saved proposal evidence
+and the `--meta-harness` / `--meta-command` opt-in refusal ("existing learn binding
+preserved") all read the role binding's command, binding and timeout. A learn Atom
+that declares its own `timeoutMs` keeps it, as learning runs it. A Formula whose
+learn Atom carries the command, with no `meta` role, behaves as before.
+
+`forgecell init --lab DIR --harness HARNESS` on an approved Formula proposes the same
+kind of binding change as `--rebind`, with these differences:
+
+- It refuses a harness that cannot perform read-only ticket analysis (for example
+  Cursor) when `harnesses.analysis` is not declared, because analysis would fall
+  back to it. The error carries the adapter's own reason and says to declare
+  `harnesses.analysis` first, and no proposal is saved. `--rebind` always made
+  this check; bootstrap `--harness` on an unapproved Lab is unchanged.
+- It repoints only native analysis, meta and learn commands that use the old default
+  launcher, so when the default harness is a custom command it repoints none of
+  them. `--rebind` is the way to move native commands on any launcher that is
+  established as a Forgecell executable.
+
+Either command overwrites a `harnesses.coding` override with the new coding binding.
+When that override was a custom command, or was bound to a different adapter than the
+old default, the proposal note says so in a separate sentence, beside the list of
+rewritten keys, so the reviewer can confirm the overwrite. It is a note, not a
+refusal, and an override on the same adapter as the old default adds nothing.
 
 Every harness-bound Atom action records the Formula binding that executed it as
 `executedBinding` in the ledger, including each analysis attempt; older ledgers

@@ -820,8 +820,8 @@ func presentRun(out io.Writer, r molecule.Record) {
 			for _, d := range p.ExpectedProtectedDeltas {
 				fmt.Fprintf(out, "  %s %s · check %s · justified by scope path %s — %s\n", d.Package, d.Test, d.CheckID, d.ScopePath, d.Reason)
 			}
-			fmt.Fprintln(out, "  Any other failing test still fails the check; a declared test that does not fail is reported as a warning.")
-		} else if advisory := p.ProtectedDeltaAdvisory(); advisory != "" {
+			fmt.Fprintln(out, "  Any other failing test still fails the check, including the parent of a declared subtest, which must be declared explicitly. A declared test that does not fail is only a warning; amend the plan to remove it.")
+		} else if advisory := p.ProtectedDeltaAdvisory(protectedFailures(r)...); advisory != "" {
 			fmt.Fprintln(out, advisory)
 		}
 		if p.Continuation == "" {
@@ -864,6 +864,24 @@ func presentRun(out io.Writer, r molecule.Record) {
 		}
 	}
 	fmt.Fprintf(out, "Ledger: %s\n", filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
+}
+
+// protectedFailures lists the tests that failed in the protected regression run
+// recorded for the Molecule, so the delta advisory can name them.
+func protectedFailures(r molecule.Record) []readiness.FailingTest {
+	if r.Verification == nil || r.Verification.Protected == nil {
+		return nil
+	}
+	var failing []readiness.FailingTest
+	for _, o := range r.Verification.Protected.Checks {
+		if o.Result.OK {
+			continue
+		}
+		for _, id := range o.FailedTests {
+			failing = append(failing, readiness.FailingTest{Package: id.Package, Test: id.Test})
+		}
+	}
+	return failing
 }
 
 // codingTimeoutLine states the timeout the approved plan will use, so a reviewed
@@ -1207,12 +1225,7 @@ func proposalMeta(p onboarding.Proposal) onboarding.MetaReport {
 		return *p.CapabilityEvidence.Meta
 	}
 	f, _ := formula.Parse([]byte(p.YAML))
-	for _, a := range f.Atoms {
-		if a.Type == "learn" {
-			return onboarding.DescribeMeta(a.Command, a.Binding, a.TimeoutMS, onboarding.Candidate{})
-		}
-	}
-	return onboarding.DescribeMeta(nil, "", 0, onboarding.Candidate{})
+	return onboarding.DescribeFormulaMeta(f)
 }
 func renderMeta(out io.Writer, r onboarding.MetaReport, source string) {
 	argv, _ := json.Marshal(r.Command)
