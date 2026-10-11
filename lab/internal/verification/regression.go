@@ -166,7 +166,13 @@ type goTestEvent struct {
 	Package    string
 	Test       string
 	ImportPath string
+	Output     string
 }
+
+// abortMarkers identify a package run that stopped early. Tests after the
+// abort never start and leave no event, so a declared failing test must not
+// be allowed to stand in for them.
+var abortMarkers = []string{"panic: ", "fatal error: ", "test timed out after", "[build failed]", "[setup failed]"}
 
 // parseFailedTests reads go test -json output. It fails closed: every non-blank
 // line must be a JSON event, a build failure or a failed package without any
@@ -174,6 +180,8 @@ type goTestEvent struct {
 func parseFailedTests(stdout string) ([]TestID, error) {
 	failed := map[TestID]bool{}
 	failedPackages := map[string]bool{}
+	started := map[TestID]bool{}
+	aborted := map[string]string{}
 	events := 0
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -185,12 +193,29 @@ func parseFailedTests(stdout string) ([]TestID, error) {
 			return nil, fmt.Errorf("protected regression output is not go test -json; no delta can be accepted")
 		}
 		events++
+		if ev.Action == "output" {
+			for _, marker := range abortMarkers {
+				if strings.Contains(ev.Output, marker) {
+					aborted[ev.Package] = strings.TrimSpace(marker)
+				}
+			}
+		}
+		key := TestID{Package: ev.Package, Test: ev.Test}
+		switch ev.Action {
+		case "run":
+			if ev.Test != "" {
+				started[key] = true
+			}
+		case "pass", "skip":
+			delete(started, key)
+		}
 		switch ev.Action {
 		case "build-fail":
 			return nil, fmt.Errorf("build failure in %q; no delta can be accepted", ev.ImportPath)
 		case "fail":
 			if ev.Test != "" {
-				failed[TestID{Package: ev.Package, Test: ev.Test}] = true
+				failed[key] = true
+				delete(started, key)
 			} else {
 				failedPackages[ev.Package] = true
 			}
@@ -198,6 +223,15 @@ func parseFailedTests(stdout string) ([]TestID, error) {
 	}
 	if events == 0 {
 		return nil, fmt.Errorf("protected regression produced no go test -json events; no delta can be accepted")
+	}
+	for pkg, marker := range aborted {
+		if !failedPackages[pkg] {
+			continue
+		}
+		return nil, fmt.Errorf("package %q stopped early (%q); tests after the abort never ran, so no delta can be accepted", pkg, marker)
+	}
+	for id := range started {
+		return nil, fmt.Errorf("test %s in %q started but never finished; no delta can be accepted", id.Test, id.Package)
 	}
 	for pkg := range failedPackages {
 		found := false
@@ -334,4 +368,45 @@ func acceptedProtectedFailure(p readiness.Plan, check readiness.Check, obs Obser
 		return true
 	}
 	return len(uncoveredFailures(declared, obs.FailedTests)) == 0
+}
+
+// verifyDeltaPackages binds each declared delta to the package whose test
+// source its scope path edits, using the workspace's own go.mod to resolve the
+// import path. A delta can therefore never excuse an unrelated (for example
+// security) test elsewhere in the module.
+func verifyDeltaPackages(workspace string, declared []readiness.ProtectedDelta) error {
+	for _, d := range declared {
+		dir := filepath.Join(workspace, filepath.FromSlash(readiness.DeltaPackageDir(d.ScopePath)))
+		root, module := dir, ""
+		for {
+			raw, err := os.ReadFile(filepath.Join(root, "go.mod"))
+			if err == nil {
+				for _, line := range strings.Split(string(raw), "\n") {
+					if f := strings.Fields(line); len(f) == 2 && f[0] == "module" {
+						module = strings.Trim(f[1], "\"")
+					}
+				}
+				break
+			}
+			if root == workspace || len(root) <= len(workspace) {
+				break
+			}
+			root = filepath.Dir(root)
+		}
+		if module == "" {
+			return fmt.Errorf("expected protected delta %s %s: no go.mod encloses %q; no delta can be accepted", d.Package, d.Test, d.ScopePath)
+		}
+		rel, err := filepath.Rel(root, dir)
+		if err != nil {
+			return err
+		}
+		want := module
+		if rel != "." {
+			want = module + "/" + filepath.ToSlash(rel)
+		}
+		if d.Package != want {
+			return fmt.Errorf("expected protected delta %s %s is not in the package of its scope path %q (%s); no delta can be accepted", d.Package, d.Test, d.ScopePath, want)
+		}
+	}
+	return nil
 }

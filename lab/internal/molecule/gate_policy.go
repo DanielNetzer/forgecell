@@ -101,6 +101,10 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) P
 	n := len(r.Readiness.Plans) - 1
 	proposal := r.Readiness.Plans[n]
 	plan := proposal.Plan
+	if len(plan.ExpectedProtectedDeltas) > 0 {
+		// Excusing protected-regression failures always needs a human decision.
+		return decline("plan-has-protected-deltas", "the plan declares %d expected protected-regression delta(s), which require human review", len(plan.ExpectedProtectedDeltas))
+	}
 	base := fmt.Sprintf("/readiness/plans/%d", n)
 	if plan.Continuation != "" {
 		return decline("plan-continuation", "plan continuation %q is not a first scope approval", plan.Continuation)

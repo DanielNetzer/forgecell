@@ -280,6 +280,10 @@ func deltaFixture(t *testing.T, candidateBody, protectedBody string, deltas ...r
 	if err := os.WriteFile(filepath.Join(dir, "testdata", "pin.txt"), []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// Deltas are bound to the package of their scope path through go.mod.
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test/pkg\n\ngo 1.22\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	gitTest(t, dir, "add", ".")
 	gitTest(t, dir, "commit", "-m", "pinned fixture and checker")
 	base := gitTest(t, dir, "rev-parse", "HEAD")
@@ -489,5 +493,15 @@ func TestProtectedDeltaEvaluatorRejectsIncompleteResults(t *testing.T) {
 		if _, err := EvaluateProtectedDeltas(declared, r); err == nil {
 			t.Fatalf("incomplete result %d was accepted", i)
 		}
+	}
+}
+
+// A delta may only excuse a test in the package its scope path belongs to.
+func TestProtectedDeltaOutsideItsScopePackageIsRefused(t *testing.T) {
+	const security = "example.test/pkg/security"
+	dir, p, c := deltaFixture(t, passingBody(deltaPkg, "TestPinned"), failingBody(security, "TestAuth"), pinnedDelta(security, "TestAuth"))
+	v := runDelta(t, dir, p, c)
+	if v.RequiredChecksPassed || !strings.Contains(v.Error, "not in the package of its scope path") {
+		t.Fatalf("delta outside its scope package accepted: %+v", v.Error)
 	}
 }

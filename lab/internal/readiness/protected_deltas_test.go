@@ -218,3 +218,16 @@ func TestProtectedDeltaFixturePathsAndLookup(t *testing.T) {
 		t.Fatal("lookup by check identity is wrong")
 	}
 }
+
+func TestDeltaPackageDirMapsTestdataToItsPackage(t *testing.T) {
+	for in, want := range map[string]string{
+		"lab/internal/harness/testdata/contracts.json": "lab/internal/harness",
+		"lab/internal/cli/cli_test.go":                 "lab/internal/cli",
+		"testdata/pin.txt":                             ".",
+		"x_test.go":                                    ".",
+	} {
+		if got := DeltaPackageDir(in); got != want {
+			t.Fatalf("%s: %q, want %q", in, got, want)
+		}
+	}
+}

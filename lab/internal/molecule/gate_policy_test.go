@@ -114,6 +114,9 @@ func TestGatePolicyScopeDeclinesEachUnreadyCondition(t *testing.T) {
 		{"empty scope", func(r *Record) { r.Readiness.Plans[0].Plan.Analysis.Scope = nil }, "scope-empty"},
 		{"parent path", func(r *Record) { r.Readiness.Plans[0].Plan.Analysis.Scope[0].Path = "../x" }, "scope-path-invalid"},
 		{"absolute path", func(r *Record) { r.Readiness.Plans[0].Plan.Analysis.Scope[0].Path = "/abs" }, "scope-path-invalid"},
+		{"protected deltas", func(r *Record) {
+			r.Readiness.Plans[0].Plan.ExpectedProtectedDeltas = []readiness.ProtectedDelta{{CheckID: "regression", Package: "example.test/pkg", Test: "TestX"}}
+		}, "plan-has-protected-deltas"},
 		{"missing allowlist", func(r *Record) { r.Readiness.Plans[0].Plan.CodingAllowlist = nil }, "allowlist-missing"},
 		{"extra allowlist entry", func(r *Record) {
 			p := &r.Readiness.Plans[0].Plan

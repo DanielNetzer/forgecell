@@ -345,7 +345,9 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			if declared := p.DeltasForCheck(command.ID); len(declared) > 0 {
 				evaluated = true
 				var evaluation DeltaEvaluation
-				evaluation, deltaErr = EvaluateProtectedDeltas(declared, observation.Result)
+				if deltaErr = verifyDeltaPackages(destination, declared); deltaErr == nil {
+					evaluation, deltaErr = EvaluateProtectedDeltas(declared, observation.Result)
+				}
 				if deltaErr == nil {
 					observation.FailedTests = evaluation.Failed
 					observation.AcceptedDeltas = evaluation.Accepted

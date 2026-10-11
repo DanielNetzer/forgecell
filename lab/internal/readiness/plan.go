@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	pathpkg "path"
 	"regexp"
 	"strings"
 	"unicode"
@@ -774,6 +775,19 @@ func (p Plan) validateProtectedDeltas(scope map[string]bool, cited func([]string
 		}
 	}
 	return nil
+}
+
+// DeltaPackageDir is the Go package directory a protected test source belongs
+// to: its directory, or the parent of a testdata tree (Go ignores testdata).
+func DeltaPackageDir(scopePath string) string {
+	dir := pathpkg.Dir(scopePath)
+	if i := strings.Index(dir+"/", "/testdata/"); i >= 0 {
+		return dir[:i]
+	}
+	if strings.HasPrefix(dir+"/", "testdata/") {
+		return "."
+	}
+	return dir
 }
 
 // DeltasForCheck returns the declared protected deltas of one check, in plan order.
