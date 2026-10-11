@@ -59,6 +59,9 @@ type AtomAction struct {
 	PlannedAction  string           `json:"plannedAction"`
 	StartedAt      string           `json:"startedAt"`
 	Observed       *AtomObservation `json:"observed,omitempty"`
+	// ExecutedBinding is the Formula binding id that a harness-bound action ran
+	// under; empty for actions that are not harness-bound and for older ledgers.
+	ExecutedBinding string `json:"executedBinding,omitempty"`
 }
 type AtomObservation struct {
 	Action         string               `json:"action"`
@@ -87,6 +90,7 @@ type Atom struct {
 	ElapsedMS  int64           `json:"elapsedMs,omitempty"`
 }
 type HarnessAttempt struct {
+	Forgecell       *harness.Provenance         `json:"forgecell,omitempty"`
 	Coding          *harness.CodingOutcome      `json:"coding,omitempty"`
 	CodingAllowlist []string                    `json:"codingAllowlist,omitempty"`
 	ID              string                      `json:"id"`

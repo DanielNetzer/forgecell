@@ -74,3 +74,24 @@ func TestAnalysisWrapperReferenceValidation(t *testing.T) {
 		t.Fatalf("a valid reference was rejected: %v", err)
 	}
 }
+
+// A role override must not carry an unvalidated wrapper reference: per-role
+// bindings (#38) and the analysis wrapper (#2) meet here.
+func TestRoleOverrideAnalysisWrapperIsValidated(t *testing.T) {
+	recipe := func(role, wrapper string) []byte {
+		return []byte("schemaVersion: v0\nkind: formula\nid: wrapped\nharness:\n  binding: custom\n  command: [\"/bin/echo\"]\nharnesses:\n  " + role + ":\n    binding: custom\n    command: [\"/bin/echo\"]\n    analysisWrapper: " + wrapper + "\natoms:\n  - {id: intake, type: intake}\n")
+	}
+	good := "{manifest: analysis-wrappers/w.json, sha256: " + strings.Repeat("a", 64) + "}"
+	if _, err := Parse(recipe("analysis", good)); err != nil {
+		t.Fatalf("valid analysis-role wrapper rejected: %v", err)
+	}
+	for name, tc := range map[string][2]string{
+		"bad digest":        {"analysis", "{manifest: analysis-wrappers/w.json, sha256: abc}"},
+		"escaping manifest": {"analysis", "{manifest: ../w.json, sha256: " + strings.Repeat("a", 64) + "}"},
+		"coding role":       {"coding", good},
+	} {
+		if _, err := Parse(recipe(tc[0], tc[1])); err == nil {
+			t.Fatalf("%s: unvalidated role-override wrapper accepted", name)
+		}
+	}
+}

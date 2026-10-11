@@ -459,7 +459,9 @@ func TestAnalysisWrapperSwapBetweenApprovalAndExecution(t *testing.T) {
 		if err := d.Err(); err != nil {
 			t.Fatal(err)
 		}
-		testHookAfterRevalidate = func() { fx.setScript(fmt.Sprintf("touch %q\nprintf '%%s' '%s'\n", filepath.Join(out, "evil-ran"), wrapperOKAnalysis)) }
+		testHookAfterRevalidate = func() {
+			fx.setScript(fmt.Sprintf("touch %q\nprintf '%%s' '%s'\n", filepath.Join(out, "evil-ran"), wrapperOKAnalysis))
+		}
 		t.Cleanup(func() { testHookAfterRevalidate = nil })
 		result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second)
 		if result.OK || !strings.Contains(result.Error, "changed after approval") {

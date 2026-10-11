@@ -306,11 +306,52 @@ deployments remain outside this milestone. API provenance:
 [GitHub rules](https://docs.github.com/en/rest/repos/rules) and
 [branch protection](https://docs.github.com/en/rest/branches/branch-protection).
 
+## Quick rebind and per-role harness bindings
+
+`forgecell init --lab DIR --rebind HARNESS` proposes a reviewed Formula diff that
+changes only the binding block of an exactly approved Formula: `harness.binding`,
+`harness.command` and the binding of the harness Atom. Atoms, checks, instructions,
+learned guidance, the learn Atom and any per-role bindings are preserved, and the
+proposal is refused unless its YAML differs from the approved YAML only at those
+keys. It needs a current exact approval, a ready discovered harness with an
+executable, no pending proposal, and none of `--harness`, `--meta-harness`,
+`--meta-command`, the timeout flags or `--review`/`--approve`/`--dismiss`. The
+saved capability evidence follows the new binding; the usual `--review`,
+`--approve ID` and `--dismiss ID` flow applies, and dismissing leaves the active
+Formula untouched. When `harnesses.coding` overrides the coding binding, the
+harness Atom binding is left alone.
+
+A Formula may declare optional per-role bindings next to the default `harness`:
+
+```yaml
+harness: {binding: codex, command: [...]}   # default for every role not listed
+harnesses:
+  analysis: {binding: claude-code, command: [...]}
+  coding:   {binding: codex, command: [...]}
+  meta:     {binding: claude-code, command: [...]}
+```
+
+Each entry has the shape of `harness` (the `command` is required; a `policy` key is
+rejected) and may only name `analysis`, `coding` or `meta`. A role that is not
+declared uses `harness`. `analysis` runs the intake Atom's ticket analysis,
+`coding` the harness Atom, and `meta` the learn Atom, which must exist and must not
+contradict the role binding. A declared role whose adapter cannot perform its
+operation, for example Cursor for analysis or a custom command for analysis, is
+rejected when the proposal is saved or inspected, with the adapter's own reason.
+The default `harness` is not judged this way, so existing Formulas are unchanged.
+Adding or changing `harnesses` changes the Formula bytes and therefore needs a new
+exact approval.
+
+Every harness-bound Atom action records the Formula binding that executed it as
+`executedBinding` in the ledger, including each analysis attempt; older ledgers
+decode unchanged. `forgecell doctor` adds a `roles` array (role, binding, source
+`default`, `override` or `learn-atom`, readiness, capability and next command) and,
+for a Formula with `harnesses`, is ready only when every configured role is ready.
+
 ## Remaining release evidence
 
 The installed clear/ambiguous GitHub cases and independent acceptance passed.
 Draft publication, exact-commit CI and final implementation review are recorded
 in the research record. A replacement public preview requires a separate release
 decision and provider coverage; this development milestone does not publish it. No automatic
-Formula mutation, issue comments, MCP Events, local UI, or multi-harness routing
-is included.
+Formula mutation, issue comments, MCP Events, or local UI is included.

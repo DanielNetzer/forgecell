@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 )
 
@@ -28,8 +29,9 @@ type Result struct {
 	Home    string `json:"home"`
 }
 type manifest struct {
-	Version string `json:"version"`
-	SHA256  string `json:"sha256"`
+	Version         string `json:"version"`
+	SHA256          string `json:"sha256"`
+	ProtocolVersion string `json:"protocolVersion,omitempty"`
 }
 
 func sum(raw []byte) string { h := sha256.Sum256(raw); return hex.EncodeToString(h[:]) }
@@ -220,7 +222,7 @@ func Install(ctx context.Context, o Options) (result Result, err error) {
 	if err != nil {
 		return result, err
 	}
-	m := manifest{o.Version, sum(raw)}
+	m := manifest{o.Version, sum(raw), harness.AdapterProtocolVersion}
 	stage, err := os.MkdirTemp(o.Home, ".install-")
 	if err != nil {
 		return result, err
@@ -246,7 +248,7 @@ func Install(ctx context.Context, o Options) (result Result, err error) {
 		if e != nil {
 			return result, e
 		}
-		if existing != m {
+		if existing.Version != m.Version || existing.SHA256 != m.SHA256 {
 			return result, fmt.Errorf("release version already exists with different content")
 		}
 	} else if !os.IsNotExist(e) {

@@ -32,8 +32,9 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
+	harness.SetRunningVersion(version)
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -318,6 +319,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		flags.SetOutput(stderr)
 		lab := flags.String("lab", defaultLab, "Lab directory")
 		preferred := flags.String("harness", "", "Explicit default harness")
+		rebind := flags.String("rebind", "", "Propose a binding-only rebind of the approved default harness for review")
 		metaHarness := flags.String("meta-harness", "", "Explicit separate native meta binding")
 		metaArgv := flags.String("meta-command", "", "BYO meta argv as JSON; containment unknown")
 		timeoutMS := flags.Int("harness-timeout-ms", 0, "Reviewed coding attempt budget in ms (default 900000)")
@@ -333,12 +335,27 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			return fail(fmt.Errorf("unexpected init arguments"))
 		}
 		var metaCommand []string
-		metaRequested := false
+		metaRequested, rebindRequested := false, false
 		flags.Visit(func(f *flag.Flag) {
 			if f.Name == "meta-harness" || f.Name == "meta-command" {
 				metaRequested = true
 			}
+			rebindRequested = rebindRequested || f.Name == "rebind"
 		})
+		if rebindRequested {
+			switch {
+			case *rebind == "":
+				return fail(fmt.Errorf("--rebind needs a harness ID, for example --rebind codex"))
+			case *preferred != "":
+				return fail(fmt.Errorf("--rebind and --harness cannot be combined; use --rebind for a binding-only change"))
+			case metaRequested:
+				return fail(fmt.Errorf("--rebind cannot be combined with --meta-harness or --meta-command"))
+			case *timeoutMS != 0 || *maxTimeoutMS != 0:
+				return fail(fmt.Errorf("--rebind cannot be combined with the timeout flags; it changes only the binding"))
+			case *review != "" || *approve != "" || *dismiss != "":
+				return fail(fmt.Errorf("--rebind proposes a change; review, approve or dismiss the saved proposal in a separate command"))
+			}
+		}
 		if metaRequested && (*review != "" || *approve != "" || *dismiss != "") {
 			return fail(fmt.Errorf("meta opt-in cannot accompany saved review or decisions"))
 		}
@@ -417,7 +434,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if err != nil {
 			return fail(err)
 		}
-		launcher := os.Getenv("FORGECELL_LAUNCHER")
+		launcher := initLauncher()
 		if launcher == "" {
 			launcher, err = os.Executable()
 			if err != nil {
@@ -428,7 +445,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		for _, key := range []string{"CODEX_THREAD_ID", "CLAUDECODE", "CURSOR_AGENT", "TERM_PROGRAM"} {
 			env[key] = os.Getenv(key)
 		}
-		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand, HarnessTimeoutMS: *timeoutMS, MaxTimeoutMS: *maxTimeoutMS})
+		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Rebind: *rebind, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand, HarnessTimeoutMS: *timeoutMS, MaxTimeoutMS: *maxTimeoutMS})
 		if err != nil {
 			return fail(err)
 		}
@@ -525,6 +542,24 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			labDir = abs
 		}
 		commands := doctorCommands{lab: labDir, pathReady: pathReady}
+		roles := []onboarding.RoleReadiness{}
+		if active.Formula.ID != "" {
+			roles = onboarding.InspectRoles(ctx, active.Formula, cwd, nil)
+		}
+		firstRoleCommand := ""
+		rolesReady := true
+		for i := range roles {
+			if !roles[i].Ready {
+				rolesReady = false
+				roles[i].NextCommand = commands.candidate(roles[i].Candidate)
+				if firstRoleCommand == "" {
+					firstRoleCommand = roles[i].NextCommand
+				}
+			}
+		}
+		if len(active.Formula.Harnesses) > 0 {
+			ready = git.OK && gh.OK && rolesReady
+		}
 		withSteps := *verbose && structured
 		views := make([]doctorCandidate, len(candidates))
 		for i, c := range candidates {
@@ -538,10 +573,13 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		next := ""
 		if !ready {
 			next = commands.overall(savedView, views, selection)
+			if len(active.Formula.Harnesses) > 0 && firstRoleCommand != "" {
+				next = firstRoleCommand
+			}
 		}
 		note := "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."
 		if structured {
-			report := map[string]any{"schemaVersion": doctorSchemaVersion, "metaBinding": meta, "metaCandidates": views, "activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": savedView, "learnBound": onboarding.LearnBound(active.Formula), "workflow": workflow, "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": views, "selection": selection, "note": note}
+			report := map[string]any{"schemaVersion": doctorSchemaVersion, "roles": roles, "metaBinding": meta, "metaCandidates": views, "activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": savedView, "learnBound": onboarding.LearnBound(active.Formula), "workflow": workflow, "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": views, "selection": selection, "note": note}
 			if next != "" {
 				report["nextCommand"] = next
 			}
@@ -549,7 +587,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Next: next, Note: note})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Next: next, Note: note})
 		}
 		if !ready {
 			return 2
@@ -719,6 +757,23 @@ func encode(out, stderr io.Writer, value any) int {
 	return 0
 }
 
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
+}
+
+// initLauncher names the launcher a new binding should save. The managed launcher
+// (FORGECELL_BIN/forgecell) stays valid across upgrades because it resolves to the
+// active release at run time; otherwise the installer's current-release path is used.
+func initLauncher() string {
+	if managed, ok := harness.ManagedLauncher(os.Getenv("FORGECELL_BIN")); ok {
+		return managed
+	}
+	return os.Getenv("FORGECELL_LAUNCHER")
+}
+
 func presentRun(out io.Writer, r molecule.Record) {
 	fmt.Fprintf(out, "Molecule %s · %s\n%s#%d — %s\n", r.ID, r.Status, r.Issue.Repo, r.Issue.Number, r.Issue.Title)
 	if r.Analysis != nil {
@@ -790,7 +845,7 @@ func codingTimeoutLine(snapshot string, planMS int) string {
 		}
 		return "Coding harness timeout: Formula timeoutMs unset (process default applies)"
 	}
-	b := f.Harness
+	b, _ := f.RoleBinding(formula.CodingHarness)
 	switch {
 	case planMS > 0:
 		return fmt.Sprintf("Coding harness timeout: %dms (reviewed per-Molecule harnessTimeoutMs; Formula timeoutMs %d, maximum %d)", planMS, b.TimeoutMS, b.TimeoutCeilingMS())
@@ -830,9 +885,14 @@ func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, js
 	}
 	command := fmt.Sprintf("forgecell init --lab %q --review %s", dir, p.ID)
 	if jsonMode {
-		return encode(out, stderr, map[string]any{"proposal": p, "verified": true, "repository": f.Intake.Repo, "harness": f.Harness.Binding, "atoms": process["atoms"], "repositoryContext": process["repositoryContext"], "reviewCommand": command, "nextAction": next, "metaBinding": proposalMeta(p), "beforeYaml": proposalMeta(p).BeforeYAML, "capabilityEvidence": proposalCapabilities(p), "capabilityEvidenceSource": "saved observation; not current verification"})
+		return encode(out, stderr, map[string]any{"proposal": p, "verified": true, "repository": f.Intake.Repo, "harness": f.Harness.Binding, "harnesses": f.Harnesses, "atoms": process["atoms"], "repositoryContext": process["repositoryContext"], "reviewCommand": command, "nextAction": next, "metaBinding": proposalMeta(p), "beforeYaml": proposalMeta(p).BeforeYAML, "capabilityEvidence": proposalCapabilities(p), "capabilityEvidenceSource": "saved observation; not current verification"})
 	}
 	fmt.Fprintf(out, "Formula proposal %s: %s\nRepository: %s\nCoding harness: %s\nVerified SHA-256: %s\nReview: %s\nEvidence: %s · %s\nOrdered Atoms (gates and check identities):\n", p.ID, p.Status, f.Intake.Repo, f.Harness.Binding, p.YAMLHash, command, p.EvidencePath, p.EvidenceHash)
+	for _, role := range formula.HarnessRoles {
+		if b, ok := f.Harnesses[string(role)]; ok {
+			fmt.Fprintf(out, "Role binding %s: %s (overrides the default harness %s)\n", role, b.Binding, f.Harness.Binding)
+		}
+	}
 	report := proposalCapabilities(p)
 	renderCapabilities(out, report.Candidate, report.LearnBound, "saved observation; not current verification")
 	meta := proposalMeta(p)
@@ -887,6 +947,7 @@ type doctorView struct {
 	Workflow                   harness.Capability
 	Saved                      *doctorCandidate
 	Candidates                 []doctorCandidate
+	Roles                      []onboarding.RoleReadiness
 }
 
 // doctorCommands chooses the one next command for a non-ready state, using only
@@ -1005,6 +1066,19 @@ func renderDoctor(out io.Writer, v doctorView) {
 			renderDoctorCandidate(out, "Candidate", c)
 		}
 	}
+	if len(v.Roles) > 0 {
+		fmt.Fprintln(out, "\nRole readiness:")
+		for _, r := range v.Roles {
+			state := "ready"
+			if !r.Ready {
+				state = "not ready"
+			}
+			fmt.Fprintf(out, "  %s: %s (%s binding) — %s; %s: %s\n", r.Role, r.Binding, r.Source, state, r.Capability.State, r.Capability.Reason)
+			if r.NextCommand != "" {
+				fmt.Fprintf(out, "    Next: %s\n", r.NextCommand)
+			}
+		}
+	}
 	if v.Meta != nil && v.Meta.Binding != "" {
 		fmt.Fprintf(out, "\nMeta harness: %s — %s: %s\n", v.Meta.Binding, v.Meta.Capability.State, v.Meta.Capability.Reason)
 		if v.Meta.NextAction != "" {
@@ -1024,9 +1098,12 @@ func renderDoctorCandidate(out io.Writer, title string, c doctorCandidate) {
 		fmt.Fprintf(out, "  %s\n", c.Detail)
 	}
 	if b := c.Binding; b != nil {
-		fmt.Fprintf(out, "  Formula binding: %s · adapter: %s\n  Launcher (saved): %s — version %s (%s)\n", b.FormulaBinding, b.Adapter, b.Launcher, b.LauncherVersion, b.LauncherVersionSource)
+		fmt.Fprintf(out, "  Formula binding: %s · adapter: %s\n  Launcher (saved): %s — version %s (%s) · adapter protocol %s\n", b.FormulaBinding, b.Adapter, b.Launcher, b.LauncherVersion, b.LauncherVersionSource, orUnknown(b.LauncherProtocol))
+		if b.ResolvedLauncher != "" {
+			fmt.Fprintf(out, "  Launcher (resolved at run time): %s\n", b.ResolvedLauncher)
+		}
 		if b.RunningLauncher != "" {
-			fmt.Fprintf(out, "  Launcher (running): %s — version %s\n", b.RunningLauncher, b.RunningVersion)
+			fmt.Fprintf(out, "  Launcher (running): %s — version %s · adapter protocol %s\n", b.RunningLauncher, b.RunningVersion, orUnknown(b.RunningProtocol))
 		}
 		provider := b.Provider
 		if b.ResolvedProvider != "" && b.ResolvedProvider != b.Provider {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"go.yaml.in/yaml/v4"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -17,6 +18,8 @@ type InitOptions struct {
 	Runner                           Runner
 	MetaHarness                      string
 	MetaCommand                      []string
+	// Rebind proposes a binding-only change of the approved default harness.
+	Rebind string
 	// HarnessTimeoutMS and MaxTimeoutMS set the reviewed coding budget and the
 	// ceiling for per-Molecule timeouts; zero selects the defaults below.
 	HarnessTimeoutMS, MaxTimeoutMS int
@@ -56,12 +59,74 @@ type Outcome struct {
 	Note       string         `json:"note"`
 }
 
+func codingOverridden(f formula.Formula) bool {
+	_, ok := f.Harnesses[string(formula.CodingHarness)]
+	return ok
+}
+
+// checkRebindTarget requires a ready, discovered harness with an executable and
+// a launcher, and refuses a rebind that would change nothing.
+func checkRebindTarget(candidates []Candidate, id, launcher string, active formula.Formula, lab string) error {
+	for _, c := range candidates {
+		if c.ID != id {
+			continue
+		}
+		if c.Readiness != "ready" || c.Executable == "" {
+			return fmt.Errorf("cannot rebind to %s: %s; run forgecell doctor --lab %q to see what is missing", id, c.Detail, lab)
+		}
+		if launcher == "" {
+			return fmt.Errorf("cannot rebind to %s: the Forgecell launcher is unknown; set FORGECELL_LAUNCHER to its path", id)
+		}
+		if active.Harness.Binding == id && reflect.DeepEqual(active.Harness.Command, []string{launcher, "__adapter", id, c.Executable}) {
+			return fmt.Errorf("the default harness is already bound to %s with this launcher and executable; nothing to rebind", id)
+		}
+		return nil
+	}
+	return fmt.Errorf("cannot rebind to %q: no such harness was discovered; run forgecell doctor --lab %q to list the available harnesses", id, lab)
+}
+
+// verifyRebindDiff proves a rebind proposal differs from the approved Formula only
+// in binding keys: harness.binding, harness.command and, unless harnesses.coding
+// overrides it, the binding of the harness Atom.
+func verifyRebindDiff(before, after string, codingOverride bool) error {
+	var a, b map[string]any
+	if err := yaml.Unmarshal([]byte(before), &a); err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal([]byte(after), &b); err != nil {
+		return err
+	}
+	for _, doc := range []map[string]any{a, b} {
+		if h, ok := doc["harness"].(map[string]any); ok {
+			delete(h, "binding")
+			delete(h, "command")
+		}
+		if atoms, ok := doc["atoms"].([]any); ok && !codingOverride {
+			for _, v := range atoms {
+				if atom, ok := v.(map[string]any); ok && atom["type"] == "harness" {
+					delete(atom, "binding")
+				}
+			}
+		}
+	}
+	if !reflect.DeepEqual(a, b) {
+		return fmt.Errorf("rebind would change more than the binding keys; no proposal saved")
+	}
+	return nil
+}
+
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	budgetRequested := o.HarnessTimeoutMS != 0 || o.MaxTimeoutMS != 0
 	if budgetRequested {
 		if _, _, err = harnessBudget(o); err != nil {
 			return out, err
 		}
+	}
+	if o.Rebind != "" {
+		if o.Preferred != "" || o.MetaHarness != "" || o.MetaCommand != nil || budgetRequested {
+			return out, fmt.Errorf("--rebind changes only the binding; do not combine it with --harness, --meta-harness, --meta-command or the timeout flags")
+		}
+		o.Preferred = o.Rebind
 	}
 	if o.MetaHarness != "" && o.MetaCommand != nil {
 		return out, fmt.Errorf("choose meta-harness or meta-command")
@@ -93,6 +158,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if pending, e := pendingProposal(o.LabDir); e != nil {
 		return out, e
 	} else if pending != nil {
+		if o.Rebind != "" {
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %q --review/--approve/--dismiss %s before --rebind", o.LabDir, pending.ID)
+		}
 		if budgetRequested {
 			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it before proposing a new harness timeout budget")
 		}
@@ -128,9 +196,15 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		}
 		return out, nil
 	}
+	if o.Rebind != "" && active.Formula.ID == "" {
+		return out, fmt.Errorf("--rebind needs an approved Formula; run init --lab %q and approve the bootstrap proposal first", o.LabDir)
+	}
 	if active.Formula.ID != "" {
 		approved, e := formula.Load(o.LabDir, "")
 		if e != nil || !approved.Approved {
+			if o.Rebind != "" {
+				return out, fmt.Errorf("--rebind needs a current exact approval of the active Formula; run init --lab %q to review it, then init --lab %q --approve PROPOSAL_ID", o.LabDir, o.LabDir)
+			}
 			checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 			out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
 			p, e := saveWithEvidence(o.LabDir, active.Formula.YAML, nil, out.Binding)
@@ -151,6 +225,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	}
 	for i := range out.Candidates {
 		out.Candidates[i] = out.Candidates[i].CompleteUnknowns()
+	}
+	if o.Rebind != "" {
+		if err = checkRebindTarget(out.Candidates, o.Rebind, o.Launcher, active.Formula, o.LabDir); err != nil {
+			return out, err
+		}
 	}
 	existing := ""
 	if active.Approved {
@@ -214,7 +293,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			command = active.Formula.Harness.Command
 			selected = ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 		}
-		if atoms, ok := recipe["atoms"].([]any); ok {
+		if atoms, ok := recipe["atoms"].([]any); ok && !codingOverridden(active.Formula) {
 			for _, value := range atoms {
 				if atom, ok := value.(map[string]any); ok && atom["type"] == "harness" && o.Preferred != "" {
 					atom["binding"] = selected.ID
@@ -222,6 +301,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			}
 		}
 		out.Note = "Proposes only a coding-harness rebind (plus any explicitly requested timeout budget); existing instructions, workflow and meta-harness configuration are preserved. Review the complete YAML before approval."
+		if o.Rebind != "" {
+			out.Note = "Proposes only a binding rebind to " + selected.ID + ": harness.binding, harness.command and the harness Atom binding change (the Atom binding is left alone when harnesses.coding overrides it). Atoms, checks, instructions, learned guidance and per-role bindings are preserved. Review the exact YAML before approval."
+		}
 	} else {
 		name := strings.ToLower(strings.Split(out.Repository.Repo, "/")[1]) + "-github-issue"
 		timeoutMS, maxTimeoutMS, err := harnessBudget(o)
@@ -284,6 +366,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	encoded, err := yaml.Marshal(recipe)
 	if err != nil {
 		return out, err
+	}
+	if o.Rebind != "" {
+		if err = verifyRebindDiff(active.Formula.YAML, string(encoded), codingOverridden(active.Formula)); err != nil {
+			return out, err
+		}
 	}
 	var evidence *Repository
 	if !active.Approved {

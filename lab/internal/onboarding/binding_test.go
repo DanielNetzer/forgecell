@@ -3,6 +3,7 @@ package onboarding
 import (
 	"context"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"os"
 	"path/filepath"
@@ -130,7 +131,7 @@ func TestForeignLauncherIsReportedWithManifestVersionAndNeverExecuted(t *testing
 		t.Fatal("foreign launcher was executed")
 	}
 	d := c.Binding
-	if !reflect.DeepEqual(stateNames(t, c), []string{"launcher-different"}) || d.Launcher != launcher || d.RunningLauncher != self || d.LauncherVersion != "0.2.0-preview.1" || d.LauncherVersionSource != "manifest.json" || d.Provider != provider || d.ResolvedProvider != provider {
+	if !reflect.DeepEqual(stateNames(t, c), []string{"launcher-unknown"}) || d.Launcher != launcher || d.RunningLauncher != self || d.LauncherVersion != "0.2.0-preview.1" || d.LauncherVersionSource != "manifest.json" || d.LauncherProtocol != "unknown" || d.Provider != provider || d.ResolvedProvider != provider {
 		t.Fatalf("%+v", d)
 	}
 	if c.Binding.States[0].Path != launcher || !strings.Contains(c.Detail, launcher) || !strings.Contains(c.Detail, self) {
@@ -150,6 +151,90 @@ func TestForeignLauncherIsReportedWithManifestVersionAndNeverExecuted(t *testing
 		if argv[0] != provider || argv[0] == launcher || !allowed[strings.Join(argv[1:], " ")] {
 			t.Fatalf("unexpected provider call %v", argv)
 		}
+	}
+}
+
+func TestDifferentLauncherWithTheSameProtocolIsCompatibleAndNeverExecuted(t *testing.T) {
+	self, _ := os.Executable()
+	provider := fixtureProvider(t)
+	launcher, sentinel := foreignLauncher(t)
+	os.WriteFile(filepath.Join(filepath.Dir(launcher), "manifest.json"), []byte(`{"version":"0.2.0","sha256":"abc","protocolVersion":"`+harness.AdapterProtocolVersion+`"}`), 0600)
+	var calls [][]string
+	c := ProbeBinding(context.Background(), formula.Binding{Binding: "codex", Command: []string{launcher, "__adapter", "codex", provider}}, t.TempDir(), recordingRunner(&calls))
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("compatible launcher was executed")
+	}
+	d := c.Binding
+	if c.Readiness != "ready" || c.WorkflowCapability().State == "blocked" || !reflect.DeepEqual(stateNames(t, c), []string{"launcher-compatible"}) {
+		t.Fatalf("a compatible different build must not block: %+v", c)
+	}
+	if d.Launcher != launcher || d.RunningLauncher != self || d.LauncherVersion != "0.2.0" || d.LauncherProtocol != harness.AdapterProtocolVersion || d.RunningProtocol != harness.AdapterProtocolVersion {
+		t.Fatalf("%+v", d)
+	}
+	for _, want := range []string{launcher, self, "version 0.2.0", "adapter protocol " + harness.AdapterProtocolVersion, "compatible"} {
+		if !strings.Contains(d.States[0].Detail, want) {
+			t.Fatalf("detail omits %q: %s", want, d.States[0].Detail)
+		}
+	}
+	if strings.Contains(c.Detail, "missing or belongs to a different") {
+		t.Fatalf("blended message remains: %q", c.Detail)
+	}
+	if len(calls) == 0 {
+		t.Fatal("provider was not probed")
+	}
+}
+
+func TestIncompatibleAndUnknownProtocolsBlockWithBothPathsAndVersions(t *testing.T) {
+	self, _ := os.Executable()
+	for name, tc := range map[string]struct{ manifest, state, protocol string }{
+		"bumped protocol":     {`{"version":"0.2.0","sha256":"abc","protocolVersion":"99"}`, "launcher-incompatible", "99"},
+		"no protocol field":   {`{"version":"0.2.0","sha256":"abc"}`, "launcher-unknown", "unknown"},
+		"unreadable manifest": {`{`, "launcher-unknown", "unknown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider := fixtureProvider(t)
+			launcher, sentinel := foreignLauncher(t)
+			os.WriteFile(filepath.Join(filepath.Dir(launcher), "manifest.json"), []byte(tc.manifest), 0600)
+			c := ProbeBinding(context.Background(), formula.Binding{Binding: "codex", Command: []string{launcher, "__adapter", "codex", provider}}, t.TempDir(), healthyRunner(nil))
+			if _, err := os.Stat(sentinel); err == nil {
+				t.Fatal("foreign launcher was executed")
+			}
+			if c.Readiness != "blocked" || c.WorkflowCapability().State != "blocked" || !reflect.DeepEqual(stateNames(t, c), []string{tc.state}) || c.Binding.LauncherProtocol != tc.protocol {
+				t.Fatalf("%+v", c)
+			}
+			for _, want := range []string{launcher, self, "adapter protocol " + tc.protocol, "adapter protocol " + harness.AdapterProtocolVersion, "forgecell init --lab DIR --harness codex"} {
+				if !strings.Contains(c.Detail, want) {
+					t.Fatalf("detail omits %q: %s", want, c.Detail)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedLauncherProbesTheActiveRelease(t *testing.T) {
+	home := t.TempDir()
+	os.MkdirAll(filepath.Join(home, "bin"), 0700)
+	wrapper := "#!/bin/sh\n# Forgecell managed native launcher v1\nexit 99\n"
+	managed := filepath.Join(home, "bin", "forgecell")
+	os.WriteFile(managed, []byte(wrapper), 0755)
+	release := filepath.Join(home, "releases", "0.4.0")
+	os.MkdirAll(release, 0700)
+	sentinel := filepath.Join(release, "executed")
+	os.WriteFile(filepath.Join(release, "forgecell"), []byte("#!/bin/sh\ntouch '"+sentinel+"'\n"), 0755)
+	os.WriteFile(filepath.Join(release, "manifest.json"), []byte(`{"version":"0.4.0","sha256":"x","protocolVersion":"`+harness.AdapterProtocolVersion+`"}`), 0600)
+	os.Symlink(release, filepath.Join(home, "current"))
+	c := ProbeBinding(context.Background(), formula.Binding{Binding: "codex", Command: []string{managed, "__adapter", "codex", fixtureProvider(t)}}, t.TempDir(), healthyRunner(nil))
+	d := c.Binding
+	if c.Readiness != "ready" || !reflect.DeepEqual(stateNames(t, c), []string{"launcher-compatible"}) || d.LauncherVersion != "0.4.0" || !strings.HasSuffix(d.ResolvedLauncher, filepath.Join("releases", "0.4.0", "forgecell")) {
+		t.Fatalf("%+v", c)
+	}
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("the active release was executed")
+	}
+	os.Remove(filepath.Join(home, "current"))
+	c = ProbeBinding(context.Background(), formula.Binding{Binding: "codex", Command: []string{managed, "__adapter", "codex", fixtureProvider(t)}}, t.TempDir(), healthyRunner(nil))
+	if c.Readiness != "blocked" || !reflect.DeepEqual(stateNames(t, c), []string{"launcher-missing"}) || !strings.Contains(c.Detail, "no active release") {
+		t.Fatalf("%+v", c)
 	}
 }
 
