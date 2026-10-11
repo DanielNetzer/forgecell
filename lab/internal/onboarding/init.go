@@ -414,7 +414,19 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			return out, err
 		}
 		recipe = map[string]any{"schemaVersion": "v0", "kind": "formula", "id": name, "name": out.Repository.Repo + " issue workflow", "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "bootstrap-assay", "intake": map[string]any{"source": "github-issues", "repo": out.Repository.Repo}, "harness": map[string]any{"binding": selected.ID, "command": command, "invoke": "byo", "timeoutMs": timeoutMS, "maxTimeoutMs": maxTimeoutMS}, "lab": map[string]any{"dir": o.LabDir, "observe": false}, "repositoryContext": out.Repository.Compact(), "atoms": []map[string]any{{"id": "intake", "type": "intake", "source": "github-issues"}, {"id": "scope", "type": "gate", "purpose": "scope", "mode": "human"}, {"id": "harness", "type": "harness", "binding": selected.ID}, {"id": "check", "type": "check", "workflows": out.Repository.Workflows}, {"id": "gate", "type": "gate", "purpose": "review", "mode": "human"}, {"id": "ship", "type": "ship", "via": "github"}, {"id": "document", "type": "document", "target": "github-issue"}}}
+		baseline, err := bootstrapBaseline(ctx, out.Repository)
+		if err != nil {
+			return out, err
+		}
 		out.Note = "Bootstrap Assay is read-only. Proposed checks are evidence, not executed commands. Approving binds the coding harness; runs still stop at human review."
+		if len(baseline) > 0 {
+			recipe["requiredChecks"] = baseline
+			ids := make([]string, len(baseline))
+			for i, c := range baseline {
+				ids[i] = c.ID
+			}
+			out.Note += fmt.Sprintf(" Derived %d CI baseline required check(s) from pull-request workflows and recorded them as reviewed requiredChecks (%s). Every plan must include them; review the exact YAML before approval.", len(baseline), strings.Join(ids, ", "))
+		}
 	}
 	if o.MetaHarness != "" || o.MetaCommand != nil {
 		if LearnBound(active.Formula) {

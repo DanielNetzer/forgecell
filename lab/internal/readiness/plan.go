@@ -137,6 +137,11 @@ type Plan struct {
 	// pin. It joins the plan digest, so only the exact human approval accepts it.
 	// Empty keeps the digest of every earlier plan unchanged.
 	ExpectedProtectedDeltas []ProtectedDelta `json:"expectedProtectedDeltas,omitempty"`
+	// FormulaBaseline lists the ids of the checks the approved Formula requires in
+	// every plan. Each must match a required regression check below, so a baseline
+	// check can be told apart from a candidate. It joins the plan digest; empty
+	// keeps the digest of every earlier plan unchanged.
+	FormulaBaseline []string `json:"formulaBaseline,omitempty"`
 }
 
 // ProtectedDelta names one test, matched by exact Go package import path and
@@ -476,6 +481,9 @@ func (p Plan) Validate() error {
 	if err := p.validateProtectedDeltas(paths, cited); err != nil {
 		return err
 	}
+	if err := p.validateFormulaBaseline(); err != nil {
+		return err
+	}
 	if err := validateCodingAllowlist(p.CodingAllowlist); err != nil {
 		return err
 	}
@@ -773,6 +781,27 @@ func (p Plan) validateProtectedDeltas(scope map[string]bool, cited func([]string
 		if err := cited(d.Evidence); err != nil {
 			return fmt.Errorf("expected protected delta %s %s: %w", d.Package, d.Test, err)
 		}
+	}
+	return nil
+}
+
+// validateFormulaBaseline requires every listed baseline id to be unique and to name
+// a required regression check without a reviewed-acceptance repair.
+func (p Plan) validateFormulaBaseline() error {
+	if len(p.FormulaBaseline) > len(p.Analysis.Checks) {
+		return fmt.Errorf("formulaBaseline lists more checks than the plan contains")
+	}
+	checks := map[string]Check{}
+	for _, c := range p.Analysis.Checks {
+		checks[c.ID] = c
+	}
+	listed := map[string]bool{}
+	for _, id := range p.FormulaBaseline {
+		c, ok := checks[id]
+		if listed[id] || !ok || c.Category != "regression" || !c.Required || c.ReviewedAcceptance != "" {
+			return fmt.Errorf("formulaBaseline %q must be listed once and name a required regression check", id)
+		}
+		listed[id] = true
 	}
 	return nil
 }

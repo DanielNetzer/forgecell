@@ -497,6 +497,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	for _, input := range o.CheckInputs {
 		p.Evidence = append(p.Evidence, input.Evidence)
 	}
+	if err = applyFormulaBaseline(f, &p); err != nil {
+		return stopIntake(r, err.Error())
+	}
 	if p.CodingAllowlist, err = harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks); err != nil {
 		return stopIntake(r, err.Error())
 	}
@@ -508,6 +511,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		return stopIntake(r, err.Error())
 	}
 	r.Readiness = &state
+	if len(p.FormulaBaseline) > 0 {
+		r.Notes = append(r.Notes, formulaBaselineNote(f))
+	}
 	for _, overlap := range p.DefinitionOverlaps() {
 		r.Notes = append(r.Notes, fmt.Sprintf("Scope/check overlap %s [%s] checks %s: %s", overlap.Path, overlap.Kind, strings.Join(overlap.CheckIDs, ", "), overlap.Detail))
 	}
@@ -637,6 +643,9 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	}
 	p := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan
 	if err = p.ValidateForCoding(); err != nil {
+		return r, err
+	}
+	if err = requireFormulaBaseline(f, p); err != nil {
 		return r, err
 	}
 	codingBinding := roles.bindings[formula.Coding]
