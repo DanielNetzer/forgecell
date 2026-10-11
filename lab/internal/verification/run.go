@@ -24,7 +24,9 @@ type Observation struct {
 	Result     process.Result      `json:"result"`
 	// FailedTests is the observed failing set of a protected regression check with
 	// declared deltas. It survives the compact ledger projection that drops captured
-	// streams, so delivery can re-check coverage against the approved plan.
+	// streams, so delivery can re-check coverage against the approved plan. A failing
+	// protected go test -json check without deltas records its set when it parses
+	// cleanly, as evidence for a reviewer; that never changes the verdict.
 	FailedTests []TestID `json:"failedTests,omitempty"`
 	// AcceptedDeltas are the declared deltas that failed as expected.
 	AcceptedDeltas []readiness.ProtectedDelta `json:"acceptedDeltas,omitempty"`
@@ -333,7 +335,21 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 				argv[i] = file
 			}
 		}
-		result := process.Run(ctx, process.Options{Argv: argv, Dir: filepath.Join(destination, filepath.FromSlash(command.Dir)), Env: env, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000})
+		options := process.Options{Argv: argv, Dir: filepath.Join(destination, filepath.FromSlash(command.Dir)), Env: env, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
+		protectedRegression := protected && i >= len(p.Setup) && command.Required && command.Category == "regression"
+		declared := p.DeltasForCheck(command.ID)
+		// A required regression check with declared deltas asks for go test -json, which
+		// is read as a stream so a large suite is not cut off by the capture cap. Every
+		// other check keeps the cap, and exceeding it still fails the check.
+		var parser *failedTestParser
+		if i >= len(p.Setup) && command.Required && command.Category == "regression" && len(declared) > 0 && readiness.RequestsGoTestJSON(command.Argv) {
+			options.StdoutLines = &process.LineSink{Line: func([]byte) error { return nil }}
+			if protected {
+				parser = newFailedTestParser()
+				options.StdoutLines.Line = parser.Line
+			}
+		}
+		result := process.Run(ctx, options)
 		category := command.Category
 		if repaired[command.ID] {
 			category = "candidate"
@@ -341,17 +357,27 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets)}
 		var deltaErr error
 		evaluated := false
-		if protected && i >= len(p.Setup) && command.Required && command.Category == "regression" {
-			if declared := p.DeltasForCheck(command.ID); len(declared) > 0 {
+		if protectedRegression {
+			if len(declared) > 0 {
 				evaluated = true
 				var evaluation DeltaEvaluation
 				if deltaErr = verifyDeltaPackages(destination, declared); deltaErr == nil {
-					evaluation, deltaErr = EvaluateProtectedDeltas(declared, observation.Result)
+					if parser != nil {
+						evaluation, deltaErr = evaluateStreamedDeltas(declared, observation.Result, parser)
+					} else {
+						evaluation, deltaErr = EvaluateProtectedDeltas(declared, observation.Result)
+					}
 				}
 				if deltaErr == nil {
 					observation.FailedTests = evaluation.Failed
 					observation.AcceptedDeltas = evaluation.Accepted
 					observation.Warnings = evaluation.Warnings
+				}
+			} else if !result.OK && !result.Overflow && readiness.RequestsGoTestJSON(command.Argv) {
+				// No delta is declared, so this changes no verdict. The failing tests are
+				// recorded so a reviewer drafting expectedProtectedDeltas can name them.
+				if failed, err := parseFailedTests(observation.Result.Stdout); err == nil {
+					observation.FailedTests = failed
 				}
 			}
 		}

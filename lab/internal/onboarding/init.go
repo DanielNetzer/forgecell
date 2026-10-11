@@ -353,13 +353,31 @@ func rebindRecipe(recipe map[string]any, active formula.Formula, target string, 
 	return changes, rewrites, left
 }
 
-func learnCommand(f formula.Formula) []string {
-	for _, a := range f.Atoms {
-		if a.Type == "learn" {
-			return a.Command
-		}
+// codingOverrideNote names a harnesses.coding override that a rebind overwrites
+// although it is a custom command or is bound to another adapter than the old
+// default. It is a note for the reviewer, never a refusal.
+func codingOverrideNote(active formula.Formula, target string, command []string) string {
+	coding, ok := active.Harnesses[string(formula.CodingHarness)]
+	if !ok || coding.Binding == target && reflect.DeepEqual(coding.Command, command) {
+		return ""
 	}
-	return nil
+	var what string
+	switch {
+	case nativeLauncher(coding.Command) == "":
+		argv, _ := json.Marshal(coding.Command)
+		what = "a custom command " + string(argv)
+	case coding.Binding != active.Harness.Binding:
+		what = fmt.Sprintf("bound to %s, not the old default %s", coding.Binding, active.Harness.Binding)
+	default:
+		return ""
+	}
+	return fmt.Sprintf(" The harnesses.coding override was overwritten although it was %s; confirm the new default binding should replace it.", what)
+}
+
+// learnCommand is the command learning runs, from harnesses.meta or the learn Atom.
+func learnCommand(f formula.Formula) []string {
+	b, _, _ := MetaBinding(f)
+	return b.Command
 }
 
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
@@ -426,13 +444,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			out.BeforeYAML = out.Meta.BeforeYAML
 		} else {
 			// Historical proposals carry no current capability observations.
-			report := DescribeMeta(nil, "", 0, Candidate{})
-			for _, atom := range f.Atoms {
-				if atom.Type == "learn" {
-					report = DescribeMeta(atom.Command, atom.Binding, atom.TimeoutMS, Candidate{})
-					break
-				}
-			}
+			report := DescribeFormulaMeta(f)
 			out.Meta = &report
 		}
 		out.Note = "Preserved pending proposal. Review or dismiss before proposing another binding; no model invoked. Stale approval remains refused."
@@ -512,6 +524,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, fmt.Errorf("verified harness executable and Forgecell launcher are required")
 	}
 	command := []string{o.Launcher, "__adapter", selected.ID, selected.Executable}
+	if active.Approved && o.Preferred != "" && o.Rebind == "" {
+		if err = CheckAnalysisFallback(active.Formula, formula.Binding{Binding: selected.ID, Command: command}); err != nil {
+			return out, err
+		}
+	}
 	var recipe map[string]any
 	var rewrites []launcherRewrite
 	if active.Approved {
@@ -542,15 +559,20 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			selected = ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 		}
 		out.Note = "Proposes only a coding-harness rebind (plus any explicitly requested timeout budget); existing instructions, workflow and meta-harness configuration are preserved. Review the complete YAML before approval."
+		overwrite := ""
+		if o.Preferred != "" {
+			overwrite = codingOverrideNote(active.Formula, selected.ID, command)
+		}
 		if len(rewritten) > 0 {
 			out.Note += " Rewritten keys (old -> new): " + strings.Join(rewritten, "; ") + "."
 		}
+		out.Note += overwrite
 		if o.Rebind != "" {
 			out.Note = "Proposes only a binding rebind to " + selected.ID + ". Rewritten keys (old -> new): " + strings.Join(rewritten, "; ") + "."
 			if len(left) > 0 {
 				out.Note += " Left unchanged because the launcher is not established as a Forgecell executable: " + strings.Join(left, "; ") + "."
 			}
-			out.Note += " Atoms, checks, instructions, timeouts, learned guidance and the adapter and provider of every other binding are preserved. Review the exact YAML before approval."
+			out.Note += overwrite + " Atoms, checks, instructions, timeouts, learned guidance and the adapter and provider of every other binding are preserved. Review the exact YAML before approval."
 		}
 	} else {
 		name := strings.ToLower(strings.Split(out.Repository.Repo, "/")[1]) + "-github-issue"

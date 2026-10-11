@@ -159,7 +159,7 @@ func TestBootstrapDetachesEvidence(t *testing.T) {
 func TestRebindPreservesDetachedEvidenceAndProcess(t *testing.T) {
 	root, runner := repoFixture(t)
 	dir := t.TempDir()
-	options := InitOptions{Cwd: root, LabDir: dir, Launcher: "/cli", Candidates: []Candidate{{ID: "codex", Executable: "/codex", Readiness: "ready"}, {ID: "cursor", Executable: "/cursor", Readiness: "ready"}}, Preferred: "codex", Runner: runner}
+	options := InitOptions{Cwd: root, LabDir: dir, Launcher: "/cli", Candidates: []Candidate{{ID: "codex", Executable: "/codex", Readiness: "ready"}, {ID: "claude-code", Executable: "/claude", Readiness: "ready"}}, Preferred: "codex", Runner: runner}
 	out, err := Prepare(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -167,12 +167,12 @@ func TestRebindPreservesDetachedEvidenceAndProcess(t *testing.T) {
 	if _, err = Review(dir, out.Proposal.ID, "approve"); err != nil {
 		t.Fatal(err)
 	}
-	options.Preferred = "cursor"
+	options.Preferred = "claude-code"
 	next, err := Prepare(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.Proposal.EvidenceHash != out.Proposal.EvidenceHash || next.Proposal.Version != "v1" || next.Binding == nil || next.Binding.Candidate.ID != "cursor" || next.Proposal.CapabilityEvidence == nil {
+	if next.Proposal.EvidenceHash != out.Proposal.EvidenceHash || next.Proposal.Version != "v1" || next.Binding == nil || next.Binding.Candidate.ID != "claude-code" || next.Proposal.CapabilityEvidence == nil {
 		t.Fatal("rebind dropped evidence binding")
 	}
 	if _, err = InspectProposal(dir, next.Proposal.ID); err != nil {

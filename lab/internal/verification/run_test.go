@@ -332,11 +332,20 @@ func TestProtectedDeltaDeclaredFailurePasses(t *testing.T) {
 	}
 }
 
-func TestProtectedDeltaSubtestFailuresAccountForParents(t *testing.T) {
-	dir, p, c := deltaFixture(t, passingBody(deltaPkg, "TestPinned"), failingBody(deltaPkg, "TestParent/sub/case", "TestParent/sub", "TestParent"), pinnedDelta(deltaPkg, "TestParent/sub/case"))
+func TestProtectedDeltaSubtestFailuresRequireDeclaredParents(t *testing.T) {
+	dir, p, c := deltaFixture(t, passingBody(deltaPkg, "TestPinned"), failingBody(deltaPkg, "TestParent/sub/case", "TestParent/sub", "TestParent"),
+		pinnedDelta(deltaPkg, "TestParent/sub/case"), pinnedDelta(deltaPkg, "TestParent/sub"), pinnedDelta(deltaPkg, "TestParent"))
 	v := runDelta(t, dir, p, c)
-	if !v.RequiredChecksPassed || len(v.AcceptedDeltas) != 1 || v.AcceptedDeltas[0].Test != "TestParent/sub/case" {
-		t.Fatalf("declared subtest was not accepted: %+v", v)
+	if !v.RequiredChecksPassed || len(v.AcceptedDeltas) != 3 {
+		t.Fatalf("declared subtest and parents were not accepted: %+v", v)
+	}
+}
+
+func TestProtectedDeltaUndeclaredParentIsNotMasked(t *testing.T) {
+	dir, p, c := deltaFixture(t, passingBody(deltaPkg, "TestPinned"), failingBody(deltaPkg, "TestParent/sub", "TestParent"), pinnedDelta(deltaPkg, "TestParent/sub"))
+	v := runDelta(t, dir, p, c)
+	if v.RequiredChecksPassed || len(v.AcceptedDeltas) != 0 || !strings.Contains(v.Error, deltaPkg+" TestParent") || !strings.Contains(v.Error, "declared") {
+		t.Fatalf("an undeclared failing parent was masked by its declared subtest: %+v", v)
 	}
 }
 

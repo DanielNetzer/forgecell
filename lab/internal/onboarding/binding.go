@@ -230,17 +230,10 @@ func RoleCapabilities(f formula.Formula) []RoleCapability {
 		if override {
 			source = "override"
 		} else if role == formula.MetaHarness {
-			bound := false
-			for _, a := range f.Atoms {
-				if a.Type == "learn" && len(a.Command) > 0 {
-					b, bound = formula.Binding{Binding: a.Binding, Command: a.Command, TimeoutMS: a.TimeoutMS}, true
-					break
-				}
-			}
-			if !bound {
+			var bound bool
+			if b, source, bound = MetaBinding(f); !bound {
 				continue
 			}
-			source = "learn-atom"
 		}
 		roles = append(roles, RoleCapability{Role: string(role), Binding: b.Binding, Source: source, Capability: roleCapability(role, b)})
 	}
@@ -297,17 +290,10 @@ func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner
 		if override {
 			source = "override"
 		} else if role == formula.MetaHarness {
-			bound := false
-			for _, a := range f.Atoms {
-				if a.Type == "learn" && len(a.Command) > 0 {
-					b, bound = formula.Binding{Binding: a.Binding, Command: a.Command, TimeoutMS: a.TimeoutMS}, true
-					break
-				}
-			}
-			if !bound {
+			var bound bool
+			if b, source, bound = MetaBinding(f); !bound {
 				continue
 			}
-			source = "learn-atom"
 		}
 		c := probe(b)
 		item := RoleReadiness{Role: string(role), Binding: b.Binding, Source: source, Readiness: c.Readiness, Detail: c.Detail, Candidate: c}
@@ -327,13 +313,36 @@ func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner
 	return roles
 }
 
-func LearnBound(f formula.Formula) bool {
-	for _, atom := range f.Atoms {
-		if atom.Type == "learn" && len(atom.Command) > 0 {
-			return true
+// MetaBinding resolves the separate meta binding learning runs. A declared
+// harnesses.meta role supplies it, and a commandless learn Atom is enough; the
+// Atom's own timeoutMs still wins, as learning runs it. Without a role the
+// command of a learn Atom is the binding. Source is "override" or "learn-atom".
+func MetaBinding(f formula.Formula) (b formula.Binding, source string, bound bool) {
+	var learn *formula.Atom
+	for i := range f.Atoms {
+		a := &f.Atoms[i]
+		if a.Type == "learn" && (learn == nil || len(learn.Command) == 0 && len(a.Command) > 0) {
+			learn = a
 		}
 	}
-	return false
+	if learn == nil {
+		return formula.Binding{}, "", false
+	}
+	if role, declared := f.RoleBinding(formula.MetaHarness); declared {
+		if learn.TimeoutMS > 0 {
+			role.TimeoutMS = learn.TimeoutMS
+		}
+		return role, "override", true
+	}
+	if len(learn.Command) == 0 {
+		return formula.Binding{}, "", false
+	}
+	return formula.Binding{Binding: learn.Binding, Command: learn.Command, TimeoutMS: learn.TimeoutMS}, "learn-atom", true
+}
+
+func LearnBound(f formula.Formula) bool {
+	_, _, bound := MetaBinding(f)
+	return bound
 }
 
 // MetaReport records declarations and observations, never verified containment.
@@ -382,11 +391,30 @@ func DescribeMeta(command []string, binding string, timeout int, candidate Candi
 	return r
 }
 
-func InspectMeta(ctx context.Context, f formula.Formula, cwd string, run Runner) MetaReport {
+// metaSubject names what a Formula's learn Atom and meta role bind, without
+// judging whether it is a usable command.
+func metaSubject(f formula.Formula) (command []string, binding string, timeout int, found bool) {
+	if b, _, bound := MetaBinding(f); bound {
+		return b.Command, b.Binding, b.TimeoutMS, true
+	}
 	for _, a := range f.Atoms {
 		if a.Type == "learn" {
-			return DescribeMeta(a.Command, a.Binding, a.TimeoutMS, ProbeBinding(ctx, formula.Binding{Binding: a.Binding, Command: a.Command}, cwd, run))
+			return a.Command, a.Binding, a.TimeoutMS, true
 		}
 	}
-	return DescribeMeta(nil, "", 0, Candidate{})
+	return nil, "", 0, false
+}
+
+// DescribeFormulaMeta reports the declared meta binding without probing anything.
+func DescribeFormulaMeta(f formula.Formula) MetaReport {
+	command, binding, timeout, _ := metaSubject(f)
+	return DescribeMeta(command, binding, timeout, Candidate{})
+}
+
+func InspectMeta(ctx context.Context, f formula.Formula, cwd string, run Runner) MetaReport {
+	command, binding, timeout, found := metaSubject(f)
+	if !found {
+		return DescribeMeta(nil, "", 0, Candidate{})
+	}
+	return DescribeMeta(command, binding, timeout, ProbeBinding(ctx, formula.Binding{Binding: binding, Command: command}, cwd, run))
 }

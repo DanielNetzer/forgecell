@@ -171,13 +171,13 @@ func TestCodingRoleInheritsOmittedInstructionsAndTimeouts(t *testing.T) {
 	}
 }
 
-func TestOnlyTheCodingRoleInheritsFromTheDefaultHarness(t *testing.T) {
+func TestOnlyTheCodingRoleInheritsInstructionsFromTheDefaultHarness(t *testing.T) {
 	const defaults = "  timeoutMs: 1000\n  instructions: approved guidance\n"
 	f, err := Parse([]byte(inheritFormula(defaults, "  analysis: {binding: analyst, command: [/bin/a]}\n  coding: {binding: coder, command: [/bin/coder]}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := f.RoleBinding(AnalysisHarness); b.Instructions != "" || b.TimeoutMS != 0 {
+	if b, _ := f.RoleBinding(AnalysisHarness); b.Instructions != "" || b.TimeoutMS != 1000 {
 		t.Fatalf("the analysis role inherited %+v", b)
 	}
 	if b, override := f.RoleBinding(MetaHarness); override || b.Instructions != "approved guidance" || b.TimeoutMS != 1000 {
