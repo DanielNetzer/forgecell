@@ -59,6 +59,14 @@ func ProbeBinding(ctx context.Context, b formula.Binding, cwd string, run Runner
 		return c
 	}
 	if len(b.Command) != 4 || b.Command[1] != "__adapter" {
+		if b.AnalysisWrapper != nil {
+			// Inspection never reads, hashes or runs the wrapper; intake revalidates it.
+			c.Capabilities.Analysis = harness.Capability{State: "unknown", Reason: "An analysis wrapper is declared (" + b.AnalysisWrapper.Manifest + ") and unverified until intake revalidates its pinned manifest, identities and controls. Declared controls are wrapper claims; it was not executed."}
+			c.Capabilities.AnalysisControls = c.Capabilities.Analysis
+			c.Readiness = "unknown"
+			c.Detail = "Custom command preserved and not executed. An analysis wrapper is declared but unverified until intake revalidation; doctor cannot verify it or its containment."
+			return c
+		}
 		c.Capabilities.Analysis = harness.Capability{State: "unsupported", Reason: "Custom binding has no verified read-only ticket-analysis protocol; it was preserved and not invoked."}
 		c.Capabilities.AnalysisControls = c.Capabilities.Analysis
 		c.Readiness = "unknown"
