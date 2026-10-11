@@ -1,12 +1,25 @@
 package molecule
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"slices"
+	"strings"
 )
+
+// The Plan.Policy auto-when-ready accepts: exactly the defaults Run writes into
+// every plan, which a human approves on each default plan today. They are listed
+// here rather than shared with Run so the accepted set cannot change implicitly
+// when a Lab default does; a test runs a real default plan through the evaluator.
+const (
+	autoWhenReadyNetwork     = "unrestricted"
+	autoWhenReadyContainment = "filtered-environment"
+)
+
+var autoWhenReadyEnvironment = []string{"PATH"}
 
 type PolicyOutcome string
 
@@ -44,7 +57,8 @@ func (e PolicyEvaluation) ApprovedBy() string {
 // every other gate, including a declared but unevaluated policy, is human.
 func EvaluateGatePolicy(r Record, role formula.ExecutionRole) PolicyEvaluation {
 	eval := PolicyEvaluation{Outcome: PolicyDecline, FormulaSHA256: r.FormulaSnapshot.SHA256}
-	if _, err := resolveExecutionRoles(r); err != nil {
+	resolved, err := resolveExecutionRoles(r)
+	if err != nil {
 		return eval.withReason("formula-snapshot-invalid", err.Error())
 	}
 	f, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))
@@ -71,7 +85,7 @@ func EvaluateGatePolicy(r Record, role formula.ExecutionRole) PolicyEvaluation {
 		return eval.withReason("policy-not-evaluated", fmt.Sprintf("policy %s is declared but not evaluated yet; a human decides", id))
 	}
 	eval.Outcome = PolicyDecline
-	return evaluateAutoWhenReady(r, f, eval)
+	return evaluateAutoWhenReady(r, f, resolved.bindings[formula.Coding], eval)
 }
 
 func (e PolicyEvaluation) withReason(reason, detail string) PolicyEvaluation {
@@ -79,7 +93,7 @@ func (e PolicyEvaluation) withReason(reason, detail string) PolicyEvaluation {
 	return e
 }
 
-func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) PolicyEvaluation {
+func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, eval PolicyEvaluation) PolicyEvaluation {
 	decline := func(reason, format string, args ...any) PolicyEvaluation {
 		return eval.withReason(reason, fmt.Sprintf(format, args...))
 	}
@@ -109,6 +123,34 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) P
 	if plan.Continuation != "" {
 		return decline("plan-continuation", "plan continuation %q is not a first scope approval", plan.Continuation)
 	}
+	if len(plan.Setup) > 0 {
+		return decline("plan-has-setup", "the plan runs %d setup command(s), which a human must review", len(plan.Setup))
+	}
+	if len(plan.Inputs.MandatoryConstraints) > 0 {
+		return decline("plan-has-mandatory-constraints", "the plan carries %d mandatory constraint(s), which a human must review", len(plan.Inputs.MandatoryConstraints))
+	}
+	if plan.AllowNoChange {
+		return decline("plan-allows-no-change", "the plan permits a no-change outcome, which a human must approve")
+	}
+	if err := coding.CheckTimeout(plan.HarnessTimeoutMS); err != nil {
+		return decline("harness-timeout-invalid", "%v", err)
+	}
+	pol := plan.Policy
+	if len(pol.CredentialNames) > 0 {
+		return decline("policy-has-credentials", "the plan exposes %d credential name(s), which a human must review", len(pol.CredentialNames))
+	}
+	if !slices.Equal(pol.Environment, autoWhenReadyEnvironment) {
+		return decline("policy-environment-not-default", "the plan environment is %q, not the Lab default %q", pol.Environment, autoWhenReadyEnvironment)
+	}
+	if pol.SetupNetwork != autoWhenReadyNetwork {
+		return decline("policy-setup-network-not-default", "the plan setup network is %q, not %q", pol.SetupNetwork, autoWhenReadyNetwork)
+	}
+	if pol.CheckNetwork != autoWhenReadyNetwork {
+		return decline("policy-check-network-not-default", "the plan check network is %q, not %q", pol.CheckNetwork, autoWhenReadyNetwork)
+	}
+	if pol.Containment != autoWhenReadyContainment {
+		return decline("policy-containment-not-default", "the plan containment is %q, not %q", pol.Containment, autoWhenReadyContainment)
+	}
 	if r.Analysis == nil {
 		return decline("analysis-missing", "the ledger has no intake analysis")
 	}
@@ -117,6 +159,12 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) P
 	}
 	if len(plan.Analysis.Questions) > 0 {
 		return decline("plan-has-questions", "the plan has %d open question(s)", len(plan.Analysis.Questions))
+	}
+	if len(r.Analysis.Unknowns) > 0 {
+		return decline("analysis-has-unknowns", "the intake analysis has %d unknown(s), which a human must review", len(r.Analysis.Unknowns))
+	}
+	if len(plan.Analysis.Unknowns) > 0 {
+		return decline("plan-has-unknowns", "the plan has %d unknown(s), which a human must review", len(plan.Analysis.Unknowns))
 	}
 	if len(plan.Analysis.Scope) == 0 {
 		return decline("scope-empty", "the plan scopes no paths")
@@ -152,34 +200,58 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) P
 	}
 	eval.Outcome = PolicyApprove
 	eval.PlanDigest = digest
+	paths := make([]string, len(plan.Analysis.Scope))
+	for i, s := range plan.Analysis.Scope {
+		paths[i] = s.Path
+	}
+	listed := sha256.Sum256([]byte(strings.Join(derived, "\n")))
 	eval.Evidence = []PolicyEvidence{
 		{Pointer: "/formulaSnapshot/sha256", Observed: r.FormulaSnapshot.SHA256},
 		{Pointer: "/checkoutStatus", Observed: r.CheckoutStatus},
 		{Pointer: "/readiness/phase", Observed: r.Readiness.Phase},
 		{Pointer: base + "/digest", Observed: digest},
-		{Pointer: "/analysis/questions", Observed: "0 questions"},
-		{Pointer: base + "/plan/analysis/questions", Observed: "0 questions"},
-		{Pointer: base + "/plan/analysis/scope", Observed: fmt.Sprintf("%d paths, all exact repository paths", len(plan.Analysis.Scope))},
-		{Pointer: base + "/plan/codingAllowlist", Observed: fmt.Sprintf("%d entries, equal to the allowlist derived from the Formula and plan checks", len(derived))},
+		{Pointer: "/analysis/questions", Observed: fmt.Sprintf("%d questions", len(r.Analysis.Questions))},
+		{Pointer: "/analysis/unknowns", Observed: fmt.Sprintf("%d unknowns", len(r.Analysis.Unknowns))},
+		{Pointer: base + "/plan/analysis/questions", Observed: fmt.Sprintf("%d questions", len(plan.Analysis.Questions))},
+		{Pointer: base + "/plan/analysis/unknowns", Observed: fmt.Sprintf("%d unknowns", len(plan.Analysis.Unknowns))},
+		{Pointer: base + "/plan/analysis/scope", Observed: fmt.Sprintf("%d paths: %s", len(paths), strings.Join(paths, ", "))},
+		{Pointer: base + "/plan/setup", Observed: fmt.Sprintf("%d setup commands", len(plan.Setup))},
+		{Pointer: base + "/plan/inputs/mandatoryConstraints", Observed: fmt.Sprintf("%d mandatory constraints", len(plan.Inputs.MandatoryConstraints))},
+		{Pointer: base + "/plan/policy", Observed: fmt.Sprintf("environment=[%s] credentialNames=%d setupNetwork=%s checkNetwork=%s containment=%s", strings.Join(pol.Environment, ","), len(pol.CredentialNames), pol.SetupNetwork, pol.CheckNetwork, pol.Containment)},
+		{Pointer: base + "/plan", Observed: fmt.Sprintf("allowNoChange=%t harnessTimeoutMs=%d ceilingMs=%d expectedProtectedDeltas=%d", plan.AllowNoChange, plan.HarnessTimeoutMS, coding.TimeoutCeilingMS(), len(plan.ExpectedProtectedDeltas))},
+		{Pointer: base + "/plan/codingAllowlist", Observed: fmt.Sprintf("%d entries, sha256 %x", len(derived), listed)},
 	}
 	return eval
 }
 
-// RecordScopePolicyApproval re-evaluates the scope gate and, only on approve,
-// returns a copy of the record with the decision appended. It does not save the
-// record and does not approve anything: Run --approve stays the sole approval
-// path, and a caller must persist the decision before using it.
-func RecordScopePolicyApproval(r Record) (Record, error) {
+// scopePolicyDecision evaluates the scope gate and, only on approve, builds the
+// decision to record. It neither approves nor saves: the decision has no effect
+// until the approval transaction in resume appends it in the same save as the
+// approved readiness event.
+func scopePolicyDecision(r Record) (PolicyDecision, error) {
 	eval := EvaluateGatePolicy(r, formula.ScopeApproval)
 	if eval.Outcome != PolicyApprove {
-		return r, fmt.Errorf("scope policy did not approve (%s): %s: %s", eval.Outcome, eval.Reason, eval.Detail)
+		return PolicyDecision{}, fmt.Errorf("scope policy did not approve (%s): %s: %s", eval.Outcome, eval.Reason, eval.Detail)
 	}
 	for _, d := range r.PolicyDecisions {
 		if d.Gate == eval.Gate && d.PlanDigest == eval.PlanDigest {
-			return r, fmt.Errorf("a policy decision for this gate and plan is already recorded")
+			return PolicyDecision{}, fmt.Errorf("a policy decision for this gate and plan is already recorded")
 		}
 	}
-	decision := PolicyDecision{Policy: eval.Policy, ApprovedBy: eval.ApprovedBy(), Gate: eval.Gate, PlanDigest: eval.PlanDigest, FormulaSHA256: eval.FormulaSHA256, At: stamp(), Evidence: slices.Clone(eval.Evidence)}
+	return PolicyDecision{Policy: eval.Policy, ApprovedBy: eval.ApprovedBy(), Gate: eval.Gate, PlanDigest: eval.PlanDigest, FormulaSHA256: eval.FormulaSHA256, At: stamp(), Evidence: slices.Clone(eval.Evidence)}, nil
+}
+
+// RecordScopePolicyApproval returns an in-memory copy of r with the scope
+// policy's decision appended, for inspection. It re-reads nothing, approves
+// nothing and saves nothing, so its result must never be persisted: a decision
+// is persisted only by the approval transaction in resume, after the live issue,
+// evidence, base, origin, branch and workspace checks and the approval itself
+// succeed, in the same save as the approved event.
+func RecordScopePolicyApproval(r Record) (Record, error) {
+	decision, err := scopePolicyDecision(r)
+	if err != nil {
+		return r, err
+	}
 	r.PolicyDecisions = append(slices.Clone(r.PolicyDecisions), decision)
 	return r, nil
 }
