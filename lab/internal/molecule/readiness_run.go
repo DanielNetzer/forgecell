@@ -511,6 +511,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	for _, overlap := range p.DefinitionOverlaps() {
 		r.Notes = append(r.Notes, fmt.Sprintf("Scope/check overlap %s [%s] checks %s: %s", overlap.Path, overlap.Kind, strings.Join(overlap.CheckIDs, ", "), overlap.Detail))
 	}
+	if advisory := p.ProtectedDeltaAdvisory(); advisory != "" {
+		r.Notes = append(r.Notes, advisory)
+	}
 	atom(&r, roles.atoms[formula.IntakeRole], "done", a.Summary)
 	atom(&r, roles.atoms[formula.ScopeApproval], "waiting", "Review exact scope, checks and process limits before approving the digest.")
 	return allocateRecord(ctx, o, r, allocateWorkspace, save)

@@ -22,13 +22,26 @@ type Observation struct {
 	SourceTree string              `json:"sourceTree"`
 	Command    readiness.Check     `json:"command"`
 	Result     process.Result      `json:"result"`
+	// FailedTests is the observed failing set of a protected regression check with
+	// declared deltas. It survives the compact ledger projection that drops captured
+	// streams, so delivery can re-check coverage against the approved plan.
+	FailedTests []TestID `json:"failedTests,omitempty"`
+	// AcceptedDeltas are the declared deltas that failed as expected.
+	AcceptedDeltas []readiness.ProtectedDelta `json:"acceptedDeltas,omitempty"`
+	// Warnings name declared deltas that did not fail.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // MatchesCheckObservation binds delivery evidence to the approved command and
 // view. Only valid explicit repairs permit candidate provenance or the protected
-// runner's removal of the candidate-only acceptance reference.
+// runner's removal of the candidate-only acceptance reference. A failing
+// protected regression observation matches only when the approved plan's declared
+// deltas cover its entire failing set.
 func MatchesCheckObservation(p readiness.Plan, check readiness.Check, obs Observation, tree string, protected bool) bool {
-	if obs.ID != check.ID || obs.SourceTree != tree || !obs.Result.OK || obs.Result.TimedOut || obs.Result.Interrupted || obs.Result.Overflow {
+	if obs.ID != check.ID || obs.SourceTree != tree || obs.Result.TimedOut || obs.Result.Interrupted || obs.Result.Overflow {
+		return false
+	}
+	if !obs.Result.OK && !(protected && acceptedProtectedFailure(p, check, obs)) {
 		return false
 	}
 	expected := check
@@ -66,6 +79,10 @@ type Result struct {
 	IndependentAcceptanceVerified bool          `json:"independentAcceptanceVerified"`
 	Containment                   string        `json:"containment"`
 	Error                         string        `json:"error,omitempty"`
+	// AcceptedDeltas failed in the protected view exactly as the approved plan declared.
+	AcceptedDeltas []readiness.ProtectedDelta `json:"acceptedProtectedDeltas,omitempty"`
+	// Warnings name declared deltas that did not fail or were never exercised.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -119,7 +136,14 @@ func scrub(r process.Result, secrets []string) process.Result {
 func runView(ctx context.Context, source, destination string, p readiness.Plan, c CaptureResult) Result {
 	return runViewObserved(ctx, source, destination, p, c, nil)
 }
-func runViewObserved(ctx context.Context, source, destination string, p readiness.Plan, c CaptureResult, observe func(Observation) error) (v Result) {
+func runViewObserved(ctx context.Context, source, destination string, p readiness.Plan, c CaptureResult, observe func(Observation) error) Result {
+	return runViewDeltas(ctx, source, destination, p, c, observe, false)
+}
+
+// runViewDeltas applies the plan's declared protected deltas only when protected
+// is true, which only the protected regression view requests. The candidate view
+// never relaxes a failing check.
+func runViewDeltas(ctx context.Context, source, destination string, p readiness.Plan, c CaptureResult, observe func(Observation) error, protected bool) (v Result) {
 	v = Result{SchemaVersion: "v1", Workspace: destination, SourceTree: c.Tree, Setup: []Observation{}, Checks: []Observation{}, Containment: "Filtered environment and temporary HOME; no OS filesystem/network sandbox. Network access is unrestricted."}
 	fail := func(e error) Result {
 		v.Error = e.Error()
@@ -315,6 +339,22 @@ func runViewObserved(ctx context.Context, source, destination string, p readines
 			category = "candidate"
 		}
 		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets)}
+		var deltaErr error
+		evaluated := false
+		if protected && i >= len(p.Setup) && command.Required && command.Category == "regression" {
+			if declared := p.DeltasForCheck(command.ID); len(declared) > 0 {
+				evaluated = true
+				var evaluation DeltaEvaluation
+				if deltaErr = verifyDeltaPackages(destination, declared); deltaErr == nil {
+					evaluation, deltaErr = EvaluateProtectedDeltas(declared, observation.Result)
+				}
+				if deltaErr == nil {
+					observation.FailedTests = evaluation.Failed
+					observation.AcceptedDeltas = evaluation.Accepted
+					observation.Warnings = evaluation.Warnings
+				}
+			}
+		}
 		if i < len(p.Setup) {
 			v.Setup = append(v.Setup, observation)
 		} else {
@@ -346,8 +386,15 @@ func runViewObserved(ctx context.Context, source, destination string, p readines
 		if err != nil || strings.TrimSpace(staged) != c.Tree {
 			return fail(fmt.Errorf("verification changed staged content"))
 		}
-		if !result.OK && (i < len(p.Setup) || command.Required) {
+		if !result.OK && (i < len(p.Setup) || command.Required) && !(evaluated && deltaErr == nil) {
+			if deltaErr != nil {
+				return fail(fmt.Errorf("required command %s did not pass: %w", command.ID, deltaErr))
+			}
 			return fail(fmt.Errorf("required command %s did not pass", command.ID))
+		}
+		if evaluated && deltaErr == nil {
+			v.AcceptedDeltas = append(v.AcceptedDeltas, observation.AcceptedDeltas...)
+			v.Warnings = append(v.Warnings, observation.Warnings...)
 		}
 	}
 	v.RequiredChecksPassed = true

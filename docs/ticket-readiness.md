@@ -207,6 +207,53 @@ Inventories are hashed, nested repositories and escaping links are rejected, and
 artifacts never enter the delivered tree or seed a fresh verification checkout.
 A repository-tree audit cannot observe every transient or host-wide write.
 
+### Expected protected deltas
+
+The protected view restores base-commit test sources, so a ticket whose approved
+purpose is to change a pinned contract (for example a `testdata` fixture) would
+otherwise always fail there. A reviewed plan may declare `expectedProtectedDeltas`:
+
+```json
+"expectedProtectedDeltas": [{
+  "checkId": "go-test-lab",
+  "package": "github.com/owner/repo/lab/internal/harness",
+  "test": "TestAdapterCompatibility/claude-code/molecule",
+  "scopePath": "lab/internal/harness/testdata/contracts.json",
+  "reason": "The approved change alters the pinned Claude coding argv.",
+  "evidence": ["file-5"]
+}]
+```
+
+- Each entry is an exact Go package import path plus an exact test name
+  (subtests as `Test/sub/case`; no wildcards). The check must be a required
+  `regression` check whose argv requests `-json` (for example
+  `go test -json ./...`). `scopePath` must be an approved scope path that the
+  protected view restores (a conventional test path or a regression check
+  definition). Duplicates and more than 64 entries are rejected.
+- The declaration is part of the plan digest. It is proposed in a reviewed
+  amendment (`forgecell amend`) and accepted only by approving the exact digest at the
+  scope gate, which lists every delta with its package, test, scope path and
+  reason. Intake never writes or approves a delta; when scope touches `testdata` or
+  `fixtures` it only records a labelled advisory ("proposed for review; never
+  auto-approved"). Plans without the field keep their earlier digests.
+- Deltas apply to the protected view only. The candidate view still has to pass
+  entirely. In the protected view the check passes if it exits non-zero, its
+  complete `go test -json` stream parses, and every failing test is declared.
+  Package and test must both match. Failing parents of a declared failing subtest
+  are accounted for; a parent that also fails for an unrelated reason cannot be
+  told apart from that, so review declared subtests with care.
+- Any undeclared failing test fails the check, naming its package and test. So do
+  a build or setup failure with no failing test, unparseable output, timeout,
+  interruption, output over the 256,000-byte capture limit, or a non-zero exit with
+  no failing test. For a large module, narrow the check argv to the affected
+  packages so the JSON stream fits the limit.
+- A declared test that does not fail is reported as a warning and does not fail
+  the check. The final review output lists the accepted deltas and warnings next to
+  the required-check result, and the compact ledger keeps them.
+- Delivery accepts a protected observation with failures only when the approved
+  plan's declared deltas still cover its recorded failing set.
+- Only Go tests are supported. Matching is exact equality, never a pattern.
+
 ## Provider and policy support
 
 Codex analysis preserves the configured provider/model and disables action tools,

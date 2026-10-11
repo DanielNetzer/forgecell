@@ -802,6 +802,15 @@ func presentRun(out io.Writer, r molecule.Record) {
 			args, _ := json.Marshal(c.Argv)
 			fmt.Fprintf(out, "  %s · %s · cwd %s · timeout %dms · argv %s\n", c.ID, c.Category, c.Dir, c.TimeoutMS, args)
 		}
+		if len(p.ExpectedProtectedDeltas) > 0 {
+			fmt.Fprintln(out, "EXPECTED PROTECTED-TEST FAILURES — approving this exact digest accepts these failures in the protected regression run:")
+			for _, d := range p.ExpectedProtectedDeltas {
+				fmt.Fprintf(out, "  %s %s · check %s · justified by scope path %s — %s\n", d.Package, d.Test, d.CheckID, d.ScopePath, d.Reason)
+			}
+			fmt.Fprintln(out, "  Any other failing test still fails the check; a declared test that does not fail is reported as a warning.")
+		} else if advisory := p.ProtectedDeltaAdvisory(); advisory != "" {
+			fmt.Fprintln(out, advisory)
+		}
 		if p.Continuation == "" {
 			fmt.Fprintln(out, codingTimeoutLine(r.FormulaSnapshot.YAML, p.HarnessTimeoutMS))
 			if len(p.CodingAllowlist) == 0 {
@@ -831,6 +840,15 @@ func presentRun(out io.Writer, r molecule.Record) {
 	}
 	if r.Verification != nil {
 		fmt.Fprintf(out, "Required checks passed: %t · independent acceptance verified: %t\n", r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified)
+		if len(r.Verification.AcceptedDeltas) > 0 {
+			fmt.Fprintln(out, "ACCEPTED PROTECTED DELTAS — these tests failed in the protected regression run as declared and approved:")
+			for _, d := range r.Verification.AcceptedDeltas {
+				fmt.Fprintf(out, "  %s %s · check %s · justified by scope path %s — %s\n", d.Package, d.Test, d.CheckID, d.ScopePath, d.Reason)
+			}
+		}
+		for _, w := range r.Verification.Warnings {
+			fmt.Fprintf(out, "Warning: %s\n", w)
+		}
 	}
 	fmt.Fprintf(out, "Ledger: %s\n", filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
 }
