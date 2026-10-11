@@ -124,20 +124,21 @@ func codingTimeout(b formula.Binding, p readiness.Plan) (int, string) {
 // Intake and amendment always store a derived list, so a plan without one was
 // approved by an earlier Lab under the fixed Node allowance; it keeps that
 // allowance (plus read-only git status/diff) rather than silently losing it. A
-// stored list must equal the one rederived from the approved Formula and the
-// plan's checks, so rule or input drift cannot widen what coding may run.
+// stored list must equal the one rederived from the approved Formula, the
+// plan's checks and scope, or the pre-formatter derivation that earlier plans
+// were approved under, so rule or input drift cannot widen what coding may run.
 func approvedCodingAllowlist(f formula.Formula, p readiness.Plan) ([]string, error) {
 	if len(p.CodingAllowlist) == 0 {
 		return harness.LegacyCodingAllowlist()
 	}
-	derived, err := harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks)
+	allowed, ok, err := harness.MatchCodingAllowlist(f.YAML, p.Analysis.Checks, p.Analysis.Scope, p.CodingAllowlist)
 	if err != nil {
 		return nil, err
 	}
-	if !reflect.DeepEqual(derived, p.CodingAllowlist) {
+	if !ok {
 		return nil, fmt.Errorf("approved coding allowlist differs from the one derived from the plan checks and Formula; refresh intake")
 	}
-	return derived, nil
+	return allowed, nil
 }
 func issueInput(i Issue) readiness.Issue {
 	return readiness.Issue{Repository: i.Repo, Number: i.Number, URL: i.URL, State: i.State, Title: i.Title, Body: i.Body, UpdatedAt: i.UpdatedAt}
@@ -524,7 +525,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if err = applyFormulaBaseline(f, &p); err != nil {
 		return stopIntake(r, err.Error())
 	}
-	if p.CodingAllowlist, err = harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks); err != nil {
+	if p.CodingAllowlist, err = harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks, p.Analysis.Scope...); err != nil {
 		return stopIntake(r, err.Error())
 	}
 	if err = snapshot.ValidateScope(a.Scope); err != nil {

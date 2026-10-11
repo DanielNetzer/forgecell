@@ -6,6 +6,7 @@ import (
 	"go.yaml.in/yaml/v4"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -73,8 +74,39 @@ func formulaComponents(text string) ([]formulaComponent, error) {
 // DeriveCodingAllowlist returns the exact Claude Code tool allowance for a coding
 // attempt: fixed base entries, the Node preset for package.json components, and
 // exact argv checks taken from the approved Formula's repositoryContext and the
-// plan's checks. Unsafe or publishing commands are omitted, never escaped.
-func DeriveCodingAllowlist(formulaYAML string, checks []readiness.Check) ([]string, error) {
+// plan's checks. Unsafe or publishing commands are omitted, never escaped. When a
+// required check runs gofmt -l (or go fmt), the approved scope adds exact
+// formatter entries for its .go files; without such a check the result is
+// independent of scope.
+func DeriveCodingAllowlist(formulaYAML string, checks []readiness.Check, scope ...readiness.ScopedPath) ([]string, error) {
+	return deriveAllowlist(formulaYAML, checks, scope, true)
+}
+
+// DerivePreFormatterAllowlist is the derivation that ran before formatter
+// entries existed. It exists only so plans approved earlier keep verifying.
+func DerivePreFormatterAllowlist(formulaYAML string, checks []readiness.Check) ([]string, error) {
+	return deriveAllowlist(formulaYAML, checks, nil, false)
+}
+
+// MatchCodingAllowlist reports whether stored is an allowance the plan may run
+// under: the current derivation, or the pre-formatter one, which is a subset of
+// it. Any other stored list is drift and does not match. A returned list equals stored.
+func MatchCodingAllowlist(formulaYAML string, checks []readiness.Check, scope []readiness.ScopedPath, stored []string) ([]string, bool, error) {
+	legacy, err := DerivePreFormatterAllowlist(formulaYAML, checks)
+	if err != nil {
+		return nil, false, err
+	}
+	derived, derr := DeriveCodingAllowlist(formulaYAML, checks, scope...)
+	if derr == nil && slices.Equal(derived, stored) {
+		return derived, true, nil
+	}
+	if slices.Equal(legacy, stored) {
+		return legacy, true, nil
+	}
+	return nil, false, derr
+}
+
+func deriveAllowlist(formulaYAML string, checks []readiness.Check, scope []readiness.ScopedPath, formatters bool) ([]string, error) {
 	components, err := formulaComponents(formulaYAML)
 	if err != nil {
 		return nil, err
@@ -99,7 +131,108 @@ func DeriveCodingAllowlist(formulaYAML string, checks []readiness.Check) ([]stri
 			entries = append(entries, entry)
 		}
 	}
+	if formatters {
+		entries = append(entries, formatterEntries(checks, scope)...)
+	}
 	return EffectiveCodingAllowlist(entries)
+}
+
+var gofmtPathToken = regexp.MustCompile(`^(?:\.|(?:\./)?[A-Za-z0-9_][A-Za-z0-9_./-]*)$`)
+
+const (
+	gofmtShellPrefix = `test -z "$(gofmt -l `
+	gofmtShellSuffix = `)"`
+)
+
+// gofmtCheckPaths recognises exactly `gofmt -l PATHS` and the shell form
+// `sh -c 'test -z "$(gofmt -l PATHS)"'`. Anything else fails closed.
+func gofmtCheckPaths(argv []string) ([]string, bool) {
+	var args []string
+	switch {
+	case len(argv) >= 3 && argv[0] == "gofmt" && argv[1] == "-l":
+		args = argv[2:]
+	case len(argv) == 3 && argv[0] == "sh" && argv[1] == "-c":
+		body, ok := strings.CutPrefix(argv[2], gofmtShellPrefix)
+		if !ok {
+			return nil, false
+		}
+		if body, ok = strings.CutSuffix(body, gofmtShellSuffix); !ok {
+			return nil, false
+		}
+		args = strings.Split(body, " ")
+	default:
+		return nil, false
+	}
+	for _, arg := range args {
+		if !gofmtPathToken.MatchString(arg) || slices.Contains(strings.Split(arg, "/"), "..") {
+			return nil, false
+		}
+	}
+	return args, true
+}
+
+// gofmtListEntry joins each path argument to the check directory, so the exact
+// entry runs from the workspace root.
+func gofmtListEntry(dir string, args []string) (string, bool) {
+	if dir != "" && dir != "." && (readiness.ValidatePath(dir) != nil || !safeArgument.MatchString(dir)) {
+		return "", false
+	}
+	argv := []string{"gofmt", "-l"}
+	for _, arg := range args {
+		joined := path.Join(dir, arg)
+		if readiness.ValidatePath(joined) != nil {
+			return "", false
+		}
+		argv = append(argv, joined)
+	}
+	return renderEntry("", argv)
+}
+
+// formatterEntries returns exact formatter entries for required gofmt or go fmt
+// checks: one per approved scope path that ends in .go. No pattern is granted.
+func formatterEntries(checks []readiness.Check, scope []readiness.ScopedPath) []string {
+	var files []string
+	for _, s := range scope {
+		if strings.HasSuffix(s.Path, ".go") && readiness.ValidatePath(s.Path) == nil {
+			files = append(files, s.Path)
+		}
+	}
+	sort.Strings(files)
+	var entries []string
+	for _, c := range checks {
+		if !c.Required {
+			continue
+		}
+		if args, ok := gofmtCheckPaths(c.Argv); ok {
+			list, ok := gofmtListEntry(c.Dir, args)
+			if !ok {
+				continue
+			}
+			entries = append(entries, list)
+			for _, file := range files {
+				if entry, ok := renderEntry("", []string{"gofmt", "-w", file}); ok {
+					entries = append(entries, entry)
+				}
+			}
+		} else if len(c.Argv) >= 2 && c.Argv[0] == "go" && c.Argv[1] == "fmt" {
+			if _, ok := renderEntry(c.Dir, c.Argv); !ok {
+				continue
+			}
+			for _, file := range files {
+				rel := file
+				if c.Dir != "" && c.Dir != "." {
+					var under bool
+					if rel, under = strings.CutPrefix(file, c.Dir+"/"); !under {
+						continue
+					}
+				}
+				if entry, ok := renderEntry(c.Dir, []string{"go", "fmt", rel}); ok {
+					entries = append(entries, entry)
+				}
+			}
+		}
+	}
+	return entries
 }
 
 // EffectiveCodingAllowlist validates entries and returns the canonical list the

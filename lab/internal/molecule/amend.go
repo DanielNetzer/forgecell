@@ -68,8 +68,8 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	next.Revision = previous.Revision + 1
 	next.ParentDigest = parent
 	// The coding allowlist is runtime-owned like the lifecycle fields: derive it
-	// from the amended checks so a submitted payload can neither smuggle nor drop it.
-	if next.CodingAllowlist, err = harness.DeriveCodingAllowlist(r.FormulaSnapshot.YAML, next.Analysis.Checks); err != nil {
+	// from the amended checks and scope so a submitted payload can neither smuggle nor drop it.
+	if next.CodingAllowlist, err = harness.DeriveCodingAllowlist(r.FormulaSnapshot.YAML, next.Analysis.Checks, next.Analysis.Scope...); err != nil {
 		return r, err
 	}
 	approvedFormula, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))

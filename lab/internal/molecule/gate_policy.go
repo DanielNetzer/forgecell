@@ -207,11 +207,11 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 	if len(plan.CodingAllowlist) == 0 {
 		return decline("allowlist-missing", "the plan carries no derived coding allowlist")
 	}
-	derived, err := harness.DeriveCodingAllowlist(f.YAML, plan.Analysis.Checks)
+	derived, matched, err := harness.MatchCodingAllowlist(f.YAML, plan.Analysis.Checks, plan.Analysis.Scope, plan.CodingAllowlist)
 	if err != nil {
 		return decline("allowlist-underivable", "%v", err)
 	}
-	if !slices.Equal(derived, plan.CodingAllowlist) {
+	if !matched {
 		return decline("allowlist-mismatch", "the plan allowlist differs from the one derived from its checks and the Formula")
 	}
 	digest, err := plan.Digest()
