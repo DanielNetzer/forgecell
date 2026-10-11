@@ -31,11 +31,13 @@ use an amendment and a new digest.
 
 ### Corrective analysis retry
 
-The analysis validator is never relaxed. Two rejections of an otherwise complete
+The analysis validator is never relaxed. Three rejections of an otherwise complete
 response are retryable: the response asserts independent acceptance
-(`independent-acceptance`, `independentProvenance` or `reviewedAcceptance`), or it
-carries more than 16 evidence requests (`at most 16 evidence requests permitted`).
-For either, intake makes **one** corrective analysis call. It receives the exact
+(`independent-acceptance`, `independentProvenance` or `reviewedAcceptance`), it
+carries more than 16 evidence requests (`at most 16 evidence requests permitted`),
+or a check is defined by a file the same plan proposes to edit
+(`drop or replace checks defined by in-scope files`).
+For any of them, intake makes **one** corrective analysis call. It receives the exact
 validator message and the rejected response, under a `correction` key; the rejected
 response is also kept on its failed attempt in the ledger. For the evidence-request
 cap the correction also carries an `instruction` to return at most 16
@@ -45,7 +47,20 @@ response that is still over the cap is rejected, never accepted. A second reject
 blocks intake, and no coding harness runs. The over-cap response never becomes the
 plan's analysis, so none of its requests is collected or approved.
 
-The two cases share one budget: one retry per intake, whichever pass it occurs in
+A check is defined by an in-scope file when one of its `definitions` evidence IDs
+resolves to a scope path, or when an `argv` token, taken as written or relative to
+the check's `dir`, is exactly a scope path. The message names each such path and
+check ID after the fixed phrase, so the correction can drop or replace those
+checks. A conventional test path that `argv` merely names is not rejected, matching
+the run-time guard's non-blocking test-source assessment, and a read that no `argv`
+token spells out (through a test runner or a shell string) is not detected at
+intake. The rule applies to the model's response only, once it has no evidence
+requests left; it does not apply to `--verification` checks or Formula baseline
+checks. The run-time guard stays as the backstop: approval still refuses a plan
+whose frozen definition overlaps its scope (`frozen definition overlaps proposed
+scope`).
+
+The three cases share one budget: one retry per intake, whichever pass it occurs in
 and whichever rejection uses it. So there are at most three analysis invocations
 (one supplemental evidence pass plus one retry). Every invocation is its own attempt
 with its own provenance action.

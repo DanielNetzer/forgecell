@@ -429,6 +429,10 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			// real harness rejects it at its boundary. Both take the same retry path.
 			err = readiness.ValidateEvidenceRequestCap(a.EvidenceRequests)
 		}
+		if err == nil && len(a.EvidenceRequests) == 0 {
+			// Intake-time rejection; Plan.ValidateForCoding stays as the run-time backstop.
+			err = readiness.ValidateInScopeDefinitions(a, snapshot.References())
+		}
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
 		attempt.Diagnostics = analysisDiagnostics
