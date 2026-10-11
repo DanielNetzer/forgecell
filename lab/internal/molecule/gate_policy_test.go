@@ -332,27 +332,32 @@ func TestGatePolicyDecisionsAreIndependentPerMolecule(t *testing.T) {
 	}
 }
 
-func pointerTarget(doc any, pointer string) bool {
+func pointerValue(doc any, pointer string) (any, bool) {
 	cur := doc
 	for _, part := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
 		switch v := cur.(type) {
 		case map[string]any:
 			next, ok := v[part]
 			if !ok {
-				return false
+				return nil, false
 			}
 			cur = next
 		case []any:
 			i, err := strconv.Atoi(part)
 			if err != nil || i < 0 || i >= len(v) {
-				return false
+				return nil, false
 			}
 			cur = v[i]
 		default:
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return cur, true
+}
+
+func pointerTarget(doc any, pointer string) bool {
+	_, ok := pointerValue(doc, pointer)
+	return ok
 }
 
 func policyLoaded(t *testing.T, o Options) formula.Loaded {
@@ -548,6 +553,10 @@ func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
 		{plan + "/policy", "environment=[PATH] credentialNames=0 setupNetwork=unrestricted checkNetwork=unrestricted containment=filtered-environment"},
 		{plan, "allowNoChange=false harnessTimeoutMs=0 ceilingMs=0 expectedProtectedDeltas=0"},
 		{plan + "/codingAllowlist", fmt.Sprintf("%d entries, sha256 %x", len(list), sum)},
+		{plan + "/artifacts", "0 artifact roots"},
+		{plan + "/checkInputs", "0 check inputs"},
+		{plan + "/analysis", "sensitive-path list v1: 2 scope paths examined"},
+		{plan + "/analysis/checks", "1 checks examined for scope paths cited by a check definition"},
 		{"/checkoutStatus", "available"},
 		{"/readiness/phase", "scope-waiting"},
 		{"/readiness/plans/0/digest", r.Readiness.Plans[0].Digest},
@@ -568,8 +577,12 @@ func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
 	}
 	wider.Readiness.Plans[0].Digest = digest
 	wider.Readiness.Events[0].Digest = digest
-	if got := observe(wider)[plan+"/analysis/scope"]; got != "3 paths: code.txt, request.json, docs/extra.md" {
+	widerSeen := observe(wider)
+	if got := widerSeen[plan+"/analysis/scope"]; got != "3 paths: code.txt, request.json, docs/extra.md" {
 		t.Fatalf("scope evidence observed %q", got)
+	}
+	if got := widerSeen[plan+"/analysis"]; got != "sensitive-path list v1: 3 scope paths examined" {
+		t.Fatalf("sensitive-path evidence observed %q", got)
 	}
 }
 
@@ -699,5 +712,383 @@ func TestGatePolicyHumanApprovalRecordsNoPolicyDecision(t *testing.T) {
 	}
 	if _, md := ledgerFiles(t, saved); strings.Contains(md, "Policy decisions") {
 		t.Fatal("a human approval rendered a policy decision")
+	}
+}
+
+func rebindPlanDigest(t *testing.T, r *Record) {
+	t.Helper()
+	digest, err := r.Readiness.Plans[0].Plan.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Readiness.Plans[0].Digest = digest
+	r.Readiness.Events[0].Digest = digest
+}
+
+func assertPolicyDeclines(t *testing.T, r Record, reason string) PolicyEvaluation {
+	t.Helper()
+	got := EvaluateGatePolicy(r, formula.ScopeApproval)
+	if got.Outcome != PolicyDecline || got.Reason != reason || got.Detail == "" || got.PlanDigest != "" || len(got.Evidence) != 0 {
+		t.Fatalf("want decline for %s, got %+v", reason, got)
+	}
+	if _, err := RecordScopePolicyApproval(r); err == nil {
+		t.Fatal("a declined evaluation was recorded as an approval")
+	}
+	return got
+}
+
+func assertPolicyApproves(t *testing.T, r Record) {
+	t.Helper()
+	if got := EvaluateGatePolicy(r, formula.ScopeApproval); got.Outcome != PolicyApprove {
+		t.Fatalf("want approve, got %+v", got)
+	}
+}
+
+func TestGatePolicyDeclinesArtifactAllowancesAndCheckInputs(t *testing.T) {
+	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	assertPolicyApproves(t, ready)
+	const content = "frozen human input"
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "input-1", Path: "docs/input.txt", SHA256: sum}, Content: content}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*readiness.Plan)
+		reason string
+	}{
+		{"artifact allowance", func(p *readiness.Plan) {
+			p.Artifacts = []readiness.ArtifactRoot{{Path: "output", CommandID: p.Analysis.Checks[0].ID}}
+		}, "plan-has-artifacts"},
+		{"check input", func(p *readiness.Plan) {
+			p.CheckInputs = []readiness.FileEvidence{input}
+			p.Evidence = append(p.Evidence, input.Evidence)
+		}, "plan-has-check-inputs"},
+	} {
+		// A stale digest must still show the specific reason, so these checks sit before the digest check.
+		for _, rebind := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s rebound=%t", tc.name, rebind), func(t *testing.T) {
+				r := cloneRecord(t, ready)
+				tc.mutate(&r.Readiness.Plans[0].Plan)
+				if rebind {
+					rebindPlanDigest(t, &r)
+				}
+				assertPolicyDeclines(t, r, tc.reason)
+			})
+		}
+	}
+}
+
+func TestGatePolicySensitivePathListIsPinned(t *testing.T) {
+	if sensitivePathListVersion != "v1" {
+		t.Fatalf("sensitive-path list version %q: a list change needs a reviewed version bump and test edit", sensitivePathListVersion)
+	}
+	if want := []string{".github/", ".claude/", ".forgecell/", ".githooks/", ".husky/", "scripts/"}; !reflect.DeepEqual(sensitivePathPrefixes, want) {
+		t.Fatalf("sensitive prefixes changed: %q", sensitivePathPrefixes)
+	}
+	if want := []string{".gitlab-ci.yml", "go.mod", "go.sum", "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lockb", "Makefile"}; !reflect.DeepEqual(sensitiveBaseNames, want) {
+		t.Fatalf("sensitive base names changed: %q", sensitiveBaseNames)
+	}
+	if want := []string{".lock"}; !reflect.DeepEqual(sensitiveExtensions, want) {
+		t.Fatalf("sensitive extensions changed: %q", sensitiveExtensions)
+	}
+	for _, prefix := range sensitivePathPrefixes {
+		if !strings.HasSuffix(prefix, "/") || prefix != strings.ToLower(prefix) {
+			t.Fatalf("prefix %q must be lower case and directory-bounded", prefix)
+		}
+	}
+}
+
+func TestGatePolicyDeclinesSensitiveScopePaths(t *testing.T) {
+	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	assertPolicyApproves(t, ready)
+	scoped := func(t *testing.T, path string) Record {
+		t.Helper()
+		r := cloneRecord(t, ready)
+		r.Readiness.Plans[0].Plan.Analysis.Scope[0].Path = path
+		rebindPlanDigest(t, &r)
+		return r
+	}
+	for _, path := range []string{
+		".github/workflows/lab.yml", ".GitHub/workflows/x.yml", ".gitlab-ci.yml", "go.mod", "lab/go.mod", "lab/go.sum",
+		"web/package.json", "yarn.lock", "Makefile", "lab/MAKEFILE", ".claude/settings.json", ".forgecell/x",
+		".husky/pre-commit", ".githooks/pre-push", "scripts/check-repo-hygiene.sh", "web/package-lock.json",
+		"pnpm-lock.yaml", "bun.lockb", "npm-shrinkwrap.json", "Cargo.LOCK",
+	} {
+		t.Run("declines "+path, func(t *testing.T) {
+			got := assertPolicyDeclines(t, scoped(t, path), "scope-path-sensitive")
+			if !strings.Contains(got.Detail, path) || !strings.Contains(got.Detail, sensitivePathListVersion) {
+				t.Fatalf("detail does not name the path and list version: %q", got.Detail)
+			}
+		})
+	}
+	for _, path := range []string{
+		"docs/atoms.md", "docs/github.md", "Makefile.md", ".githubx/foo", "scriptsx/run.sh", "lab/internal/molecule/gate_policy.go", "locks/readme.md",
+	} {
+		t.Run("approves "+path, func(t *testing.T) { assertPolicyApproves(t, scoped(t, path)) })
+	}
+	t.Run("names the sensitive path among others", func(t *testing.T) {
+		r := cloneRecord(t, ready)
+		r.Readiness.Plans[0].Plan.Analysis.Scope[1].Path = ".claude/settings.json"
+		rebindPlanDigest(t, &r)
+		if got := assertPolicyDeclines(t, r, "scope-path-sensitive"); !strings.Contains(got.Detail, ".claude/settings.json") || strings.Contains(got.Detail, "code.txt") {
+			t.Fatalf("%q", got.Detail)
+		}
+	})
+	t.Run("an invalid path keeps its own reason", func(t *testing.T) {
+		r := cloneRecord(t, ready)
+		r.Readiness.Plans[0].Plan.Analysis.Scope[0].Path = ".github/workflows/lab.yml"
+		r.Readiness.Plans[0].Plan.Analysis.Scope[1].Path = "../x"
+		assertPolicyDeclines(t, r, "scope-path-invalid")
+	})
+	t.Run("a stale digest still shows the sensitive reason", func(t *testing.T) {
+		r := cloneRecord(t, ready)
+		r.Readiness.Plans[0].Plan.Analysis.Scope[0].Path = "go.mod"
+		assertPolicyDeclines(t, r, "scope-path-sensitive")
+	})
+}
+
+func TestGatePolicyDeclinesScopeCitedByCheckDefinition(t *testing.T) {
+	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	assertPolicyApproves(t, ready)
+	const defined = "tools/check.sh"
+	// bind adds the file to the plan's evidence and lets mutate make a check cite it,
+	// without putting the file in scope.
+	bind := func(t *testing.T, mutate func(*readiness.Plan)) Record {
+		t.Helper()
+		r := cloneRecord(t, ready)
+		p := &r.Readiness.Plans[0].Plan
+		p.Evidence = append(p.Evidence, readiness.Evidence{ID: "file-90", Path: defined, SHA256: strings.Repeat("b", 64)})
+		mutate(p)
+		rebindPlanDigest(t, &r)
+		return r
+	}
+	addToScope := func(r Record, file string) Record {
+		p := &r.Readiness.Plans[0].Plan
+		p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: file, Reason: "Edit the checker", Evidence: []string{"issue"}})
+		return r
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*readiness.Plan)
+	}{
+		{"definition evidence", func(p *readiness.Plan) {
+			p.Analysis.Checks[0].Definitions = append(p.Analysis.Checks[0].Definitions, "file-90")
+		}},
+		{"argv path", func(p *readiness.Plan) {
+			p.Analysis.Checks[0].Argv = []string{"/bin/sh", defined}
+		}},
+		{"argv path relative to the check directory", func(p *readiness.Plan) {
+			p.Analysis.Checks[0].Dir = "tools"
+			p.Analysis.Checks[0].Argv = []string{"/bin/sh", "check.sh"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The same plan is ready until the cited file joins the scope, so the scope is the only cause.
+			r := bind(t, tc.mutate)
+			assertPolicyApproves(t, r)
+			r = addToScope(r, defined)
+			rebindPlanDigest(t, &r)
+			got := assertPolicyDeclines(t, r, "scope-path-check-definition")
+			if !strings.Contains(got.Detail, defined) {
+				t.Fatalf("detail does not name the path: %q", got.Detail)
+			}
+			// A stale digest shows the specific reason, so the check sits before the digest check.
+			stale := cloneRecord(t, r)
+			stale.Readiness.Plans[0].Digest = strings.Repeat("0", 64)
+			assertPolicyDeclines(t, stale, "scope-path-check-definition")
+		})
+	}
+	t.Run("a reviewed repair does not excuse the overlap", func(t *testing.T) {
+		r := bind(t, func(p *readiness.Plan) {
+			p.Analysis.Checks[0].Definitions = append(p.Analysis.Checks[0].Definitions, "file-90")
+		})
+		r = addToScope(r, defined)
+		r.Readiness.Plans[0].Plan.Analysis.Checks[0].ReviewedAcceptance = "accept-1"
+		assertPolicyDeclines(t, r, "scope-path-check-definition")
+	})
+	t.Run("a test path named in argv is exempt", func(t *testing.T) {
+		r := bind(t, func(p *readiness.Plan) {
+			p.Analysis.Checks[0].Argv = []string{"/bin/sh", "tools/check_test.go"}
+		})
+		r = addToScope(r, "tools/check_test.go")
+		rebindPlanDigest(t, &r)
+		assertPolicyApproves(t, r)
+	})
+}
+
+func TestGatePolicyPointerTargetRequiresPresentKey(t *testing.T) {
+	var doc any
+	if err := json.Unmarshal([]byte(`{"a":{"empty":[],"null":null,"list":[1]},"b":"text"}`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for pointer, want := range map[string]bool{
+		"/a": true, "/a/empty": true, "/a/null": true, "/a/list/0": true, "/b": true,
+		"/a/missing": false, "/a/list/1": false, "/a/list/x": false, "/a/list/-1": false, "/b/deeper": false, "/missing": false,
+	} {
+		if got := pointerTarget(doc, pointer); got != want {
+			t.Fatalf("pointerTarget(%q) = %t, want %t", pointer, got, want)
+		}
+	}
+}
+
+func TestGatePolicyRecordedPointersResolveInPersistedLedger(t *testing.T) {
+	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	if _, err := approveByPolicy(t, o, r); err != nil {
+		t.Fatal(err)
+	}
+	saved, _ := ledgerFiles(t, r)
+	decoded, err := ledger.Decode([]byte(saved))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := decoded.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc any
+	if err = json.Unmarshal(encoded, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var round Record
+	if err = json.Unmarshal(encoded, &round); err != nil {
+		t.Fatal(err)
+	}
+	if len(round.PolicyDecisions) != 1 {
+		t.Fatalf("decisions after the round trip: %d", len(round.PolicyDecisions))
+	}
+	recorded := map[string]bool{}
+	for _, e := range round.PolicyDecisions[0].Evidence {
+		recorded[e.Pointer] = true
+		value, ok := pointerValue(doc, e.Pointer)
+		if !ok {
+			t.Fatalf("evidence pointer does not resolve in the persisted ledger: %s", e.Pointer)
+		}
+		if list, isList := value.([]any); isList && len(list) == 0 {
+			t.Fatalf("evidence pointer targets an empty slice: %s", e.Pointer)
+		}
+	}
+	// omitempty slices are absent from the JSON when empty, so none may be recorded then.
+	const plan = "/readiness/plans/0/plan"
+	p := round.Readiness.Plans[0].Plan
+	for _, tc := range []struct {
+		name string
+		n    int
+	}{
+		{"codingAllowlist", len(p.CodingAllowlist)},
+		{"expectedProtectedDeltas", len(p.ExpectedProtectedDeltas)},
+		{"formulaBaseline", len(p.FormulaBaseline)},
+	} {
+		pointer := plan + "/" + tc.name
+		switch {
+		case tc.n == 0 && (pointerTarget(doc, pointer) || recorded[pointer]):
+			t.Fatalf("empty omitempty slice %s is present or recorded", pointer)
+		case tc.n > 0 && !pointerTarget(doc, pointer):
+			t.Fatalf("non-empty slice %s is absent from the persisted ledger", pointer)
+		}
+	}
+	if len(p.CodingAllowlist) == 0 || !recorded[plan+"/codingAllowlist"] {
+		t.Fatal("the derived allowlist is not recorded against a non-empty slice")
+	}
+}
+
+func TestGatePolicyApprovalDeclinesChangedLiveInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		drift  func(t *testing.T, o *Options, r Record)
+		reason string
+	}{
+		{"base commit", func(t *testing.T, o *Options, r Record) {
+			testGit(t, o.SourceRoot, "commit", "--allow-empty", "-qm", "moved")
+		}, "source base changed"},
+		{"base ref", func(t *testing.T, o *Options, r Record) {
+			testGit(t, o.SourceRoot, "commit", "--allow-empty", "-qm", "elsewhere")
+			testGit(t, o.SourceRoot, "branch", "elsewhere")
+			testGit(t, o.SourceRoot, "reset", "-q", "--hard", "HEAD~1")
+			o.Base = "elsewhere"
+		}, "source base changed"},
+		{"workspace origin", func(t *testing.T, o *Options, r Record) {
+			testGit(t, r.Workspace.Path, "remote", "set-url", "origin", "https://github.com/other/repository.git")
+		}, "repository origin changed"},
+		{"source origin", func(t *testing.T, o *Options, r Record) {
+			testGit(t, o.SourceRoot, "remote", "set-url", "origin", "https://github.com/other/repository.git")
+		}, "repository origin changed"},
+		{"workspace branch", func(t *testing.T, o *Options, r Record) {
+			testGit(t, r.Workspace.Path, "checkout", "-q", "-b", "other-branch")
+		}, "workspace branch changed"},
+		{"target branch", func(t *testing.T, o *Options, r Record) { o.TargetBranch = "release" }, "target branch changed"},
+		{"frozen evidence", func(t *testing.T, o *Options, r Record) {
+			// The stored plan froze different evidence than the repository now yields, with a consistent digest.
+			rewriteStoredPlan(t, r, func(p *readiness.Plan) { p.Inputs.EvidenceSHA256 = strings.Repeat("0", 64) })
+		}, "readiness inputs changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+			tc.drift(t, &o, r)
+			if got := EvaluateGatePolicy(r, formula.ScopeApproval); got.Outcome != PolicyApprove {
+				t.Fatalf("the recorded plan is ready, so only a live input can decline: %+v", got)
+			}
+			jsonBefore, mdBefore := ledgerFiles(t, r)
+			_, err := approveByPolicy(t, o, r)
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("want %q, got %v", tc.reason, err)
+			}
+			assertNothingApproved(t, r)
+			if jsonAfter, mdAfter := ledgerFiles(t, r); jsonAfter != jsonBefore || mdAfter != mdBefore {
+				t.Fatal("a declined approval changed the ledger")
+			}
+		})
+	}
+}
+
+func TestGatePolicyUnusualModeNeverApproves(t *testing.T) {
+	for _, tc := range []struct{ name, mode string }{
+		{"integer", "7"},
+		{"boolean", "true"},
+		{"null", "null"},
+		{"tilde", "~"},
+		{"empty string", `""`},
+		{"sequence", "[policy]"},
+		{"capitalised", "Policy"},
+		{"upper case", "POLICY"},
+		{"padded", `"policy "`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, r := scopeReadyRecord(t, "{id: scope, type: gate, purpose: scope, mode: "+tc.mode+"}", defaultReviewAtom)
+			got := EvaluateGatePolicy(r, formula.ScopeApproval)
+			if got.Outcome != PolicyHuman || got.Reason != "gate-is-human" || got.PlanDigest != "" || len(got.Evidence) != 0 {
+				t.Fatalf("%+v", got)
+			}
+			out, err := RecordScopePolicyApproval(r)
+			if err == nil || len(out.PolicyDecisions) != 0 {
+				t.Fatal("a gate with an unusual mode was approved by policy")
+			}
+			if _, err = approveByPolicy(t, o, r); err == nil || !strings.Contains(err.Error(), "gate-is-human") {
+				t.Fatalf("%v", err)
+			}
+			assertNothingApproved(t, r)
+		})
+	}
+}
+
+func TestGatePolicyDecisionIsStampedByItsRecorder(t *testing.T) {
+	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	built, err := scopePolicyDecision(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.At != "" {
+		t.Fatalf("the decision builder stamped %q; its recorder stamps it once", built.At)
+	}
+	projected, err := RecordScopePolicyApproval(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = time.Parse(time.RFC3339Nano, projected.PolicyDecisions[0].At); err != nil {
+		t.Fatalf("the in-memory projection has no valid time: %v", err)
+	}
+	if _, err = approveByPolicy(t, o, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = time.Parse(time.RFC3339Nano, loadRecord(t, r.LabDir, r.ID).PolicyDecisions[0].At); err != nil {
+		t.Fatalf("the persisted decision has no valid time: %v", err)
 	}
 }

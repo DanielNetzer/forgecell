@@ -6,6 +6,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"path"
 	"slices"
 	"strings"
 )
@@ -20,6 +21,19 @@ const (
 )
 
 var autoWhenReadyEnvironment = []string{"PATH"}
+
+// The sensitive-path list auto-when-ready never approves a scope against: CI and
+// tooling control files, where an edit changes what later runs execute. It is
+// versioned and pinned by a test, so any change is a reviewed edit of both. A
+// prefix is directory-bounded and anchored at the repository root; base names
+// and extensions match at any depth. Matching is case-insensitive.
+const sensitivePathListVersion = "v1"
+
+var (
+	sensitivePathPrefixes = []string{".github/", ".claude/", ".forgecell/", ".githooks/", ".husky/", "scripts/"}
+	sensitiveBaseNames    = []string{".gitlab-ci.yml", "go.mod", "go.sum", "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lockb", "Makefile"}
+	sensitiveExtensions   = []string{".lock"}
+)
 
 type PolicyOutcome string
 
@@ -126,6 +140,12 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 	if len(plan.Setup) > 0 {
 		return decline("plan-has-setup", "the plan runs %d setup command(s), which a human must review", len(plan.Setup))
 	}
+	if len(plan.Artifacts) > 0 {
+		return decline("plan-has-artifacts", "the plan declares %d artifact write allowance(s), which a human must review", len(plan.Artifacts))
+	}
+	if len(plan.CheckInputs) > 0 {
+		return decline("plan-has-check-inputs", "the plan carries %d human-supplied check input(s), which a human must review", len(plan.CheckInputs))
+	}
 	if len(plan.Inputs.MandatoryConstraints) > 0 {
 		return decline("plan-has-mandatory-constraints", "the plan carries %d mandatory constraint(s), which a human must review", len(plan.Inputs.MandatoryConstraints))
 	}
@@ -174,6 +194,16 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 			return decline("scope-path-invalid", "scope path %q: %v", s.Path, err)
 		}
 	}
+	for _, s := range plan.Analysis.Scope {
+		if sensitiveScopePath(s.Path) {
+			return decline("scope-path-sensitive", "scope path %q is a CI or tooling control file on sensitive-path list %s, which a human must review", s.Path, sensitivePathListVersion)
+		}
+	}
+	// Defence in depth: intake already rejects this, but a ledger can predate or bypass it, and the
+	// policy never approves a plan that edits a file its own checks are defined by.
+	if err := readiness.ValidateInScopeDefinitions(plan.Analysis, plan.Evidence); err != nil {
+		return decline("scope-path-check-definition", "%v", err)
+	}
 	if len(plan.CodingAllowlist) == 0 {
 		return decline("allowlist-missing", "the plan carries no derived coding allowlist")
 	}
@@ -220,14 +250,36 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 		{Pointer: base + "/plan/policy", Observed: fmt.Sprintf("environment=[%s] credentialNames=%d setupNetwork=%s checkNetwork=%s containment=%s", strings.Join(pol.Environment, ","), len(pol.CredentialNames), pol.SetupNetwork, pol.CheckNetwork, pol.Containment)},
 		{Pointer: base + "/plan", Observed: fmt.Sprintf("allowNoChange=%t harnessTimeoutMs=%d ceilingMs=%d expectedProtectedDeltas=%d", plan.AllowNoChange, plan.HarnessTimeoutMS, coding.TimeoutCeilingMS(), len(plan.ExpectedProtectedDeltas))},
 		{Pointer: base + "/plan/codingAllowlist", Observed: fmt.Sprintf("%d entries, sha256 %x", len(derived), listed)},
+		{Pointer: base + "/plan/artifacts", Observed: fmt.Sprintf("%d artifact roots", len(plan.Artifacts))},
+		{Pointer: base + "/plan/checkInputs", Observed: fmt.Sprintf("%d check inputs", len(plan.CheckInputs))},
+		{Pointer: base + "/plan/analysis", Observed: fmt.Sprintf("sensitive-path list %s: %d scope paths examined", sensitivePathListVersion, len(paths))},
+		{Pointer: base + "/plan/analysis/checks", Observed: fmt.Sprintf("%d checks examined for scope paths cited by a check definition", len(plan.Analysis.Checks))},
 	}
 	return eval
 }
 
+// sensitiveScopePath reports whether a validated, clean repository path is on the
+// sensitive-path list.
+func sensitiveScopePath(p string) bool {
+	lower := strings.ToLower(p)
+	for _, prefix := range sensitivePathPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	base := path.Base(lower)
+	for _, name := range sensitiveBaseNames {
+		if base == strings.ToLower(name) {
+			return true
+		}
+	}
+	return slices.Contains(sensitiveExtensions, path.Ext(base))
+}
+
 // scopePolicyDecision evaluates the scope gate and, only on approve, builds the
-// decision to record. It neither approves nor saves: the decision has no effect
-// until the approval transaction in resume appends it in the same save as the
-// approved readiness event.
+// decision to record. It neither approves nor saves, and leaves At empty: the
+// decision has no effect until the approval transaction in resume stamps and
+// appends it in the same save as the approved readiness event.
 func scopePolicyDecision(r Record) (PolicyDecision, error) {
 	eval := EvaluateGatePolicy(r, formula.ScopeApproval)
 	if eval.Outcome != PolicyApprove {
@@ -238,7 +290,7 @@ func scopePolicyDecision(r Record) (PolicyDecision, error) {
 			return PolicyDecision{}, fmt.Errorf("a policy decision for this gate and plan is already recorded")
 		}
 	}
-	return PolicyDecision{Policy: eval.Policy, ApprovedBy: eval.ApprovedBy(), Gate: eval.Gate, PlanDigest: eval.PlanDigest, FormulaSHA256: eval.FormulaSHA256, At: stamp(), Evidence: slices.Clone(eval.Evidence)}, nil
+	return PolicyDecision{Policy: eval.Policy, ApprovedBy: eval.ApprovedBy(), Gate: eval.Gate, PlanDigest: eval.PlanDigest, FormulaSHA256: eval.FormulaSHA256, Evidence: slices.Clone(eval.Evidence)}, nil
 }
 
 // RecordScopePolicyApproval returns an in-memory copy of r with the scope
@@ -252,6 +304,7 @@ func RecordScopePolicyApproval(r Record) (Record, error) {
 	if err != nil {
 		return r, err
 	}
+	decision.At = stamp()
 	r.PolicyDecisions = append(slices.Clone(r.PolicyDecisions), decision)
 	return r, nil
 }

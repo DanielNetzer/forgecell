@@ -119,3 +119,58 @@ func TestGatePolicyKeepsExistingFormulaBytes(t *testing.T) {
 		t.Fatalf("recipe gained a mode or policy: %+v", f.Atoms[2])
 	}
 }
+
+func TestGatePolicyKeepsUnusualModeFormulaBytes(t *testing.T) {
+	const intakeAtom = "  - id: intake\n    type: intake\n"
+	const workAtom = "  - id: work\n    type: harness\n"
+	modes := []struct{ name, line string }{
+		{"integer", "    mode: 7\n"},
+		{"float", "    mode: 1.5\n"},
+		{"true", "    mode: true\n"},
+		{"false", "    mode: false\n"},
+		{"null", "    mode: null\n"},
+		{"tilde", "    mode: ~\n"},
+		{"blank scalar", "    mode:\n"},
+		{"empty string", "    mode: \"\"\n"},
+		{"flow sequence", "    mode: [policy]\n"},
+		{"block sequence", "    mode:\n      - policy\n"},
+		{"capitalised", "    mode: Policy\n"},
+		{"upper case", "    mode: POLICY\n"},
+		{"padded", "    mode: \"policy \"\n"},
+		{"mixed with human", "    mode: [human, policy]\n"},
+	}
+	placements := []struct {
+		name  string
+		place func(line string) string
+	}{
+		{"scope gate", func(line string) string { return withGate(scopeGate(line)) }},
+		{"review gate", func(line string) string {
+			return withGate("  - id: gate\n    type: gate\n    purpose: review\n" + line)
+		}},
+		{"gate without purpose", func(line string) string { return withGate(baseGate + line) }},
+		{"harness atom", func(line string) string { return strings.Replace(recipe, workAtom, workAtom+line, 1) }},
+		{"intake atom", func(line string) string { return strings.Replace(recipe, intakeAtom, intakeAtom+line, 1) }},
+	}
+	for _, place := range placements {
+		for _, mode := range modes {
+			t.Run(place.name+" "+mode.name, func(t *testing.T) {
+				text := place.place(mode.line)
+				if text == recipe {
+					t.Fatal("the placement did not change the Formula")
+				}
+				f, err := Parse([]byte(text))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if f.YAML != text || f.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte(text))) {
+					t.Fatal("bytes or hash changed")
+				}
+				for _, atom := range f.Atoms {
+					if id, ok := atom.DeclaresPolicy(); ok {
+						t.Fatalf("atom %s declared policy %q with mode %q", atom.ID, id, atom.Mode)
+					}
+				}
+			})
+		}
+	}
+}

@@ -49,6 +49,12 @@ a `policy` without `mode: policy`, and a `policy` key at the Formula root or ins
 - the plan digest and proposal history are intact and the plan has no continuation;
 - the intake analysis and the plan have no unknowns, the plan has no setup commands, no
   mandatory constraints and no `allowNoChange`, and no expected protected-regression delta;
+- the plan has no `artifacts` (artifact write allowances) and no `checkInputs` (human-supplied
+  frozen inputs); a human gate examines both, so either one declines;
+- no scope path is on the sensitive-path list below, and no scope path is one that a check
+  definition cites: a frozen definition file reached through a check's `definitions`, or an
+  exact non-test path named in a check's argv. This holds even when the check carries a
+  `reviewedAcceptance` repair, because the policy never approves edits to a check definition;
 - the plan's `harnessTimeoutMs` is within the coding binding's Formula ceiling;
 - the plan's execution policy is exactly the Lab default: `environment` is `["PATH"]`, there
   are no `credentialNames`, `setupNetwork` and `checkNetwork` are `unrestricted` and
@@ -62,20 +68,50 @@ declares no evaluable policy, so a human decides). An automatic decision is reco
 ledger as `approvedBy: policy:<id>@<formula-sha256>` with the ledger pointers it relied on,
 and is rendered as policy-approved, never as a human decision. Its evidence holds the values
 the evaluator observed (counts, the scope paths, the policy fields, the timeout, a hash of the
-derived allowlist), not fixed wording. Policies relax only the conditions above: approved
-checks still run repository code, and passing candidate checks is not independent acceptance.
+derived allowlist, the artifact and check-input counts, the sensitive-path list version and the
+number of scope paths examined against it), not fixed wording. Policies relax only the
+conditions above: approved checks still run repository code, and passing candidate checks is
+not independent acceptance.
 
-The policy does not examine the plan's `artifacts` (artifact write allowances) or `checkInputs`
-(human-supplied frozen inputs), and it does not re-read the live issue itself. A decision is
-recorded only inside the approval transaction, which re-reads the live issue, evidence, base,
-origin, branch and workspace capture as `run --approve` does, and persists the decision in the
-same save as the approved event. A changed issue declines and records nothing; the ledger stays
-at the waiting scope gate.
+The policy does not re-read the live issue itself. A decision is recorded only inside the
+approval transaction, which re-reads the live issue, evidence, base, origin, branch and
+workspace capture as `run --approve` does, and persists the decision in the same save as the
+approved event. A changed issue, base commit, origin, branch or frozen evidence set declines
+and records nothing; the ledger stays at the waiting scope gate.
 
 This change adds the Formula grammar, the evaluator, the ledger record and an internal
 approval-transaction mode. No runner applies a decision yet, so `forgecell run --approve`
 remains the only way a scope is approved, and `deliver-when-checks-pass` is accepted by
 validation but always evaluates to a human decision.
+
+### Sensitive-path list (version `v1`)
+
+A scope path on this list declines with `scope-path-sensitive`, because an edit there changes
+what later runs execute. A path that a check definition cites declines with
+`scope-path-check-definition`. The list is versioned, recorded in each decision's evidence and
+pinned by a test, so changing it is a reviewed change to the code, that test and this page.
+Matching runs on the already-validated clean path and ignores case:
+
+- directory prefixes at the repository root: `.github/`, `.claude/`, `.forgecell/`,
+  `.githooks/`, `.husky/` and `scripts/`. The whole `scripts/` directory is listed because the
+  CI workflow and the Formula baseline checks run several scripts from it;
+- file names at any depth: `.gitlab-ci.yml`, `go.mod`, `go.sum`, `package.json`,
+  `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `bun.lockb` and `Makefile`;
+- any file with a `.lock` extension.
+
+Paths under `.git` are already rejected by path validation. A decline only sends the plan to a
+human, who can approve it with `run --approve` as before.
+
+### Accepted residual risk: check argv
+
+Approved check argv runs repository code with unrestricted network access, a temporary `HOME`
+and a filtered environment, and no OS filesystem or network sandbox. This is an
+accepted residual risk of the Lab-default `auto-when-ready` policy. The policy does not
+restrict check argv: it adds no access beyond what a human approves on a default plan, where
+the same argv, network and containment are approved today. It does not decline checks that are
+not a Formula baseline or a derived regression check, because that would decline every
+model-proposed candidate check. Passing candidate checks is not independent acceptance. A
+stricter rule is a reviewed policy change.
 
 ### Downgrade behaviour
 
