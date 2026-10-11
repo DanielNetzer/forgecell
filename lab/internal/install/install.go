@@ -22,7 +22,8 @@ import (
 var notices []byte
 var versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$`)
 
-type Options struct{ Home, Bin, Source, Version string }
+// Protocol is the adapter protocol the release speaks; empty records the running binary's.
+type Options struct{ Home, Bin, Source, Version, Protocol string }
 type Result struct {
 	Version string `json:"version"`
 	Command string `json:"command"`
@@ -34,9 +35,10 @@ type manifest struct {
 	ProtocolVersion string `json:"protocolVersion,omitempty"`
 }
 
-func sum(raw []byte) string { h := sha256.Sum256(raw); return hex.EncodeToString(h[:]) }
-func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-func normalize(o Options) (Options, error) {
+func sum(raw []byte) string                { h := sha256.Sum256(raw); return hex.EncodeToString(h[:]) }
+func quote(s string) string                { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+func normalize(o Options) (Options, error) { return normalizeDirs(o, true) }
+func normalizeDirs(o Options, withBin bool) (Options, error) {
 	user, err := os.UserHomeDir()
 	if err != nil {
 		return o, err
@@ -51,17 +53,21 @@ func normalize(o Options) (Options, error) {
 	if err != nil {
 		return o, err
 	}
-	o.Bin, err = filepath.Abs(o.Bin)
-	if err != nil {
-		return o, err
+	dirs := []string{o.Home}
+	if withBin {
+		o.Bin, err = filepath.Abs(o.Bin)
+		if err != nil {
+			return o, err
+		}
+		dirs = append(dirs, o.Bin)
 	}
-	for _, dir := range []string{o.Home, o.Bin} {
+	for _, dir := range dirs {
 		if err = os.MkdirAll(dir, 0700); err != nil {
 			return o, err
 		}
 	}
 	o.Home, err = filepath.EvalSymlinks(o.Home)
-	if err != nil {
+	if err != nil || !withBin {
 		return o, err
 	}
 	o.Bin, err = filepath.EvalSymlinks(o.Bin)
@@ -159,6 +165,84 @@ func verify(dir string) (manifest, error) {
 	}
 	return m, nil
 }
+
+// stageRelease verifies o.Source and stores it as Home/releases/<version> without
+// touching current, previous, the launcher or the exposed command. The caller holds the
+// install lock and has created Home/releases.
+func stageRelease(ctx context.Context, o Options) (string, error) {
+	st, err := os.Stat(o.Source)
+	if err != nil {
+		return "", err
+	}
+	if !st.Mode().IsRegular() || st.Size() > 100_000_000 {
+		return "", fmt.Errorf("invalid release executable")
+	}
+	raw, err := os.ReadFile(o.Source)
+	if err != nil {
+		return "", err
+	}
+	protocol := o.Protocol
+	if protocol == "" {
+		protocol = harness.AdapterProtocolVersion
+	}
+	m := manifest{o.Version, sum(raw), protocol}
+	stage, err := os.MkdirTemp(o.Home, ".install-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(stage)
+	file := filepath.Join(stage, "forgecell")
+	if err = os.WriteFile(file, raw, 0755); err != nil {
+		return "", err
+	}
+	if err = os.WriteFile(filepath.Join(stage, "THIRD-PARTY-NOTICES.txt"), notices, 0644); err != nil {
+		return "", err
+	}
+	meta, _ := json.Marshal(m)
+	if err = os.WriteFile(filepath.Join(stage, "manifest.json"), meta, 0600); err != nil {
+		return "", err
+	}
+	if err = smoke(ctx, file, o.Version); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(o.Home, "releases", o.Version)
+	if _, e := os.Lstat(dest); e == nil {
+		existing, e := verify(dest)
+		if e != nil {
+			return "", e
+		}
+		if existing.Version != m.Version || existing.SHA256 != m.SHA256 || (o.Protocol != "" && existing.ProtocolVersion != m.ProtocolVersion) {
+			return "", fmt.Errorf("release version already exists with different content")
+		}
+	} else if !os.IsNotExist(e) {
+		return "", e
+	} else if err = os.Rename(stage, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+// Stage stores a verified release beside the active ones without activating it:
+// current, previous, the launcher and the exposed command are left alone.
+func Stage(ctx context.Context, o Options) (dir string, err error) {
+	o, err = normalizeDirs(o, false)
+	if err != nil {
+		return "", err
+	}
+	if !versionPattern.MatchString(o.Version) {
+		return "", fmt.Errorf("only versioned release builds can be installed")
+	}
+	unlock, err := lock(o)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if err = os.MkdirAll(filepath.Join(o.Home, "releases"), 0700); err != nil {
+		return "", err
+	}
+	return stageRelease(ctx, o)
+}
+
 func Install(ctx context.Context, o Options) (result Result, err error) {
 	o, err = normalize(o)
 	if err != nil {
@@ -211,49 +295,8 @@ func Install(ctx context.Context, o Options) (result Result, err error) {
 			return result, err
 		}
 	}
-	st, err := os.Stat(o.Source)
+	dest, err := stageRelease(ctx, o)
 	if err != nil {
-		return result, err
-	}
-	if !st.Mode().IsRegular() || st.Size() > 100_000_000 {
-		return result, fmt.Errorf("invalid release executable")
-	}
-	raw, err := os.ReadFile(o.Source)
-	if err != nil {
-		return result, err
-	}
-	m := manifest{o.Version, sum(raw), harness.AdapterProtocolVersion}
-	stage, err := os.MkdirTemp(o.Home, ".install-")
-	if err != nil {
-		return result, err
-	}
-	defer os.RemoveAll(stage)
-	file := filepath.Join(stage, "forgecell")
-	if err = os.WriteFile(file, raw, 0755); err != nil {
-		return result, err
-	}
-	if err = os.WriteFile(filepath.Join(stage, "THIRD-PARTY-NOTICES.txt"), notices, 0644); err != nil {
-		return result, err
-	}
-	meta, _ := json.Marshal(m)
-	if err = os.WriteFile(filepath.Join(stage, "manifest.json"), meta, 0600); err != nil {
-		return result, err
-	}
-	if err = smoke(ctx, file, o.Version); err != nil {
-		return result, err
-	}
-	dest := filepath.Join(o.Home, "releases", o.Version)
-	if _, e := os.Lstat(dest); e == nil {
-		existing, e := verify(dest)
-		if e != nil {
-			return result, e
-		}
-		if existing.Version != m.Version || existing.SHA256 != m.SHA256 {
-			return result, fmt.Errorf("release version already exists with different content")
-		}
-	} else if !os.IsNotExist(e) {
-		return result, e
-	} else if err = os.Rename(stage, dest); err != nil {
 		return result, err
 	}
 	if _, e := os.Lstat(launcher); os.IsNotExist(e) {
