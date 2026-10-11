@@ -2,7 +2,9 @@ package molecule
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -117,6 +119,29 @@ func TestGatePolicyScopeDeclinesEachUnreadyCondition(t *testing.T) {
 		{"protected deltas", func(r *Record) {
 			r.Readiness.Plans[0].Plan.ExpectedProtectedDeltas = []readiness.ProtectedDelta{{CheckID: "regression", Package: "example.test/pkg", Test: "TestX"}}
 		}, "plan-has-protected-deltas"},
+		{"ledger unknowns", func(r *Record) { r.Analysis.Unknowns = []string{"Is the base branch stable?"} }, "analysis-has-unknowns"},
+		{"plan unknowns", func(r *Record) {
+			r.Readiness.Plans[0].Plan.Analysis.Unknowns = []string{"Is the base branch stable?"}
+		}, "plan-has-unknowns"},
+		{"setup command", func(r *Record) {
+			r.Readiness.Plans[0].Plan.Setup = []readiness.Check{{ID: "setup", Category: "setup", Argv: []string{"/bin/sh", "-c", "true"}, Dir: ".", TimeoutMS: 1000}}
+		}, "plan-has-setup"},
+		{"mandatory constraint", func(r *Record) {
+			r.Readiness.Plans[0].Plan.Inputs.MandatoryConstraints = []string{"signed commits"}
+		}, "plan-has-mandatory-constraints"},
+		{"allow no change", func(r *Record) { r.Readiness.Plans[0].Plan.AllowNoChange = true }, "plan-allows-no-change"},
+		{"timeout above the Formula ceiling", func(r *Record) { r.Readiness.Plans[0].Plan.HarnessTimeoutMS = 3600001 }, "harness-timeout-invalid"},
+		{"credential name", func(r *Record) {
+			r.Readiness.Plans[0].Plan.Policy.CredentialNames = []string{"GITHUB_TOKEN"}
+		}, "policy-has-credentials"},
+		{"extra environment name", func(r *Record) {
+			r.Readiness.Plans[0].Plan.Policy.Environment = []string{"PATH", "HOME"}
+		}, "policy-environment-not-default"},
+		{"empty environment", func(r *Record) { r.Readiness.Plans[0].Plan.Policy.Environment = nil }, "policy-environment-not-default"},
+		{"other environment", func(r *Record) { r.Readiness.Plans[0].Plan.Policy.Environment = []string{"HOME"} }, "policy-environment-not-default"},
+		{"setup network", func(r *Record) { r.Readiness.Plans[0].Plan.Policy.SetupNetwork = "none" }, "policy-setup-network-not-default"},
+		{"check network", func(r *Record) { r.Readiness.Plans[0].Plan.Policy.CheckNetwork = "none" }, "policy-check-network-not-default"},
+		{"containment", func(r *Record) { r.Readiness.Plans[0].Plan.Policy.Containment = "unfiltered" }, "policy-containment-not-default"},
 		{"missing allowlist", func(r *Record) { r.Readiness.Plans[0].Plan.CodingAllowlist = nil }, "allowlist-missing"},
 		{"extra allowlist entry", func(r *Record) {
 			p := &r.Readiness.Plans[0].Plan
@@ -330,18 +355,83 @@ func pointerTarget(doc any, pointer string) bool {
 	return true
 }
 
-func TestGatePolicyRecordsIdentityAndEvidence(t *testing.T) {
-	_, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
-	mdBefore, _ := os.ReadFile(filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
-	if strings.Contains(string(mdBefore), "Policy decisions") {
-		t.Fatal("a Markdown ledger without decisions changed")
-	}
-	out, err := RecordScopePolicyApproval(r)
+func policyLoaded(t *testing.T, o Options) formula.Loaded {
+	t.Helper()
+	loaded, err := formula.Load(o.LabDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.PolicyDecisions) != 0 || len(out.PolicyDecisions) != 1 {
-		t.Fatalf("decisions: input %d, output %d", len(r.PolicyDecisions), len(out.PolicyDecisions))
+	return loaded
+}
+
+// approveByPolicy runs the approval transaction with the scope policy as approver.
+func approveByPolicy(t *testing.T, o Options, r Record) (Record, error) {
+	t.Helper()
+	o.Approve = r.Readiness.Plans[0].Digest
+	return resumeByPolicy(context.Background(), o, policyLoaded(t, o), r.Issue.Number, r.Issue.Repo)
+}
+
+func ledgerFiles(t *testing.T, r Record) (string, string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(r.LabDir, "ledgers", r.ID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, err := os.ReadFile(filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw), string(md)
+}
+
+// assertNothingApproved fails unless the ledger still waits at the scope gate with
+// no decision, no coding attempt and no coding process.
+func assertNothingApproved(t *testing.T, r Record) {
+	t.Helper()
+	saved := loadRecord(t, r.LabDir, r.ID)
+	if saved.Readiness == nil || saved.Readiness.Phase != "scope-waiting" {
+		t.Fatalf("the ledger left the scope gate: %+v", saved.Readiness)
+	}
+	for _, e := range saved.Readiness.Events {
+		if e.Kind != "proposed" {
+			t.Fatalf("unexpected readiness event %q", e.Kind)
+		}
+	}
+	if len(saved.PolicyDecisions) != 0 || len(saved.HarnessAttempts) != 0 {
+		t.Fatalf("decisions %d, harness attempts %d", len(saved.PolicyDecisions), len(saved.HarnessAttempts))
+	}
+	if _, err := os.Stat(filepath.Join(saved.Workspace.Path, "request.json")); !os.IsNotExist(err) {
+		t.Fatal("the coding harness ran")
+	}
+}
+
+func TestGatePolicyRecordsIdentityAndEvidence(t *testing.T) {
+	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	jsonBefore, mdBefore := ledgerFiles(t, r)
+	if strings.Contains(mdBefore, "Policy decisions") {
+		t.Fatal("a Markdown ledger without decisions changed")
+	}
+	// The projection is in memory only: it must not reach the ledger.
+	pending, err := RecordScopePolicyApproval(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.PolicyDecisions) != 0 || len(pending.PolicyDecisions) != 1 {
+		t.Fatalf("decisions: input %d, output %d", len(r.PolicyDecisions), len(pending.PolicyDecisions))
+	}
+	if _, err = RecordScopePolicyApproval(pending); err == nil {
+		t.Fatal("the same policy decision was projected twice")
+	}
+	if jsonAfter, mdAfter := ledgerFiles(t, r); jsonAfter != jsonBefore || mdAfter != mdBefore {
+		t.Fatal("the in-memory projection changed the ledger")
+	}
+
+	if _, err = approveByPolicy(t, o, r); err != nil {
+		t.Fatal(err)
+	}
+	out := loadRecord(t, r.LabDir, r.ID)
+	if len(out.PolicyDecisions) != 1 {
+		t.Fatalf("persisted decisions: %d", len(out.PolicyDecisions))
 	}
 	d := out.PolicyDecisions[0]
 	sha := r.FormulaSnapshot.SHA256
@@ -386,14 +476,8 @@ func TestGatePolicyRecordsIdentityAndEvidence(t *testing.T) {
 		}
 	}
 
-	if err = save(out); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := os.ReadFile(filepath.Join(r.LabDir, "ledgers", r.ID+".json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := ledger.Decode(saved)
+	saved, md := ledgerFiles(t, out)
+	decoded, err := ledger.Decode([]byte(saved))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,16 +492,212 @@ func TestGatePolicyRecordsIdentityAndEvidence(t *testing.T) {
 	if !reflect.DeepEqual(round.PolicyDecisions, out.PolicyDecisions) {
 		t.Fatalf("decision did not survive the ledger round trip: %+v", round.PolicyDecisions)
 	}
-	md, err := os.ReadFile(filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, want := range []string{"Approved by: policy:auto-when-ready@" + sha, "policy-approved", d.PlanDigest, d.Evidence[0].Pointer} {
-		if !strings.Contains(string(md), want) {
+		if !strings.Contains(md, want) {
 			t.Fatalf("Markdown ledger lacks %q", want)
 		}
 	}
 	if _, err = RecordScopePolicyApproval(out); err == nil {
 		t.Fatal("the same policy decision was recorded twice")
+	}
+}
+
+func TestGatePolicyAcceptsExactLabDefaultPolicy(t *testing.T) {
+	_, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	p := r.Readiness.Plans[0].Plan
+	if !reflect.DeepEqual(p.Policy.Environment, []string{"PATH"}) || len(p.Policy.CredentialNames) != 0 || p.Policy.SetupNetwork != "unrestricted" || p.Policy.CheckNetwork != "unrestricted" || p.Policy.Containment != "filtered-environment" {
+		t.Fatalf("Run no longer writes the Lab default policy the evaluator accepts: %+v", p.Policy)
+	}
+	if len(p.Setup) != 0 || len(p.Inputs.MandatoryConstraints) != 0 || len(p.Analysis.Unknowns) != 0 || len(r.Analysis.Unknowns) != 0 || p.AllowNoChange || p.HarnessTimeoutMS != 0 {
+		t.Fatalf("the default plan is not a plain default plan: %+v", p)
+	}
+	if got := EvaluateGatePolicy(r, formula.ScopeApproval); got.Outcome != PolicyApprove {
+		t.Fatalf("a default Lab plan was not approved: %+v", got)
+	}
+}
+
+func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
+	_, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	observe := func(r Record) map[string]string {
+		t.Helper()
+		got := EvaluateGatePolicy(r, formula.ScopeApproval)
+		if got.Outcome != PolicyApprove {
+			t.Fatalf("%+v", got)
+		}
+		seen := map[string]string{}
+		for _, e := range got.Evidence {
+			seen[e.Pointer] = e.Observed
+			if strings.Contains(e.Observed, "all exact repository paths") || strings.Contains(e.Observed, "equal to the allowlist derived") {
+				t.Fatalf("evidence holds constant text: %+v", e)
+			}
+		}
+		return seen
+	}
+	const plan = "/readiness/plans/0/plan"
+	plain := observe(r)
+	list := r.Readiness.Plans[0].Plan.CodingAllowlist
+	sum := sha256.Sum256([]byte(strings.Join(list, "\n")))
+	for _, tc := range []struct{ pointer, want string }{
+		{"/analysis/questions", "0 questions"},
+		{"/analysis/unknowns", "0 unknowns"},
+		{plan + "/analysis/questions", "0 questions"},
+		{plan + "/analysis/unknowns", "0 unknowns"},
+		{plan + "/analysis/scope", "2 paths: code.txt, request.json"},
+		{plan + "/setup", "0 setup commands"},
+		{plan + "/inputs/mandatoryConstraints", "0 mandatory constraints"},
+		{plan + "/policy", "environment=[PATH] credentialNames=0 setupNetwork=unrestricted checkNetwork=unrestricted containment=filtered-environment"},
+		{plan, "allowNoChange=false harnessTimeoutMs=0 ceilingMs=0 expectedProtectedDeltas=0"},
+		{plan + "/codingAllowlist", fmt.Sprintf("%d entries, sha256 %x", len(list), sum)},
+		{"/checkoutStatus", "available"},
+		{"/readiness/phase", "scope-waiting"},
+		{"/readiness/plans/0/digest", r.Readiness.Plans[0].Digest},
+		{"/formulaSnapshot/sha256", r.FormulaSnapshot.SHA256},
+	} {
+		if plain[tc.pointer] != tc.want {
+			t.Fatalf("evidence %s observed %q, want %q", tc.pointer, plain[tc.pointer], tc.want)
+		}
+	}
+
+	// A different plan yields different observations, so the values are not constant.
+	wider := cloneRecord(t, r)
+	p := &wider.Readiness.Plans[0].Plan
+	p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "docs/extra.md", Reason: "Documentation", Evidence: []string{"issue"}})
+	digest, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wider.Readiness.Plans[0].Digest = digest
+	wider.Readiness.Events[0].Digest = digest
+	if got := observe(wider)[plan+"/analysis/scope"]; got != "3 paths: code.txt, request.json, docs/extra.md" {
+		t.Fatalf("scope evidence observed %q", got)
+	}
+}
+
+func TestGatePolicyApprovalPersistsDecisionWithApprovedEvent(t *testing.T) {
+	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	digest := r.Readiness.Plans[0].Digest
+	assertNothingApproved(t, r)
+
+	// The coding process cannot start before the approval is persisted, so the
+	// ledger as it stands when preparation runs is the earliest observable state.
+	var atStart Record
+	prepared := false
+	o.PrepareWorkspace = func(context.Context, Workspace) error {
+		prepared = true
+		raw, err := os.ReadFile(filepath.Join(o.LabDir, "ledgers", r.ID+".json"))
+		if err != nil {
+			t.Error(err)
+			return err
+		}
+		return json.Unmarshal(raw, &atStart)
+	}
+	pre := EvaluateGatePolicy(r, formula.ScopeApproval)
+	got, err := approveByPolicy(t, o, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared {
+		t.Fatal("approval did not reach coding")
+	}
+	approved := false
+	for _, e := range atStart.Readiness.Events {
+		approved = approved || (e.Kind == "approved" && e.Digest == digest)
+	}
+	if !approved || len(atStart.PolicyDecisions) != 1 || atStart.PolicyDecisions[0].PlanDigest != digest {
+		t.Fatalf("approval and decision were not persisted together: events %+v, decisions %+v", atStart.Readiness.Events, atStart.PolicyDecisions)
+	}
+	if !reflect.DeepEqual(atStart.PolicyDecisions[0].Evidence, pre.Evidence) {
+		t.Fatal("the recorded evidence differs from the evaluation of the pre-approval record")
+	}
+	saved := loadRecord(t, o.LabDir, r.ID)
+	if got.Status != "waiting" || len(got.PolicyDecisions) != 1 || len(saved.PolicyDecisions) != 1 || len(saved.HarnessAttempts) != 1 {
+		t.Fatalf("status %s, decisions %d/%d, attempts %d", got.Status, len(got.PolicyDecisions), len(saved.PolicyDecisions), len(saved.HarnessAttempts))
+	}
+	if saved.PolicyDecisions[0].ApprovedBy != pre.ApprovedBy() {
+		t.Fatalf("approvedBy %q", saved.PolicyDecisions[0].ApprovedBy)
+	}
+}
+
+func TestGatePolicyApprovalDeclinesChangedIssue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*Issue)
+	}{
+		{"title", func(i *Issue) { i.Title = "A different title" }},
+		{"body", func(i *Issue) { i.Body = "Write something else" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+			o.ReadIssue = func(context.Context, string, int64, string) (Issue, error) {
+				i := Issue{Number: 12, Repo: "acme/widgets", Title: "Change code", Body: "Write changed", URL: "https://github.com/acme/widgets/issues/12", State: "OPEN"}
+				tc.edit(&i)
+				return i, nil
+			}
+			if EvaluateGatePolicy(r, formula.ScopeApproval).Outcome != PolicyApprove {
+				t.Fatal("the recorded plan is ready, so only the live issue can decline")
+			}
+			jsonBefore, mdBefore := ledgerFiles(t, r)
+			_, err := approveByPolicy(t, o, r)
+			if err == nil || !strings.Contains(err.Error(), "readiness inputs changed") {
+				t.Fatalf("a changed issue was not detected: %v", err)
+			}
+			assertNothingApproved(t, r)
+			if jsonAfter, mdAfter := ledgerFiles(t, r); jsonAfter != jsonBefore || mdAfter != mdBefore {
+				t.Fatal("a declined approval changed the ledger")
+			}
+		})
+	}
+}
+
+func TestGatePolicyApprovalDeclinedByPolicyRecordsNothing(t *testing.T) {
+	t.Run("plan not ready", func(t *testing.T) {
+		o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+		r.Analysis.Unknowns = []string{"Is the base branch stable?"}
+		if err := save(r); err != nil {
+			t.Fatal(err)
+		}
+		jsonBefore, mdBefore := ledgerFiles(t, r)
+		_, err := approveByPolicy(t, o, r)
+		if err == nil || !strings.Contains(err.Error(), "analysis-has-unknowns") {
+			t.Fatalf("%v", err)
+		}
+		assertNothingApproved(t, r)
+		if jsonAfter, mdAfter := ledgerFiles(t, r); jsonAfter != jsonBefore || mdAfter != mdBefore {
+			t.Fatal("a declined approval changed the ledger")
+		}
+	})
+	t.Run("human gate", func(t *testing.T) {
+		o, r := scopeReadyRecord(t, defaultScopeAtom, defaultReviewAtom)
+		_, err := approveByPolicy(t, o, r)
+		if err == nil || !strings.Contains(err.Error(), "gate-is-human") {
+			t.Fatalf("%v", err)
+		}
+		assertNothingApproved(t, r)
+	})
+}
+
+func TestGatePolicyHumanApprovalRecordsNoPolicyDecision(t *testing.T) {
+	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	if EvaluateGatePolicy(r, formula.ScopeApproval).Outcome != PolicyApprove {
+		t.Fatal("the policy would approve this plan, but Run must not apply it")
+	}
+	assertNothingApproved(t, r)
+
+	o.Approve = r.Readiness.Plans[0].Digest
+	got, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := loadRecord(t, o.LabDir, r.ID)
+	if len(got.PolicyDecisions) != 0 || len(saved.PolicyDecisions) != 0 || len(saved.HarnessAttempts) != 1 {
+		t.Fatalf("decisions %d/%d, attempts %d", len(got.PolicyDecisions), len(saved.PolicyDecisions), len(saved.HarnessAttempts))
+	}
+	for _, a := range saved.Atoms {
+		if a.ID == "scope" && (a.Provenance == nil || len(a.Provenance.Actions) != 1 || a.Provenance.Actions[0].ResolvedSource != "readiness-approval") {
+			t.Fatalf("the human approval was not recorded as one: %+v", a.Provenance)
+		}
+	}
+	if _, md := ledgerFiles(t, saved); strings.Contains(md, "Policy decisions") {
+		t.Fatal("a human approval rendered a policy decision")
 	}
 }

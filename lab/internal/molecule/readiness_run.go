@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -609,7 +610,21 @@ func findPending(lab, digest string) (Record, error) {
 	}
 	return found, nil
 }
-func resume(ctx context.Context, o Options, expected formula.Loaded, number int64, repo string) (r Record, err error) {
+
+// resume is the human approval path: o.Approve names the digest a human reviewed.
+func resume(ctx context.Context, o Options, expected formula.Loaded, number int64, repo string) (Record, error) {
+	return resumeApproved(ctx, o, expected, number, repo, false)
+}
+
+// resumeByPolicy is the approval transaction with the scope gate's policy as the
+// approver. It runs every live check the human path runs, and records a decision
+// only when the policy approves the pre-approval record and Approve then succeeds
+// against the live inputs. Nothing calls it from Run or the CLI yet.
+func resumeByPolicy(ctx context.Context, o Options, expected formula.Loaded, number int64, repo string) (Record, error) {
+	return resumeApproved(ctx, o, expected, number, repo, true)
+}
+
+func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, number int64, repo string, byPolicy bool) (r Record, err error) {
 	f := expected.Formula
 	r, err = findPending(o.LabDir, o.Approve)
 	if err != nil {
@@ -638,6 +653,15 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	}
 	if r.Issue.Number != number || r.Issue.Repo != repo || r.FormulaID != f.ID || r.FormulaSnapshot.SHA256 != f.SHA256 {
 		return r, fmt.Errorf("issue or Formula changed; refresh intake")
+	}
+	var decision PolicyDecision
+	if byPolicy {
+		if decision, err = scopePolicyDecision(r); err != nil {
+			return r, err
+		}
+		if decision.PlanDigest != o.Approve {
+			return r, fmt.Errorf("scope policy approved plan %s, not the requested plan %s", decision.PlanDigest, o.Approve)
+		}
 	}
 	if err = ValidateVerificationHistory(r); err != nil {
 		return r, err
@@ -752,9 +776,15 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	r.Readiness = &state
-	startAtomAction(&r, r.Atoms[roles.atoms[formula.ScopeApproval]].ID, "scope-"+o.Approve, o.Approve, "readiness-approval", "record-exact-scope-approval")
+	approvalSource, approvalDetail := "readiness-approval", "Exact readiness plan approved; no publication authorized."
+	if byPolicy {
+		decision.At = stamp()
+		r.PolicyDecisions = append(slices.Clone(r.PolicyDecisions), decision)
+		approvalSource, approvalDetail = "readiness-policy-approval", "Exact readiness plan approved by "+decision.ApprovedBy+"; no publication authorized."
+	}
+	startAtomAction(&r, r.Atoms[roles.atoms[formula.ScopeApproval]].ID, "scope-"+o.Approve, o.Approve, approvalSource, "record-exact-scope-approval")
 	observeAtomAction(&r, r.Atoms[roles.atoms[formula.ScopeApproval]].ID, "scope-"+o.Approve, "record-exact-scope-approval", "approved", ProvenanceEvidence{Pointer: "/readiness/events"})
-	atom(&r, roles.atoms[formula.ScopeApproval], "done", "Exact readiness plan approved; no publication authorized.")
+	atom(&r, roles.atoms[formula.ScopeApproval], "done", approvalDetail)
 	if p.Continuation == "" {
 		atom(&r, roles.atoms[formula.Coding], "active", "Coding approved scope")
 	}

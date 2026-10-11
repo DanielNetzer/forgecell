@@ -46,19 +46,45 @@ a `policy` without `mode: policy`, and a `policy` key at the Formula root or ins
 - the scope is not empty and every path is an exact repository path;
 - the plan's coding allowlist is non-empty and equals the allowlist derived from the Formula
   snapshot and the plan's checks;
-- the plan digest and proposal history are intact and the plan has no continuation.
+- the plan digest and proposal history are intact and the plan has no continuation;
+- the intake analysis and the plan have no unknowns, the plan has no setup commands, no
+  mandatory constraints and no `allowNoChange`, and no expected protected-regression delta;
+- the plan's `harnessTimeoutMs` is within the coding binding's Formula ceiling;
+- the plan's execution policy is exactly the Lab default: `environment` is `["PATH"]`, there
+  are no `credentialNames`, `setupNetwork` and `checkNetwork` are `unrestricted` and
+  `containment` is `filtered-environment`. These are what a human approves on every default
+  plan, so the policy adds no access. Any credential name, any other environment name, and
+  any other network or containment value declines. The accepted set is fixed in the
+  evaluator rather than read from the Lab defaults, so a later tightening is a reviewed change.
 
 Any other result is `decline` (a condition fails, so a human decides) or `human` (the gate
 declares no evaluable policy, so a human decides). An automatic decision is recorded in the
 ledger as `approvedBy: policy:<id>@<formula-sha256>` with the ledger pointers it relied on,
-and is rendered as policy-approved, never as a human decision. Policies relax nothing else:
-approved checks still run repository code, and passing candidate checks is not independent
-acceptance.
+and is rendered as policy-approved, never as a human decision. Its evidence holds the values
+the evaluator observed (counts, the scope paths, the policy fields, the timeout, a hash of the
+derived allowlist), not fixed wording. Policies relax only the conditions above: approved
+checks still run repository code, and passing candidate checks is not independent acceptance.
 
-This change adds the Formula grammar, the evaluator and the ledger record only. No runner
-applies a decision yet, so `forgecell run --approve` remains the only way a scope is
-approved, and `deliver-when-checks-pass` is accepted by validation but always evaluates to
-a human decision.
+The policy does not examine the plan's `artifacts` (artifact write allowances) or `checkInputs`
+(human-supplied frozen inputs), and it does not re-read the live issue itself. A decision is
+recorded only inside the approval transaction, which re-reads the live issue, evidence, base,
+origin, branch and workspace capture as `run --approve` does, and persists the decision in the
+same save as the approved event. A changed issue declines and records nothing; the ledger stays
+at the waiting scope gate.
+
+This change adds the Formula grammar, the evaluator, the ledger record and an internal
+approval-transaction mode. No runner applies a decision yet, so `forgecell run --approve`
+remains the only way a scope is approved, and `deliver-when-checks-pass` is accepted by
+validation but always evaluates to a human decision.
+
+### Downgrade behaviour
+
+`policyDecisions` is an additive ledger field. A Lab binary that predates it still decodes a
+ledger that carries it, but it saves the ledger from its own record type and silently drops
+the field the next time it writes that ledger. The record that a policy approved a scope is
+then lost, although the approved readiness event remains. Do not run an older Lab binary on a
+ledger that has a policy decision. The ledger schema version is unchanged, so an older writer
+is not refused.
 
 The check Atom executes reviewed argv, working directories and timeouts after validating
 command definition hashes. It uses a temporary HOME and filtered environment, with
