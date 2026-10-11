@@ -726,7 +726,8 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	if err != nil {
 		return r, err
 	}
-	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist})
+	forgecell := harness.RecordProvenance(codingBinding.Command)
+	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell})
 	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+codingBinding.Binding, "invoke-coding-harness")
 	recordExecutedBinding(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, codingBinding.Binding)
 	timeoutMS, timeoutSource := codingTimeout(codingBinding, p)

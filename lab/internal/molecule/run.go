@@ -90,6 +90,7 @@ type Atom struct {
 	ElapsedMS  int64           `json:"elapsedMs,omitempty"`
 }
 type HarnessAttempt struct {
+	Forgecell       *harness.Provenance         `json:"forgecell,omitempty"`
 	Coding          *harness.CodingOutcome      `json:"coding,omitempty"`
 	CodingAllowlist []string                    `json:"codingAllowlist,omitempty"`
 	ID              string                      `json:"id"`
