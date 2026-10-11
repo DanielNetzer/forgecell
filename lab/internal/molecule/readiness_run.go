@@ -138,6 +138,39 @@ func issueInput(i Issue) readiness.Issue {
 	return readiness.Issue{Repository: i.Repo, Number: i.Number, URL: i.URL, State: i.State, Title: i.Title, Body: i.Body, UpdatedAt: i.UpdatedAt}
 }
 
+// analyzeWithWrapper runs the separately approved analysis wrapper. The decision,
+// including a refusal, is persisted as immutable evidence and cited in the
+// ledger before any wrapper process starts. Every failure is returned as an
+// error, so intake stops with no coding harness and no fallback analysis.
+// b is the resolved analysis role binding, which may differ from f.Harness.
+func analyzeWithWrapper(ctx context.Context, r *Record, f formula.Formula, b formula.Binding, request map[string]any) (readiness.Analysis, []ProvenanceEvidence, error) {
+	ref := b.AnalysisWrapper
+	ordinal := len(r.AnalysisAttempts)
+	decision := harness.ApproveAnalysisWrapper(r.LabDir, ref.Manifest, ref.SHA256)
+	file, err := historyFile(*r, fmt.Sprintf("analysis-wrapper-%d-decision.json", ordinal), decision)
+	if err != nil {
+		return readiness.Analysis{}, nil, fmt.Errorf("analysis wrapper decision could not be persisted; no process was started: %w", err)
+	}
+	evidence := []ProvenanceEvidence{fileProvenance(file)}
+	r.Notes = append(r.Notes, fmt.Sprintf("Analysis wrapper decision %q for attempt %d is recorded at %s (SHA-256 %s). Declared controls are wrapper claims, not Forgecell-verified containment.", decision.Status, ordinal, file.Path, file.SHA256))
+	if err = save(*r); err != nil {
+		return readiness.Analysis{}, evidence, fmt.Errorf("analysis wrapper decision could not be saved to the ledger; no process was started: %w", err)
+	}
+	if err = decision.Err(); err != nil {
+		return readiness.Analysis{}, evidence, err
+	}
+	contract := []map[string]any{}
+	for _, a := range f.Atoms {
+		if a.Type == "check" {
+			contract = append(contract, map[string]any{"id": a.ID, "command": a.Command, "timeoutMs": a.TimeoutMS, "source": a.Source, "binding": a.Binding, "workflows": a.Workflows})
+		}
+	}
+	request["formulaCheckContract"] = contract
+	result := harness.InvokeAnalysisWrapper(ctx, r.LabDir, decision, request, time.Duration(b.TimeoutMS)*time.Millisecond)
+	a, err := decodeAnalysisResult(result)
+	return a, evidence, err
+}
+
 // Lookup uses approved identity and never fills historical absence.
 func atomProvenance(r *Record, id string) *AtomProvenance {
 	for i := range r.Atoms {
@@ -325,11 +358,18 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		r.RemotePolicy = &policy
 	}
 	analysis := o.Analyze
+	var wrapperEvidence []ProvenanceEvidence
 	if analysis == nil {
 		analysis = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+			inputs := readiness.VerificationInputs{CheckInputs: o.CheckInputs, Checks: o.Checks, Setup: o.Setup, Artifacts: o.Artifacts, Policy: o.Policy}
+			if b.AnalysisWrapper != nil {
+				a, evidence, err := analyzeWithWrapper(ctx, &r, f, b, analysisRequest(ctx, i, s, inputs))
+				wrapperEvidence = evidence
+				return a, err
+			}
 			// Resolve configuration from the source checkout, then Execute constrains the
 			// provider and moves analysis to a temporary directory before the model runs.
-			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, analysisRequest(ctx, i, s, readiness.VerificationInputs{CheckInputs: o.CheckInputs, Checks: o.Checks, Setup: o.Setup, Artifacts: o.Artifacts, Policy: o.Policy}))
+			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, analysisRequest(ctx, i, s, inputs))
 			return decodeAnalysisResult(result)
 		}
 	}
@@ -353,6 +393,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		analysisID := fmt.Sprintf("analysis-%d", ordinal)
 		analysisBinding := roles.bindings[formula.IntakeRole]
 		analysisSource := "bound-harness:" + analysisBinding.Binding
+		if analysisBinding.AnalysisWrapper != nil && o.Analyze == nil {
+			analysisSource = "analysis-wrapper:" + analysisBinding.Binding + "@sha256:" + analysisBinding.AnalysisWrapper.SHA256
+		}
 		if o.Analyze != nil {
 			analysisSource = "supplied-analysis-function"
 		}
@@ -365,6 +408,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if correction != nil {
 			callCtx = withAnalysisCorrection(ctx, *correction)
 		}
+		wrapperEvidence = nil
 		a, err = analysis(callCtx, analysisBinding, issue, snapshot)
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
@@ -385,7 +429,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if err != nil {
 			analysisResult = "analysis-failed"
 		}
-		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, analysisID, "analyze-ticket", analysisResult, ProvenanceEvidence{Pointer: fmt.Sprintf("/analysisAttempts/%d", len(r.AnalysisAttempts)-1)})
+		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, analysisID, "analyze-ticket", analysisResult, append([]ProvenanceEvidence{{Pointer: fmt.Sprintf("/analysisAttempts/%d", len(r.AnalysisAttempts)-1)}}, wrapperEvidence...)...)
 		if e = save(r); e != nil {
 			return r, e
 		}

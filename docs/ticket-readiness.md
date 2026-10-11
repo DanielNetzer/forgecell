@@ -215,7 +215,84 @@ plugins, apps and configured MCP servers. A live ambiguous-input probe passed on
 its model selection can be preserved explicitly. Claude Code needs the verified
 safe-mode/tool controls; a live Claude analysis probe is still outstanding. Cursor
 and custom bindings remain inspectable but stop new readiness runs because their
-read-only action isolation has not been established. No provider substitution.
+read-only action isolation has not been established, unless a custom binding
+carries an approved analysis wrapper (below). No provider substitution.
+
+### Approved analysis wrapper for a custom binding
+
+A custom coding binding can opt in to ticket analysis by adding a separate
+`analysisWrapper` reference (`manifest`: a Lab-relative path, `sha256`: its exact
+digest) to the Formula `harness` block. The coding command, its argv and native
+adapters are unchanged. A Formula without the reference parses and hashes exactly
+as before and gains no analysis capability. A reference on a native `__adapter`
+binding, or without a coding command, is refused.
+
+The manifest is a strict, size-bounded JSON file that pins by content digest the
+wrapper executable, its argv, configuration files, interpreter, policy files and
+reviewed enforcement-critical dependencies. A mutable dependency nobody explained
+is declared `unknown` and is never treated as verified. It also declares the
+wrapper's own claims about inputs (stdin only), scratch writes, processes, tools,
+network and credentials. The enforcement evidence is a pinned file: each entry
+names a file `path` and its `sha256` plus origin, limitations and review basis,
+and Forgecell recomputes the file's digest at every verification. A digest that
+points at no file is refused, and the digest it computed is recorded in the
+decision.
+
+The permitted control vocabulary is deliberately small. `inputs` must be exactly
+`stdin`, `tools` and `network` must be `none`, and no credential is ever forwarded:
+a declared credential name is refused, both because a name such as `PATH`,
+`TMPDIR`, `HOME`, `LD_*`, `DYLD_*`, `SSH_*` or an agent socket could replace the
+fixed environment and because credentials combined with `network: none` are
+contradictory. `scratchWrites` may be `none` or `temporary-directory`, and
+`processes` may be `none` or `wrapper-managed`. The last two are explicit
+relaxations of strict read-only analysis. They are recorded as such in the
+decision (`relaxations`) and mean only that the wrapper claims to confine its
+writes to its private temporary directory and to manage any helper processes it
+starts. Forgecell removes that directory and reconciles the process group
+afterwards. It does not confine the writes or prevent the processes.
+
+These are claims, not proof. A human approves the exact Formula bytes, which pin
+the manifest digest; trusting an external review of the enforcement is that
+person's explicit decision. Forgecell observes only pin integrity, approval
+freshness, the process outcome and whether the output is valid and bounded. It
+does not establish external authenticity or substantive containment, and this is
+not an OS sandbox.
+
+Before every analysis invocation (initial, supplemental and corrective) the Lab
+revalidates the Formula approval and re-hashes the manifest and every pinned
+identity. A missing, self-attested, unrecognized-origin, stale, changed, denied or
+unknown control or identity is refused before any process starts. Pinned paths
+must be absolute and clean, must not be symlinks or resolve through one, must not
+be group- or world-writable, and must not live under a directory that others can
+write to (a sticky directory such as `/tmp` is accepted). On Windows these checks
+cannot be made, so a wrapper is refused there.
+
+The decision, including a refusal, is saved as immutable ledger evidence before
+the process starts and is cited from the intake Atom provenance, whose analysis
+source records the wrapper identity (`analysis-wrapper:BINDING@sha256:MANIFEST`).
+The verified bytes, not the original paths, are what runs. The executable,
+configuration, policy and pinned dependencies are streamed from the hash-checked
+handle into a private temporary directory (`exec/` at mode 0500, the rest 0400
+or 0500), hashed again there, and the copied executable is run with the approved
+argv. The wrapper finds the copies under `$FORGECELL_WRAPPER_HOME` (`config/`,
+`policy/`, `dependencies/`; files keep their names, so names must be distinct
+within a role). A swap of an original after verification therefore cannot change
+what runs. The interpreter cannot be copied: it is verified in place under the
+same placement rules, and a script's shebang must name it exactly.
+
+The environment is fixed: `PATH=/usr/bin:/bin`, `TMPDIR` and
+`FORGECELL_WRAPPER_HOME`, nothing inherited. The working directory is the private
+`scratch/`. The wrapper receives the frozen issue and repository evidence, the
+human verification inputs and the Formula check Atoms over stdin and returns one
+Analysis JSON document, bounded and validated like a native analysis. Wrapper
+stderr is never returned or stored; only its byte count is. Timeout,
+interruption, overflow, malformed output, a failed process or an unreconciled
+descendant stop intake: no coding harness runs, no other provider or binding is
+substituted and no plan is created. The human scope gate and exact plan approval
+are unchanged, and a wrapper analysis authorizes no publication.
+
+`doctor` reports a custom binding with a reference only as declared and unverified
+until intake revalidates it; it never runs the wrapper.
 
 Real intake records available GitHub ruleset and classic branch-protection
 observations. Permission errors, missing responses and incomplete bounded results

@@ -24,6 +24,42 @@ type Binding struct {
 	// MaxTimeoutMS bounds a reviewed per-Molecule coding timeout. The Binding is
 	// JSON-hashed untagged, so omitempty keeps existing binding hashes unchanged.
 	MaxTimeoutMS int `yaml:"maxTimeoutMs" json:"maxTimeoutMs,omitempty"`
+	// AnalysisWrapper separately pins a read-only ticket-analysis wrapper beside
+	// the coding command. A nil pointer is omitted, so existing binding hashes
+	// and historical Formulas are unchanged.
+	AnalysisWrapper *AnalysisWrapperRef `yaml:"analysisWrapper" json:"analysisWrapper,omitempty"`
+}
+
+// AnalysisWrapperRef names a Lab-relative manifest and its exact SHA-256. The
+// reference is covered by the exact-byte Formula approval.
+type AnalysisWrapperRef struct {
+	Manifest string `yaml:"manifest" json:"manifest"`
+	SHA256   string `yaml:"sha256" json:"sha256"`
+}
+
+var wrapperDigest = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+func validateAnalysisWrapper(binding map[string]any, value any) error {
+	m, ok := value.(map[string]any)
+	if !ok || len(m) != 2 {
+		return fmt.Errorf("analysisWrapper must be a mapping with exactly manifest and sha256")
+	}
+	manifest, _ := m["manifest"].(string)
+	digest, _ := m["sha256"].(string)
+	if manifest == "" || len(manifest) > 512 || strings.ContainsAny(manifest, "\\\x00") || !filepath.IsLocal(manifest) || filepath.ToSlash(filepath.Clean(manifest)) != manifest {
+		return fmt.Errorf("analysisWrapper manifest must be a clean Lab-relative path")
+	}
+	if !wrapperDigest.MatchString(digest) {
+		return fmt.Errorf("analysisWrapper sha256 must be a lowercase SHA-256")
+	}
+	command, _ := binding["command"].([]any)
+	if len(command) == 0 {
+		return fmt.Errorf("analysisWrapper requires an existing coding command in the same binding")
+	}
+	if len(command) == 4 && command[1] == "__adapter" {
+		return fmt.Errorf("analysisWrapper is refused on a native adapter binding; native analysis is never substituted")
+	}
+	return nil
 }
 
 const maxFormulaTimeoutMS = 3600000
@@ -163,6 +199,14 @@ func validateHarnessRoles(value any) error {
 		if err := validateBindingMapping(m); err != nil {
 			return fmt.Errorf("harnesses.%s: %w", name, err)
 		}
+		if value, ok := m["analysisWrapper"]; ok {
+			if name != "analysis" {
+				return fmt.Errorf("harnesses.%s: analysisWrapper is only valid on the analysis role", name)
+			}
+			if err := validateAnalysisWrapper(m, value); err != nil {
+				return fmt.Errorf("harnesses.%s: %w", name, err)
+			}
+		}
 		if id, ok := m["binding"].(string); !ok || strings.TrimSpace(id) == "" {
 			return fmt.Errorf("harnesses.%s: binding must be a non-empty string", name)
 		}
@@ -293,6 +337,11 @@ func Parse(data []byte) (Formula, error) {
 		}
 		if err := validateBindingMapping(m); err != nil {
 			return f, err
+		}
+		if value, ok := m["analysisWrapper"]; ok {
+			if err := validateAnalysisWrapper(m, value); err != nil {
+				return f, err
+			}
 		}
 	}
 	if value, exists := raw["harnesses"]; exists {
