@@ -20,6 +20,15 @@ import (
 
 const wrapperOKAnalysis = `{"summary":"Read-only wrapper analysis"}`
 
+const (
+	// wrapperRunTimeout bounds wrappers that are expected to finish on their own. It
+	// is only a backstop against a hang, far above any start-up delay under load.
+	wrapperRunTimeout = 30 * time.Second
+	// wrapperStallTimeout is the timeout under test for wrappers that stall on
+	// purpose; the fixtures sleep well past it.
+	wrapperStallTimeout = 10 * time.Second
+)
+
 type wrapperFixture struct {
 	t        *testing.T
 	lab      string
@@ -160,7 +169,7 @@ func runManifestCases(t *testing.T, cases []manifestCase) {
 			tc.mutate(&fx.manifest)
 			d := fx.approve()
 			assertRefused(t, d, tc.class)
-			if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second); result.OK {
+			if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout); result.OK {
 				t.Fatalf("a refused decision must not run: %+v", result)
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -197,7 +206,7 @@ func TestAnalysisWrapperApprovedInvocationIsBoundedAndFiltered(t *testing.T) {
 			t.Fatalf("recorded digest must be the one computed from the file: %+v", id)
 		}
 	}
-	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 10*time.Second)
+	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 	if !result.OK || result.Stdout != wrapperOKAnalysis {
 		t.Fatalf("%+v", result)
 	}
@@ -320,7 +329,7 @@ func TestAnalysisWrapperRefusesChangedIdentitiesAndStaleApproval(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.change(fx)
-			result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second)
+			result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 			if result.OK || !strings.Contains(result.Error, "changed") {
 				t.Fatalf("a changed identity must stop revalidation: %+v", result)
 			}
@@ -355,7 +364,7 @@ func TestAnalysisWrapperTimeoutReconcilesDescendants(t *testing.T) {
 	if err := d.Err(); err != nil {
 		t.Fatal(err)
 	}
-	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 3*time.Second)
+	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperStallTimeout)
 	if result.OK || !result.TimedOut {
 		t.Fatalf("a timed-out wrapper must fail intake: %+v", result)
 	}
@@ -376,7 +385,7 @@ func TestAnalysisWrapperTimeoutReconcilesDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(3 * time.Second); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
+	for deadline := time.Now().Add(10 * time.Second); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			proc.Kill()
 			t.Fatalf("the timed-out descendant %d is still alive", pid)
@@ -439,7 +448,7 @@ func TestAnalysisWrapperRefusesSymlinkedAndWritableIdentities(t *testing.T) {
 			if !strings.Contains(strings.Join(d.Findings, "\n"), tc.detail) {
 				t.Fatalf("expected a finding mentioning %q: %v", tc.detail, d.Findings)
 			}
-			if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second); result.OK {
+			if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout); result.OK {
 				t.Fatalf("a refused decision must not run: %+v", result)
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -463,7 +472,7 @@ func TestAnalysisWrapperSwapBetweenApprovalAndExecution(t *testing.T) {
 			fx.setScript(fmt.Sprintf("touch %q\nprintf '%%s' '%s'\n", filepath.Join(out, "evil-ran"), wrapperOKAnalysis))
 		}
 		t.Cleanup(func() { testHookAfterRevalidate = nil })
-		result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second)
+		result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 		if result.OK || !strings.Contains(result.Error, "changed after approval") {
 			t.Fatalf("a swap between revalidation and copy must stop the run: %+v", result)
 		}
@@ -488,7 +497,7 @@ func TestAnalysisWrapperSwapBetweenApprovalAndExecution(t *testing.T) {
 			}
 		}
 		t.Cleanup(func() { testHookAfterCopy = nil })
-		result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second)
+		result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 		if !result.OK {
 			t.Fatalf("the verified copy must still run: %+v", result)
 		}
@@ -507,13 +516,13 @@ func TestAnalysisWrapperSwapBetweenApprovalAndExecution(t *testing.T) {
 func TestAnalysisWrapperStderrIsNeverReturnedOrPersisted(t *testing.T) {
 	fx := newWrapperFixture(t, "cat >/dev/null\necho 'leaked-detail' >&2\nexit 4\n")
 	d := fx.approve()
-	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second)
+	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 	if result.OK || result.Code != 4 || strings.Contains(result.Stderr, "leaked-detail") || !strings.Contains(result.Stderr, "stderr omitted") {
 		t.Fatalf("stderr must be omitted from the result: %+v", result)
 	}
 	fx = newWrapperFixture(t, "cat >/dev/null\nhead -c 300000 /dev/zero | tr '\\0' e >&2\n")
 	d = fx.approve()
-	result = InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 10*time.Second)
+	result = InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 	if result.OK || !result.Overflow || len(result.Stderr) > 100 {
 		t.Fatalf("stderr overflow must fail the run without returning the stream: %d bytes %+v", len(result.Stderr), result)
 	}
@@ -522,15 +531,30 @@ func TestAnalysisWrapperStderrIsNeverReturnedOrPersisted(t *testing.T) {
 func TestAnalysisWrapperInterruptionAndProcessFailureFailClosed(t *testing.T) {
 	fx := newWrapperFixture(t, "cat >/dev/null\nexit 3\n")
 	d := fx.approve()
-	if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 5*time.Second); result.OK || result.Code != 3 {
+	if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout); result.OK || result.Code != 3 {
 		t.Fatalf("a failing wrapper must fail intake: %+v", result)
 	}
-	fx = newWrapperFixture(t, "cat >/dev/null\nsleep 30\n")
+	started := filepath.Join(t.TempDir(), "started")
+	fx = newWrapperFixture(t, fmt.Sprintf("cat >/dev/null\ntouch %q\nsleep 60\n", started))
 	d = fx.approve()
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(300*time.Millisecond, cancel)
-	if result := InvokeAnalysisWrapper(ctx, fx.lab, d, analysisRequestFixture(), 20*time.Second); result.OK || !result.Interrupted {
+	defer cancel()
+	// Cancel only once the wrapper reports that it is running, so the test does
+	// not depend on how quickly the process starts.
+	go func() {
+		defer cancel()
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(started); err == nil {
+				return
+			}
+		}
+	}()
+	result := InvokeAnalysisWrapper(ctx, fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
+	if result.OK || !result.Interrupted || result.TimedOut {
 		t.Fatalf("an interrupted wrapper must fail intake: %+v", result)
+	}
+	if _, err := os.Stat(started); err != nil {
+		t.Fatalf("the wrapper was interrupted before it started: %v", err)
 	}
 }
 
@@ -555,7 +579,7 @@ func TestAnalysisWrapperOverflowAndMalformedOutput(t *testing.T) {
 			if err := d.Err(); err != nil {
 				t.Fatal(err)
 			}
-			result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), 10*time.Second)
+			result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 			if result.OK {
 				t.Fatalf("invalid output must fail: %+v", result)
 			}
@@ -617,7 +641,7 @@ func TestAnalysisWrapperLeavesCustomCodingInvocationAndFingerprintUntouched(t *t
 	if err != nil || before != after {
 		t.Fatalf("the legacy fingerprint pins only argv0 and must stay unchanged by wrapper configuration: %v %s %s", err, before, after)
 	}
-	result := InvokeBinding(context.Background(), []string{fx.script}, t.TempDir(), time.Second, map[string]any{"kind": "ticket-analysis"})
+	result := InvokeBinding(context.Background(), []string{fx.script}, t.TempDir(), wrapperRunTimeout, map[string]any{"kind": "ticket-analysis"})
 	if result.OK || !strings.Contains(result.Error, "no verified read-only ticket-analysis protocol") {
 		t.Fatalf("a custom binding without an approved wrapper must still refuse analysis: %+v", result)
 	}

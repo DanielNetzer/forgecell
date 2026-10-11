@@ -45,7 +45,7 @@ func TestReturnedProcessHasReconciliationEvidence(t *testing.T) {
 }
 
 func TestLiveManagedDescendantMakesResultUncertain(t *testing.T) {
-	r := Run(context.Background(), Options{Argv: []string{"/bin/sh", "-c", "sleep 2 >/dev/null 2>&1 & exit 0"}})
+	r := Run(context.Background(), Options{Argv: []string{"/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & exit 0"}})
 	if r.OK || r.Reconciled || r.Uncertainty == "" {
 		t.Fatalf("live descendant accepted: %+v", r)
 	}

@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -23,7 +25,9 @@ func TestBoundAdapterTimeoutStopsProviderDescendants(t *testing.T) {
 	}
 	dir := t.TempDir()
 	provider := filepath.Join(dir, "provider")
-	script := "#!/bin/sh\n(printf started > started; sleep 2.5; printf late > orphan) &\nwait\n"
+	// The descendant records its own pid and then sleeps far past the test, so only
+	// a group stop can end it.
+	script := "#!/bin/sh\nsh -c 'printf %s $$ > pid.tmp && mv pid.tmp pid; exec sleep 60' &\nwait\n"
 	if err = os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -35,11 +39,12 @@ func TestBoundAdapterTimeoutStopsProviderDescendants(t *testing.T) {
 	defer cancel(context.Canceled)
 	done := make(chan process.Result, 1)
 	go func() {
-		done <- invokeHarness(ctx, []string{exe, "__adapter", "claude-code", provider}, dir, 10*time.Second, map[string]any{"kind": "molecule", "issue": map[string]any{"number": 9, "title": "fixture"}})
+		done <- invokeHarness(ctx, []string{exe, "__adapter", "claude-code", provider}, dir, 60*time.Second, map[string]any{"kind": "molecule", "issue": map[string]any{"number": 9, "title": "fixture"}})
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	pidFile := filepath.Join(dir, "pid")
+	deadline := time.Now().Add(30 * time.Second)
 	for {
-		if _, err = os.Stat(filepath.Join(dir, "started")); err == nil {
+		if _, err = os.Stat(pidFile); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -54,9 +59,24 @@ func TestBoundAdapterTimeoutStopsProviderDescendants(t *testing.T) {
 	if r.OK || !r.TimedOut {
 		t.Fatalf("expected provider deadline: %+v", r)
 	}
-	time.Sleep(2700 * time.Millisecond)
-	if _, err = os.Stat(filepath.Join(dir, "orphan")); !os.IsNotExist(err) {
-		t.Fatal("provider descendant survived timeout")
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("unusable descendant pid %q", raw)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A killed descendant may linger as a zombie until init reaps it, so poll.
+	for deadline = time.Now().Add(15 * time.Second); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			proc.Kill()
+			t.Fatal("provider descendant survived timeout")
+		}
 	}
 }
 
@@ -71,7 +91,7 @@ func TestNativeBindingRetainsBlockedContractAndTransport(t *testing.T) {
 	if err = os.WriteFile(provider, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"structured_output\":"+report+"}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	result := invokeHarness(context.Background(), []string{exe, "__adapter", "claude-code", provider}, dir, time.Second, map[string]any{"kind": "molecule"})
+	result := invokeHarness(context.Background(), []string{exe, "__adapter", "claude-code", provider}, dir, 30*time.Second, map[string]any{"kind": "molecule"})
 	if !result.OK || result.Code != 0 || !result.Reconciled || result.Stdout != report || result.RawStdout == "" {
 		t.Fatalf("native evidence lost: %+v", result)
 	}

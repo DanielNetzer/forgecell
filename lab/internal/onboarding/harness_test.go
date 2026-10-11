@@ -255,6 +255,7 @@ func TestProbeNamesFailingVersionAndHelpSteps(t *testing.T) {
 			{"version", map[string]process.Result{"--version": {Code: 3}}, []string{"version"}, map[string]string{"version": "exit-code-3"}},
 			{"help", map[string]process.Result{"--help": {TimedOut: true}}, []string{"help"}, map[string]string{"help": "timeout"}},
 			{"both", map[string]process.Result{"--version": {Code: -1, Error: "start"}, "--help": {Overflow: true}}, []string{"version", "help"}, map[string]string{"version": "start-failed", "help": "output-limit"}},
+			{"caller deadline", map[string]process.Result{"--help": {ParentDeadline: true, Code: 1}}, []string{"help"}, map[string]string{"help": "parent-deadline"}},
 		} {
 			t.Run(id+"/"+tc.name, func(t *testing.T) {
 				run := healthyRunner(func(args string) *process.Result {

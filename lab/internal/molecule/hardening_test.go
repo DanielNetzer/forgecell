@@ -138,7 +138,7 @@ func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *tes
 	next.CheckInputs = []readiness.FileEvidence{input}
 	next.Evidence = append(next.Evidence, input.Evidence)
 	next.Analysis.Checks[0].ReviewedAcceptance = "human-check"
-	next.Analysis.Checks = append(next.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "human fixture review", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen external acceptance"})
+	next.Analysis.Checks = append(next.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "human fixture review", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 10000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen external acceptance"})
 	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
 	if err != nil {
 		t.Fatal(err)

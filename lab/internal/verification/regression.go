@@ -349,7 +349,7 @@ func describeUncovered(declared []readiness.ProtectedDelta, failed, uncovered []
 // checkProtectedResult refuses a protected regression result whose process did not
 // run to a normal exit, whatever its output says.
 func checkProtectedResult(r process.Result) error {
-	if r.TimedOut || r.Interrupted || r.Overflow || !r.Reconciled {
+	if r.Incomplete() || !r.Reconciled {
 		return fmt.Errorf("protected regression output is incomplete (timed out, interrupted, over the capture limit or unreconciled); no delta can be accepted")
 	}
 	if !r.OK && r.Code <= 0 {
@@ -435,7 +435,7 @@ func acceptedProtectedFailure(p readiness.Plan, check readiness.Check, obs Obser
 	}
 	declared := p.DeltasForCheck(check.ID)
 	r := obs.Result
-	if len(declared) == 0 || len(obs.FailedTests) == 0 || r.TimedOut || r.Interrupted || r.Overflow || !r.Reconciled || r.Code <= 0 {
+	if len(declared) == 0 || len(obs.FailedTests) == 0 || r.Incomplete() || !r.Reconciled || r.Code <= 0 {
 		return false
 	}
 	if r.Stdout != "" && !r.Truncated {

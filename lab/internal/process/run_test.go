@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -34,13 +36,16 @@ func TestHelperProcess(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
+		if pidFile := os.Getenv("FORGECELL_TEST_CHILD_PID"); pidFile != "" {
+			os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0600)
+		}
 		fmt.Fprint(os.Stdout, "child started")
-		time.Sleep(30 * time.Second)
+		time.Sleep(60 * time.Second)
 	case "sentinel":
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(20 * time.Second)
 		os.WriteFile(os.Getenv("FORGECELL_TEST_SENTINEL"), []byte("escaped"), 0600)
 	case "wait":
-		time.Sleep(30 * time.Second)
+		time.Sleep(60 * time.Second)
 	case "flood":
 		for i := 0; i < 100000; i++ {
 			fmt.Fprint(os.Stdout, "0123456789")
@@ -50,7 +55,7 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 func options(mode string) Options {
-	return Options{Argv: []string{os.Args[0], "-test.run=^TestHelperProcess$", "--", mode}, Env: append(os.Environ(), "FORGECELL_TEST_PROCESS=1"), Timeout: 5 * time.Second}
+	return Options{Argv: []string{os.Args[0], "-test.run=^TestHelperProcess$", "--", mode}, Env: append(os.Environ(), "FORGECELL_TEST_PROCESS=1"), Timeout: 30 * time.Second}
 }
 func TestStructuredInputIsData(t *testing.T) {
 	o := options("echo")
@@ -78,10 +83,11 @@ func TestUnicodeAndNonzeroExit(t *testing.T) {
 	}
 }
 func TestTimeoutAndCancellation(t *testing.T) {
+	t.Parallel()
 	o := options("wait")
-	o.Timeout = 50 * time.Millisecond
+	o.Timeout = stallTimeout
 	r := Run(context.Background(), o)
-	if r.OK || !r.TimedOut || r.ElapsedMS > 2000 {
+	if r.OK || !r.TimedOut || r.ElapsedMS >= 60000 {
 		t.Fatalf("%+v", r)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -120,15 +126,38 @@ func TestCancellationStopsDescendants(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("process tree cancellation is only supported on release target operating systems")
 	}
-	marker := filepath.Join(t.TempDir(), "escaped")
+	t.Parallel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "escaped")
+	pidFile := filepath.Join(dir, "child.pid")
 	o := options("tree")
-	o.Timeout = 200 * time.Millisecond
-	o.Env = append(o.Env, "FORGECELL_TEST_SENTINEL="+marker)
+	o.Timeout = stallTimeout
+	o.Env = append(o.Env, "FORGECELL_TEST_SENTINEL="+marker, "FORGECELL_TEST_CHILD_PID="+pidFile)
 	r := Run(context.Background(), o)
-	if !r.TimedOut || !strings.Contains(r.Stdout, "child started") {
+	if !r.TimedOut || !strings.Contains(r.Stdout, "child started") || !r.Reconciled {
 		t.Fatalf("fixture did not start its child: %+v", r)
 	}
-	time.Sleep(500 * time.Millisecond)
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("the fixture never recorded its descendant: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("unusable descendant pid %q", raw)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The descendant sleeps well past the timeout, so seeing it gone proves the
+	// group stop rather than a natural exit; a killed process may linger as a
+	// zombie until init reaps it, so poll instead of assuming it is already gone.
+	for deadline := time.Now().Add(10 * time.Second); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			proc.Kill()
+			t.Fatal("descendant survived cancellation")
+		}
+	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("descendant survived cancellation")
 	}
