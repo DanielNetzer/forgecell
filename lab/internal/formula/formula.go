@@ -109,8 +109,11 @@ type Formula struct {
 	Harnesses map[string]Binding `yaml:"harnesses" json:"harnesses,omitempty"`
 	Intake    Intake             `yaml:"intake"`
 	Atoms     []Atom             `yaml:"atoms"`
-	YAML      string             `yaml:"-"`
-	SHA256    string             `yaml:"-"`
+	// RequiredChecks is the reviewed CI baseline every plan must include. Absent
+	// keeps the Formula bytes, SHA and behaviour of earlier Formulas unchanged.
+	RequiredChecks []RequiredCheck `yaml:"requiredChecks" json:"requiredChecks,omitempty"`
+	YAML           string          `yaml:"-"`
+	SHA256         string          `yaml:"-"`
 }
 type Loaded struct {
 	Formula  Formula
@@ -363,6 +366,11 @@ func Parse(data []byte) (Formula, error) {
 	}
 	if value, exists := raw["harnesses"]; exists {
 		if err := validateHarnessRoles(value); err != nil {
+			return f, err
+		}
+	}
+	if value, exists := raw["requiredChecks"]; exists {
+		if err := validateRequiredChecks(value); err != nil {
 			return f, err
 		}
 	}
