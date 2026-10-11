@@ -159,7 +159,8 @@ const MaxProtectedDeltas = 64
 const MaxHarnessTimeoutMS = 3600000
 
 // PolicyViolation marks a complete, well-formed analysis that was rejected for a
-// policy or labelling reason, as opposed to missing evidence or malformed output.
+// policy, labelling or evidence-request-cap reason, as opposed to missing evidence
+// or malformed output.
 type PolicyViolation struct{ Reason string }
 
 func (e *PolicyViolation) Error() string { return e.Reason }
@@ -868,9 +869,26 @@ func (p Plan) ValidateForCoding() error {
 	return nil
 }
 
+// MaxEvidenceRequests bounds the evidence requests of one analysis response.
+const MaxEvidenceRequests = 16
+
+// EvidenceRequestCapMessage is the exact validator message for an over-cap response.
+func EvidenceRequestCapMessage() string {
+	return fmt.Sprintf("at most %d evidence requests permitted", MaxEvidenceRequests)
+}
+
+// ValidateEvidenceRequestCap rejects an over-cap response with a PolicyViolation:
+// the analysis is complete and well-formed, and a corrective pass can trim it.
+func ValidateEvidenceRequestCap(requests []EvidenceRequest) error {
+	if len(requests) > MaxEvidenceRequests {
+		return &PolicyViolation{Reason: EvidenceRequestCapMessage()}
+	}
+	return nil
+}
+
 func ValidateEvidenceRequests(requests []EvidenceRequest, evidence []Evidence) error {
-	if len(requests) > 16 {
-		return fmt.Errorf("at most 16 evidence requests permitted")
+	if err := ValidateEvidenceRequestCap(requests); err != nil {
+		return err
 	}
 	refs := map[string]bool{"issue": true}
 	for _, e := range evidence {

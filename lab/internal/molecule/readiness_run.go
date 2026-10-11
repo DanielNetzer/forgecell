@@ -52,7 +52,11 @@ func analysisCorrectionFrom(ctx context.Context) (analysisCorrection, bool) {
 func analysisRequest(ctx context.Context, i Issue, s readiness.RepositorySnapshot, inputs readiness.VerificationInputs) map[string]any {
 	request := map[string]any{"kind": "ticket-analysis", "issue": i, "repository": s, "humanVerification": inputs}
 	if c, ok := analysisCorrectionFrom(ctx); ok {
-		request["correction"] = map[string]string{"validatorMessage": c.ValidatorMessage, "previousResponse": c.PreviousResponse}
+		correction := map[string]string{"validatorMessage": c.ValidatorMessage, "previousResponse": c.PreviousResponse}
+		if c.ValidatorMessage == readiness.EvidenceRequestCapMessage() {
+			correction["instruction"] = fmt.Sprintf("Return the complete analysis again with at most %d evidenceRequests, ordered by importance to the ticket scope, most important first. Drop the least important requests; do not relax or reword the limit.", readiness.MaxEvidenceRequests)
+		}
+		request["correction"] = correction
 	}
 	return request
 }
@@ -410,6 +414,11 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		}
 		wrapperEvidence = nil
 		a, err = analysis(callCtx, analysisBinding, issue, snapshot)
+		if err == nil {
+			// A supplied Analyze can return an over-cap response without an error; the
+			// real harness rejects it at its boundary. Both take the same retry path.
+			err = readiness.ValidateEvidenceRequestCap(a.EvidenceRequests)
+		}
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
 		if err != nil {
