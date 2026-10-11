@@ -204,15 +204,19 @@ generates `mcpServers` from the verified manifests:
 With extensions, the generated config contains **only `read-only` tools**, and
 `--allowedTools` lists exactly those.
 
-**Open item, to be verified against the live CLI before implementation (first plan
-step).** `--safe-mode` documents disabling MCP servers, so it may ignore an explicit
-`--mcp-config`.
+**Probe result (#103, Claude Code 2.1.202).** `--safe-mode` drops an explicit
+`--mcp-config`, and so does `--safe-mode --setting-sources user`. With
+`--setting-sources ""` the server stays `pending` and never connects.
+`--setting-sources user` connects the server and exposes only the allowed MCP tool,
+while built-ins stay off (`--tools ""`).
 
-- If it does, the analysis invocation *with extensions* replaces `--safe-mode` with
-  `--setting-sources ""` (or the narrowest equivalent the probe confirms) and keeps
+- With extensions, analysis drops `--safe-mode`, adds `--setting-sources user`, and keeps
   `--tools ""`, strict MCP, `--no-chrome` and `--disable-slash-commands`.
 - Analysis *without* extensions keeps its current flags byte-for-byte.
-- The probe result is recorded in the plan PR.
+- Trade-off: without safe mode, user-level settings can load (user hooks, the user's
+  CLAUDE.md). With no built-in tools they can't touch the filesystem, but they can steer
+  the analysis. Full isolation is #36. Until then, the scope gate states that analysis
+  ran without safe mode because extensions were attached.
 
 ### 5.2 Codex and Cursor
 
