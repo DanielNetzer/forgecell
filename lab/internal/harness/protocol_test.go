@@ -96,6 +96,56 @@ func TestCapabilitiesMatchInvocationSupport(t *testing.T) {
 	}
 }
 
+func TestExtensionCapabilityPerAdapter(t *testing.T) {
+	for id, want := range map[string]string{"claude-code": "supported", "codex": "unsupported", "cursor": "unsupported", "custom": "unknown", "": "unknown"} {
+		if got := AdapterCapabilities(id).Extensions; got.State != want || got.Reason == "" {
+			t.Fatalf("%q: %+v, want %s", id, got, want)
+		}
+	}
+	for _, id := range []string{"codex", "cursor"} {
+		if got := AdapterCapabilities(id).Extensions.Reason; got != "extensions are not wired for this adapter in v1" {
+			t.Fatalf("%s reason %q", id, got)
+		}
+	}
+	for id, want := range map[string][3]string{
+		"claude-code": {"supported", "supported", "supported"},
+		"codex":       {"supported", "supported", "supported"},
+		"cursor":      {"supported", "unsupported", "supported"},
+		"custom":      {"unknown", "unknown", "unknown"},
+	} {
+		c := AdapterCapabilities(id)
+		if got := [3]string{c.Coding.State, c.Analysis.State, c.Meta.State}; got != want || c.AnalysisControls.State != "unknown" || c.ModelAccess.State != "unknown" {
+			t.Fatalf("%s operation capabilities changed: %+v", id, c)
+		}
+	}
+	raw, err := json.Marshal(AdapterCapabilities("claude-code"))
+	if err != nil || !strings.Contains(string(raw), `"extensions":{"state":"supported"`) {
+		t.Fatalf("%s %v", raw, err)
+	}
+}
+
+func TestExtensionCapabilityOfBindingCommand(t *testing.T) {
+	for name, tc := range map[string]struct {
+		command []string
+		want    string
+	}{
+		"native claude-code": {[]string{"/cli", "__adapter", "claude-code", "/claude"}, "supported"},
+		"native codex":       {[]string{"/cli", "__adapter", "codex", "/codex"}, "unsupported"},
+		"native cursor":      {[]string{"/cli", "__adapter", "cursor", "/cursor"}, "unsupported"},
+		"native unknown id":  {[]string{"/cli", "__adapter", "other", "/other"}, "unknown"},
+		"custom command":     {[]string{"/bin/custom"}, "unknown"},
+		"codex-like custom":  {[]string{"/cli", "codex", "claude-code", "/x"}, "unknown"},
+		"wrong arity":        {[]string{"/cli", "__adapter", "codex"}, "unknown"},
+		"no command":         {nil, "unknown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := BindingExtensionCapability(tc.command); got.State != tc.want || got.Reason == "" {
+				t.Fatalf("%+v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 type testComponent struct {
 	path, manifest string
 	checks         [][]string

@@ -36,11 +36,18 @@ type Capabilities struct {
 	Meta             Capability `json:"metaLearning"`
 	AnalysisControls Capability `json:"analysisControls"`
 	ModelAccess      Capability `json:"modelAccess"`
+	Extensions       Capability `json:"extensions"`
 }
 
 func AdapterCapabilities(id string) Capabilities {
 	unknown := Capability{"unknown", "Adapter support is unknown."}
-	c := Capabilities{unknown, unknown, unknown, Capability{"unknown", "Installed isolation controls have not been verified."}, Capability{"unknown", "Model access is unverified without a run."}}
+	c := Capabilities{unknown, unknown, unknown, Capability{"unknown", "Installed isolation controls have not been verified."}, Capability{"unknown", "Model access is unverified without a run."}, unknown}
+	switch id {
+	case "claude-code":
+		c.Extensions = Capability{"supported", "Adapter can attach pinned extensions; each extension is verified when a run prepares it."}
+	case "codex", "cursor":
+		c.Extensions = Capability{"unsupported", "extensions are not wired for this adapter in v1"}
+	}
 	for _, operation := range []struct {
 		kind   string
 		target *Capability
@@ -56,6 +63,17 @@ func AdapterCapabilities(id string) Capabilities {
 		}
 	}
 	return c
+}
+
+// BindingExtensionCapability is the static extension support of a saved binding
+// command. Only a native `launcher __adapter ID PROVIDER` command names an
+// adapter; any other command stays unknown. It executes nothing.
+func BindingExtensionCapability(command []string) Capability {
+	id := ""
+	if len(command) == 4 && command[1] == "__adapter" {
+		id = command[2]
+	}
+	return AdapterCapabilities(id).Extensions
 }
 
 type Invocation struct {
