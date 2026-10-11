@@ -94,23 +94,26 @@ func TestStaleIssueAndWorkspaceRefuseCoding(t *testing.T) {
 
 func TestDefinitionOverlapIsReviewableButCannotStartCoding(t *testing.T) {
 	o, _ := fixture(t)
-	analyze := o.Analyze
-	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
-		a, err := analyze(ctx, b, i, s)
-		a.Scope = append(a.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Update checker", Evidence: a.Checks[0].Definitions})
-		return a, err
-	}
 	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Intake rejects a model-proposed overlap, so a human amendment introduces it.
+	parent := r.Readiness.Plans[0]
+	next := copyPlan(t, parent.Plan)
+	next.Analysis.Scope = append(next.Analysis.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Update checker", Evidence: next.Analysis.Checks[0].Definitions})
+	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.Readiness == nil || r.Status != "waiting" {
 		t.Fatal("overlap should remain reviewable")
 	}
-	if !strings.Contains(strings.Join(r.Notes, "\n"), "package.json [definition] checks check") {
-		t.Fatal("overlap not surfaced before approval")
+	overlaps := r.Readiness.Plans[1].Plan.DefinitionOverlaps()
+	if len(overlaps) != 1 || overlaps[0].Path != "package.json" || overlaps[0].Kind != "definition" || strings.Join(overlaps[0].CheckIDs, ",") != "check" {
+		t.Fatalf("overlap not surfaced before approval: %+v", overlaps)
 	}
-	o.Approve = r.Readiness.Plans[0].Digest
+	o.Approve = r.Readiness.Plans[1].Digest
 	if _, err = Run(context.Background(), o); err == nil {
 		t.Fatal("definition overlap reached coding without reviewed repair")
 	}
@@ -125,7 +128,6 @@ func TestRepairCannotDropEarlierProtectedGate(t *testing.T) {
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		a, e := analyze(ctx, b, i, s)
 		a.Checks[0].Category = "regression"
-		a.Scope = append(a.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Checker", Evidence: a.Checks[0].Definitions})
 		return a, e
 	}
 	r, err := Run(context.Background(), o)
@@ -134,6 +136,7 @@ func TestRepairCannotDropEarlierProtectedGate(t *testing.T) {
 	}
 	parent := r.Readiness.Plans[0]
 	next := copyPlan(t, parent.Plan)
+	next.Analysis.Scope = append(next.Analysis.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Checker", Evidence: next.Analysis.Checks[0].Definitions})
 	input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human", Path: "acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("true")))}, Content: "true"}
 	next.CheckInputs = []readiness.FileEvidence{input}
 	next.Evidence = append(next.Evidence, input.Evidence)

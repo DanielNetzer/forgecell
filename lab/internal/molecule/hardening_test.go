@@ -123,7 +123,6 @@ func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *tes
 	analyze := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		a, e := analyze(ctx, b, i, s)
-		a.Scope = append(a.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Edit frozen checker manifest", Evidence: a.Checks[0].Definitions})
 		a.Checks[0].Category = "regression"
 		return a, e
 	}
@@ -133,6 +132,7 @@ func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *tes
 	}
 	parent := r.Readiness.Plans[0]
 	next := copyPlan(t, parent.Plan)
+	next.Analysis.Scope = append(next.Analysis.Scope, readiness.ScopedPath{Path: "package.json", Reason: "Edit frozen checker manifest", Evidence: next.Analysis.Checks[0].Definitions})
 	content := "exit 1\n"
 	input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human", Path: "acceptance.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content}
 	next.CheckInputs = []readiness.FileEvidence{input}
