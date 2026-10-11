@@ -107,7 +107,27 @@ type AnalysisAttempt struct {
 	Response       *readiness.Analysis `json:"response,omitempty"`
 	Error          string              `json:"error,omitempty"`
 }
+
+// PolicyEvidence points at the ledger value a policy decision relied on.
+// Pointer is an RFC 6901 JSON pointer into the marshalled Record.
+type PolicyEvidence struct {
+	Pointer  string `json:"pointer"`
+	Observed string `json:"observed"`
+}
+
+// PolicyDecision records an automatic gate decision. ApprovedBy names the policy
+// and the exact Formula bytes it came from; it is never a human identity.
+type PolicyDecision struct {
+	Policy        string           `json:"policy"`
+	ApprovedBy    string           `json:"approvedBy"`
+	Gate          string           `json:"gate"`
+	PlanDigest    string           `json:"planDigest"`
+	FormulaSHA256 string           `json:"formulaSha256"`
+	At            string           `json:"at"`
+	Evidence      []PolicyEvidence `json:"evidence"`
+}
 type Record struct {
+	PolicyDecisions               []PolicyDecision  `json:"policyDecisions,omitempty"`
 	ClarificationPredecessors     []string          `json:"clarificationPredecessors,omitempty"`
 	ClarificationHistoryTruncated bool              `json:"clarificationHistoryTruncated,omitempty"`
 	CheckoutStatus                string            `json:"checkoutStatus,omitempty"`

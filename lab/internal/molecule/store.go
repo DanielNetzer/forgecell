@@ -127,6 +127,15 @@ func save(r Record) error {
 			fmt.Fprintf(&b, "\n- %s · %s · %s\n", event.At, event.Kind, event.Detail)
 		}
 	}
+	if len(r.PolicyDecisions) > 0 {
+		fmt.Fprintln(&b, "\n## Policy decisions (automatic, policy-approved; not a human decision)")
+		for _, d := range r.PolicyDecisions {
+			fmt.Fprintf(&b, "\n- Approved by: %s (policy-approved)\n  Gate: %s; plan: `%s`; Formula SHA-256: %s; at %s\n", d.ApprovedBy, d.Gate, d.PlanDigest, d.FormulaSHA256, d.At)
+			for _, e := range d.Evidence {
+				fmt.Fprintf(&b, "  - Evidence: `%s` — %s\n", e.Pointer, e.Observed)
+			}
+		}
+	}
 	for _, a := range r.HarnessAttempts {
 		if a.Coding != nil {
 			fmt.Fprintf(&b, "\nImplementation outcome: %s\nReason: %s\n", a.Coding.Outcome, a.Coding.Reason)

@@ -53,6 +53,10 @@ type Atom struct {
 	Source    string   `yaml:"source"`
 	Binding   string   `yaml:"binding"`
 	Workflows []string `yaml:"workflows"`
+	// Mode and Policy are filled from the raw mapping by Parse, so an existing
+	// Formula with an unusual `mode` value still decodes. See gate_policy.go.
+	Mode   string `yaml:"-"`
+	Policy string `yaml:"-"`
 }
 type Intake struct {
 	Source string `yaml:"source"`
@@ -140,11 +144,20 @@ func Parse(data []byte) (Formula, error) {
 		if !ok || strings.TrimSpace(typ) == "" {
 			return f, fmt.Errorf("Atom type is required")
 		}
+		if err := validateGatePolicy(m); err != nil {
+			return f, err
+		}
+	}
+	if _, exists := raw["policy"]; exists {
+		return f, fmt.Errorf("a Formula cannot declare a policy; Formula changes always require human review")
 	}
 	if value, exists := raw["harness"]; exists {
 		m, ok := value.(map[string]any)
 		if !ok {
 			return f, fmt.Errorf("harness must be a mapping")
+		}
+		if _, exists := m["policy"]; exists {
+			return f, fmt.Errorf("a binding cannot declare a policy; binding changes always require human review")
 		}
 		if err := validateCommand(m); err != nil {
 			return f, err
@@ -184,6 +197,12 @@ func Parse(data []byte) (Formula, error) {
 	seen := map[string]bool{}
 	for i := range f.Atoms {
 		a := &f.Atoms[i]
+		if i < len(atoms) {
+			if m, ok := atoms[i].(map[string]any); ok {
+				a.Mode, _ = m["mode"].(string)
+				a.Policy, _ = m["policy"].(string)
+			}
+		}
 		a.Type = strings.TrimSpace(a.Type)
 		a.ID = strings.TrimSpace(a.ID)
 		if a.ID == "" {
