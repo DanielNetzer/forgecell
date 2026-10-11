@@ -131,7 +131,28 @@ type Plan struct {
 	// Formula timeout and leaves the digest of every earlier plan unchanged. The
 	// Formula-declared maximum is enforced where the Formula is known.
 	HarnessTimeoutMS int `json:"harnessTimeoutMs,omitempty"`
+	// ExpectedProtectedDeltas lists exact Go tests that may fail in the protected
+	// regression view because the approved scope intentionally changes what they
+	// pin. It joins the plan digest, so only the exact human approval accepts it.
+	// Empty keeps the digest of every earlier plan unchanged.
+	ExpectedProtectedDeltas []ProtectedDelta `json:"expectedProtectedDeltas,omitempty"`
 }
+
+// ProtectedDelta names one test, matched by exact Go package import path and
+// exact test name (subtests as Test/sub/case), that may fail in the protected run
+// of a required regression check. ScopePath is the approved protected test source
+// whose intentional change justifies the failure.
+type ProtectedDelta struct {
+	CheckID   string   `json:"checkId"`
+	Package   string   `json:"package"`
+	Test      string   `json:"test"`
+	ScopePath string   `json:"scopePath"`
+	Reason    string   `json:"reason"`
+	Evidence  []string `json:"evidence"`
+}
+
+// MaxProtectedDeltas bounds a declaration so it stays reviewable.
+const MaxProtectedDeltas = 64
 
 // MaxHarnessTimeoutMS is the same hard cap the Formula and checks use.
 const MaxHarnessTimeoutMS = 3600000
@@ -451,6 +472,9 @@ func (p Plan) Validate() error {
 	if err := p.validateDefinitionRepairs(); err != nil {
 		return err
 	}
+	if err := p.validateProtectedDeltas(paths, cited); err != nil {
+		return err
+	}
 	if err := validateCodingAllowlist(p.CodingAllowlist); err != nil {
 		return err
 	}
@@ -641,6 +665,168 @@ func containsID(ids []string, id string) bool {
 		}
 	}
 	return false
+}
+
+var goPackagePath = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~+/-]{0,255}$`)
+
+// validGoTestName accepts one exact test ID as reported by go test -json:
+// Test/sub/case with no empty segment, whitespace or wildcard.
+func validGoTestName(name string) bool {
+	if name == "" || len(name) > 512 || strings.Contains(name, "...") || strings.ContainsAny(name, "*?\\") {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	parts := strings.Split(name, "/")
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+	}
+	top := parts[0]
+	return strings.HasPrefix(top, "Test") || strings.HasPrefix(top, "Fuzz") || strings.HasPrefix(top, "Example")
+}
+
+// requestsGoTestJSON reports whether a check argv asks go test for -json output,
+// directly or inside a reviewed shell string. Matching needs that stream.
+func requestsGoTestJSON(argv []string) bool {
+	for _, arg := range argv {
+		for _, token := range strings.Fields(arg) {
+			switch token {
+			case "-json", "--json", "-json=true", "--json=true":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// protectedTestSource mirrors what the protected view restores from the base
+// commit: conventional test paths and every regression check definition.
+func (p Plan) protectedTestSource(file string) bool {
+	if ConventionalTestPath(file) {
+		return true
+	}
+	ids := map[string]bool{}
+	for _, e := range p.Evidence {
+		if e.Path == file {
+			ids[e.ID] = true
+		}
+	}
+	for _, c := range p.Analysis.Checks {
+		if c.Category != "regression" {
+			continue
+		}
+		for _, id := range c.Definitions {
+			if ids[id] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (p Plan) validateProtectedDeltas(scope map[string]bool, cited func([]string) error) error {
+	if len(p.ExpectedProtectedDeltas) == 0 {
+		return nil
+	}
+	if len(p.ExpectedProtectedDeltas) > MaxProtectedDeltas {
+		return fmt.Errorf("at most %d expected protected deltas permitted", MaxProtectedDeltas)
+	}
+	checks := map[string]Check{}
+	for _, c := range p.Analysis.Checks {
+		checks[c.ID] = c
+	}
+	seen := map[string]bool{}
+	for _, d := range p.ExpectedProtectedDeltas {
+		c, ok := checks[d.CheckID]
+		if !ok || c.Category != "regression" || !c.Required {
+			return fmt.Errorf("expected protected delta %s %s needs a required regression check, not %q", d.Package, d.Test, d.CheckID)
+		}
+		if !requestsGoTestJSON(c.Argv) {
+			return fmt.Errorf("expected protected delta %s %s needs check %s to request go test -json", d.Package, d.Test, d.CheckID)
+		}
+		if !goPackagePath.MatchString(d.Package) || strings.Contains(d.Package, "...") || strings.Contains(d.Package, "//") {
+			return fmt.Errorf("expected protected delta needs an exact Go package import path: %q", d.Package)
+		}
+		if !validGoTestName(d.Test) {
+			return fmt.Errorf("expected protected delta needs an exact test name without wildcards: %q", d.Test)
+		}
+		key := d.CheckID + "\x00" + d.Package + "\x00" + d.Test
+		if seen[key] {
+			return fmt.Errorf("duplicate expected protected delta: %s %s", d.Package, d.Test)
+		}
+		seen[key] = true
+		if !scope[d.ScopePath] {
+			return fmt.Errorf("expected protected delta %s %s cites a path outside the approved scope: %q", d.Package, d.Test, d.ScopePath)
+		}
+		if !p.protectedTestSource(d.ScopePath) {
+			return fmt.Errorf("expected protected delta %s %s cites a path that is not a protected test source: %q", d.Package, d.Test, d.ScopePath)
+		}
+		if !textOK(d.Reason) {
+			return fmt.Errorf("expected protected delta %s %s needs a reason", d.Package, d.Test)
+		}
+		if err := cited(d.Evidence); err != nil {
+			return fmt.Errorf("expected protected delta %s %s: %w", d.Package, d.Test, err)
+		}
+	}
+	return nil
+}
+
+// DeltasForCheck returns the declared protected deltas of one check, in plan order.
+func (p Plan) DeltasForCheck(id string) []ProtectedDelta {
+	var out []ProtectedDelta
+	for _, d := range p.ExpectedProtectedDeltas {
+		if d.CheckID == id {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// IsFixturePath identifies testdata and fixtures directories, where pinned
+// contract files usually live.
+func IsFixturePath(file string) bool {
+	for _, part := range strings.Split(strings.ToLower(file), "/") {
+		if part == "testdata" || part == "fixtures" {
+			return true
+		}
+	}
+	return false
+}
+
+// FixtureScopePaths lists approved scope paths under testdata or fixtures.
+func (p Plan) FixtureScopePaths() []string {
+	var out []string
+	for _, s := range p.Analysis.Scope {
+		if IsFixturePath(s.Path) {
+			out = append(out, s.Path)
+		}
+	}
+	return out
+}
+
+// ProtectedDeltaAdvisory is a deterministic prompt for a human reviewer. It is
+// returned only when scope touches fixture paths, a regression check will run in
+// the protected view and no delta is declared. It never declares or approves one.
+func (p Plan) ProtectedDeltaAdvisory() string {
+	if len(p.ExpectedProtectedDeltas) > 0 {
+		return ""
+	}
+	regression := false
+	for _, c := range p.Analysis.Checks {
+		if c.Category == "regression" && c.Required {
+			regression = true
+		}
+	}
+	fixtures := p.FixtureScopePaths()
+	if !regression || len(fixtures) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Protected-delta advisory (proposed for review; never auto-approved): scope touches fixture path(s) %s. The protected regression run restores base-commit test sources, so tests that pin these files may fail there and block the Molecule. If this change intentionally alters a pinned contract, a reviewer may amend the plan with expectedProtectedDeltas naming exact Go package and test IDs; nothing is declared or approved automatically.", strings.Join(fixtures, ", "))
 }
 
 // ValidateForCoding leaves overlapping proposals digestible and reviewable, but
