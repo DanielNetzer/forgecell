@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,80 @@ func TestDoctorRoleReadinessSingleBindingKeepsResult(t *testing.T) {
 		if _, ok := report[key]; !ok {
 			t.Fatalf("existing key %s missing", key)
 		}
+	}
+}
+
+// olderBuild lays out a Forgecell build beside its release manifest. Doctor reads
+// both and executes neither; the protocol decides whether the build is compatible.
+func olderBuild(t *testing.T, protocol string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"version":"0.2.0","protocolVersion":"`+protocol+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return writeTool(t, dir, "forgecell", "#!/bin/sh\nexit 1\n")
+}
+
+func TestDoctorStaleMetaLauncherPointsAtRebindOfTheCodingBinding(t *testing.T) {
+	for _, c := range []struct {
+		name, source string
+		override     bool
+		launcher     func(t *testing.T) string
+		ready        bool
+		noCoding     bool
+		wantRebind   bool
+	}{
+		{name: "learn atom on an incompatible build", source: "learn-atom", launcher: func(t *testing.T) string { return olderBuild(t, "7") }, wantRebind: true},
+		{name: "learn atom on a compatible build", source: "learn-atom", launcher: func(t *testing.T) string { return olderBuild(t, "1") }, ready: true, wantRebind: true},
+		{name: "meta override on an incompatible build", source: "override", override: true, launcher: func(t *testing.T) string { return olderBuild(t, "7") }, wantRebind: true},
+		{name: "meta override on a compatible build", source: "override", override: true, launcher: func(t *testing.T) string { return olderBuild(t, "1") }, ready: true, wantRebind: true},
+		{name: "learn atom on a tool that is not Forgecell", source: "learn-atom", launcher: func(t *testing.T) string { return writeTool(t, t.TempDir(), "custom-tool", "#!/bin/sh\nexit 1\n") }},
+		{name: "coding harness that init cannot discover ready", source: "learn-atom", launcher: func(t *testing.T) string { return olderBuild(t, "7") }, noCoding: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			bin, lab := doctorFixture(t)
+			launcher, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			codex := filepath.Join(bin, "codex")
+			if !c.noCoding {
+				codex = writeTool(t, bin, "codex", strings.Replace(codexTool, "LOGIN", "Logged in using ChatGPT", 1))
+			}
+			claude := writeTool(t, bin, "claude", strings.NewReplacer("LOGGED", "true").Replace(claudeTool))
+			stale := argv(t, c.launcher(t), "__adapter", "claude-code", claude)
+			harnesses, learn := "", ""
+			if c.override {
+				harnesses = "harnesses:\n  meta: {binding: claude-code, command: " + stale + "}\n"
+			} else {
+				learn = "  - {id: learn, type: learn, binding: claude-code, command: " + stale + ", timeoutMs: 900000}\n"
+			}
+			os.MkdirAll(filepath.Join(lab, "formulas"), 0700)
+			os.WriteFile(filepath.Join(lab, "lab.json"), []byte(`{"schemaVersion":"v0","activeFormulaId":"f"}`), 0600)
+			recipe := "kind: formula\nid: f\nintake: {repo: acme/widgets}\nharness:\n  binding: codex\n  command: " + argv(t, launcher, "__adapter", "codex", codex) + "\n" + harnesses + roleAtoms + learn
+			if err = os.WriteFile(filepath.Join(lab, "formulas", "f.yaml"), []byte(recipe), 0600); err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf("forgecell init --lab %q --rebind codex", lab)
+			_, out := runDoctor(t, lab)
+			meta := rolesByName(t, decodeDoctor(t, out))["meta"]
+			if meta["source"] != c.source || meta["binding"] != "claude-code" || meta["ready"] != c.ready {
+				t.Fatalf("meta role = %v", meta)
+			}
+			if !c.wantRebind {
+				if next, _ := meta["nextCommand"].(string); strings.Contains(next, "--rebind") {
+					t.Fatalf("doctor offers a rebind that init would refuse or that would not move the launcher: %v", meta)
+				}
+				return
+			}
+			if meta["nextCommand"] != want {
+				t.Fatalf("meta role = %v, want nextCommand %q", meta, want)
+			}
+			_, human := runDoctor(t, lab, "--verbose")
+			if !strings.Contains(human, "Role readiness:") || !strings.Contains(human, "Next: "+want) {
+				t.Fatalf("human doctor output lacks %q:\n%s", want, human)
+			}
+		})
 	}
 }
 

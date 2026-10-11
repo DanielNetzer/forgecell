@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"go.yaml.in/yaml/v4"
 	"reflect"
 	"slices"
@@ -69,6 +70,59 @@ func nativeLauncher(command []string) string {
 	return ""
 }
 
+// recordedLaunchers are the native launchers the approved Formula's default and
+// coding bindings already name: Forgecell wrote them and a human approved them.
+func recordedLaunchers(f formula.Formula) map[string]bool {
+	recorded := map[string]bool{}
+	for _, b := range []formula.Binding{f.Harness, f.Harnesses[string(formula.CodingHarness)]} {
+		if l := nativeLauncher(b.Command); l != "" {
+			recorded[l] = true
+		}
+	}
+	return recorded
+}
+
+// establishedForgecell reports whether a saved launcher is established as a
+// Forgecell executable without executing it: the running executable, a managed
+// launcher, a launcher beside a release manifest, or a launcher the approved
+// Formula already records. A custom tool that merely has the native argv shape
+// is none of these.
+func establishedForgecell(saved string, recorded map[string]bool) bool {
+	if recorded[saved] {
+		return true
+	}
+	id := harness.ResolveLauncher(saved)
+	return id.Class == harness.LauncherRunning || id.Managed || id.Manifest.Found
+}
+
+// RebindRepoints reports whether init --rebind would repoint a native command
+// saved with this launcher in f, so doctor names the command only when it works.
+func RebindRepoints(f formula.Formula, launcher string) bool {
+	return launcher != "" && establishedForgecell(launcher, recordedLaunchers(f))
+}
+
+// staleNativeCommand reports whether a native analysis or meta role override or
+// learn Atom command names an established Forgecell launcher other than the
+// target one.
+func staleNativeCommand(f formula.Formula, launcher string) bool {
+	recorded := recordedLaunchers(f)
+	stale := func(command []string) bool {
+		current := nativeLauncher(command)
+		return current != "" && current != launcher && establishedForgecell(current, recorded)
+	}
+	for _, role := range []formula.HarnessRole{formula.AnalysisHarness, formula.MetaHarness} {
+		if b, ok := f.Harnesses[string(role)]; ok && stale(b.Command) {
+			return true
+		}
+	}
+	for _, a := range f.Atoms {
+		if a.Type == "learn" && stale(a.Command) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkRebindTarget requires a ready, discovered harness with an executable and
 // a launcher, refuses a rebind that would change nothing, and refuses a target
 // that would become the analysis binding by fallback without supporting it.
@@ -85,8 +139,8 @@ func checkRebindTarget(candidates []Candidate, id, launcher string, active formu
 		}
 		command := []string{launcher, "__adapter", id, c.Executable}
 		coding, overridden := active.Harnesses[string(formula.CodingHarness)]
-		if active.Harness.Binding == id && reflect.DeepEqual(active.Harness.Command, command) && (!overridden || coding.Binding == id && reflect.DeepEqual(coding.Command, command)) {
-			return fmt.Errorf("the default harness and any coding role binding are already bound to %s with this launcher and executable; nothing to rebind", id)
+		if active.Harness.Binding == id && reflect.DeepEqual(active.Harness.Command, command) && (!overridden || coding.Binding == id && reflect.DeepEqual(coding.Command, command)) && !staleNativeCommand(active, launcher) {
+			return fmt.Errorf("the default harness and any coding role binding are already bound to %s with this launcher and executable, and no native analysis, meta or learn command is on another Forgecell launcher; nothing to rebind", id)
 		}
 		return CheckAnalysisFallback(active, formula.Binding{Binding: id, Command: command})
 	}
@@ -154,12 +208,116 @@ func verifyRebindDiff(before, after string) error {
 	return nil
 }
 
-// rebindRecipe points the coding binding at the target and re-points every
-// native command that still uses the old default launcher: the learn Atom and the
-// analysis and meta overrides keep their own adapter and provider. It returns
-// each rewritten key path with its old and new value.
-func rebindRecipe(recipe, harnessMap map[string]any, active formula.Formula, target string, command []string) []string {
-	var changes []string
+// launcherRewrite is one recorded repoint of a native command's launcher. Path
+// names the command's holder, such as harnesses.meta or atoms[learn].
+type launcherRewrite struct{ Path, Old, New string }
+
+// verifyRebindExact proves the proposal is the approved Formula with the target
+// binding keys set and only the recorded launcher rewrites applied: any other
+// launcher value, or any unrecorded change, is refused.
+func verifyRebindExact(before, after, target string, command []string, rewrites []launcherRewrite) error {
+	if err := verifyRebindDiff(before, after); err != nil {
+		return err
+	}
+	var expected, proposed map[string]any
+	if err := yaml.Unmarshal([]byte(before), &expected); err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal([]byte(after), &proposed); err != nil {
+		return err
+	}
+	setBindingKeys(expected, target, command, func(_ string, holder map[string]any, key string, value any) {
+		if list, ok := value.([]string); ok {
+			items := make([]any, len(list))
+			for i, item := range list {
+				items[i] = item
+			}
+			value = items
+		}
+		holder[key] = value
+	})
+	holders := nativeHolders(expected)
+	for _, w := range rewrites {
+		index := slices.IndexFunc(holders, func(h nativeHolder) bool { return h.path == w.Path })
+		if index < 0 {
+			return fmt.Errorf("rebind rewrote %s, which is not a native command in the approved Formula; no proposal saved", w.Path)
+		}
+		args := holders[index].holder["command"].([]any)
+		if args[0] != w.Old {
+			return fmt.Errorf("rebind rewrote %s from a launcher the approved Formula does not name; no proposal saved", w.Path)
+		}
+		holders[index].holder["command"] = append([]any{w.New}, args[1:]...)
+	}
+	if !reflect.DeepEqual(expected, proposed) {
+		return fmt.Errorf("rebind would change more than the recorded launcher rewrites; no proposal saved")
+	}
+	return nil
+}
+
+func atomPath(i int, atom map[string]any) string {
+	if id, ok := atom["id"].(string); ok && id != "" {
+		return "atoms[" + id + "]"
+	}
+	return fmt.Sprintf("atoms[%d]", i)
+}
+
+// setBindingKeys visits every key a rebind sets to the target binding and
+// command: the default harness, the coding override and each harness Atom.
+func setBindingKeys(doc map[string]any, target string, command []string, set func(path string, holder map[string]any, key string, value any)) {
+	if h, ok := doc["harness"].(map[string]any); ok {
+		set("harness.binding", h, "binding", target)
+		set("harness.command", h, "command", command)
+	}
+	roles, _ := doc["harnesses"].(map[string]any)
+	if coding, ok := roles[string(formula.CodingHarness)].(map[string]any); ok {
+		set("harnesses.coding.binding", coding, "binding", target)
+		set("harnesses.coding.command", coding, "command", command)
+	}
+	atoms, _ := doc["atoms"].([]any)
+	for i, v := range atoms {
+		if atom, ok := v.(map[string]any); ok && atom["type"] == "harness" {
+			set(atomPath(i, atom)+".binding", atom, "binding", target)
+		}
+	}
+}
+
+// nativeHolder is a native [launcher, "__adapter", adapter, provider] command held
+// by an analysis or meta role override or by a learn Atom.
+type nativeHolder struct {
+	path   string
+	holder map[string]any
+}
+
+func nativeHolders(doc map[string]any) []nativeHolder {
+	var found []nativeHolder
+	add := func(path string, holder map[string]any) {
+		if args, ok := holder["command"].([]any); ok && len(args) == 4 && args[1] == "__adapter" {
+			found = append(found, nativeHolder{path, holder})
+		}
+	}
+	roles, _ := doc["harnesses"].(map[string]any)
+	for _, role := range []formula.HarnessRole{formula.AnalysisHarness, formula.MetaHarness} {
+		if m, ok := roles[string(role)].(map[string]any); ok {
+			add("harnesses."+string(role), m)
+		}
+	}
+	atoms, _ := doc["atoms"].([]any)
+	for i, v := range atoms {
+		if atom, ok := v.(map[string]any); ok && atom["type"] == "learn" {
+			add(atomPath(i, atom), atom)
+		}
+	}
+	return found
+}
+
+// rebindRecipe points the coding binding at the target and re-points native
+// commands onto the target launcher: the learn Atom and the analysis and meta
+// overrides keep their own adapter and provider. With repointStale a native
+// command on another launcher moves only when that launcher is established as a
+// Forgecell executable; the rest are returned as left. Otherwise only commands on
+// the old default launcher move. It returns each rewritten key path with its old
+// and new value, the structured launcher rewrites, and the commands left alone.
+func rebindRecipe(recipe map[string]any, active formula.Formula, target string, command []string, repointStale bool) (changes []string, rewrites []launcherRewrite, left []string) {
 	record := func(path string, before, after any) {
 		b, _ := json.Marshal(before)
 		a, _ := json.Marshal(after)
@@ -167,50 +325,32 @@ func rebindRecipe(recipe, harnessMap map[string]any, active formula.Formula, tar
 			changes = append(changes, fmt.Sprintf("%s: %s -> %s", path, b, a))
 		}
 	}
-	set := func(path string, holder map[string]any, key string, value any) {
+	setBindingKeys(recipe, target, command, func(path string, holder map[string]any, key string, value any) {
 		record(path, holder[key], value)
 		holder[key] = value
-	}
-	set("harness.binding", harnessMap, "binding", target)
-	set("harness.command", harnessMap, "command", command)
-	roles, _ := recipe["harnesses"].(map[string]any)
-	if coding, ok := roles[string(formula.CodingHarness)].(map[string]any); ok {
-		set("harnesses.coding.binding", coding, "binding", target)
-		set("harnesses.coding.command", coding, "command", command)
-	}
-	atoms, _ := recipe["atoms"].([]any)
-	atomPath := func(i int, atom map[string]any) string {
-		if id, ok := atom["id"].(string); ok && id != "" {
-			return "atoms[" + id + "]"
-		}
-		return fmt.Sprintf("atoms[%d]", i)
-	}
-	for i, v := range atoms {
-		if atom, ok := v.(map[string]any); ok && atom["type"] == "harness" {
-			set(atomPath(i, atom)+".binding", atom, "binding", target)
-		}
-	}
+	})
 	old := nativeLauncher(active.Harness.Command)
-	if old == "" || old == command[0] {
-		return changes
-	}
-	repoint := func(path string, holder map[string]any) {
-		if args, ok := holder["command"].([]any); ok && len(args) == 4 && args[1] == "__adapter" && args[0] == old {
-			record(path+".command[0]", args[0], command[0])
-			holder["command"] = append([]any{command[0]}, args[1:]...)
+	recorded := recordedLaunchers(active)
+	for _, h := range nativeHolders(recipe) {
+		args := h.holder["command"].([]any)
+		launcher, _ := args[0].(string)
+		if launcher == command[0] {
+			continue
 		}
-	}
-	for _, role := range []formula.HarnessRole{formula.AnalysisHarness, formula.MetaHarness} {
-		if m, ok := roles[string(role)].(map[string]any); ok {
-			repoint("harnesses."+string(role), m)
+		if repointStale {
+			if !establishedForgecell(launcher, recorded) {
+				quoted, _ := json.Marshal(args[0])
+				left = append(left, fmt.Sprintf("%s.command[0]: %s", h.path, quoted))
+				continue
+			}
+		} else if old == "" || launcher != old {
+			continue
 		}
+		record(h.path+".command[0]", args[0], command[0])
+		rewrites = append(rewrites, launcherRewrite{h.path, launcher, command[0]})
+		h.holder["command"] = append([]any{command[0]}, args[1:]...)
 	}
-	for i, v := range atoms {
-		if atom, ok := v.(map[string]any); ok && atom["type"] == "learn" {
-			repoint(atomPath(i, atom), atom)
-		}
-	}
-	return changes
+	return changes, rewrites, left
 }
 
 func learnCommand(f formula.Formula) []string {
@@ -373,6 +513,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	}
 	command := []string{o.Launcher, "__adapter", selected.ID, selected.Executable}
 	var recipe map[string]any
+	var rewrites []launcherRewrite
 	if active.Approved {
 		out.BeforeYAML = active.Formula.YAML
 		if err = yaml.Unmarshal([]byte(active.Formula.YAML), &recipe); err != nil {
@@ -382,9 +523,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if !ok {
 			return out, fmt.Errorf("existing harness is not a mapping")
 		}
-		var rewritten []string
+		var rewritten, left []string
 		if o.Preferred != "" {
-			rewritten = rebindRecipe(recipe, binding, active.Formula, selected.ID, command)
+			rewritten, rewrites, left = rebindRecipe(recipe, active.Formula, selected.ID, command, o.Rebind != "")
 			if budgetRequested {
 				current := o
 				if current.HarnessTimeoutMS == 0 {
@@ -405,7 +546,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			out.Note += " Rewritten keys (old -> new): " + strings.Join(rewritten, "; ") + "."
 		}
 		if o.Rebind != "" {
-			out.Note = "Proposes only a binding rebind to " + selected.ID + ". Rewritten keys (old -> new): " + strings.Join(rewritten, "; ") + ". Atoms, checks, instructions, timeouts, learned guidance and the adapter and provider of every other binding are preserved. Review the exact YAML before approval."
+			out.Note = "Proposes only a binding rebind to " + selected.ID + ". Rewritten keys (old -> new): " + strings.Join(rewritten, "; ") + "."
+			if len(left) > 0 {
+				out.Note += " Left unchanged because the launcher is not established as a Forgecell executable: " + strings.Join(left, "; ") + "."
+			}
+			out.Note += " Atoms, checks, instructions, timeouts, learned guidance and the adapter and provider of every other binding are preserved. Review the exact YAML before approval."
 		}
 	} else {
 		name := strings.ToLower(strings.Split(out.Repository.Repo, "/")[1]) + "-github-issue"
@@ -483,7 +628,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, err
 	}
 	if o.Rebind != "" {
-		if err = verifyRebindDiff(active.Formula.YAML, string(encoded)); err != nil {
+		if err = verifyRebindExact(active.Formula.YAML, string(encoded), selected.ID, command, rewrites); err != nil {
 			return out, err
 		}
 	}

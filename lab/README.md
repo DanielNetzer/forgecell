@@ -49,7 +49,10 @@ A failed `isolation` step blocks the ticket workflow without changing the
 harness's `readiness`.
 
 A saved binding is reported by state, each with its paths: `launcher-missing`,
-`launcher-different` (the saved launcher is not the running executable),
+`launcher-incompatible` and `launcher-unknown` (the saved launcher is a different
+Forgecell build whose adapter protocol differs or cannot be established; these block
+the binding), `launcher-compatible` (a different build with the same adapter protocol;
+informational, the binding still runs),
 `adapter-mismatch` (the saved adapter differs from the Formula binding) and
 `provider-missing` (the bound provider is absent or not an executable file). The
 launcher is never executed; its version is read from the adjacent release
@@ -63,7 +66,30 @@ command (`codex login`, `claude auth login` or `agent login`) when authenticatio
 failed; `forgecell init --lab DIR --harness ID` when a ready provider is available
 to rebind (prefixed with the provider's directory on `PATH` when it is bound
 outside `PATH`, because init discovers harnesses through `PATH`); otherwise
-`forgecell doctor --lab DIR --harness ID` to re-check.
+`forgecell doctor --lab DIR --harness ID` to re-check. A meta role (the learn Atom
+or a `harnesses.meta` override) saved on an older Forgecell build, in any
+`launcher-*` state including the runnable `launcher-compatible`, instead carries
+`forgecell init --lab DIR --rebind CODING_ID`, where `CODING_ID` is the current
+coding binding: `--harness` with the meta adapter would rebind the coding harness,
+not the learn Atom. Doctor prints it only when `init --rebind` would repoint that
+launcher and `CODING_ID` is a harness init discovers ready, and it leaves `ready`,
+the exit code and the other JSON fields unchanged.
+
+`init --rebind ID` proposes a reviewed, binding-only change. Besides the coding
+binding, it repoints the launcher (`command[0]`) of every native
+`[launcher, "__adapter", adapter, provider]` command in the learn Atom and in the
+`harnesses.analysis` and `harnesses.meta` overrides that is not on the target
+launcher, so a learn Atom stranded on an older build moves with the coding harness.
+A launcher is repointed only when it is established as a Forgecell executable
+without running it: the running executable, a managed launcher, a launcher beside a
+release `manifest.json`, or the launcher the approved default or coding binding
+already records. A custom tool that merely has the same argv shape is left
+unchanged and named in the proposal note. Adapter, provider, timeout and every
+other key are kept, custom commands are never touched, and each rewrite is listed
+as `path: old -> new` in the proposal note. The proposal is verified to equal the
+approved Formula with only the target binding keys and those recorded launcher
+rewrites applied, and `--rebind` refuses with "nothing to rebind" when no key would
+change.
 
 ## Review a ticket (development build)
 

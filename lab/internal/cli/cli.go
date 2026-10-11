@@ -552,9 +552,15 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if !roles[i].Ready {
 				rolesReady = false
 				roles[i].NextCommand = commands.candidate(roles[i].Candidate)
-				if firstRoleCommand == "" {
-					firstRoleCommand = roles[i].NextCommand
+			}
+			if roles[i].Role == string(formula.MetaHarness) {
+				coding, _ := active.Formula.RoleBinding(formula.CodingHarness)
+				if fix := commands.staleMeta(active.Formula, roles[i].Candidate, coding.Binding); fix != "" {
+					roles[i].NextCommand = fix
 				}
+			}
+			if !roles[i].Ready && firstRoleCommand == "" {
+				firstRoleCommand = roles[i].NextCommand
 			}
 		}
 		if len(active.Formula.Harnesses) > 0 {
@@ -991,6 +997,24 @@ func (x doctorCommands) recheck(id string) string {
 		command += " --harness " + harnessArg(id)
 	}
 	return command
+}
+
+// staleMeta returns the reviewed proposal that repoints a meta binding (the learn
+// Atom or a meta override) saved on an older Forgecell build, or "" when none
+// applies. It keeps the coding binding, which init --harness with the meta adapter
+// would change, and is offered only when the same launcher is one init --rebind
+// repoints and the coding binding is a harness init discovers ready, so the
+// command yields a proposal instead of a refusal.
+func (x doctorCommands) staleMeta(f formula.Formula, c onboarding.Candidate, codingID string) string {
+	if c.Binding == nil || !x.pathReady[codingID] || !onboarding.RebindRepoints(f, c.Binding.Launcher) {
+		return ""
+	}
+	for _, s := range c.Binding.States {
+		if strings.HasPrefix(s.State, "launcher-") {
+			return fmt.Sprintf("forgecell init --lab %q --rebind %s", x.lab, harnessArg(codingID))
+		}
+	}
+	return ""
 }
 
 func harnessArg(id string) string {
