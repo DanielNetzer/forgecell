@@ -638,7 +638,8 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 // resumeByPolicy is the approval transaction with the scope gate's policy as the
 // approver. It runs every live check the human path runs, and records a decision
 // only when the policy approves the pre-approval record and Approve then succeeds
-// against the live inputs. Nothing calls it from Run or the CLI yet.
+// against the live inputs. Only the Lab loop calls it; Run and `forgecell run`
+// never approve by policy.
 func resumeByPolicy(ctx context.Context, o Options, expected formula.Loaded, number int64, repo string) (Record, error) {
 	return resumeApproved(ctx, o, expected, number, repo, true)
 }
