@@ -6,16 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/pinned"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
@@ -28,7 +29,6 @@ const (
 	MaxAnalysisWrapperManifestBytes = 64 * 1024
 	maxWrapperListEntries           = 32
 	maxWrapperText                  = 1024
-	maxPinnedFileBytes              = 256 << 20
 
 	// wrapperPathEnv is the only PATH a wrapper ever receives.
 	wrapperPathEnv = "/usr/bin:/bin"
@@ -50,10 +50,7 @@ var (
 )
 
 // PinnedFile is one content-addressed identity.
-type PinnedFile struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-}
+type PinnedFile = pinned.File
 
 // WrapperDependency is a reviewed enforcement-critical dependency. A mutable
 // dependency nobody explained is declared with state "unknown" and is never
@@ -108,11 +105,7 @@ type AnalysisWrapperManifest struct {
 
 // VerifiedIdentity is a digest Forgecell computed from the file itself at
 // verification time, never one copied from the manifest.
-type VerifiedIdentity struct {
-	Role   string `json:"role"`
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-}
+type VerifiedIdentity = pinned.Identity
 
 // AnalysisWrapperDecision is the immutable evidence of one approval attempt.
 type AnalysisWrapperDecision struct {
@@ -151,8 +144,12 @@ func DecodeAnalysisWrapperManifest(raw []byte) (AnalysisWrapperManifest, error) 
 	if len(raw) > MaxAnalysisWrapperManifestBytes {
 		return m, fmt.Errorf("analysis wrapper manifest exceeds %d bytes", MaxAnalysisWrapperManifestBytes)
 	}
-	if err := rejectDuplicateKeys(raw); err != nil {
-		return m, err
+	if err := pinned.RejectDuplicateKeys(raw); err != nil {
+		var dup *pinned.DuplicateKeyError
+		if errors.As(err, &dup) {
+			err = fmt.Errorf("analysis wrapper manifest has a duplicate key %q", dup.Key)
+		}
+		return m, fmt.Errorf("invalid analysis wrapper manifest: %w", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -168,50 +165,6 @@ func DecodeAnalysisWrapperManifest(raw []byte) (AnalysisWrapperManifest, error) 
 	return m, nil
 }
 
-func rejectDuplicateKeys(raw []byte) error {
-	d := json.NewDecoder(bytes.NewReader(raw))
-	var walk func() error
-	walk = func() error {
-		tok, err := d.Token()
-		if err != nil {
-			return err
-		}
-		delim, ok := tok.(json.Delim)
-		if !ok {
-			return nil
-		}
-		if delim == '{' {
-			seen := map[string]bool{}
-			for d.More() {
-				key, err := d.Token()
-				if err != nil {
-					return err
-				}
-				k, _ := key.(string)
-				if seen[k] {
-					return fmt.Errorf("analysis wrapper manifest has a duplicate key %q", k)
-				}
-				seen[k] = true
-				if err := walk(); err != nil {
-					return err
-				}
-			}
-		} else {
-			for d.More() {
-				if err := walk(); err != nil {
-					return err
-				}
-			}
-		}
-		_, err = d.Token()
-		return err
-	}
-	if err := walk(); err != nil {
-		return fmt.Errorf("invalid analysis wrapper manifest: %w", err)
-	}
-	return nil
-}
-
 func validWrapperPath(p string) bool {
 	return p != "" && len(p) <= 4096 && filepath.IsAbs(p) && filepath.Clean(p) == p && !strings.ContainsRune(p, 0)
 }
@@ -220,13 +173,13 @@ func (m AnalysisWrapperManifest) validate() error {
 	if m.SchemaVersion != "v1" || m.Kind != "analysis-wrapper" {
 		return fmt.Errorf("analysis wrapper manifest must be schemaVersion v1, kind analysis-wrapper")
 	}
-	pinned := func(label string, f PinnedFile) error {
+	checkPin := func(label string, f PinnedFile) error {
 		if !validWrapperPath(f.Path) || !hex64.MatchString(f.SHA256) {
 			return fmt.Errorf("%s needs a clean absolute path and a lowercase SHA-256", label)
 		}
 		return nil
 	}
-	if err := pinned("executable", m.Executable); err != nil {
+	if err := checkPin("executable", m.Executable); err != nil {
 		return err
 	}
 	if len(m.Args) > maxWrapperListEntries {
@@ -241,17 +194,17 @@ func (m AnalysisWrapperManifest) validate() error {
 		return fmt.Errorf("analysis wrapper lists exceed %d entries", maxWrapperListEntries)
 	}
 	if m.Interpreter != nil {
-		if err := pinned("interpreter", *m.Interpreter); err != nil {
+		if err := checkPin("interpreter", *m.Interpreter); err != nil {
 			return err
 		}
 	}
 	for _, f := range m.Configuration {
-		if err := pinned("configuration entry", f); err != nil {
+		if err := checkPin("configuration entry", f); err != nil {
 			return err
 		}
 	}
 	for _, f := range m.Policy {
-		if err := pinned("policy entry", f); err != nil {
+		if err := checkPin("policy entry", f); err != nil {
 			return err
 		}
 	}
@@ -394,139 +347,6 @@ func (m AnalysisWrapperManifest) Assess() []string {
 	return findings
 }
 
-// checkPlacement rejects a pinned path that another principal could swap after
-// verification: a symlink (or a path resolved through one), a group- or
-// world-writable file, or any ancestor directory that others can write to
-// without the sticky bit.
-func checkPlacement(path string) error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("%s cannot be checked: permission and symlink checks are unsupported on Windows", path)
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("%s is unreadable: %v", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink", path)
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("%s is unreadable: %v", path, err)
-	}
-	if resolved != path {
-		return fmt.Errorf("%s resolves to %s through a symlink", path, resolved)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s is group- or world-writable", path)
-	}
-	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
-		di, err := os.Lstat(dir)
-		if err != nil {
-			return fmt.Errorf("%s has an unreadable parent: %v", path, err)
-		}
-		if di.Mode().Perm()&0o022 != 0 && di.Mode()&os.ModeSticky == 0 {
-			return fmt.Errorf("%s lives in the writable directory %s", path, dir)
-		}
-		if filepath.Dir(dir) == dir {
-			return nil
-		}
-	}
-}
-
-// openPinned opens a placement-checked regular file and proves the open handle
-// is the file that was checked, so a swap between check and open is refused.
-func openPinned(path string) (*os.File, error) {
-	if err := checkPlacement(path); err != nil {
-		return nil, err
-	}
-	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s must be a regular file", path)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("%s is unreadable: %v", path, err)
-	}
-	after, err := file.Stat()
-	if err != nil || !os.SameFile(before, after) || after.Size() > maxPinnedFileBytes {
-		file.Close()
-		return nil, fmt.Errorf("%s was replaced while it was opened or exceeds %d bytes", path, int64(maxPinnedFileBytes))
-	}
-	return file, nil
-}
-
-func sha256Path(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	h := sha256.New()
-	if _, err = io.Copy(h, io.LimitReader(file, maxPinnedFileBytes+1)); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// verifyPinned hashes the file as it is now. An unavailable file is reported
-// with the given class; a digest mismatch is always "changed".
-func verifyPinned(role string, f PinnedFile, unavailable string) (VerifiedIdentity, string) {
-	file, err := openPinned(f.Path)
-	if err != nil {
-		return VerifiedIdentity{}, unavailable + ": " + role + " " + err.Error()
-	}
-	defer file.Close()
-	h := sha256.New()
-	if _, err = io.Copy(h, io.LimitReader(file, maxPinnedFileBytes)); err != nil {
-		return VerifiedIdentity{}, unavailable + ": " + role + " " + f.Path + " is unreadable: " + err.Error()
-	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if got != f.SHA256 {
-		return VerifiedIdentity{}, fmt.Sprintf("changed: %s %s changed: SHA-256 %s differs from the pinned %s", role, f.Path, got, f.SHA256)
-	}
-	return VerifiedIdentity{Role: role, Path: f.Path, SHA256: got}, ""
-}
-
-// copyPinned streams a verified file into the private directory, proves the
-// bytes it read match the pin, then re-hashes the copy that will be executed.
-func copyPinned(f PinnedFile, dst string) error {
-	src, err := openPinned(f.Path)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	info, err := src.Stat()
-	if err != nil {
-		return err
-	}
-	mode := os.FileMode(0o400)
-	if info.Mode().Perm()&0o100 != 0 {
-		mode = 0o500
-	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(out, h), io.LimitReader(src, maxPinnedFileBytes))
-	if closeErr := out.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != f.SHA256 {
-		return fmt.Errorf("%s changed after approval: SHA-256 %s differs from the pinned %s", f.Path, got, f.SHA256)
-	}
-	if err = os.Chmod(dst, mode); err != nil {
-		return err
-	}
-	if got, err := sha256Path(dst); err != nil || got != f.SHA256 {
-		return fmt.Errorf("the private copy of %s does not match its pinned SHA-256", f.Path)
-	}
-	return nil
-}
-
 // verifyIdentities hashes every pinned file now and returns the digests it
 // computed. A script's shebang interpreter must be declared and pinned; a
 // PATH-resolved one is unknown. Evidence that points at nothing is refused.
@@ -534,7 +354,7 @@ func (m AnalysisWrapperManifest) verifyIdentities() ([]string, []VerifiedIdentit
 	var findings []string
 	var identities []VerifiedIdentity
 	check := func(role string, f PinnedFile, unavailable string) {
-		if id, finding := verifyPinned(role, f, unavailable); finding != "" {
+		if id, finding := pinned.Verify(role, f, unavailable); finding != "" {
 			findings = append(findings, finding)
 		} else {
 			identities = append(identities, id)
@@ -652,7 +472,7 @@ func materializeWrapper(root string, m AnalysisWrapperManifest) (string, error) 
 	}
 	copyTo := func(sub string, f PinnedFile) (string, error) {
 		dst := filepath.Join(root, sub, filepath.Base(f.Path))
-		return dst, copyPinned(f, dst)
+		return dst, pinned.Copy(f, dst)
 	}
 	executable, err := copyTo("exec", m.Executable)
 	if err != nil {
