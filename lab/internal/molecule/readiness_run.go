@@ -143,21 +143,22 @@ func issueInput(i Issue) readiness.Issue {
 // ledger before any wrapper process starts. Every failure is returned as an
 // error, so intake stops with no coding harness and no fallback analysis.
 // b is the resolved analysis role binding, which may differ from f.Harness.
-func analyzeWithWrapper(ctx context.Context, r *Record, f formula.Formula, b formula.Binding, request map[string]any) (readiness.Analysis, []ProvenanceEvidence, error) {
+// The diagnostics are nil until a wrapper invocation returns a process result.
+func analyzeWithWrapper(ctx context.Context, r *Record, f formula.Formula, b formula.Binding, request map[string]any) (readiness.Analysis, []ProvenanceEvidence, *process.Diagnostics, error) {
 	ref := b.AnalysisWrapper
 	ordinal := len(r.AnalysisAttempts)
 	decision := harness.ApproveAnalysisWrapper(r.LabDir, ref.Manifest, ref.SHA256)
 	file, err := historyFile(*r, fmt.Sprintf("analysis-wrapper-%d-decision.json", ordinal), decision)
 	if err != nil {
-		return readiness.Analysis{}, nil, fmt.Errorf("analysis wrapper decision could not be persisted; no process was started: %w", err)
+		return readiness.Analysis{}, nil, nil, fmt.Errorf("analysis wrapper decision could not be persisted; no process was started: %w", err)
 	}
 	evidence := []ProvenanceEvidence{fileProvenance(file)}
 	r.Notes = append(r.Notes, fmt.Sprintf("Analysis wrapper decision %q for attempt %d is recorded at %s (SHA-256 %s). Declared controls are wrapper claims, not Forgecell-verified containment.", decision.Status, ordinal, file.Path, file.SHA256))
 	if err = save(*r); err != nil {
-		return readiness.Analysis{}, evidence, fmt.Errorf("analysis wrapper decision could not be saved to the ledger; no process was started: %w", err)
+		return readiness.Analysis{}, evidence, nil, fmt.Errorf("analysis wrapper decision could not be saved to the ledger; no process was started: %w", err)
 	}
 	if err = decision.Err(); err != nil {
-		return readiness.Analysis{}, evidence, err
+		return readiness.Analysis{}, evidence, nil, err
 	}
 	contract := []map[string]any{}
 	for _, a := range f.Atoms {
@@ -168,7 +169,13 @@ func analyzeWithWrapper(ctx context.Context, r *Record, f formula.Formula, b for
 	request["formulaCheckContract"] = contract
 	result := harness.InvokeAnalysisWrapper(ctx, r.LabDir, decision, request, time.Duration(b.TimeoutMS)*time.Millisecond)
 	a, err := decodeAnalysisResult(result)
-	return a, evidence, err
+	return a, evidence, resultDiagnostics(result), err
+}
+
+// resultDiagnostics keeps only the secret-free diagnostics of a process result.
+func resultDiagnostics(result process.Result) *process.Diagnostics {
+	d := result.Diagnostics()
+	return &d
 }
 
 // Lookup uses approved identity and never fills historical absence.
@@ -359,17 +366,19 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	}
 	analysis := o.Analyze
 	var wrapperEvidence []ProvenanceEvidence
+	var analysisDiagnostics *process.Diagnostics
 	if analysis == nil {
 		analysis = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 			inputs := readiness.VerificationInputs{CheckInputs: o.CheckInputs, Checks: o.Checks, Setup: o.Setup, Artifacts: o.Artifacts, Policy: o.Policy}
 			if b.AnalysisWrapper != nil {
-				a, evidence, err := analyzeWithWrapper(ctx, &r, f, b, analysisRequest(ctx, i, s, inputs))
-				wrapperEvidence = evidence
+				a, evidence, diagnostics, err := analyzeWithWrapper(ctx, &r, f, b, analysisRequest(ctx, i, s, inputs))
+				wrapperEvidence, analysisDiagnostics = evidence, diagnostics
 				return a, err
 			}
 			// Resolve configuration from the source checkout, then Execute constrains the
 			// provider and moves analysis to a temporary directory before the model runs.
 			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, analysisRequest(ctx, i, s, inputs))
+			analysisDiagnostics = resultDiagnostics(result)
 			return decodeAnalysisResult(result)
 		}
 	}
@@ -408,10 +417,11 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if correction != nil {
 			callCtx = withAnalysisCorrection(ctx, *correction)
 		}
-		wrapperEvidence = nil
+		wrapperEvidence, analysisDiagnostics = nil, nil
 		a, err = analysis(callCtx, analysisBinding, issue, snapshot)
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
+		attempt.Diagnostics = analysisDiagnostics
 		if err != nil {
 			attempt.Status = "failed"
 			attempt.Error = err.Error()
