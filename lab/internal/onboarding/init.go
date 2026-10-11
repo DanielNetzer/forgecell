@@ -7,6 +7,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"go.yaml.in/yaml/v4"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 )
@@ -59,13 +60,18 @@ type Outcome struct {
 	Note       string         `json:"note"`
 }
 
-func codingOverridden(f formula.Formula) bool {
-	_, ok := f.Harnesses[string(formula.CodingHarness)]
-	return ok
+// nativeLauncher returns the launcher of a native [launcher, "__adapter", adapter,
+// provider] command, or "" for any other command.
+func nativeLauncher(command []string) string {
+	if len(command) == 4 && command[1] == "__adapter" {
+		return command[0]
+	}
+	return ""
 }
 
 // checkRebindTarget requires a ready, discovered harness with an executable and
-// a launcher, and refuses a rebind that would change nothing.
+// a launcher, refuses a rebind that would change nothing, and refuses a target
+// that would become the analysis binding by fallback without supporting it.
 func checkRebindTarget(candidates []Candidate, id, launcher string, active formula.Formula, lab string) error {
 	for _, c := range candidates {
 		if c.ID != id {
@@ -77,18 +83,62 @@ func checkRebindTarget(candidates []Candidate, id, launcher string, active formu
 		if launcher == "" {
 			return fmt.Errorf("cannot rebind to %s: the Forgecell launcher is unknown; set FORGECELL_LAUNCHER to its path", id)
 		}
-		if active.Harness.Binding == id && reflect.DeepEqual(active.Harness.Command, []string{launcher, "__adapter", id, c.Executable}) {
-			return fmt.Errorf("the default harness is already bound to %s with this launcher and executable; nothing to rebind", id)
+		command := []string{launcher, "__adapter", id, c.Executable}
+		coding, overridden := active.Harnesses[string(formula.CodingHarness)]
+		if active.Harness.Binding == id && reflect.DeepEqual(active.Harness.Command, command) && (!overridden || coding.Binding == id && reflect.DeepEqual(coding.Command, command)) {
+			return fmt.Errorf("the default harness and any coding role binding are already bound to %s with this launcher and executable; nothing to rebind", id)
 		}
-		return nil
+		return CheckAnalysisFallback(active, formula.Binding{Binding: id, Command: command})
 	}
 	return fmt.Errorf("cannot rebind to %q: no such harness was discovered; run forgecell doctor --lab %q to list the available harnesses", id, lab)
 }
 
+// maskLauncher blanks the launcher of a native command held under m["command"].
+func maskLauncher(m map[string]any) {
+	if args, ok := m["command"].([]any); ok && len(args) == 4 && args[1] == "__adapter" {
+		m["command"] = append([]any{"<launcher>"}, args[1:]...)
+	}
+}
+
+// maskRebindKeys removes the only keys a rebind may change: harness.binding and
+// harness.command, harnesses.coding.binding and harnesses.coding.command, the
+// binding of the harness Atom, and the launcher element of native commands in the
+// learn Atom and in the analysis and meta overrides.
+func maskRebindKeys(doc map[string]any) {
+	if h, ok := doc["harness"].(map[string]any); ok {
+		delete(h, "binding")
+		delete(h, "command")
+	}
+	if roles, ok := doc["harnesses"].(map[string]any); ok {
+		if coding, ok := roles[string(formula.CodingHarness)].(map[string]any); ok {
+			delete(coding, "binding")
+			delete(coding, "command")
+		}
+		for _, role := range []formula.HarnessRole{formula.AnalysisHarness, formula.MetaHarness} {
+			if m, ok := roles[string(role)].(map[string]any); ok {
+				maskLauncher(m)
+			}
+		}
+	}
+	if atoms, ok := doc["atoms"].([]any); ok {
+		for _, v := range atoms {
+			atom, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch atom["type"] {
+			case "harness":
+				delete(atom, "binding")
+			case "learn":
+				maskLauncher(atom)
+			}
+		}
+	}
+}
+
 // verifyRebindDiff proves a rebind proposal differs from the approved Formula only
-// in binding keys: harness.binding, harness.command and, unless harnesses.coding
-// overrides it, the binding of the harness Atom.
-func verifyRebindDiff(before, after string, codingOverride bool) error {
+// in the keys maskRebindKeys names.
+func verifyRebindDiff(before, after string) error {
 	var a, b map[string]any
 	if err := yaml.Unmarshal([]byte(before), &a); err != nil {
 		return err
@@ -96,21 +146,78 @@ func verifyRebindDiff(before, after string, codingOverride bool) error {
 	if err := yaml.Unmarshal([]byte(after), &b); err != nil {
 		return err
 	}
-	for _, doc := range []map[string]any{a, b} {
-		if h, ok := doc["harness"].(map[string]any); ok {
-			delete(h, "binding")
-			delete(h, "command")
-		}
-		if atoms, ok := doc["atoms"].([]any); ok && !codingOverride {
-			for _, v := range atoms {
-				if atom, ok := v.(map[string]any); ok && atom["type"] == "harness" {
-					delete(atom, "binding")
-				}
-			}
-		}
-	}
+	maskRebindKeys(a)
+	maskRebindKeys(b)
 	if !reflect.DeepEqual(a, b) {
 		return fmt.Errorf("rebind would change more than the binding keys; no proposal saved")
+	}
+	return nil
+}
+
+// rebindRecipe points the coding binding at the target and re-points every
+// native command that still uses the old default launcher: the learn Atom and the
+// analysis and meta overrides keep their own adapter and provider. It returns
+// each rewritten key path with its old and new value.
+func rebindRecipe(recipe, harnessMap map[string]any, active formula.Formula, target string, command []string) []string {
+	var changes []string
+	record := func(path string, before, after any) {
+		b, _ := json.Marshal(before)
+		a, _ := json.Marshal(after)
+		if string(b) != string(a) {
+			changes = append(changes, fmt.Sprintf("%s: %s -> %s", path, b, a))
+		}
+	}
+	set := func(path string, holder map[string]any, key string, value any) {
+		record(path, holder[key], value)
+		holder[key] = value
+	}
+	set("harness.binding", harnessMap, "binding", target)
+	set("harness.command", harnessMap, "command", command)
+	roles, _ := recipe["harnesses"].(map[string]any)
+	if coding, ok := roles[string(formula.CodingHarness)].(map[string]any); ok {
+		set("harnesses.coding.binding", coding, "binding", target)
+		set("harnesses.coding.command", coding, "command", command)
+	}
+	atoms, _ := recipe["atoms"].([]any)
+	atomPath := func(i int, atom map[string]any) string {
+		if id, ok := atom["id"].(string); ok && id != "" {
+			return "atoms[" + id + "]"
+		}
+		return fmt.Sprintf("atoms[%d]", i)
+	}
+	for i, v := range atoms {
+		if atom, ok := v.(map[string]any); ok && atom["type"] == "harness" {
+			set(atomPath(i, atom)+".binding", atom, "binding", target)
+		}
+	}
+	old := nativeLauncher(active.Harness.Command)
+	if old == "" || old == command[0] {
+		return changes
+	}
+	repoint := func(path string, holder map[string]any) {
+		if args, ok := holder["command"].([]any); ok && len(args) == 4 && args[1] == "__adapter" && args[0] == old {
+			record(path+".command[0]", args[0], command[0])
+			holder["command"] = append([]any{command[0]}, args[1:]...)
+		}
+	}
+	for _, role := range []formula.HarnessRole{formula.AnalysisHarness, formula.MetaHarness} {
+		if m, ok := roles[string(role)].(map[string]any); ok {
+			repoint("harnesses."+string(role), m)
+		}
+	}
+	for i, v := range atoms {
+		if atom, ok := v.(map[string]any); ok && atom["type"] == "learn" {
+			repoint(atomPath(i, atom), atom)
+		}
+	}
+	return changes
+}
+
+func learnCommand(f formula.Formula) []string {
+	for _, a := range f.Atoms {
+		if a.Type == "learn" {
+			return a.Command
+		}
 	}
 	return nil
 }
@@ -275,9 +382,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if !ok {
 			return out, fmt.Errorf("existing harness is not a mapping")
 		}
+		var rewritten []string
 		if o.Preferred != "" {
-			binding["binding"] = selected.ID
-			binding["command"] = command
+			rewritten = rebindRecipe(recipe, binding, active.Formula, selected.ID, command)
 			if budgetRequested {
 				current := o
 				if current.HarnessTimeoutMS == 0 {
@@ -293,16 +400,12 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			command = active.Formula.Harness.Command
 			selected = ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 		}
-		if atoms, ok := recipe["atoms"].([]any); ok && !codingOverridden(active.Formula) {
-			for _, value := range atoms {
-				if atom, ok := value.(map[string]any); ok && atom["type"] == "harness" && o.Preferred != "" {
-					atom["binding"] = selected.ID
-				}
-			}
-		}
 		out.Note = "Proposes only a coding-harness rebind (plus any explicitly requested timeout budget); existing instructions, workflow and meta-harness configuration are preserved. Review the complete YAML before approval."
+		if len(rewritten) > 0 {
+			out.Note += " Rewritten keys (old -> new): " + strings.Join(rewritten, "; ") + "."
+		}
 		if o.Rebind != "" {
-			out.Note = "Proposes only a binding rebind to " + selected.ID + ": harness.binding, harness.command and the harness Atom binding change (the Atom binding is left alone when harnesses.coding overrides it). Atoms, checks, instructions, learned guidance and per-role bindings are preserved. Review the exact YAML before approval."
+			out.Note = "Proposes only a binding rebind to " + selected.ID + ". Rewritten keys (old -> new): " + strings.Join(rewritten, "; ") + ". Atoms, checks, instructions, timeouts, learned guidance and the adapter and provider of every other binding are preserved. Review the exact YAML before approval."
 		}
 	} else {
 		name := strings.ToLower(strings.Split(out.Repository.Repo, "/")[1]) + "-github-issue"
@@ -368,8 +471,18 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, err
 	}
 	if o.Rebind != "" {
-		if err = verifyRebindDiff(active.Formula.YAML, string(encoded), codingOverridden(active.Formula)); err != nil {
+		if err = verifyRebindDiff(active.Formula.YAML, string(encoded)); err != nil {
 			return out, err
+		}
+	}
+	if active.Approved && o.Preferred != "" && o.MetaHarness == "" && o.MetaCommand == nil && LearnBound(active.Formula) {
+		proposed, e := formula.Parse(encoded)
+		if e != nil {
+			return out, e
+		}
+		if !slices.Equal(learnCommand(active.Formula), learnCommand(proposed)) {
+			refreshed := InspectMeta(ctx, proposed, out.Repository.Root, o.Runner)
+			out.Meta = &refreshed
 		}
 	}
 	var evidence *Repository

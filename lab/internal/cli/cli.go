@@ -895,6 +895,7 @@ func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, js
 	}
 	report := proposalCapabilities(p)
 	renderCapabilities(out, report.Candidate, report.LearnBound, "saved observation; not current verification")
+	renderRoleCapabilities(out, report.Roles, "saved observation; not current verification")
 	meta := proposalMeta(p)
 	renderMeta(out, meta, "saved observation; not current verification")
 	if meta.BeforeYAML != "" {
@@ -1144,6 +1145,12 @@ func renderCapabilities(out io.Writer, c onboarding.Candidate, learn bool, sourc
 		fmt.Fprintf(out, "%s: %s — %s\n", item.name, item.value.State, item.value.Reason)
 	}
 	fmt.Fprintf(out, "Learn command bound: %t\n", learn)
+}
+
+func renderRoleCapabilities(out io.Writer, roles []onboarding.RoleCapability, source string) {
+	for _, r := range roles {
+		fmt.Fprintf(out, "Role capability %s (%s): %s adapter support %s — %s [%s]\n", r.Role, r.Source, r.Binding, r.Capability.State, r.Capability.Reason, source)
+	}
 }
 
 func proposalMeta(p onboarding.Proposal) onboarding.MetaReport {

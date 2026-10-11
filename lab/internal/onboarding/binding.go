@@ -199,6 +199,70 @@ func ValidateRoleBindings(f formula.Formula) error {
 	return f.ValidateHarnessRoles()
 }
 
+// CheckAnalysisFallback refuses a new default binding that would silently become
+// the analysis binding when harnesses.analysis is absent but cannot perform
+// read-only ticket analysis. It executes nothing.
+func CheckAnalysisFallback(f formula.Formula, target formula.Binding) error {
+	if _, declared := f.Harnesses[string(formula.AnalysisHarness)]; declared {
+		return nil
+	}
+	if c := roleCapability(formula.AnalysisHarness, target); c.State == "unsupported" {
+		return fmt.Errorf("cannot rebind to %s: harnesses.analysis is not declared, so read-only ticket analysis would fall back to the default binding, which cannot be used for it: %s; declare harnesses.analysis with a supported harness first", target.Binding, c.Reason)
+	}
+	return nil
+}
+
+// RoleCapability is the adapter's static support for one role, computed from the
+// proposed Formula alone. It is a saved observation, never a fresh probe.
+type RoleCapability struct {
+	Role       string             `json:"role"`
+	Binding    string             `json:"binding"`
+	Source     string             `json:"source"`
+	Capability harness.Capability `json:"capability"`
+}
+
+// RoleCapabilities lists the roles InspectRoles would probe, without probing.
+func RoleCapabilities(f formula.Formula) []RoleCapability {
+	var roles []RoleCapability
+	for _, role := range formula.HarnessRoles {
+		b, override := f.RoleBinding(role)
+		source := "default"
+		if override {
+			source = "override"
+		} else if role == formula.MetaHarness {
+			bound := false
+			for _, a := range f.Atoms {
+				if a.Type == "learn" && len(a.Command) > 0 {
+					b, bound = formula.Binding{Binding: a.Binding, Command: a.Command, TimeoutMS: a.TimeoutMS}, true
+					break
+				}
+			}
+			if !bound {
+				continue
+			}
+			source = "learn-atom"
+		}
+		roles = append(roles, RoleCapability{Role: string(role), Binding: b.Binding, Source: source, Capability: roleCapability(role, b)})
+	}
+	return roles
+}
+
+// validateRoleEvidence checks that saved role evidence names the same roles,
+// bindings and sources as the proposed Formula. Capability states are
+// observations and are covered by the proposal identity instead.
+func validateRoleEvidence(f formula.Formula, saved []RoleCapability) error {
+	want := RoleCapabilities(f)
+	if len(saved) != len(want) {
+		return fmt.Errorf("saved role capability evidence does not match the proposed Formula")
+	}
+	for i, r := range saved {
+		if r.Role != want[i].Role || r.Binding != want[i].Binding || r.Source != want[i].Source {
+			return fmt.Errorf("saved role capability evidence does not match the proposed Formula")
+		}
+	}
+	return nil
+}
+
 // RoleReadiness is one role's current readiness, probed without invoking a model.
 type RoleReadiness struct {
 	Role       string             `json:"role"`

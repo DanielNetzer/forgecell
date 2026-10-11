@@ -122,3 +122,68 @@ func TestHarnessRolesAtomConflicts(t *testing.T) {
 		})
 	}
 }
+
+func inheritFormula(defaults, roles string) string {
+	return "kind: formula\nid: roles\nharness:\n  binding: default\n  command: [/bin/default]\n" + defaults + "harnesses:\n" + roles + rolesAtoms
+}
+
+func TestCodingRoleInheritsOmittedInstructionsAndTimeouts(t *testing.T) {
+	const defaults = "  timeoutMs: 1000\n  maxTimeoutMs: 3000\n  instructions: approved guidance\n"
+	cases := []struct {
+		name         string
+		coding       string
+		instructions string
+		timeoutMS    int
+		maxTimeoutMS int
+		ceilingMS    int
+	}{
+		{"omitted fields are inherited", "  coding: {binding: coder, command: [/bin/coder]}\n", "approved guidance", 1000, 3000, 3000},
+		{"explicit fields win", "  coding: {binding: coder, command: [/bin/coder], instructions: own, timeoutMs: 400, maxTimeoutMs: 800}\n", "own", 400, 800, 800},
+		{"an explicit smaller timeout is never widened by the default ceiling", "  coding: {binding: coder, command: [/bin/coder], timeoutMs: 400}\n", "approved guidance", 400, 0, 400},
+		{"only instructions declared keeps the approved timeouts", "  coding: {binding: coder, command: [/bin/coder], instructions: own}\n", "own", 1000, 3000, 3000},
+		{"a lone maximum bounds the inherited timeout", "  coding: {binding: coder, command: [/bin/coder], maxTimeoutMs: 800}\n", "approved guidance", 800, 800, 800},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data := []byte(inheritFormula(defaults, c.coding))
+			f, err := Parse(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			declared := f.Harnesses["coding"]
+			b, override := f.RoleBinding(CodingHarness)
+			if !override || b.Binding != "coder" || len(b.Command) != 1 || b.Command[0] != "/bin/coder" {
+				t.Fatalf("%+v override=%v", b, override)
+			}
+			if b.Instructions != c.instructions || b.TimeoutMS != c.timeoutMS || b.MaxTimeoutMS != c.maxTimeoutMS || b.TimeoutCeilingMS() != c.ceilingMS {
+				t.Fatalf("resolved %+v, want instructions %q timeout %d maximum %d ceiling %d", b, c.instructions, c.timeoutMS, c.maxTimeoutMS, c.ceilingMS)
+			}
+			if eb, ok := f.ExecutionBinding(Coding); !ok || eb.Instructions != c.instructions || eb.TimeoutMS != c.timeoutMS {
+				t.Fatalf("the execution binding does not follow the coding role: %+v", eb)
+			}
+			if after := f.Harnesses["coding"]; after.Instructions != declared.Instructions || after.TimeoutMS != declared.TimeoutMS || after.MaxTimeoutMS != declared.MaxTimeoutMS {
+				t.Fatalf("resolving the role changed the parsed declaration: %+v", after)
+			}
+			if f.SHA256 != fmt.Sprintf("%x", sha256.Sum256(data)) || f.YAML != string(data) {
+				t.Fatal("the Formula identity changed")
+			}
+		})
+	}
+}
+
+func TestOnlyTheCodingRoleInheritsFromTheDefaultHarness(t *testing.T) {
+	const defaults = "  timeoutMs: 1000\n  instructions: approved guidance\n"
+	f, err := Parse([]byte(inheritFormula(defaults, "  analysis: {binding: analyst, command: [/bin/a]}\n  coding: {binding: coder, command: [/bin/coder]}\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := f.RoleBinding(AnalysisHarness); b.Instructions != "" || b.TimeoutMS != 0 {
+		t.Fatalf("the analysis role inherited %+v", b)
+	}
+	if b, override := f.RoleBinding(MetaHarness); override || b.Instructions != "approved guidance" || b.TimeoutMS != 1000 {
+		t.Fatalf("an undeclared role resolves to the default harness: %+v override=%v", b, override)
+	}
+	if b, _ := f.RoleBinding(CodingHarness); b.TimeoutCeilingMS() != 1000 {
+		t.Fatalf("a default without a maximum grants none: %+v", b)
+	}
+}
