@@ -121,7 +121,11 @@ Re-init preserves pending proposals; review or dismiss before preparing another.
 Interrupted activation retains its exact saved recovery decision. Stale approvals are
 refused. Re-init preserves the full approved recipe. Explicit rebinding changes the coding binding
 while retaining learned instructions, custom Atom order and the separately configured learn
-binding. It does not silently migrate an existing meta harness.
+binding. It does not silently migrate an existing meta harness. `init --rebind ID` proposes, for
+review, repointing the launcher of every native `__adapter` command on another Forgecell build,
+including the learn Atom's, and lists each rewrite in the proposal note. Only a launcher established
+as a Forgecell executable without running it is repointed; other tools are named and left unchanged.
+Adapters, providers, timeouts and custom commands are kept, and nothing activates without approval.
 
 ## Adapter boundaries
 

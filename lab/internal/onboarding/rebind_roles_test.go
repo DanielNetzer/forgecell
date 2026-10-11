@@ -57,6 +57,41 @@ func approveEdited(t *testing.T, dir string, mutate func(doc map[string]any)) fo
 
 func rebindToNewLauncher(o *InitOptions) { o.Launcher = "/new-cli" }
 
+// forgecellBuild lays out an older Forgecell build: an executable beside its
+// release manifest, which is what establishes it as Forgecell without running it.
+func forgecellBuild(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	manifest := `{"version":"0.2.0","protocolVersion":"` + harness.AdapterProtocolVersion + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "forgecell")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// lookalikeTool is an executable that only shares the native argv shape.
+func lookalikeTool(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "custom-tool")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func quoted(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestRebindRepointsStaleNativeLearnAtom(t *testing.T) {
 	root, runner, dir, boot := approvedLab(t)
 	active, _ := formula.Inspect(dir, "")
@@ -110,29 +145,30 @@ func TestRebindRepointsStaleNativeLearnAtom(t *testing.T) {
 	}
 }
 
-func TestRebindRepointsRoleOverridesOnTheOldLauncherOnly(t *testing.T) {
+func TestRebindRepointsNativeRoleOverridesOnAnyOtherLauncher(t *testing.T) {
 	for _, c := range []struct {
 		name          string
-		launcher      string
+		launcher      func(t *testing.T) string
 		custom        bool
 		wantRepointed bool
 	}{
-		{name: "old launcher", launcher: "/cli", wantRepointed: true},
-		{name: "different launcher", launcher: "/other"},
-		{name: "custom argv", launcher: "/cli", custom: true},
+		{name: "old launcher", launcher: func(*testing.T) string { return "/cli" }, wantRepointed: true},
+		{name: "different Forgecell build", launcher: forgecellBuild, wantRepointed: true},
+		{name: "custom argv", launcher: func(*testing.T) string { return "/cli" }, custom: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			root, runner, dir, _ := approvedLab(t)
+			launcher := c.launcher(t)
 			approved := approveEdited(t, dir, func(doc map[string]any) {
 				learn := learnAtomOf(t, doc)
 				if c.custom {
 					learn["command"] = []any{"/bin/custom-learner"}
 					return
 				}
-				learn["command"] = nativeCommand(c.launcher, "codex")
+				learn["command"] = nativeCommand(launcher, "codex")
 				doc["harnesses"] = map[string]any{
-					"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand(c.launcher, "claude-code")},
-					"meta":     map[string]any{"binding": "codex", "command": nativeCommand(c.launcher, "codex")},
+					"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand(launcher, "claude-code")},
+					"meta":     map[string]any{"binding": "codex", "command": nativeCommand(launcher, "codex")},
 				}
 			})
 			next, err := rebind(t, root, runner, dir, "claude-code", rebindToNewLauncher)
@@ -155,7 +191,7 @@ func TestRebindRepointsRoleOverridesOnTheOldLauncherOnly(t *testing.T) {
 				}
 			} else {
 				if !reflect.DeepEqual(before["harnesses"], after["harnesses"]) || !reflect.DeepEqual(learnAtomOf(t, before), learnAtomOf(t, after)) {
-					t.Fatalf("commands that do not use the old launcher were changed:\n%s", next.Proposal.YAML)
+					t.Fatalf("custom commands were changed:\n%s", next.Proposal.YAML)
 				}
 				if strings.Contains(next.Note, "command[0]") {
 					t.Fatalf("the note lists a launcher rewrite that did not happen: %s", next.Note)
@@ -166,6 +202,280 @@ func TestRebindRepointsRoleOverridesOnTheOldLauncherOnly(t *testing.T) {
 			}
 			if _, err = InspectProposal(dir, next.Proposal.ID); err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRebindMovesLearnAtomStrandedOnAnOlderBuild(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	older := forgecellBuild(t)
+	approved := approveEdited(t, dir, func(doc map[string]any) {
+		learnAtomOf(t, doc)["command"] = nativeCommand(older, "codex")
+		doc["harnesses"] = map[string]any{"coding": map[string]any{"binding": "codex", "command": nativeCommand("/cli", "codex")}}
+	})
+	next, err := rebind(t, root, runner, dir, "claude-code", rebindToNewLauncher)
+	if err != nil || next.Status != "pending" || next.Proposal == nil {
+		t.Fatalf("%+v %v", next, err)
+	}
+	parsed, err := formula.Parse([]byte(next.Proposal.YAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/new-cli", "__adapter", "claude-code", "/claude-code"}; !reflect.DeepEqual(parsed.Harness.Command, want) {
+		t.Fatalf("harness command = %v", parsed.Harness.Command)
+	}
+	if coding, _ := parsed.RoleBinding(formula.CodingHarness); !reflect.DeepEqual(coding.Command, []string{"/new-cli", "__adapter", "claude-code", "/claude-code"}) {
+		t.Fatalf("coding command = %v", coding.Command)
+	}
+	var learn formula.Atom
+	for _, a := range parsed.Atoms {
+		if a.Type == "learn" {
+			learn = a
+		}
+	}
+	if want := []string{"/new-cli", "__adapter", "codex", "/codex"}; learn.ID != "learn" || learn.Binding != "codex" || learn.TimeoutMS != 900000 || !reflect.DeepEqual(learn.Command, want) {
+		t.Fatalf("the learn Atom on the older build was not moved onto the new launcher: %+v", learn)
+	}
+	if want := `atoms[learn].command[0]: ` + quoted(t, older) + ` -> "/new-cli"`; !strings.Contains(next.Note, want) {
+		t.Fatalf("the note omits %q:\n%s", want, next.Note)
+	}
+	if err = verifyRebindDiff(approved.Formula.YAML, next.Proposal.YAML); err != nil {
+		t.Fatal(err)
+	}
+	tampered := decodeYAML(t, next.Proposal.YAML)
+	learnAtomOf(t, tampered)["timeoutMs"] = 1
+	encoded, err := yaml.Marshal(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyRebindDiff(approved.Formula.YAML, string(encoded)); err == nil {
+		t.Fatal("a changed learn timeout was accepted beside the launcher rewrite")
+	}
+	saved, err := InspectProposal(dir, next.Proposal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.CapabilityEvidence.Meta == nil || !reflect.DeepEqual(saved.CapabilityEvidence.Meta.Command, learn.Command) {
+		t.Fatalf("saved meta evidence does not carry the moved learn command: %+v", saved.CapabilityEvidence.Meta)
+	}
+}
+
+func TestRebindProposesStaleLearnAtomWhenCodingAlreadyMatches(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	older := forgecellBuild(t)
+	approved := approveEdited(t, dir, func(doc map[string]any) {
+		learnAtomOf(t, doc)["command"] = nativeCommand(older, "codex")
+	})
+	next, err := rebind(t, root, runner, dir, "codex")
+	if err != nil || next.Status != "pending" || next.Proposal == nil {
+		t.Fatalf("a stale learn Atom must make the rebind a real change: %+v %v", next, err)
+	}
+	before, after := decodeYAML(t, approved.Formula.YAML), decodeYAML(t, next.Proposal.YAML)
+	if !reflect.DeepEqual(before["harness"], after["harness"]) || !reflect.DeepEqual(harnessAtom(before), harnessAtom(after)) {
+		t.Fatalf("the coding binding changed:\n%s", next.Proposal.YAML)
+	}
+	if got := learnAtomOf(t, after)["command"]; !reflect.DeepEqual(got, nativeCommand("/cli", "codex")) {
+		t.Fatalf("learn command = %v", got)
+	}
+	if !strings.Contains(next.Note, `atoms[learn].command[0]: `+quoted(t, older)+` -> "/cli"`) || strings.Contains(next.Note, "harness.binding") || strings.Contains(next.Note, "harness.command") {
+		t.Fatalf("the note must list only the learn launcher: %s", next.Note)
+	}
+	if err = verifyRebindDiff(approved.Formula.YAML, next.Proposal.YAML); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Review(dir, next.Proposal.ID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = rebind(t, root, runner, dir, "codex"); err == nil || !strings.Contains(err.Error(), "nothing to rebind") {
+		t.Fatalf("every native command is on the target launcher now: %v", err)
+	}
+}
+
+func TestRebindRepointsStaleRoleOverridesWhenDefaultHarnessIsCustom(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	older := forgecellBuild(t)
+	approved := approveEdited(t, dir, func(doc map[string]any) {
+		doc["harness"].(map[string]any)["command"] = []any{"/bin/custom"}
+		doc["harnesses"] = map[string]any{"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand(older, "claude-code")}}
+		learnAtomOf(t, doc)["command"] = nativeCommand(older, "codex")
+	})
+	next, err := rebind(t, root, runner, dir, "claude-code", rebindToNewLauncher)
+	if err != nil || next.Proposal == nil {
+		t.Fatalf("%+v %v", next, err)
+	}
+	after := decodeYAML(t, next.Proposal.YAML)
+	if got := after["harnesses"].(map[string]any)["analysis"].(map[string]any)["command"]; !reflect.DeepEqual(got, nativeCommand("/new-cli", "claude-code")) {
+		t.Fatalf("analysis command = %v", got)
+	}
+	if got := learnAtomOf(t, after)["command"]; !reflect.DeepEqual(got, nativeCommand("/new-cli", "codex")) {
+		t.Fatalf("learn command = %v", got)
+	}
+	if !strings.Contains(next.Note, "harnesses.analysis.command[0]") || !strings.Contains(next.Note, "atoms[learn].command[0]") {
+		t.Fatalf("each rewritten command must be listed: %s", next.Note)
+	}
+	if err = verifyRebindDiff(approved.Formula.YAML, next.Proposal.YAML); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRebindLeavesLearnAtomWithCustomCommandUntouchedBesideStaleRoles(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	approved := approveEdited(t, dir, func(doc map[string]any) {
+		learnAtomOf(t, doc)["command"] = []any{"/bin/custom-learner"}
+		doc["harnesses"] = map[string]any{"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand(forgecellBuild(t), "claude-code")}}
+	})
+	next, err := rebind(t, root, runner, dir, "claude-code", rebindToNewLauncher)
+	if err != nil || next.Proposal == nil {
+		t.Fatalf("%+v %v", next, err)
+	}
+	before, after := decodeYAML(t, approved.Formula.YAML), decodeYAML(t, next.Proposal.YAML)
+	if !reflect.DeepEqual(learnAtomOf(t, before), learnAtomOf(t, after)) {
+		t.Fatalf("the custom learn command changed:\n%s", next.Proposal.YAML)
+	}
+	if strings.Contains(next.Note, "atoms[learn]") || !strings.Contains(next.Note, "harnesses.analysis.command[0]") {
+		t.Fatalf("the note must list only the native rewrite: %s", next.Note)
+	}
+	if err = verifyRebindDiff(approved.Formula.YAML, next.Proposal.YAML); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRebindLeavesNativeShapedToolsThatAreNotForgecellUntouched(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	tool := lookalikeTool(t)
+	approved := approveEdited(t, dir, func(doc map[string]any) {
+		learnAtomOf(t, doc)["command"] = nativeCommand(tool, "codex")
+		doc["harnesses"] = map[string]any{"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand("/not/installed", "claude-code")}}
+	})
+	next, err := rebind(t, root, runner, dir, "claude-code", rebindToNewLauncher)
+	if err != nil || next.Proposal == nil {
+		t.Fatalf("%+v %v", next, err)
+	}
+	before, after := decodeYAML(t, approved.Formula.YAML), decodeYAML(t, next.Proposal.YAML)
+	if !reflect.DeepEqual(learnAtomOf(t, before), learnAtomOf(t, after)) || !reflect.DeepEqual(before["harnesses"], after["harnesses"]) {
+		t.Fatalf("a tool that is not an established Forgecell executable was rewritten:\n%s", next.Proposal.YAML)
+	}
+	for _, want := range []string{"Left unchanged because the launcher is not established as a Forgecell executable", `atoms[learn].command[0]: ` + quoted(t, tool), `harnesses.analysis.command[0]: "/not/installed"`} {
+		if !strings.Contains(next.Note, want) {
+			t.Fatalf("the note omits %q:\n%s", want, next.Note)
+		}
+	}
+	if strings.Contains(next.Note, quoted(t, tool)+" ->") || strings.Contains(next.Note, `"/not/installed" ->`) {
+		t.Fatalf("the note lists a rewrite that did not happen: %s", next.Note)
+	}
+	if err = verifyRebindExact(approved.Formula.YAML, next.Proposal.YAML, "claude-code", []string{"/new-cli", "__adapter", "claude-code", "/claude-code"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Review(dir, next.Proposal.ID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = rebind(t, root, runner, dir, "claude-code", rebindToNewLauncher); err == nil || !strings.Contains(err.Error(), "nothing to rebind") {
+		t.Fatalf("a launcher that is not established as Forgecell must not make a rebind a change: %v", err)
+	}
+}
+
+func TestVerifyRebindExactRefusesAnythingButTheRecordedRewrites(t *testing.T) {
+	root, runner, dir, _ := approvedLab(t)
+	older := forgecellBuild(t)
+	approved := approveEdited(t, dir, func(doc map[string]any) {
+		learnAtomOf(t, doc)["command"] = nativeCommand(older, "codex")
+		doc["harnesses"] = map[string]any{"analysis": map[string]any{"binding": "claude-code", "command": nativeCommand(older, "claude-code")}}
+	})
+	next, err := rebind(t, root, runner, dir, "claude-code", rebindToNewLauncher)
+	if err != nil || next.Proposal == nil {
+		t.Fatalf("%+v %v", next, err)
+	}
+	command := []string{"/new-cli", "__adapter", "claude-code", "/claude-code"}
+	exact := []launcherRewrite{{"harnesses.analysis", older, "/new-cli"}, {"atoms[learn]", older, "/new-cli"}}
+	if err = verifyRebindExact(approved.Formula.YAML, next.Proposal.YAML, "claude-code", command, exact); err != nil {
+		t.Fatalf("the exact proposal was refused: %v", err)
+	}
+	for _, c := range []struct {
+		name     string
+		tamper   func(doc map[string]any)
+		rewrites []launcherRewrite
+		launcher bool
+	}{
+		{name: "learn rewritten to an unexpected launcher", tamper: func(doc map[string]any) { learnAtomOf(t, doc)["command"] = nativeCommand("/evil", "codex") }, rewrites: exact, launcher: true},
+		{name: "analysis rewritten to an unexpected launcher", tamper: func(doc map[string]any) {
+			doc["harnesses"].(map[string]any)["analysis"].(map[string]any)["command"] = nativeCommand("/evil", "claude-code")
+		}, rewrites: exact, launcher: true},
+		{name: "recorded rewrite not applied", tamper: func(doc map[string]any) { learnAtomOf(t, doc)["command"] = nativeCommand(older, "codex") }, rewrites: exact, launcher: true},
+		{name: "rewrite not recorded", rewrites: exact[:1], launcher: true},
+		{name: "record names a launcher the Formula does not have", rewrites: []launcherRewrite{{"harnesses.analysis", "/other", "/new-cli"}, exact[1]}, launcher: true},
+		{name: "record names a command that is not native", rewrites: append([]launcherRewrite{{"harnesses.meta", older, "/new-cli"}}, exact...), launcher: true},
+		{name: "default harness points elsewhere", tamper: func(doc map[string]any) {
+			doc["harness"].(map[string]any)["command"] = nativeCommand("/evil", "claude-code")
+		}, rewrites: exact},
+		{name: "harness Atom binding differs", tamper: func(doc map[string]any) { harnessAtom(doc)["binding"] = "codex" }, rewrites: exact},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			proposed := next.Proposal.YAML
+			if c.tamper != nil {
+				doc := decodeYAML(t, proposed)
+				c.tamper(doc)
+				encoded, err := yaml.Marshal(doc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				proposed = string(encoded)
+			}
+			if err := verifyRebindExact(approved.Formula.YAML, proposed, "claude-code", command, c.rewrites); err == nil {
+				t.Fatal("a proposal that is not exactly the recorded rewrites was accepted")
+			}
+			if c.launcher && c.tamper != nil {
+				if err := verifyRebindDiff(approved.Formula.YAML, proposed); err != nil {
+					t.Fatalf("the structural check was expected to accept a launcher-only change: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRebindRepointsOnlyEstablishedForgecellLaunchers(t *testing.T) {
+	running, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestOnly := t.TempDir()
+	if err = os.WriteFile(filepath.Join(manifestOnly, "manifest.json"), []byte(`{"version":"0.1.0","protocolVersion":"1"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if err = os.MkdirAll(filepath.Join(home, "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(home, "bin", "forgecell")
+	if err = os.WriteFile(managed, []byte("#!/bin/sh\n# Forgecell managed native launcher v1\nexec \"$0\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := formula.Parse([]byte(roleFormula("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, launcher string
+		want           bool
+	}{
+		{"release build beside its manifest", forgecellBuild(t), true},
+		{"manifest of a build whose executable was removed", filepath.Join(manifestOnly, "forgecell"), true},
+		{"managed launcher without an active release", managed, true},
+		{"running executable", running, true},
+		{"launcher the approved Formula records", "/cli", true},
+		{"tool with the native argv shape", lookalikeTool(t), false},
+		{"launcher that does not exist", "/not/installed", false},
+		{"empty launcher", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := RebindRepoints(f, c.launcher); got != c.want {
+				t.Fatalf("RebindRepoints = %t, want %t", got, c.want)
+			}
+			stale := f
+			stale.Atoms = append([]formula.Atom(nil), f.Atoms...)
+			stale.Atoms = append(stale.Atoms, formula.Atom{ID: "learn", Type: "learn", Binding: "codex", Command: []string{c.launcher, "__adapter", "codex", "/codex"}})
+			if got := staleNativeCommand(stale, "/new-cli"); got != (c.want && c.launcher != "") {
+				t.Fatalf("staleNativeCommand = %t, want %t", got, c.want)
 			}
 		})
 	}
