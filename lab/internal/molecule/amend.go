@@ -76,7 +76,8 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if err != nil {
 		return r, err
 	}
-	if err = approvedFormula.Harness.CheckTimeout(next.HarnessTimeoutMS); err != nil {
+	codingBinding, _ := approvedFormula.RoleBinding(formula.CodingHarness)
+	if err = codingBinding.CheckTimeout(next.HarnessTimeoutMS); err != nil {
 		return r, err
 	}
 	if r.RepositoryEvidence == nil {

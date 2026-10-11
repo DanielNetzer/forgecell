@@ -128,7 +128,7 @@ func TestQuickRebindApproveAndDismiss(t *testing.T) {
 	root, runner, dir, _ := approvedLab(t)
 	config, _ := os.ReadFile(filepath.Join(dir, "lab.json"))
 	active, _ := formula.Inspect(dir, "")
-	dismissed, err := rebind(t, root, runner, dir, "cursor")
+	dismissed, err := rebind(t, root, runner, dir, "claude-code")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestQuickRebindApproveAndDismiss(t *testing.T) {
 	if now, _ := formula.Inspect(dir, ""); now.Formula.YAML != active.Formula.YAML {
 		t.Fatal("dismissal changed the active Formula")
 	}
-	approved, err := rebind(t, root, runner, dir, "cursor")
+	approved, err := rebind(t, root, runner, dir, "claude-code")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestQuickRebindApproveAndDismiss(t *testing.T) {
 		t.Fatal(err)
 	}
 	now, err := formula.Load(dir, "")
-	if err != nil || !now.Approved || now.Formula.YAML != approved.Proposal.YAML || now.Formula.Harness.Binding != "cursor" {
+	if err != nil || !now.Approved || now.Formula.YAML != approved.Proposal.YAML || now.Formula.Harness.Binding != "claude-code" {
 		t.Fatalf("approval did not activate the exact proposed bytes: %v", err)
 	}
 }
@@ -180,18 +180,26 @@ func TestQuickRebindPreservesInstructionsAndRoleBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, after := decodeYAML(t, approved.Formula.YAML), decodeYAML(t, next.Proposal.YAML)
-	if harnessAtom(after)["binding"] != "codex" {
-		t.Fatalf("the coding override is authoritative; the harness Atom binding must not move: %v", harnessAtom(after))
+	if harnessAtom(after)["binding"] != "cursor" {
+		t.Fatalf("the harness Atom binding must follow the rebound coding override: %v", harnessAtom(after))
 	}
-	if after["harness"].(map[string]any)["instructions"] != "learned guidance: run the narrowest test first" || !reflect.DeepEqual(before["harnesses"], after["harnesses"]) {
-		t.Fatal("instructions or role bindings were not preserved")
+	roles := after["harnesses"].(map[string]any)
+	coding := roles["coding"].(map[string]any)
+	if coding["binding"] != "cursor" || !reflect.DeepEqual(coding["command"], []any{"/cli", "__adapter", "cursor", "/cursor"}) {
+		t.Fatalf("the coding override was not rebound: %v", coding)
 	}
-	for _, doc := range []map[string]any{before, after} {
-		delete(doc["harness"].(map[string]any), "binding")
-		delete(doc["harness"].(map[string]any), "command")
+	if after["harness"].(map[string]any)["instructions"] != "learned guidance: run the narrowest test first" || !reflect.DeepEqual(before["harnesses"].(map[string]any)["analysis"], roles["analysis"]) {
+		t.Fatal("instructions or the analysis role binding were not preserved")
 	}
-	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("rebind changed more than binding keys:\nbefore %v\nafter  %v", before, after)
+	if err = verifyRebindDiff(approved.Formula.YAML, next.Proposal.YAML); err != nil {
+		t.Fatalf("rebind changed more than binding keys: %v", err)
+	}
+	parsed, err := formula.Parse([]byte(next.Proposal.YAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, override := parsed.RoleBinding(formula.CodingHarness); !override || b.Binding != "cursor" {
+		t.Fatalf("the coding role does not resolve to the rebound harness: %+v", b)
 	}
 }
 
@@ -231,10 +239,10 @@ func TestQuickRebindGuards(t *testing.T) {
 			}
 		})
 	}
-	if _, err := rebind(t, root, runner, dir, "cursor"); err != nil {
+	if _, err := rebind(t, root, runner, dir, "claude-code"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rebind(t, root, runner, dir, "claude-code"); err == nil || !strings.Contains(err.Error(), "already pending") {
+	if _, err := rebind(t, root, runner, dir, "cursor"); err == nil || !strings.Contains(err.Error(), "already pending") {
 		t.Fatalf("second rebind beside a pending proposal: %v", err)
 	}
 }

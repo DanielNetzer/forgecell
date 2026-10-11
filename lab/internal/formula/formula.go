@@ -218,11 +218,28 @@ func validateHarnessRoles(value any) error {
 }
 
 // RoleBinding resolves a role to its declared binding, or to the default `harness`.
+// A coding override inherits the approved instructions and timeout it omits; the
+// parsed Harnesses and the Formula bytes stay as approved.
 func (f Formula) RoleBinding(role HarnessRole) (Binding, bool) {
-	if b, ok := f.Harnesses[string(role)]; ok {
-		return b, true
+	b, ok := f.Harnesses[string(role)]
+	if !ok {
+		return f.Harness, false
 	}
-	return f.Harness, false
+	if role == CodingHarness {
+		if b.Instructions == "" {
+			b.Instructions = f.Harness.Instructions
+		}
+		if b.TimeoutMS == 0 {
+			b.TimeoutMS = f.Harness.TimeoutMS
+			if b.MaxTimeoutMS > 0 {
+				b.TimeoutMS = min(b.TimeoutMS, b.MaxTimeoutMS)
+			}
+			if b.MaxTimeoutMS == 0 {
+				b.MaxTimeoutMS = f.Harness.MaxTimeoutMS
+			}
+		}
+	}
+	return b, true
 }
 
 // ExecutionBinding resolves the binding that runs an execution role: intake

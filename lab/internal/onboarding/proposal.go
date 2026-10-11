@@ -23,6 +23,9 @@ type BindingReport struct {
 	Candidate  Candidate          `json:"candidate"`
 	LearnBound bool               `json:"learnBound"`
 	Meta       *MetaReport        `json:"meta,omitempty"`
+	// Roles is the static per-role adapter support of the proposed Formula; the
+	// proposal identity covers it. Proposals saved before it was added carry none.
+	Roles []RoleCapability `json:"roles,omitempty"`
 }
 type Proposal struct {
 	CapabilityVersion  string         `json:"capabilityVersion,omitempty"`
@@ -203,6 +206,7 @@ func saveWithEvidence(dir, yaml string, evidence *Repository, reports ...*Bindin
 		p.CapabilityEvidence = reports[0]
 		p.CapabilityEvidence.Candidate = p.CapabilityEvidence.Candidate.CompleteUnknowns()
 		p.CapabilityEvidence.Workflow = p.CapabilityEvidence.Candidate.WorkflowCapability()
+		p.CapabilityEvidence.Roles = RoleCapabilities(f)
 		if !reflect.DeepEqual(p.CapabilityEvidence.Command, f.Harness.Command) || p.CapabilityEvidence.Candidate.ID != f.Harness.Binding {
 			return Proposal{}, fmt.Errorf("capability binding mismatch")
 		}
@@ -400,6 +404,11 @@ func InspectProposal(dir, id string) (p Proposal, err error) {
 	f, _ := formula.Parse([]byte(p.YAML))
 	if err = ValidateRoleBindings(f); err != nil {
 		return p, err
+	}
+	if p.CapabilityEvidence != nil && len(p.CapabilityEvidence.Roles) > 0 {
+		if err = validateRoleEvidence(f, p.CapabilityEvidence.Roles); err != nil {
+			return p, err
+		}
 	}
 	if err = validateMetaReport(f, p); err != nil {
 		return p, err
