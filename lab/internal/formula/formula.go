@@ -28,6 +28,9 @@ type Binding struct {
 	// the coding command. A nil pointer is omitted, so existing binding hashes
 	// and historical Formulas are unchanged.
 	AnalysisWrapper *AnalysisWrapperRef `yaml:"analysisWrapper" json:"analysisWrapper,omitempty"`
+	// Extensions names declared Formula extensions this binding attaches. omitempty
+	// keeps binding hashes of extension-free Formulas unchanged.
+	Extensions []string `yaml:"extensions" json:"extensions,omitempty"`
 }
 
 // AnalysisWrapperRef names a Lab-relative manifest and its exact SHA-256. The
@@ -112,8 +115,11 @@ type Formula struct {
 	// RequiredChecks is the reviewed CI baseline every plan must include. Absent
 	// keeps the Formula bytes, SHA and behaviour of earlier Formulas unchanged.
 	RequiredChecks []RequiredCheck `yaml:"requiredChecks" json:"requiredChecks,omitempty"`
-	YAML           string          `yaml:"-"`
-	SHA256         string          `yaml:"-"`
+	// Extensions declares pinned extension manifests by name; roles bind them by name.
+	// Absent keeps the Formula bytes, SHA and behaviour of earlier Formulas unchanged.
+	Extensions map[string]ExtensionRef `yaml:"extensions" json:"extensions,omitempty"`
+	YAML       string                  `yaml:"-"`
+	SHA256     string                  `yaml:"-"`
 }
 type Loaded struct {
 	Formula  Formula
@@ -367,6 +373,9 @@ func Parse(data []byte) (Formula, error) {
 		if err := validateHarnessRoles(value); err != nil {
 			return f, err
 		}
+	}
+	if err := validateExtensions(raw); err != nil {
+		return f, err
 	}
 	if value, exists := raw["requiredChecks"]; exists {
 		if err := validateRequiredChecks(value); err != nil {

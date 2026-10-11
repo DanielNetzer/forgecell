@@ -185,7 +185,9 @@ func roleCapability(role formula.HarnessRole, b formula.Binding) harness.Capabil
 
 // ValidateRoleBindings rejects a declared role whose adapter cannot perform the
 // role's operation, quoting the adapter's own reason, and any role/Atom conflict.
-// The default `harness` binding is not judged here: custom defaults stay valid.
+// The default `harness` binding is not judged for its operation: custom defaults
+// stay valid. A role that binds extensions is judged on whichever binding it
+// resolves to, including the default.
 func ValidateRoleBindings(f formula.Formula) error {
 	for _, role := range formula.HarnessRoles {
 		b, declared := f.Harnesses[string(role)]
@@ -194,6 +196,20 @@ func ValidateRoleBindings(f formula.Formula) error {
 		}
 		if c := roleCapability(role, b); c.State == "unsupported" {
 			return fmt.Errorf("harnesses.%s: binding %q cannot be used for %s: %s", role, b.Binding, roleOperation(role), c.Reason)
+		}
+	}
+	for _, role := range formula.HarnessRoles {
+		names := f.RoleExtensions(role)
+		if len(names) == 0 {
+			continue
+		}
+		b, declared := f.RoleBinding(role)
+		if c := harness.BindingExtensionCapability(b.Command); c.State == "unsupported" {
+			where := "harness (default binding, " + string(role) + " role)"
+			if declared {
+				where = "harnesses." + string(role)
+			}
+			return fmt.Errorf("%s: binding %q cannot be used with extensions %s: %s", where, b.Binding, strings.Join(names, ", "), c.Reason)
 		}
 	}
 	return f.ValidateHarnessRoles()

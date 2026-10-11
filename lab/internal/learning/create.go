@@ -10,6 +10,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,6 +32,17 @@ func behavior(f formula.Formula) any {
 	var learn any
 	var checks []any
 	coding, _ := f.RoleBinding(formula.CodingHarness)
+	// An absent role list and an empty one are the same behavior.
+	attached := map[formula.HarnessRole][]string{}
+	for _, role := range []formula.HarnessRole{formula.CodingHarness, formula.AnalysisHarness} {
+		if names := f.RoleExtensions(role); len(names) > 0 {
+			attached[role] = names
+		}
+	}
+	required := map[string]bool{}
+	for name, ref := range f.Extensions {
+		required[name] = ref.Required
+	}
 	for _, a := range f.Atoms {
 		types = append(types, a.Type)
 		if a.Type == "check" {
@@ -43,7 +55,7 @@ func behavior(f formula.Formula) any {
 			learn = []any{a.Command, a.TimeoutMS}
 		}
 	}
-	return []any{f.Intake.Repo, binding, types, learn, checks}
+	return []any{f.Intake.Repo, binding, types, learn, checks, attached, required}
 }
 
 // learnInvocation resolves the command learning runs. A declared harnesses.meta
@@ -65,6 +77,48 @@ func learnInvocation(f formula.Formula, learn formula.Atom) ([]string, int, erro
 		timeoutMS = meta.TimeoutMS
 	}
 	return meta.Command, timeoutMS, nil
+}
+
+// checkExtensionAdapters refuses a proposal that binds extensions to a role whose
+// adapter reports extensions unsupported. Approving a suggestion does not rerun
+// onboarding's binding validation, so the same static capability is judged here.
+func checkExtensionAdapters(f formula.Formula) error {
+	for _, role := range formula.HarnessRoles {
+		names := f.RoleExtensions(role)
+		if len(names) == 0 {
+			continue
+		}
+		b, _ := f.RoleBinding(role)
+		if c := harness.BindingExtensionCapability(b.Command); c.State == "unsupported" {
+			return fmt.Errorf("learning cannot bind extensions %s to the %s role: binding %q cannot be used with extensions: %s", strings.Join(names, ", "), role, b.Binding, c.Reason)
+		}
+	}
+	return nil
+}
+
+// checkExtensionDeclarations refuses a proposal that adds or removes an extension
+// declaration or changes its pinned manifest or digest. Those always need a
+// human-authored Formula; `required` and role attachment are behavior, judged
+// by behavior() and checkExtensionAdapters.
+func checkExtensionDeclarations(current, proposed formula.Formula) error {
+	names := slices.Collect(maps.Keys(current.Extensions))
+	names = slices.AppendSeq(names, maps.Keys(proposed.Extensions))
+	slices.Sort(names)
+	for _, name := range slices.Compact(names) {
+		before, had := current.Extensions[name]
+		after, has := proposed.Extensions[name]
+		switch {
+		case !had:
+			return fmt.Errorf("learning cannot add extension %q; extension declarations need human Formula review", name)
+		case !has:
+			return fmt.Errorf("learning cannot remove extension %q; extension declarations need human Formula review", name)
+		case before.Manifest != after.Manifest:
+			return fmt.Errorf("learning cannot change the manifest of extension %q; extension declarations need human Formula review", name)
+		case before.SHA256 != after.SHA256:
+			return fmt.Errorf("learning cannot change the sha256 of extension %q; extension declarations need human Formula review", name)
+		}
+	}
+	return nil
 }
 
 func Create(ctx context.Context, o Options) (Suggestion, error) {
@@ -187,6 +241,12 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 	}
 	if proposed.ID != first.FormulaID {
 		return p, fmt.Errorf("learning cannot rename a Formula")
+	}
+	if e = checkExtensionDeclarations(loaded.Formula, proposed); e != nil {
+		return p, e
+	}
+	if e = checkExtensionAdapters(proposed); e != nil {
+		return p, e
 	}
 	if reflect.DeepEqual(behavior(proposed), behavior(loaded.Formula)) {
 		return p, fmt.Errorf("no workflow behavior change; cosmetic edits are not improvements")

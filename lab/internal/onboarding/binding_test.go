@@ -331,6 +331,53 @@ func TestRunningVersionLabelsTheLauncherVersionSource(t *testing.T) {
 	}
 }
 
+func extensionBinding(adapter string, withExtensions bool) string {
+	b := "{binding: " + adapter + ", command: [/cli, __adapter, " + adapter + ", /" + adapter + "]"
+	if withExtensions {
+		b += ", extensions: [graphify]"
+	}
+	return b + "}"
+}
+
+func extensionFormulaYAML(defaultBinding, roles string) string {
+	return "kind: formula\nid: ext\nintake: {repo: acme/widgets}\nextensions:\n  graphify: {manifest: extensions/graphify.json, sha256: " + strings.Repeat("ab", 32) + "}\nharness: " + defaultBinding + "\n" + roles +
+		"atoms:\n  - {id: intake, type: intake}\n  - {id: scope, type: gate, purpose: scope}\n  - {id: harness, type: harness}\n  - {id: check, type: check}\n  - {id: gate, type: gate, purpose: review}\n  - {id: ship, type: ship}\n  - {id: document, type: document}\n"
+}
+
+func TestExtensionsRejectedOnUnsupportedAdapters(t *testing.T) {
+	custom := "{binding: custom, command: [/bin/custom], extensions: [graphify]}"
+	for _, tc := range []struct{ name, harness, roles, adapter, role string }{
+		{"codex default supplies coding", extensionBinding("codex", true), "", "codex", "coding"},
+		{"cursor default supplies coding", extensionBinding("cursor", true), "", "cursor", "coding"},
+		{"codex coding override", extensionBinding("claude-code", false), "harnesses:\n  coding: " + extensionBinding("codex", true) + "\n", "codex", "coding"},
+		{"cursor coding override", extensionBinding("claude-code", false), "harnesses:\n  coding: " + extensionBinding("cursor", true) + "\n", "cursor", "coding"},
+		{"codex analysis override", extensionBinding("claude-code", false), "harnesses:\n  analysis: " + extensionBinding("codex", true) + "\n", "codex", "analysis"},
+		{"claude-code default", extensionBinding("claude-code", true), "", "", ""},
+		{"claude-code analysis override beside codex coding", extensionBinding("codex", false), "harnesses:\n  analysis: " + extensionBinding("claude-code", true) + "\n", "", ""},
+		{"claude-code coding override", extensionBinding("codex", false), "harnesses:\n  coding: " + extensionBinding("claude-code", true) + "\n", "", ""},
+		{"codex without extensions", extensionBinding("codex", false), "", "", ""},
+		{"custom binding is not judged", custom, "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := formula.Parse([]byte(extensionFormulaYAML(tc.harness, tc.roles)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ValidateRoleBindings(f)
+			if tc.role == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			reason := harness.AdapterCapabilities(tc.adapter).Extensions.Reason
+			if err == nil || reason == "" || !strings.Contains(err.Error(), reason) || !strings.Contains(err.Error(), tc.role) || !strings.Contains(err.Error(), tc.adapter) {
+				t.Fatalf("want a %s rejection quoting %q, got %v", tc.role, reason, err)
+			}
+		})
+	}
+}
+
 func TestCustomCapabilitiesPreserveCommand(t *testing.T) {
 	c := ProbeBinding(context.Background(), formula.Binding{Binding: "custom", Command: []string{"untrusted-command"}}, t.TempDir(), func(context.Context, process.Options) process.Result {
 		t.Fatal("custom command executed")
