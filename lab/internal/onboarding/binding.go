@@ -178,6 +178,118 @@ func (c Candidate) WorkflowCapability() harness.Capability {
 	return harness.Capability{State: "conditional", Reason: "Ticket analysis can be attempted with verified controls; model access and end-to-end workflow remain unverified."}
 }
 
+func nativeAdapter(b formula.Binding) bool {
+	return len(b.Command) == 4 && b.Command[1] == "__adapter"
+}
+
+func roleOperation(role formula.HarnessRole) string {
+	switch role {
+	case formula.AnalysisHarness:
+		return "read-only ticket analysis"
+	case formula.MetaHarness:
+		return "meta learning"
+	}
+	return "coding"
+}
+
+// roleCapability is the adapter's static support for a role's operation. It
+// executes nothing; probing is separate (InspectRoles).
+func roleCapability(role formula.HarnessRole, b formula.Binding) harness.Capability {
+	caps := harness.AdapterCapabilities("")
+	if nativeAdapter(b) {
+		caps = harness.AdapterCapabilities(b.Command[2])
+	} else {
+		caps.Analysis = harness.Capability{State: "unsupported", Reason: "Custom binding has no verified read-only ticket-analysis protocol; it was preserved and not invoked."}
+	}
+	switch role {
+	case formula.AnalysisHarness:
+		return caps.Analysis
+	case formula.MetaHarness:
+		return caps.Meta
+	}
+	return caps.Coding
+}
+
+// ValidateRoleBindings rejects a declared role whose adapter cannot perform the
+// role's operation, quoting the adapter's own reason, and any role/Atom conflict.
+// The default `harness` binding is not judged here: custom defaults stay valid.
+func ValidateRoleBindings(f formula.Formula) error {
+	for _, role := range formula.HarnessRoles {
+		b, declared := f.Harnesses[string(role)]
+		if !declared {
+			continue
+		}
+		if c := roleCapability(role, b); c.State == "unsupported" {
+			return fmt.Errorf("harnesses.%s: binding %q cannot be used for %s: %s", role, b.Binding, roleOperation(role), c.Reason)
+		}
+	}
+	return f.ValidateHarnessRoles()
+}
+
+// RoleReadiness is one role's current readiness, probed without invoking a model.
+type RoleReadiness struct {
+	Role       string             `json:"role"`
+	Binding    string             `json:"binding"`
+	Source     string             `json:"source"`
+	Ready      bool               `json:"ready"`
+	Readiness  string             `json:"readiness"`
+	Capability harness.Capability `json:"capability"`
+	Detail     string             `json:"detail"`
+	// Candidate is the probe result, for callers that derive next commands.
+	Candidate   Candidate `json:"-"`
+	NextCommand string    `json:"nextCommand,omitempty"`
+}
+
+// InspectRoles probes each configured role's binding. Analysis and coding always
+// appear; meta appears when a role override or a bound learn Atom configures it.
+func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner) []RoleReadiness {
+	probed := map[string]Candidate{}
+	probe := func(b formula.Binding) Candidate {
+		key := b.Binding + "\x00" + strings.Join(b.Command, "\x00")
+		if c, ok := probed[key]; ok {
+			return c
+		}
+		c := ProbeBinding(ctx, b, cwd, run).CompleteUnknowns()
+		probed[key] = c
+		return c
+	}
+	var roles []RoleReadiness
+	for _, role := range formula.HarnessRoles {
+		b, override := f.RoleBinding(role)
+		source := "default"
+		if override {
+			source = "override"
+		} else if role == formula.MetaHarness {
+			bound := false
+			for _, a := range f.Atoms {
+				if a.Type == "learn" && len(a.Command) > 0 {
+					b, bound = formula.Binding{Binding: a.Binding, Command: a.Command, TimeoutMS: a.TimeoutMS}, true
+					break
+				}
+			}
+			if !bound {
+				continue
+			}
+			source = "learn-atom"
+		}
+		c := probe(b)
+		item := RoleReadiness{Role: string(role), Binding: b.Binding, Source: source, Readiness: c.Readiness, Detail: c.Detail, Candidate: c}
+		switch role {
+		case formula.AnalysisHarness:
+			item.Capability = c.WorkflowCapability()
+			item.Ready = item.Capability.State == "conditional"
+		case formula.MetaHarness:
+			item.Capability = c.Capabilities.Meta
+			item.Ready = c.Readiness == "ready" && item.Capability.State == "supported"
+		default:
+			item.Capability = c.Capabilities.Coding
+			item.Ready = c.Readiness == "ready" && item.Capability.State == "supported"
+		}
+		roles = append(roles, item)
+	}
+	return roles
+}
+
 func LearnBound(f formula.Formula) bool {
 	for _, atom := range f.Atoms {
 		if atom.Type == "learn" && len(atom.Command) > 0 {

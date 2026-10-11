@@ -154,6 +154,16 @@ func startAtomAction(r *Record, id, attempt, digest, source, action string) {
 		p.SkipReason = ""
 	}
 }
+func recordExecutedBinding(r *Record, id, attempt, binding string) {
+	if p := atomProvenance(r, id); p != nil {
+		for i := range p.Actions {
+			if p.Actions[i].AttemptID == attempt {
+				p.Actions[i].ExecutedBinding = binding
+				return
+			}
+		}
+	}
+}
 func observeAtomAction(r *Record, id, attempt, action, result string, evidence ...ProvenanceEvidence) {
 	if p := atomProvenance(r, id); p != nil {
 		for i := range p.Actions {
@@ -341,11 +351,13 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		r.RepositoryEvidence = &snapshot
 		r.AnalysisAttempts = append(r.AnalysisAttempts, AnalysisAttempt{Ordinal: ordinal, SnapshotSHA256: digest, StartedAt: stamp(), Status: "started"})
 		analysisID := fmt.Sprintf("analysis-%d", ordinal)
-		analysisSource := "bound-harness:" + f.Harness.Binding
+		analysisBinding := roles.bindings[formula.IntakeRole]
+		analysisSource := "bound-harness:" + analysisBinding.Binding
 		if o.Analyze != nil {
 			analysisSource = "supplied-analysis-function"
 		}
 		startAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, analysisID, "", analysisSource, "analyze-ticket")
+		recordExecutedBinding(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, analysisID, analysisBinding.Binding)
 		if err = save(r); err != nil {
 			return r, err
 		}
@@ -353,7 +365,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if correction != nil {
 			callCtx = withAnalysisCorrection(ctx, *correction)
 		}
-		a, err = analysis(callCtx, f.Harness, issue, snapshot)
+		a, err = analysis(callCtx, analysisBinding, issue, snapshot)
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
 		if err != nil {
@@ -424,13 +436,14 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if err != nil {
 		return stopIntake(r, err.Error())
 	}
-	bindingDigest, err := bindingHash(f.Harness)
+	codingBinding := roles.bindings[formula.Coding]
+	bindingDigest, err := bindingHash(codingBinding)
 	if err != nil {
 		return stopIntake(r, err.Error())
 	}
 	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: w.Repo, TargetBranch: target, BaseCommit: w.BaseCommit, FormulaSHA256: f.SHA256, EvidenceSHA256: evidenceHash, BindingSHA256: bindingDigest, Issue: issueInput(issue), MandatoryConstraints: o.MandatoryConstraints}, Evidence: snapshot.References(), Analysis: a, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
 	p.Analysis.Checks = append(p.Analysis.Checks, o.Checks...)
-	p.HarnessTimeoutMS = proposeHarnessTimeoutMS(f.Harness, len(p.Analysis.Scope))
+	p.HarnessTimeoutMS = proposeHarnessTimeoutMS(codingBinding, len(p.Analysis.Scope))
 	if o.Policy != nil {
 		p.Policy = *o.Policy
 	}
@@ -579,7 +592,8 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	if err = p.ValidateForCoding(); err != nil {
 		return r, err
 	}
-	if err = f.Harness.CheckTimeout(p.HarnessTimeoutMS); err != nil {
+	codingBinding := roles.bindings[formula.Coding]
+	if err = codingBinding.CheckTimeout(p.HarnessTimeoutMS); err != nil {
 		return r, err
 	}
 	var allowlist []string
@@ -654,7 +668,7 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	current.Issue = issueInput(issue)
 	current.FormulaSHA256 = f.SHA256
 	current.EvidenceSHA256 = hash
-	current.BindingSHA256, err = bindingHash(f.Harness)
+	current.BindingSHA256, err = bindingHash(codingBinding)
 	if err != nil {
 		return r, err
 	}
@@ -713,15 +727,16 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 		return r, err
 	}
 	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist})
-	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+f.Harness.Binding, "invoke-coding-harness")
-	timeoutMS, timeoutSource := codingTimeout(f.Harness, p)
+	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+codingBinding.Binding, "invoke-coding-harness")
+	recordExecutedBinding(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, codingBinding.Binding)
+	timeoutMS, timeoutSource := codingTimeout(codingBinding, p)
 	if p.HarnessTimeoutMS > 0 {
-		r.Notes = append(r.Notes, fmt.Sprintf("Coding harness timeout: plan harnessTimeoutMs %d applies to attempt %s (Formula timeoutMs %d, maxTimeoutMs ceiling %d).", p.HarnessTimeoutMS, attemptID, f.Harness.TimeoutMS, f.Harness.TimeoutCeilingMS()))
+		r.Notes = append(r.Notes, fmt.Sprintf("Coding harness timeout: plan harnessTimeoutMs %d applies to attempt %s (Formula timeoutMs %d, maxTimeoutMs ceiling %d).", p.HarnessTimeoutMS, attemptID, codingBinding.TimeoutMS, codingBinding.TimeoutCeilingMS()))
 	}
 	if err = save(r); err != nil {
 		return r, err
 	}
-	result := invokeHarness(ctx, f.Harness.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": f.Harness.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
+	result := invokeHarness(ctx, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
 	r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
 	r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
 
@@ -783,7 +798,7 @@ func resume(ctx context.Context, o Options, expected formula.Loaded, number int6
 	if !result.OK {
 		summary := harnessOutcomeSummary(result, ref)
 		if result.TimedOut {
-			summary = harnessTimeoutSummary(timeoutGate{Molecule: r.ID, Lab: r.LabDir, Digest: o.Approve, Attempt: attemptID, TimeoutMS: timeoutMS, Source: timeoutSource, CeilingMS: f.Harness.TimeoutCeilingMS()}, result, ref, capture, captureErr)
+			summary = harnessTimeoutSummary(timeoutGate{Molecule: r.ID, Lab: r.LabDir, Digest: o.Approve, Attempt: attemptID, TimeoutMS: timeoutMS, Source: timeoutSource, CeilingMS: codingBinding.TimeoutCeilingMS()}, result, ref, capture, captureErr)
 		}
 		r, err = finishFailed(r, summary)
 		if err != nil {

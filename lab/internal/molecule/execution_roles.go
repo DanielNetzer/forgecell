@@ -8,6 +8,9 @@ import (
 type executionRoles struct {
 	atoms map[formula.ExecutionRole]int
 	order []formula.ExecutionRole
+	// bindings holds the effective binding of each harness-bound role (intake
+	// analysis, coding, learning), resolved from the exact Formula snapshot.
+	bindings map[formula.ExecutionRole]formula.Binding
 }
 
 // resolveExecutionRoles verifies exact snapshot bytes and complete ledger
@@ -31,6 +34,9 @@ func resolveExecutionRoles(r Record) (executionRoles, error) {
 	if err != nil {
 		return executionRoles{}, err
 	}
+	if err = f.ValidateHarnessRoles(); err != nil {
+		return executionRoles{}, err
+	}
 	if len(r.Atoms) != len(f.Atoms) {
 		return executionRoles{}, fmt.Errorf("recorded Atom membership differs from Formula")
 	}
@@ -41,13 +47,16 @@ func resolveExecutionRoles(r Record) (executionRoles, error) {
 		}
 		indices[a.ID] = i
 	}
-	resolved := executionRoles{atoms: make(map[formula.ExecutionRole]int)}
+	resolved := executionRoles{atoms: make(map[formula.ExecutionRole]int), bindings: make(map[formula.ExecutionRole]formula.Binding)}
 	for role, a := range roles {
 		i, ok := indices[a.ID]
 		if !ok || r.Atoms[i].Type != a.Type {
 			return executionRoles{}, fmt.Errorf("recorded Atom %q identity/type differs from Formula", a.ID)
 		}
 		resolved.atoms[role] = i
+		if b, bound := f.ExecutionBinding(role); bound {
+			resolved.bindings[role] = b
+		}
 	}
 	for _, a := range f.Atoms {
 		for role, declared := range roles {

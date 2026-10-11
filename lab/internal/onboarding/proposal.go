@@ -143,6 +143,9 @@ func saveWithEvidence(dir, yaml string, evidence *Repository, reports ...*Bindin
 	if err != nil {
 		return Proposal{}, err
 	}
+	if err = ValidateRoleBindings(f); err != nil {
+		return Proposal{}, err
+	}
 	baseline, err := fingerprint(dir)
 	if err != nil {
 		return Proposal{}, err
@@ -395,6 +398,9 @@ func InspectProposal(dir, id string) (p Proposal, err error) {
 		}
 	}
 	f, _ := formula.Parse([]byte(p.YAML))
+	if err = ValidateRoleBindings(f); err != nil {
+		return p, err
+	}
 	if err = validateMetaReport(f, p); err != nil {
 		return p, err
 	}

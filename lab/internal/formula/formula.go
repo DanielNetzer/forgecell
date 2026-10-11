@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -68,10 +69,12 @@ type Formula struct {
 	ID            string  `yaml:"id"`
 	Name          string  `yaml:"name"`
 	Harness       Binding `yaml:"harness"`
-	Intake        Intake  `yaml:"intake"`
-	Atoms         []Atom  `yaml:"atoms"`
-	YAML          string  `yaml:"-"`
-	SHA256        string  `yaml:"-"`
+	// Harnesses holds optional per-role bindings; a role not declared here uses Harness.
+	Harnesses map[string]Binding `yaml:"harnesses" json:"harnesses,omitempty"`
+	Intake    Intake             `yaml:"intake"`
+	Atoms     []Atom             `yaml:"atoms"`
+	YAML      string             `yaml:"-"`
+	SHA256    string             `yaml:"-"`
 }
 type Loaded struct {
 	Formula  Formula
@@ -101,6 +104,138 @@ func validateCommand(m map[string]any) error {
 	}
 	return nil
 }
+
+// validateBindingMapping holds the rules shared by `harness` and every `harnesses` role.
+func validateBindingMapping(m map[string]any) error {
+	if _, exists := m["policy"]; exists {
+		return fmt.Errorf("a binding cannot declare a policy; binding changes always require human review")
+	}
+	if err := validateCommand(m); err != nil {
+		return err
+	}
+	if value, ok := m["maxTimeoutMs"]; ok {
+		n, ok := value.(int)
+		if !ok || n < 1 || n > maxFormulaTimeoutMS {
+			return fmt.Errorf("maxTimeoutMs must be an integer from 1 to %d", maxFormulaTimeoutMS)
+		}
+		if timeout, _ := m["timeoutMs"].(int); n < timeout {
+			return fmt.Errorf("maxTimeoutMs must not be below timeoutMs")
+		}
+	}
+	if value, ok := m["instructions"]; ok {
+		s, ok := value.(string)
+		if !ok || strings.TrimSpace(s) == "" || utf8.RuneCountInString(s) > 8000 {
+			return fmt.Errorf("instructions must be non-empty bounded text")
+		}
+	}
+	return nil
+}
+
+// HarnessRole names a harness-bound activity that may carry its own binding.
+type HarnessRole string
+
+const (
+	AnalysisHarness HarnessRole = "analysis"
+	CodingHarness   HarnessRole = "coding"
+	MetaHarness     HarnessRole = "meta"
+)
+
+// HarnessRoles lists the roles a Formula may bind, in display order.
+var HarnessRoles = []HarnessRole{AnalysisHarness, CodingHarness, MetaHarness}
+
+func validateHarnessRoles(value any) error {
+	roles, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("harnesses must be a mapping of role to binding")
+	}
+	for name, v := range roles {
+		known := false
+		for _, role := range HarnessRoles {
+			known = known || name == string(role)
+		}
+		if !known {
+			return fmt.Errorf("harnesses.%s: unknown role; use analysis, coding or meta", name)
+		}
+		m, ok := v.(map[string]any)
+		if !ok {
+			return fmt.Errorf("harnesses.%s must be a mapping", name)
+		}
+		if err := validateBindingMapping(m); err != nil {
+			return fmt.Errorf("harnesses.%s: %w", name, err)
+		}
+		if id, ok := m["binding"].(string); !ok || strings.TrimSpace(id) == "" {
+			return fmt.Errorf("harnesses.%s: binding must be a non-empty string", name)
+		}
+		if _, ok := m["command"]; !ok {
+			return fmt.Errorf("harnesses.%s: command must be a non-empty argv array", name)
+		}
+	}
+	return nil
+}
+
+// RoleBinding resolves a role to its declared binding, or to the default `harness`.
+func (f Formula) RoleBinding(role HarnessRole) (Binding, bool) {
+	if b, ok := f.Harnesses[string(role)]; ok {
+		return b, true
+	}
+	return f.Harness, false
+}
+
+// ExecutionBinding resolves the binding that runs an execution role: intake
+// analysis, coding or learning (meta). Other execution roles are not harness-bound.
+func (f Formula) ExecutionBinding(role ExecutionRole) (Binding, bool) {
+	switch role {
+	case IntakeRole:
+		b, _ := f.RoleBinding(AnalysisHarness)
+		return b, true
+	case Coding:
+		b, _ := f.RoleBinding(CodingHarness)
+		return b, true
+	case Learning:
+		b, _ := f.RoleBinding(MetaHarness)
+		return b, true
+	}
+	return Binding{}, false
+}
+
+// ValidateHarnessRoles checks that each declared role has its Atom and does not
+// contradict that Atom's own binding. A Formula without `harnesses` always passes.
+func (f Formula) ValidateHarnessRoles() error {
+	if len(f.Harnesses) == 0 {
+		return nil
+	}
+	atoms, err := f.ExecutionRoles()
+	if err != nil {
+		return err
+	}
+	for _, role := range HarnessRoles {
+		b, declared := f.Harnesses[string(role)]
+		if !declared {
+			continue
+		}
+		var atom Atom
+		var present bool
+		switch role {
+		case AnalysisHarness:
+			atom, present = atoms[IntakeRole]
+		case CodingHarness:
+			atom, present = atoms[Coding]
+		case MetaHarness:
+			atom, present = atoms[Learning]
+		}
+		if !present {
+			return fmt.Errorf("harnesses.%s: the Formula has no Atom for this role; add the learn Atom or remove the role binding", role)
+		}
+		if atom.Binding != "" && atom.Binding != b.Binding {
+			return fmt.Errorf("harnesses.%s binding %q conflicts with Atom %s binding %q", role, b.Binding, atom.ID, atom.Binding)
+		}
+		if role == MetaHarness && len(atom.Command) > 0 && !slices.Equal(atom.Command, b.Command) {
+			return fmt.Errorf("harnesses.meta command conflicts with the command of learn Atom %s", atom.ID)
+		}
+	}
+	return nil
+}
+
 func Parse(data []byte) (Formula, error) {
 	var f Formula
 	if len(data) > 1_000_000 {
@@ -156,26 +291,13 @@ func Parse(data []byte) (Formula, error) {
 		if !ok {
 			return f, fmt.Errorf("harness must be a mapping")
 		}
-		if _, exists := m["policy"]; exists {
-			return f, fmt.Errorf("a binding cannot declare a policy; binding changes always require human review")
-		}
-		if err := validateCommand(m); err != nil {
+		if err := validateBindingMapping(m); err != nil {
 			return f, err
 		}
-		if value, ok := m["maxTimeoutMs"]; ok {
-			n, ok := value.(int)
-			if !ok || n < 1 || n > maxFormulaTimeoutMS {
-				return f, fmt.Errorf("maxTimeoutMs must be an integer from 1 to %d", maxFormulaTimeoutMS)
-			}
-			if timeout, _ := m["timeoutMs"].(int); n < timeout {
-				return f, fmt.Errorf("maxTimeoutMs must not be below timeoutMs")
-			}
-		}
-		if value, ok := m["instructions"]; ok {
-			s, ok := value.(string)
-			if !ok || strings.TrimSpace(s) == "" || utf8.RuneCountInString(s) > 8000 {
-				return f, fmt.Errorf("instructions must be non-empty bounded text")
-			}
+	}
+	if value, exists := raw["harnesses"]; exists {
+		if err := validateHarnessRoles(value); err != nil {
+			return f, err
 		}
 	}
 	if err := yaml.Unmarshal(data, &f); err != nil {
