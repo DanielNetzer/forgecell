@@ -46,7 +46,18 @@ a `policy` without `mode: policy`, and a `policy` key at the Formula root or ins
 - the scope is not empty and every path is an exact repository path;
 - the plan's coding allowlist is non-empty and equals the allowlist derived from the Formula
   snapshot and the plan's checks;
-- the plan digest and proposal history are intact and the plan has no continuation.
+- the plan digest and proposal history are intact and the plan has no continuation;
+- the plan declares no expected protected-regression deltas, because excusing a protected
+  failure always needs a human;
+- the plan allows no artifact write roots and carries no human-supplied check inputs;
+- no scope path is on the sensitive scope list, version `v1`, which names CI and tooling
+  control files and is matched case-insensitively: any `.github`, `.claude`, `.forgecell`,
+  `.githooks`, `.husky` or `scripts` path segment, and the file names `.gitlab-ci.yml`,
+  `go.mod`, `go.sum`, `package.json`, `package-lock.json`, `npm-shrinkwrap.json`,
+  `yarn.lock`, `pnpm-lock.yaml`, `Makefile` and `GNUmakefile` at any depth. A change to
+  the list needs a new version and a fresh human review of the list;
+- no scope path is a frozen definition file of a check or setup command, or exactly equal to
+  one of their arguments, even when the check carries a reviewed-acceptance repair.
 
 Any other result is `decline` (a condition fails, so a human decides) or `human` (the gate
 declares no evaluable policy, so a human decides). An automatic decision is recorded in the
@@ -54,6 +65,14 @@ ledger as `approvedBy: policy:<id>@<formula-sha256>` with the ledger pointers it
 and is rendered as policy-approved, never as a human decision. Policies relax nothing else:
 approved checks still run repository code, and passing candidate checks is not independent
 acceptance.
+
+Check argv under `auto-when-ready` is an accepted residual risk of the Lab-default policy.
+Approved check argv runs repository code with a temporary HOME and filtered environment,
+unrestricted network access and no OS sandbox, and `auto-when-ready` does not restrict check
+argv beyond the conditions listed above: a model-proposed candidate check can still be
+approved automatically. Only a human decision at the scope gate narrows that, for example by
+declining a plan whose checks are not a Formula baseline or a derived regression check.
+Passing such checks is not independent acceptance.
 
 This change adds the Formula grammar, the evaluator and the ledger record only. No runner
 applies a decision yet, so `forgecell run --approve` remains the only way a scope is

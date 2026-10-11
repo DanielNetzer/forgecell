@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -117,6 +118,40 @@ func TestGatePolicyScopeDeclinesEachUnreadyCondition(t *testing.T) {
 		{"protected deltas", func(r *Record) {
 			r.Readiness.Plans[0].Plan.ExpectedProtectedDeltas = []readiness.ProtectedDelta{{CheckID: "regression", Package: "example.test/pkg", Test: "TestX"}}
 		}, "plan-has-protected-deltas"},
+		{"artifacts", func(r *Record) {
+			r.Readiness.Plans[0].Plan.Artifacts = []readiness.ArtifactRoot{{Path: "out", CommandID: "check"}}
+		}, "plan-has-artifacts"},
+		{"check inputs", func(r *Record) {
+			r.Readiness.Plans[0].Plan.CheckInputs = []readiness.FileEvidence{{Evidence: readiness.Evidence{ID: "input", Path: "input.txt"}, Content: "x"}}
+		}, "plan-has-check-inputs"},
+		{"sensitive scope path", func(r *Record) {
+			r.Readiness.Plans[0].Plan.Analysis.Scope[0].Path = ".github/workflows/lab.yml"
+		}, "scope-path-sensitive"},
+		{"scope path cited as a check definition", func(r *Record) {
+			p := &r.Readiness.Plans[0].Plan
+			for i := range p.Evidence {
+				if p.Evidence[i].ID == p.Analysis.Checks[0].Definitions[0] {
+					p.Evidence[i].Path = p.Analysis.Scope[0].Path
+				}
+			}
+		}, "scope-path-cited-by-check"},
+		{"scope path cited as a definition with a reviewed repair", func(r *Record) {
+			p := &r.Readiness.Plans[0].Plan
+			for i := range p.Evidence {
+				if p.Evidence[i].ID == p.Analysis.Checks[0].Definitions[0] {
+					p.Evidence[i].Path = p.Analysis.Scope[0].Path
+				}
+			}
+			p.Analysis.Checks[0].ReviewedAcceptance = "acceptance"
+		}, "scope-path-cited-by-check"},
+		{"scope path cited as a check argument", func(r *Record) {
+			p := &r.Readiness.Plans[0].Plan
+			p.Analysis.Checks[0].Argv = []string{"/bin/sh", "./" + p.Analysis.Scope[1].Path}
+		}, "scope-path-cited-by-check"},
+		{"scope path cited by a setup command", func(r *Record) {
+			p := &r.Readiness.Plans[0].Plan
+			p.Setup = []readiness.Check{{ID: "prepare", Category: "setup", Argv: []string{"cat", p.Analysis.Scope[0].Path}}}
+		}, "scope-path-cited-by-check"},
 		{"missing allowlist", func(r *Record) { r.Readiness.Plans[0].Plan.CodingAllowlist = nil }, "allowlist-missing"},
 		{"extra allowlist entry", func(r *Record) {
 			p := &r.Readiness.Plans[0].Plan
@@ -419,5 +454,283 @@ func TestGatePolicyRecordsIdentityAndEvidence(t *testing.T) {
 	}
 	if _, err = RecordScopePolicyApproval(out); err == nil {
 		t.Fatal("the same policy decision was recorded twice")
+	}
+}
+
+func rescoped(t *testing.T, r Record, scopePath string) Record {
+	t.Helper()
+	out := cloneRecord(t, r)
+	p := &out.Readiness.Plans[0]
+	p.Plan.Analysis.Scope[0].Path = scopePath
+	if digest, err := p.Plan.Digest(); err == nil {
+		p.Digest = digest
+	}
+	return out
+}
+
+func TestGatePolicyDeclinesSensitiveScopePaths(t *testing.T) {
+	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	for _, p := range []string{
+		".github/workflows/lab.yml", ".GitHub/workflows/x.yml", ".gitlab-ci.yml",
+		"lab/go.mod", "lab/go.sum", "lab/GO.MOD",
+		"package.json", "web/package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+		"Makefile", "makefile", "lab/GNUmakefile",
+		".claude/settings.json", ".forgecell/x", ".githooks/pre-commit", ".husky/pre-commit",
+		"scripts/check-repo-hygiene.sh", "SCRIPTS/x.sh", "tools/scripts/x.sh",
+	} {
+		t.Run(p, func(t *testing.T) {
+			r := rescoped(t, ready, p)
+			got := EvaluateGatePolicy(r, formula.ScopeApproval)
+			if got.Outcome != PolicyDecline || got.Reason != "scope-path-sensitive" || got.Detail == "" || got.PlanDigest != "" || len(got.Evidence) != 0 {
+				t.Fatalf("want a sensitive-scope decline, got %+v", got)
+			}
+			if out, err := RecordScopePolicyApproval(r); err == nil || len(out.PolicyDecisions) != 0 {
+				t.Fatal("a sensitive scope was recorded as an approval")
+			}
+		})
+	}
+	for _, p := range []string{"docs/atoms.md", "lab/internal/molecule/gate_policy.go", "docs/Makefile.md", "lab/internal/githubclient/x.go", "docs/go.mod.md", "script/x.sh"} {
+		t.Run("ordinary "+p, func(t *testing.T) {
+			if got := EvaluateGatePolicy(rescoped(t, ready, p), formula.ScopeApproval); got.Outcome != PolicyApprove {
+				t.Fatalf("%+v", got)
+			}
+		})
+	}
+	t.Run("git directory stays an invalid path", func(t *testing.T) {
+		got := EvaluateGatePolicy(rescoped(t, ready, ".git/hooks/pre-commit"), formula.ScopeApproval)
+		if got.Outcome != PolicyDecline || got.Reason != "scope-path-invalid" {
+			t.Fatalf("%+v", got)
+		}
+	})
+	t.Run("any sensitive path among several", func(t *testing.T) {
+		r := cloneRecord(t, ready)
+		p := &r.Readiness.Plans[0].Plan
+		p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "lab/go.mod", Reason: "Dependency", Evidence: []string{"issue"}})
+		digest, err := p.Digest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Readiness.Plans[0].Digest = digest
+		if got := EvaluateGatePolicy(r, formula.ScopeApproval); got.Reason != "scope-path-sensitive" {
+			t.Fatalf("%+v", got)
+		}
+	})
+}
+
+func TestGatePolicySensitiveScopeListIsVersionedAndPinned(t *testing.T) {
+	const hint = "the sensitive scope list changed: bump sensitiveScopeListVersion and have the list reviewed"
+	if sensitiveScopeListVersion != "v1" {
+		t.Fatal(hint)
+	}
+	if !reflect.DeepEqual(sensitiveScopeSegments, []string{".github", ".claude", ".forgecell", ".githooks", ".husky", "scripts"}) {
+		t.Fatal(hint)
+	}
+	if !reflect.DeepEqual(sensitiveScopeBasenames, []string{
+		".gitlab-ci.yml", "go.mod", "go.sum",
+		"package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+		"Makefile", "GNUmakefile",
+	}) {
+		t.Fatal(hint)
+	}
+
+	_, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	hasVersion := func(evidence []PolicyEvidence) bool {
+		for _, e := range evidence {
+			if strings.Contains(e.Observed, "sensitive scope list v1") {
+				return true
+			}
+		}
+		return false
+	}
+	if got := EvaluateGatePolicy(r, formula.ScopeApproval); got.Outcome != PolicyApprove || !hasVersion(got.Evidence) {
+		t.Fatalf("the evaluation does not record the sensitive scope list version: %+v", got)
+	}
+	out, err := RecordScopePolicyApproval(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasVersion(out.PolicyDecisions[0].Evidence) {
+		t.Fatalf("the recorded decision lacks the sensitive scope list version: %+v", out.PolicyDecisions[0])
+	}
+}
+
+func TestGatePolicyEvidenceResolvesWithoutOmittedSlices(t *testing.T) {
+	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	for _, tc := range []struct {
+		name  string
+		shape func(*readiness.Plan)
+	}{
+		{"nil slices", func(p *readiness.Plan) {
+			p.ExpectedProtectedDeltas, p.FormulaBaseline, p.Artifacts, p.CheckInputs = nil, nil, nil, nil
+		}},
+		{"empty slices", func(p *readiness.Plan) {
+			p.ExpectedProtectedDeltas, p.FormulaBaseline = []readiness.ProtectedDelta{}, []string{}
+			p.Artifacts, p.CheckInputs = []readiness.ArtifactRoot{}, []readiness.FileEvidence{}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := cloneRecord(t, ready)
+			p := &r.Readiness.Plans[0]
+			tc.shape(&p.Plan)
+			digest, err := p.Plan.Digest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.Digest = digest
+			out, err := RecordScopePolicyApproval(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			planJSON, err := json.Marshal(out.Readiness.Plans[0].Plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var keys map[string]json.RawMessage
+			if err = json.Unmarshal(planJSON, &keys); err != nil {
+				t.Fatal(err)
+			}
+			for _, omitted := range []string{"expectedProtectedDeltas", "formulaBaseline"} {
+				if _, present := keys[omitted]; present {
+					t.Fatalf("the plan serialises %s, so the fixture no longer covers an omitted slice", omitted)
+				}
+			}
+			resolvesIn := func(label string, doc any) {
+				t.Helper()
+				for _, e := range out.PolicyDecisions[0].Evidence {
+					if strings.HasSuffix(e.Pointer, "/expectedProtectedDeltas") || strings.HasSuffix(e.Pointer, "/formulaBaseline") {
+						t.Fatalf("%s: evidence points at an omitempty slice: %+v", label, e)
+					}
+					if !pointerTarget(doc, e.Pointer) || e.Observed == "" {
+						t.Fatalf("%s: evidence does not resolve: %+v", label, e)
+					}
+				}
+			}
+			var doc any
+			marshalled, err := json.Marshal(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = json.Unmarshal(marshalled, &doc); err != nil {
+				t.Fatal(err)
+			}
+			resolvesIn("marshalled record", doc)
+
+			if err = save(out); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := os.ReadFile(filepath.Join(out.LabDir, "ledgers", out.ID+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := ledger.Decode(saved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := decoded.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var roundTripped any
+			if err = json.Unmarshal(encoded, &roundTripped); err != nil {
+				t.Fatal(err)
+			}
+			resolvesIn("ledger round trip", roundTripped)
+		})
+	}
+}
+
+// approveScopeByPolicy stands in for the apply step a runner adds later: the
+// evaluator judges only the stored record, so drift is caught by approving
+// with freshly observed inputs before any decision is recorded.
+func approveScopeByPolicy(r Record, current readiness.Inputs) (Record, error) {
+	eval := EvaluateGatePolicy(r, formula.ScopeApproval)
+	if eval.Outcome != PolicyApprove {
+		return r, fmt.Errorf("scope policy did not approve: %s", eval.Reason)
+	}
+	state, err := r.Readiness.Approve(eval.PlanDigest, current, stamp())
+	if err != nil {
+		return r, err
+	}
+	out, err := RecordScopePolicyApproval(r)
+	if err != nil {
+		return r, err
+	}
+	out.Readiness = &state
+	return out, nil
+}
+
+func TestGatePolicyApprovalRefusesInputDrift(t *testing.T) {
+	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
+	planned := ready.Readiness.Plans[0].Plan.Inputs
+	if EvaluateGatePolicy(ready, formula.ScopeApproval).Outcome != PolicyApprove {
+		t.Fatal("fixture is not ready")
+	}
+	for _, tc := range []struct {
+		name    string
+		drift   func(*readiness.Inputs)
+		refused bool
+	}{
+		{"base commit", func(in *readiness.Inputs) { in.BaseCommit = strings.Repeat("a", 40) }, true},
+		{"origin repository", func(in *readiness.Inputs) { in.Repository = "acme/other" }, true},
+		{"target branch", func(in *readiness.Inputs) { in.TargetBranch = "release" }, true},
+		{"repository evidence", func(in *readiness.Inputs) { in.EvidenceSHA256 = strings.Repeat("0", 64) }, true},
+		{"Formula hash", func(in *readiness.Inputs) { in.FormulaSHA256 = strings.Repeat("0", 64) }, true},
+		{"binding hash", func(in *readiness.Inputs) { in.BindingSHA256 = strings.Repeat("0", 64) }, true},
+		{"issue title", func(in *readiness.Inputs) { in.Issue.Title += " (edited)" }, true},
+		{"issue body", func(in *readiness.Inputs) { in.Issue.Body += "\nMore" }, true},
+		{"mandatory constraints", func(in *readiness.Inputs) {
+			in.MandatoryConstraints = []string{"github-ruleset-sha256:" + strings.Repeat("0", 64)}
+		}, true},
+		{"issue update time only", func(in *readiness.Inputs) { in.Issue.UpdatedAt = "2099-01-01T00:00:00Z" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := cloneRecord(t, ready)
+			current := planned
+			tc.drift(&current)
+			// The evaluator reads only the stored record, so it cannot see drift.
+			if EvaluateGatePolicy(r, formula.ScopeApproval).Outcome != PolicyApprove {
+				t.Fatal("the evaluator no longer approves the stored record")
+			}
+			events := len(r.Readiness.Events)
+			out, err := approveScopeByPolicy(r, current)
+			if tc.refused {
+				if err == nil {
+					t.Fatal("drifted inputs were approved")
+				}
+				if len(out.PolicyDecisions) != 0 || len(r.PolicyDecisions) != 0 || out.Readiness.Phase != "scope-waiting" || len(out.Readiness.Events) != events {
+					t.Fatalf("a refused approval changed the record: %+v", out.Readiness)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out.PolicyDecisions) != 1 || out.Readiness.Phase != "approved" || out.Readiness.Events[len(out.Readiness.Events)-1].Kind != "approved" {
+				t.Fatalf("%+v", out.Readiness)
+			}
+		})
+	}
+}
+
+func TestGatePolicyUnusualGateModeStaysHuman(t *testing.T) {
+	for _, tc := range []struct{ name, mode string }{
+		{"unrecognised string", "manual"},
+		{"mapping", "{a: b}"},
+		{"sequence", "[policy]"},
+		{"number", "7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			atom := "{id: scope, type: gate, purpose: scope, mode: " + tc.mode + "}"
+			_, r := scopeReadyRecord(t, atom, defaultReviewAtom)
+			got := EvaluateGatePolicy(r, formula.ScopeApproval)
+			if got.Outcome != PolicyHuman || got.Reason != "gate-is-human" || got.PlanDigest != "" {
+				t.Fatalf("%+v", got)
+			}
+			out, err := RecordScopePolicyApproval(r)
+			if err == nil || len(out.PolicyDecisions) != 0 {
+				t.Fatal("a gate with an unusual mode was approved by policy")
+			}
+		})
 	}
 }

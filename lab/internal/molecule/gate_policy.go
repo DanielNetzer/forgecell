@@ -5,8 +5,74 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"path"
 	"slices"
+	"strings"
 )
+
+// sensitiveScopeListVersion names the reviewed control-file lists below. A change
+// to either list needs a new version and a fresh human review of the list.
+const sensitiveScopeListVersion = "v1"
+
+// sensitiveScopeSegments are directory names that hold CI, tooling or hook control
+// files; a scope path with any such segment is sensitive. `scripts` is declined
+// wholesale because the baseline checks may run any file under it.
+var sensitiveScopeSegments = []string{".github", ".claude", ".forgecell", ".githooks", ".husky", "scripts"}
+
+// sensitiveScopeBasenames are control files that are sensitive at any depth.
+var sensitiveScopeBasenames = []string{
+	".gitlab-ci.yml", "go.mod", "go.sum",
+	"package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+	"Makefile", "GNUmakefile",
+}
+
+// sensitiveScopeRule reports the rule that makes a repository path sensitive.
+// Matching ignores case because the Lab runs on case-insensitive file systems.
+func sensitiveScopeRule(p string) (string, bool) {
+	segments := strings.Split(p, "/")
+	for _, segment := range segments {
+		for _, name := range sensitiveScopeSegments {
+			if strings.EqualFold(segment, name) {
+				return "path segment " + name, true
+			}
+		}
+	}
+	base := segments[len(segments)-1]
+	for _, name := range sensitiveScopeBasenames {
+		if strings.EqualFold(base, name) {
+			return "file name " + name, true
+		}
+	}
+	return "", false
+}
+
+// checkCitedPaths maps each lower-cased repository path a check relies on to a
+// description of the first check that cites it: a frozen definition file or an
+// argv element that is exactly that path.
+func checkCitedPaths(plan readiness.Plan) map[string]string {
+	evidencePaths := map[string]string{}
+	for _, e := range plan.Evidence {
+		evidencePaths[e.ID] = e.Path
+	}
+	cited := map[string]string{}
+	note := func(p, description string) {
+		key := strings.ToLower(p)
+		if _, ok := cited[key]; !ok {
+			cited[key] = description
+		}
+	}
+	for _, c := range slices.Concat(plan.Analysis.Checks, plan.Setup) {
+		for _, id := range c.Definitions {
+			if p, ok := evidencePaths[id]; ok {
+				note(p, fmt.Sprintf("definition of check %s", c.ID))
+			}
+		}
+		for _, arg := range c.Argv {
+			note(path.Clean(arg), fmt.Sprintf("argv of check %s", c.ID))
+		}
+	}
+	return cited
+}
 
 type PolicyOutcome string
 
@@ -105,6 +171,12 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) P
 		// Excusing protected-regression failures always needs a human decision.
 		return decline("plan-has-protected-deltas", "the plan declares %d expected protected-regression delta(s), which require human review", len(plan.ExpectedProtectedDeltas))
 	}
+	if len(plan.Artifacts) > 0 {
+		return decline("plan-has-artifacts", "the plan allows %d artifact write root(s), which require human review", len(plan.Artifacts))
+	}
+	if len(plan.CheckInputs) > 0 {
+		return decline("plan-has-check-inputs", "the plan carries %d human-supplied check input(s), which require human review", len(plan.CheckInputs))
+	}
 	base := fmt.Sprintf("/readiness/plans/%d", n)
 	if plan.Continuation != "" {
 		return decline("plan-continuation", "plan continuation %q is not a first scope approval", plan.Continuation)
@@ -124,6 +196,17 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) P
 	for _, s := range plan.Analysis.Scope {
 		if err := readiness.ValidatePath(s.Path); err != nil {
 			return decline("scope-path-invalid", "scope path %q: %v", s.Path, err)
+		}
+	}
+	for _, s := range plan.Analysis.Scope {
+		if rule, ok := sensitiveScopeRule(s.Path); ok {
+			return decline("scope-path-sensitive", "scope path %q matches %s of sensitive scope list %s, which requires human review", s.Path, rule, sensitiveScopeListVersion)
+		}
+	}
+	cited := checkCitedPaths(plan)
+	for _, s := range plan.Analysis.Scope {
+		if description, ok := cited[strings.ToLower(s.Path)]; ok {
+			return decline("scope-path-cited-by-check", "scope path %q is cited by the %s, which requires human review", s.Path, description)
 		}
 	}
 	if len(plan.CodingAllowlist) == 0 {
@@ -160,6 +243,10 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, eval PolicyEvaluation) P
 		{Pointer: "/analysis/questions", Observed: "0 questions"},
 		{Pointer: base + "/plan/analysis/questions", Observed: "0 questions"},
 		{Pointer: base + "/plan/analysis/scope", Observed: fmt.Sprintf("%d paths, all exact repository paths", len(plan.Analysis.Scope))},
+		{Pointer: base + "/plan/analysis/scope", Observed: fmt.Sprintf("no path matches sensitive scope list %s", sensitiveScopeListVersion)},
+		{Pointer: base + "/plan/analysis/checks", Observed: "no scope path is cited by a check definition or an exact check argument"},
+		{Pointer: base + "/plan/artifacts", Observed: "0 artifact write roots"},
+		{Pointer: base + "/plan/checkInputs", Observed: "0 human-supplied check inputs"},
 		{Pointer: base + "/plan/codingAllowlist", Observed: fmt.Sprintf("%d entries, equal to the allowlist derived from the Formula and plan checks", len(derived))},
 	}
 	return eval
