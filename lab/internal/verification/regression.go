@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -175,6 +176,26 @@ type goTestEvent struct {
 // be allowed to stand in for them.
 var abortMarkers = []string{"panic: ", "fatal error: ", "test timed out after", "[build failed]", "[setup failed]"}
 
+// abnormalExitMarker recognizes the whole line go test prints when its test binary
+// is killed by a signal ("signal: killed") or exits with a status other than 1
+// ("exit status 2" after os.Exit(2)). Every ordinary failing package also prints
+// "exit status 1", so that status is deliberately not an abort marker; a test
+// that calls os.Exit(1) is caught as started but never finished instead.
+func abnormalExitMarker(output string) (string, bool) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "signal: ") {
+			return line, true
+		}
+		if rest, ok := strings.CutPrefix(line, "exit status "); ok {
+			if n, err := strconv.Atoi(rest); err == nil && n != 1 {
+				return line, true
+			}
+		}
+	}
+	return "", false
+}
+
 // maxStreamedFailures bounds the tests a streamed parse tracks as failed or
 // unfinished, so the parser's memory never follows an untrusted stream's size.
 const maxStreamedFailures = 200_000
@@ -218,6 +239,9 @@ func (p *failedTestParser) Line(raw []byte) error {
 			if strings.Contains(ev.Output, marker) {
 				p.aborted[ev.Package] = strings.TrimSpace(marker)
 			}
+		}
+		if marker, ok := abnormalExitMarker(ev.Output); ok {
+			p.aborted[ev.Package] = marker
 		}
 	}
 	key := TestID{Package: ev.Package, Test: ev.Test}

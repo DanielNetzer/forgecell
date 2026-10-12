@@ -226,8 +226,8 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapSharesTheSingleRetry(t *testin
 		blocked  bool
 		attempts []string
 	}{
-		{"cap then violation", []string{"cap", "policy"}, true, []string{"failed", "failed"}},
-		{"violation then cap", []string{"policy", "cap"}, true, []string{"failed", "failed"}},
+		{"cap then violation", []string{"cap", "policy", "valid"}, false, []string{"failed", "failed", "completed"}},
+		{"violation then cap", []string{"policy", "cap", "valid"}, false, []string{"failed", "failed", "completed"}},
 		{"evidence then cap then cap", []string{"evidence", "cap", "cap"}, true, []string{"completed", "failed", "failed"}},
 		{"cap then evidence then cap", []string{"cap", "evidence", "cap"}, true, []string{"failed", "completed", "failed"}},
 		{"cap then evidence twice is exhausted", []string{"cap", "evidence", "evidence"}, true, []string{"failed", "completed", "completed"}},

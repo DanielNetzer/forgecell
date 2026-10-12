@@ -86,6 +86,11 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if err = r.RepositoryEvidence.ValidateScope(next.Analysis.Scope); err != nil {
 		return r, err
 	}
+	// Newness is derived from the frozen tree, never from the submitted payload.
+	next.NewFiles = readiness.CitedNewFiles(next.Analysis.Checks, readiness.NewScopeFiles(next.Analysis.Scope, r.RepositoryEvidence.Files))
+	if err = next.ValidateDirectDeltaChecks(); err != nil {
+		return r, err
+	}
 	allowed := []string{}
 	for _, s := range previous.Analysis.Scope {
 		allowed = append(allowed, s.Path)
@@ -188,6 +193,9 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	r.FinishedAt = ""
 	atom(&r, roles.atoms[formula.ScopeApproval], "waiting", "Amended scope requires exact approval; retained work has not been rerun.")
 	r.Notes = append(r.Notes, fmt.Sprintf("Amendment r%d retains tree %s. Compare immutable plans in the ledger before approval.", next.Revision, capture.Tree))
+	if note, ok := newFilesNote(next); ok {
+		r.Notes = append(r.Notes, note)
+	}
 	return r, save(r)
 }
 

@@ -143,6 +143,12 @@ type Plan struct {
 	// check can be told apart from a candidate. It joins the plan digest; empty
 	// keeps the digest of every earlier plan unchanged.
 	FormulaBaseline []string `json:"formulaBaseline,omitempty"`
+	// NewFiles lists the scope paths that were absent from the frozen repository tree
+	// when the Lab built this plan and that a candidate check cites as its definition
+	// by exact path. The Lab derives it from the frozen tree, never from model output,
+	// and verification re-checks the base commit. It joins the plan digest; empty keeps
+	// the digest of every earlier plan unchanged.
+	NewFiles []string `json:"newFiles,omitempty"`
 }
 
 // ProtectedDelta names one test, matched by exact Go package import path and
@@ -170,6 +176,36 @@ const MaxHarnessTimeoutMS = 3600000
 type PolicyViolation struct{ Reason string }
 
 func (e *PolicyViolation) Error() string { return e.Reason }
+
+// LabellingViolationMessage is the exact rejection of an analysis that labels its
+// own checks as independent acceptance.
+const LabellingViolationMessage = "analysis cannot assert independent acceptance review; retain as a candidate check for separate human review"
+
+// Policy violation classes. Each class gets its own corrective analysis retry.
+const (
+	PolicyClassLabelling          = "labelling"
+	PolicyClassInScopeDefinition  = "in-scope-definition"
+	PolicyClassEvidenceRequestCap = "evidence-request-cap"
+	PolicyClassDefinitionRef      = "definition-reference"
+	PolicyClassOther              = "other"
+)
+
+// PolicyClass names the class of a policy violation from its exact validator text.
+func PolicyClass(v *PolicyViolation) string {
+	switch {
+	case v == nil:
+		return PolicyClassOther
+	case v.Reason == LabellingViolationMessage:
+		return PolicyClassLabelling
+	case strings.HasPrefix(v.Reason, InScopeDefinitionMessage):
+		return PolicyClassInScopeDefinition
+	case v.Reason == EvidenceRequestCapMessage():
+		return PolicyClassEvidenceRequestCap
+	case strings.HasPrefix(v.Reason, DefinitionReferenceMessage):
+		return PolicyClassDefinitionRef
+	}
+	return PolicyClassOther
+}
 
 // IsPolicyViolation reports whether err is a rejection that a corrective analysis
 // pass may address. It never reflects a relaxed validator.
@@ -242,7 +278,7 @@ func DecodeAnalysis(raw []byte) (Analysis, error) {
 	}
 	for _, c := range a.Checks {
 		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" || c.ReviewedAcceptance != "" {
-			return a, &PolicyViolation{Reason: "analysis cannot assert independent acceptance review; retain as a candidate check for separate human review"}
+			return a, &PolicyViolation{Reason: LabellingViolationMessage}
 		}
 	}
 	if err := ValidateEvidenceRequests(a.EvidenceRequests, nil); err != nil {
@@ -430,6 +466,13 @@ func (p Plan) Validate() error {
 			return fmt.Errorf("setup commands must be labelled setup")
 		}
 	}
+	newFiles := map[string]bool{}
+	for _, file := range p.NewFiles {
+		if !paths[file] || newFiles[file] || evidencePaths[file] || refs[file] {
+			return fmt.Errorf("new file %q must be a distinct scope path that is not frozen evidence", file)
+		}
+		newFiles[file] = true
+	}
 	ids := map[string]bool{}
 	required := false
 	for _, c := range append(append([]Check{}, a.Checks...), p.Setup...) {
@@ -468,10 +511,24 @@ func (p Plan) Validate() error {
 		if err := cited(c.Evidence); err != nil {
 			return err
 		}
-		if err := cited(c.Definitions); err != nil {
-			return fmt.Errorf("command definitions: %w", err)
-		}
+		definitions := []string{}
+		citedNew := map[string]bool{}
 		for _, id := range c.Definitions {
+			if !newFiles[id] {
+				definitions = append(definitions, id)
+				continue
+			}
+			if c.Category != "candidate" || citedNew[id] {
+				return fmt.Errorf("command definitions: new file %s may define only a candidate check, once", id)
+			}
+			citedNew[id] = true
+		}
+		if len(definitions) > 0 || len(citedNew) == 0 {
+			if err := cited(definitions); err != nil {
+				return fmt.Errorf("command definitions: %w", err)
+			}
+		}
+		for _, id := range definitions {
 			if id == "issue" {
 				return fmt.Errorf("command definitions must reference frozen files")
 			}
@@ -715,6 +772,31 @@ func requestsGoTestJSON(argv []string) bool {
 	return false
 }
 
+var failfastEnvPrefix = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+var failfastFlag = regexp.MustCompile(`^--?(?:test\.)?failfast(?:=(.*))?$`)
+
+// requestsGoTestFailfast reports whether a check argv asks go test to stop after
+// the first failure, as -failfast or -test.failfast, with or without a boolean
+// value, directly, inside a reviewed shell string or through an environment
+// assignment such as GOFLAGS=-failfast. Only an explicit false value is ignored.
+func requestsGoTestFailfast(argv []string) bool {
+	for _, arg := range argv {
+		for _, token := range strings.Fields(arg) {
+			token = failfastEnvPrefix.ReplaceAllString(strings.Trim(token, "\"'`;()"), "")
+			m := failfastFlag.FindStringSubmatch(strings.Trim(token, "\"'`;()"))
+			if m == nil {
+				continue
+			}
+			switch strings.ToLower(m[1]) {
+			case "0", "f", "false":
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // RequestsGoTestJSON is requestsGoTestJSON for the verification runner, which
 // streams the output of checks that ask for it.
 func RequestsGoTestJSON(argv []string) bool { return requestsGoTestJSON(argv) }
@@ -763,6 +845,9 @@ func (p Plan) validateProtectedDeltas(scope map[string]bool, cited func([]string
 		}
 		if !requestsGoTestJSON(c.Argv) {
 			return fmt.Errorf("expected protected delta %s %s needs check %s to request go test -json", d.Package, d.Test, d.CheckID)
+		}
+		if requestsGoTestFailfast(c.Argv) {
+			return fmt.Errorf("expected protected delta %s %s cannot use check %s: it requests -failfast, so tests after the first failure never run and a declared failure could mask them", d.Package, d.Test, d.CheckID)
 		}
 		if !goPackagePath.MatchString(d.Package) || strings.Contains(d.Package, "...") || strings.Contains(d.Package, "//") {
 			return fmt.Errorf("expected protected delta needs an exact Go package import path: %q", d.Package)
@@ -920,10 +1005,36 @@ func (p Plan) ProtectedDeltaAdvisory(seen ...FailingTest) string {
 	return fmt.Sprintf("Protected-delta advisory (proposed for review; never auto-approved): scope touches fixture path(s) %s. The protected regression run restores base-commit test sources, so tests that pin these files may fail there and block the Molecule.%s If this change intentionally alters a pinned contract, a reviewer may amend the plan with expectedProtectedDeltas naming exact Go package and test IDs, declaring a failing parent test beside its failing subtest (an undeclared failing parent still fails the check); nothing is declared or approved automatically.", strings.Join(fixtures, ", "), failingTestsSentence(seen))
 }
 
+// ValidateDirectDeltaChecks requires every go test -json check that declares
+// protected deltas to be a direct go test argv (argv[0] go, argv[1] test), so the
+// Lab sees every flag. A shell, env or script wrapper can hide -failfast, which
+// stops later tests from running and lets a declared failure stand in for them.
+// It runs when a plan is amended or approved, not in Validate: the verification
+// runner validates stored plans with Validate, which keeps every earlier plan runnable.
+func (p Plan) ValidateDirectDeltaChecks() error {
+	checks := map[string]Check{}
+	for _, c := range p.Analysis.Checks {
+		checks[c.ID] = c
+	}
+	for _, d := range p.ExpectedProtectedDeltas {
+		c, ok := checks[d.CheckID]
+		if !ok || !requestsGoTestJSON(c.Argv) {
+			continue
+		}
+		if len(c.Argv) < 2 || c.Argv[0] != "go" || c.Argv[1] != "test" {
+			return fmt.Errorf("expected protected delta %s %s needs check %s to be a direct `go test` command (argv[0] go, argv[1] test), not a shell, env or script wrapper, because a wrapper can hide flags such as -failfast that stop later tests from running", d.Package, d.Test, d.CheckID)
+		}
+	}
+	return nil
+}
+
 // ValidateForCoding leaves overlapping proposals digestible and reviewable, but
 // prevents an exact approval from starting coding under unusable frozen checks.
 func (p Plan) ValidateForCoding() error {
 	if err := p.Validate(); err != nil {
+		return err
+	}
+	if err := p.ValidateDirectDeltaChecks(); err != nil {
 		return err
 	}
 	blocked := []string{}

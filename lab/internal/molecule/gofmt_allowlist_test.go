@@ -40,6 +40,9 @@ func gofmtFixture(t *testing.T, scopeAtom string, goFiles ...string) Options {
 	analyze := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		a, err := analyze(ctx, b, i, s)
+		// The default fixture check reads code.txt, a scope file, which auto-when-ready
+		// declines because a check names it. Read a file outside the scope instead.
+		a.Checks[0].Argv = []string{"/bin/sh", "-c", "test -f package.json"}
 		manifest := a.Scope[1].Evidence
 		for _, p := range goFiles {
 			a.Scope = append(a.Scope, readiness.ScopedPath{Path: p, Reason: "Implementation", Evidence: append([]string{}, manifest...)})

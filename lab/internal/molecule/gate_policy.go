@@ -6,7 +6,6 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
-	"path"
 	"slices"
 	"strings"
 )
@@ -22,18 +21,8 @@ const (
 
 var autoWhenReadyEnvironment = []string{"PATH"}
 
-// The sensitive-path list auto-when-ready never approves a scope against: CI and
-// tooling control files, where an edit changes what later runs execute. It is
-// versioned and pinned by a test, so any change is a reviewed edit of both. A
-// prefix is directory-bounded and anchored at the repository root; base names
-// and extensions match at any depth. Matching is case-insensitive.
-const sensitivePathListVersion = "v1"
-
-var (
-	sensitivePathPrefixes = []string{".github/", ".claude/", ".forgecell/", ".githooks/", ".husky/", "scripts/"}
-	sensitiveBaseNames    = []string{".gitlab-ci.yml", "go.mod", "go.sum", "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lockb", "Makefile"}
-	sensitiveExtensions   = []string{".lock"}
-)
+// The sensitive-path list auto-when-ready never approves a scope against lives in
+// sensitive_paths.go, together with the rule for scope files a check names.
 
 type PolicyOutcome string
 
@@ -204,6 +193,11 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 	if err := readiness.ValidateInScopeDefinitions(plan.Analysis, plan.Evidence); err != nil {
 		return decline("scope-path-check-definition", "%v", err)
 	}
+	// A scope file under a directory a check names can change what that check runs, even
+	// when no check cites the file itself.
+	if named := checkNamedScopePath(plan, []string{r.Workspace.Path, r.Workspace.SourceRoot}); named != "" {
+		return decline("scope-path-check-argument", "%s, which a human must review", named)
+	}
 	if len(plan.CodingAllowlist) == 0 {
 		return decline("allowlist-missing", "the plan carries no derived coding allowlist")
 	}
@@ -255,28 +249,13 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 		{Pointer: base + "/plan/analysis", Observed: fmt.Sprintf("sensitive-path list %s: %d scope paths examined", sensitivePathListVersion, len(paths))},
 		{Pointer: base + "/plan/analysis/checks", Observed: fmt.Sprintf("%d checks examined for scope paths cited by a check definition", len(plan.Analysis.Checks))},
 	}
+	if len(plan.NewFiles) > 0 {
+		eval.Evidence = append(eval.Evidence, PolicyEvidence{Pointer: base + "/plan/newFiles", Observed: fmt.Sprintf("%d new-file definitions: %s", len(plan.NewFiles), strings.Join(plan.NewFiles, ", "))})
+	}
 	if evidence, ok := extensionEvidence(r); ok {
 		eval.Evidence = append(eval.Evidence, evidence)
 	}
 	return eval
-}
-
-// sensitiveScopePath reports whether a validated, clean repository path is on the
-// sensitive-path list.
-func sensitiveScopePath(p string) bool {
-	lower := strings.ToLower(p)
-	for _, prefix := range sensitivePathPrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	base := path.Base(lower)
-	for _, name := range sensitiveBaseNames {
-		if base == strings.ToLower(name) {
-			return true
-		}
-	}
-	return slices.Contains(sensitiveExtensions, path.Ext(base))
 }
 
 // scopePolicyDecision evaluates the scope gate and, only on approve, builds the

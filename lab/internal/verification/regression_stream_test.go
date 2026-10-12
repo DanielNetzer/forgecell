@@ -201,7 +201,7 @@ func bigPrefix() string {
 }
 
 func TestProtectedDeltasAreEvaluatedFromAStreamOverTheCaptureCap(t *testing.T) {
-	dir, p, c := deltaFixture(t, bigPrefix()+passingBody(deltaPkg, "TestPinned"), bigPrefix()+failingBody(deltaPkg, "TestPinned"), pinnedDelta(deltaPkg, "TestPinned"))
+	dir, p, c := deltaFixture(t, passingBody(deltaPkg, "TestPinned"), bigPrefix()+failingBody(deltaPkg, "TestPinned"), pinnedDelta(deltaPkg, "TestPinned"))
 	v := runDelta(t, dir, p, c)
 	if !v.RequiredChecksPassed || v.Error != "" || v.Protected == nil || !v.Protected.RequiredChecksPassed {
 		t.Fatalf("a large declared failure was refused: %+v", v.Error)
@@ -209,11 +209,11 @@ func TestProtectedDeltasAreEvaluatedFromAStreamOverTheCaptureCap(t *testing.T) {
 	if len(v.AcceptedDeltas) != 1 || v.AcceptedDeltas[0].Test != "TestPinned" || len(v.Warnings) != 0 {
 		t.Fatalf("accepted delta not listed: %+v", v)
 	}
-	for name, obs := range map[string]Observation{"candidate": v.Checks[0], "protected": v.Protected.Checks[0]} {
-		r := obs.Result
-		if r.Overflow || !r.Truncated || len(r.Stdout) > 256000 || r.Activity == nil || r.Activity.StdoutBytes <= 256000 {
-			t.Fatalf("%s: the retained capture must stay capped while the stream is read in full: truncated=%t overflow=%t retained=%d activity=%+v", name, r.Truncated, r.Overflow, len(r.Stdout), r.Activity)
-		}
+	if r := v.Checks[0].Result; r.Truncated || r.Overflow {
+		t.Fatalf("the candidate view keeps its overflow guard and passes only a complete stream: %+v", r)
+	}
+	if r := v.Protected.Checks[0].Result; r.Overflow || !r.Truncated || len(r.Stdout) > 256000 || r.Activity == nil || r.Activity.StdoutBytes <= 256000 {
+		t.Fatalf("protected: the retained capture must stay capped while the stream is read in full: truncated=%t overflow=%t retained=%d activity=%+v", r.Truncated, r.Overflow, len(r.Stdout), r.Activity)
 	}
 	obs := v.Protected.Checks[0]
 	if obs.Result.OK || len(obs.FailedTests) != 1 || len(obs.AcceptedDeltas) != 1 {
@@ -250,7 +250,7 @@ func TestStreamedProtectedDeltasKeepEveryFailClosedRule(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, p, c := deltaFixture(t, bigPrefix()+passingBody(deltaPkg, "TestPinned"), bigPrefix()+tc.body, pinnedDelta(deltaPkg, "TestPinned"))
+			dir, p, c := deltaFixture(t, passingBody(deltaPkg, "TestPinned"), bigPrefix()+tc.body, pinnedDelta(deltaPkg, "TestPinned"))
 			v := runDelta(t, dir, p, c)
 			if v.RequiredChecksPassed || v.IndependentAcceptanceVerified || v.Protected == nil || v.Protected.RequiredChecksPassed || len(v.AcceptedDeltas) != 0 {
 				t.Fatalf("a streamed run that must refuse passed: %+v", v)
