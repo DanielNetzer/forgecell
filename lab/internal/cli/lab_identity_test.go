@@ -142,7 +142,7 @@ func TestLabIdentityClonesAtDifferentPathsShareOneLab(t *testing.T) {
 	base := t.TempDir()
 	one := identityCheckout(t, filepath.Join(base, "one", "forgecell"), "https://github.com/Owner/Repo.git")
 	two := identityCheckout(t, filepath.Join(base, "two", "unrelated-name"), "git@github.com:owner/repo.git")
-	want := filepath.Join(home, ".forgecell", "labs", "owner-repo")
+	want := filepath.Join(home, ".forgecell", "labs", "owner--repo")
 	for _, dir := range []string{one, filepath.Join(one, "sub"), two} {
 		identityChdir(t, dir)
 		got, err := resolveDefaultLab(context.Background(), "")
@@ -171,7 +171,7 @@ func TestLabIdentityRenamedCheckoutKeepsItsLab(t *testing.T) {
 	}
 	identityChdir(t, after)
 	second, err := resolveDefaultLab(context.Background(), "")
-	if err != nil || second.Dir != first.Dir || first.Dir != filepath.Join(home, ".forgecell", "labs", "owner-repo") {
+	if err != nil || second.Dir != first.Dir || first.Dir != filepath.Join(home, ".forgecell", "labs", "owner--repo") {
 		t.Fatalf("rename changed the Lab: %+v then %+v, %v", first, second, err)
 	}
 	if renamedPathKeyed, _ := defaultLabDir(); renamedPathKeyed == pathKeyed {
@@ -255,7 +255,7 @@ func TestLabIdentityNewRepositoryUsesIdentityDirectoryWithoutCreatingIt(t *testi
 	identityFakeCheckout(t)
 	identityStubOrigin(t, "https://github.com/Owner/Repo.git")
 	got, err := resolveDefaultLab(context.Background(), "")
-	if err != nil || got.Dir != filepath.Join(home, ".forgecell", "labs", "owner-repo") {
+	if err != nil || got.Dir != filepath.Join(home, ".forgecell", "labs", "owner--repo") {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".forgecell")); !os.IsNotExist(err) {
@@ -293,7 +293,7 @@ func TestLabIdentityMatchingIdentityDirectoryIsQuiet(t *testing.T) {
 	home := labIdentityEnv(t)
 	identityFakeCheckout(t)
 	identityStubOrigin(t, "https://github.com/Owner/Repo.git")
-	identity := filepath.Join(home, ".forgecell", "labs", "owner-repo")
+	identity := filepath.Join(home, ".forgecell", "labs", "owner--repo")
 	identityLab(t, identity, "Owner/Repo")
 	got, err := resolveDefaultLab(context.Background(), "")
 	if err != nil || got.Dir != identity || got.Notice != "" {
@@ -307,17 +307,17 @@ func TestLabIdentityAmbiguousMatchesAreReportedAndNothingIsCreated(t *testing.T)
 	identityStubOrigin(t, "https://github.com/Owner/Repo.git")
 	labs := filepath.Join(home, ".forgecell", "labs")
 	legacy := filepath.Join(labs, "forgecell-core-0123456789abcdef")
-	identity := filepath.Join(labs, "owner-repo")
+	other := filepath.Join(labs, "forgecell-public-backlog")
 	identityLab(t, legacy, "Owner/Repo")
-	identityLab(t, identity, "owner/repo")
+	identityLab(t, other, "owner/repo")
 	before := identityTree(t, labs)
 
-	if _, err := resolveDefaultLab(context.Background(), ""); err == nil || !strings.Contains(err.Error(), legacy) || !strings.Contains(err.Error(), identity) || !strings.Contains(err.Error(), "--lab") {
+	if _, err := resolveDefaultLab(context.Background(), ""); err == nil || !strings.Contains(err.Error(), legacy) || !strings.Contains(err.Error(), other) || !strings.Contains(err.Error(), "--lab") {
 		t.Fatalf("ambiguity was not reported with every candidate: %v", err)
 	}
 	for _, args := range [][]string{{"init", "--json"}, {"ledger", "mol-test"}, {"doctor"}} {
 		code, out, stderr := identityRun(args...)
-		if code != 1 || out != "" || !strings.Contains(stderr, legacy) || !strings.Contains(stderr, identity) || !strings.Contains(stderr, "--lab") {
+		if code != 1 || out != "" || !strings.Contains(stderr, legacy) || !strings.Contains(stderr, other) || !strings.Contains(stderr, "--lab") {
 			t.Fatalf("%v: code %d, out %q, err %q", args, code, out, stderr)
 		}
 	}
@@ -349,7 +349,7 @@ func TestLabIdentityIgnoresUnrelatedUnreadableAndSymlinkedLabs(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := resolveDefaultLab(context.Background(), "")
-	if err != nil || got.Dir != filepath.Join(labs, "owner-repo") {
+	if err != nil || got.Dir != filepath.Join(labs, "owner--repo") {
 		t.Fatalf("unrelated, unreadable or symlinked Labs influenced selection: %+v, %v", got, err)
 	}
 
@@ -366,7 +366,7 @@ func TestLabIdentityPendingIdentityDirectoryDoesNotHideAMatchingLegacyLab(t *tes
 	identityFakeCheckout(t)
 	identityStubOrigin(t, "https://github.com/Owner/Repo.git")
 	labs := filepath.Join(home, ".forgecell", "labs")
-	if err := os.MkdirAll(filepath.Join(labs, "owner-repo", "proposals"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(labs, "owner--repo", "proposals"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	legacy := filepath.Join(labs, "forgecell-core-abc")
@@ -380,18 +380,18 @@ func TestLabIdentityPendingIdentityDirectoryDoesNotHideAMatchingLegacyLab(t *tes
 func TestLabIdentityRefusesAnIdentityDirectoryOwnedByAnotherRepository(t *testing.T) {
 	home := labIdentityEnv(t)
 	identityFakeCheckout(t)
-	// foo-bar/baz and foo/bar-baz both map to foo-bar-baz.
+	// A Lab placed at foo/bar-baz's directory by hand but belonging to foo-bar/baz.
 	identityStubOrigin(t, "https://github.com/foo/bar-baz.git")
 	labs := filepath.Join(home, ".forgecell", "labs")
-	identityLab(t, filepath.Join(labs, "foo-bar-baz"), "foo-bar/baz")
+	identityLab(t, filepath.Join(labs, "foo--bar-baz"), "foo-bar/baz")
 	if got, err := resolveDefaultLab(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "--lab-name") || !strings.Contains(err.Error(), "--lab") {
 		t.Fatalf("another repository's Lab was reused: %+v, %v", got, err)
 	}
-	identityLab(t, filepath.Join(labs, "foo-bar-baz-x"), "foo/bar")
+	identityLab(t, filepath.Join(labs, "foo--bar-baz@x"), "foo/bar")
 	if got, err := resolveDefaultLab(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "--lab") {
 		t.Fatalf("a named Lab owned by another repository was reused: %+v, %v", got, err)
 	}
-	if got, err := resolveDefaultLab(context.Background(), "y"); err != nil || got.Dir != filepath.Join(labs, "foo-bar-baz-y") {
+	if got, err := resolveDefaultLab(context.Background(), "y"); err != nil || got.Dir != filepath.Join(labs, "foo--bar-baz@y") {
 		t.Fatalf("a free name should work: %+v, %v", got, err)
 	}
 }
@@ -402,21 +402,21 @@ func TestLabIdentityLabNameSelectsNamedLabWithoutScanning(t *testing.T) {
 	identityStubOrigin(t, "https://github.com/Owner/Repo.git")
 	labs := filepath.Join(home, ".forgecell", "labs")
 	identityLab(t, filepath.Join(labs, "forgecell-core-abc"), "Owner/Repo")
-	identityLab(t, filepath.Join(labs, "owner-repo"), "Owner/Repo")
+	identityLab(t, filepath.Join(labs, "owner--repo"), "Owner/Repo")
 	got, err := resolveDefaultLab(context.Background(), "Staging")
-	if err != nil || got.Dir != filepath.Join(labs, "owner-repo-staging") {
+	if err != nil || got.Dir != filepath.Join(labs, "owner--repo@staging") {
 		t.Fatalf("got %+v, %v", got, err)
 	}
-	identityLab(t, filepath.Join(labs, "owner-repo-staging"), "owner/repo")
+	identityLab(t, filepath.Join(labs, "owner--repo@staging"), "owner/repo")
 	got, err = resolveDefaultLab(context.Background(), "staging")
-	if err != nil || got.Dir != filepath.Join(labs, "owner-repo-staging") || got.Notice != "" {
+	if err != nil || got.Dir != filepath.Join(labs, "owner--repo@staging") || got.Notice != "" {
 		t.Fatalf("an existing named Lab for this repository should be used quietly: %+v, %v", got, err)
 	}
 	code, out, stderr := identityRun("ledger", "mol-test", "--lab-name", "staging")
 	if code == 0 || out != "" || strings.Contains(stderr, "not defined") || strings.Contains(stderr, "more than one") {
-		t.Fatalf("named Lab should select owner-repo-staging (no ledger there): %d %q %q", code, out, stderr)
+		t.Fatalf("named Lab should select owner--repo@staging (no ledger there): %d %q %q", code, out, stderr)
 	}
-	identityLedger(t, filepath.Join(labs, "owner-repo-staging"))
+	identityLedger(t, filepath.Join(labs, "owner--repo@staging"))
 	code, out, stderr = identityRun("ledger", "mol-test", "--lab-name=staging")
 	if code != 0 || out != identityRawLedger+"\n" {
 		t.Fatalf("--lab-name=NAME: %d %q %q", code, out, stderr)
@@ -452,7 +452,7 @@ func TestLabIdentityLabNameValidationHappensBeforeAnyLookup(t *testing.T) {
 		t.Fatal("validation touched Lab storage")
 	}
 	for _, name := range []string{"a", "A_b-1", strings.Repeat("a", 32)} {
-		if got, err := resolveDefaultLab(context.Background(), name); err != nil || filepath.Base(got.Dir) != "owner-repo-"+strings.ToLower(name) {
+		if got, err := resolveDefaultLab(context.Background(), name); err != nil || filepath.Base(got.Dir) != "owner--repo@"+strings.ToLower(name) {
 			t.Fatalf("name %q: %+v, %v", name, got, err)
 		}
 	}
@@ -486,18 +486,26 @@ func TestLabIdentityExplicitLabWinsWithoutLookupOrNotice(t *testing.T) {
 	calls := identityStubOrigin(t, "https://github.com/Owner/Repo.git")
 	labs := filepath.Join(home, ".forgecell", "labs")
 	identityLab(t, filepath.Join(labs, "forgecell-core-abc"), "Owner/Repo")
-	identityLab(t, filepath.Join(labs, "owner-repo"), "Owner/Repo")
+	identityLab(t, filepath.Join(labs, "owner--repo"), "Owner/Repo")
 	chosen := filepath.Join(t.TempDir(), "chosen")
 	identityLedger(t, chosen)
 	for _, args := range [][]string{
 		{"ledger", "mol-test", "--lab", chosen},
 		{"ledger", "mol-test", "--lab=" + chosen},
 		{"ledger", "mol-test", "-lab", chosen},
-		{"ledger", "mol-test", "--lab", chosen, "--lab-name", "staging"},
 	} {
 		code, out, stderr := identityRun(args...)
 		if code != 0 || out != identityRawLedger+"\n" || stderr != "" {
 			t.Fatalf("%v: code %d, out %q, err %q", args, code, out, stderr)
+		}
+	}
+	for _, args := range [][]string{
+		{"ledger", "mol-test", "--lab", chosen, "--lab-name", "staging"},
+		{"ledger", "mol-test", "--lab-name=staging", "--lab=" + chosen},
+	} {
+		code, out, stderr := identityRun(args...)
+		if code != 1 || out != "" || !strings.Contains(stderr, "--lab") || !strings.Contains(stderr, "--lab-name") || !strings.Contains(stderr, "cannot be combined") {
+			t.Fatalf("%v: --lab with --lab-name was not refused: code %d, out %q, err %q", args, code, out, stderr)
 		}
 	}
 	if *calls != 0 {

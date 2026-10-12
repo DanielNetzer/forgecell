@@ -122,10 +122,14 @@ func TestLoopOpenIssuesRefusesMalformedData(t *testing.T) {
 	}
 }
 
-func TestLoopOpenIssuesRefusesDuplicatesAcrossPages(t *testing.T) {
+func TestLoopOpenIssuesDeduplicatesAnIssueThatMovedAcrossPages(t *testing.T) {
 	loopGH(t, map[int]string{1: loopPage(1, 30), 2: loopPage(30, 2)})
-	if _, err := ReadOpenIssues(context.Background(), "o/r"); err == nil {
-		t.Fatal("a repeated Issue number was accepted")
+	got, err := ReadOpenIssues(context.Background(), "o/r")
+	if err != nil {
+		t.Fatalf("a repeated Issue number failed the whole read: %v", err)
+	}
+	if got.Truncated || len(got.Issues) != 31 || got.Issues[29].Number != 30 || got.Issues[30].Number != 31 {
+		t.Fatalf("truncated=%t issues=%d", got.Truncated, len(got.Issues))
 	}
 }
 

@@ -32,6 +32,11 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if r.ID != id {
 		return r, fmt.Errorf("Molecule and parent plan mismatch")
 	}
+	unlockLoop, err := lockMolecule(lab, id)
+	if err != nil {
+		return r, lockedByLoop(err)
+	}
+	defer unlockLoop()
 	lock := filepath.Join(lab, "ledgers", id+".lock")
 	if err = os.Mkdir(lock, 0700); err != nil {
 		return r, fmt.Errorf("Molecule is locked: %w", err)

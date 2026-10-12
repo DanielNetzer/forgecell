@@ -16,7 +16,10 @@ var runLoop = molecule.RunLoop
 
 // runLoopCommand validates every argument before it reads GitHub, writes a
 // ledger or creates a Molecule. Exit codes mirror run: 1 for a loop-level error,
-// 2 when a Molecule this run started or approved ended failed or blocked.
+// 2 when a Molecule this run started or approved ended failed or blocked. Exit 3
+// means the final pass left an Issue stalled (an approval that never applied or
+// intake that never finished) or in a state the loop could not determine, which a
+// wait at a human gate never does.
 func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, stderr io.Writer) int {
 	flags := flag.NewFlagSet("loop", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -50,6 +53,9 @@ func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, 
 	if report.Failed() {
 		return 2
 	}
+	if report.NonProgress() > 0 {
+		return 3
+	}
 	return 0
 }
 
@@ -77,5 +83,8 @@ func renderLoop(out io.Writer, report molecule.LoopReport, selector intake.Selec
 			}
 			fmt.Fprintf(out, "%s#%d · %s · Molecule %s%s\n  %s\n", item.Repository, item.Issue, item.State, id, actions, item.Reason)
 		}
+	}
+	if n := report.NonProgress(); n > 0 {
+		fmt.Fprintf(out, "%d Issue(s) made no progress in the final pass and need attention\n", n)
 	}
 }

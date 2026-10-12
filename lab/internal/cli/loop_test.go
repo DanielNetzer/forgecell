@@ -163,10 +163,10 @@ func TestLoopResolvesTheDefaultLab(t *testing.T) {
 	if code, _, stderr := runLoopCLI("--once"); code != 0 || got.Template.LabDir != lab {
 		t.Fatalf("exit %d, Lab %q, stderr %q", code, got.Template.LabDir, stderr)
 	}
-	if code, _, stderr := runLoopCLI("--lab-name", "second", "--once"); code != 0 || got.Template.LabDir != lab {
-		t.Fatalf("--lab-name was not accepted: exit %d, stderr %q", code, stderr)
-	}
 	before := calls
+	if code, _, stderr := runLoopCLI("--lab-name", "second", "--once"); code != 1 || calls != before || !strings.Contains(stderr, "FORGECELL_LAB") {
+		t.Fatalf("--lab-name was not refused beside FORGECELL_LAB: exit %d, stderr %q", code, stderr)
+	}
 	if code, _, _ := runLoopCLI("--lab-name", "not valid!", "--once"); code != 1 || calls != before {
 		t.Fatalf("an invalid Lab name exited %d", code)
 	}
