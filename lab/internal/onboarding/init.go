@@ -84,15 +84,16 @@ func recordedLaunchers(f formula.Formula) map[string]bool {
 
 // establishedForgecell reports whether a saved launcher is established as a
 // Forgecell executable without executing it: the running executable, a managed
-// launcher, a launcher beside a release manifest, or a launcher the approved
-// Formula already records. A custom tool that merely has the native argv shape
-// is none of these.
+// launcher, a launcher beside a release manifest that records the launcher's own
+// SHA-256, or a launcher the approved Formula already records. A custom tool that
+// merely has the native argv shape, or sits beside a manifest.json it did not
+// install, is none of these.
 func establishedForgecell(saved string, recorded map[string]bool) bool {
 	if recorded[saved] {
 		return true
 	}
 	id := harness.ResolveLauncher(saved)
-	return id.Class == harness.LauncherRunning || id.Managed || id.Manifest.Found
+	return id.Class == harness.LauncherRunning || id.Managed || id.ExecutableMatchesManifest()
 }
 
 // RebindRepoints reports whether init --rebind would repoint a native command
@@ -524,6 +525,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, fmt.Errorf("verified harness executable and Forgecell launcher are required")
 	}
 	command := []string{o.Launcher, "__adapter", selected.ID, selected.Executable}
+	if !active.Approved || o.Preferred != "" {
+		if err = requireAbsoluteNative("harness.command", command); err != nil {
+			return out, err
+		}
+	}
 	if active.Approved && o.Preferred != "" && o.Rebind == "" {
 		if err = CheckAnalysisFallback(active.Formula, formula.Binding{Binding: selected.ID, Command: command}); err != nil {
 			return out, err
@@ -625,6 +631,12 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 				return out, nil
 			}
 			command = []string{o.Launcher, "__adapter", binding, candidate.Executable}
+			if err = requireAbsoluteNative("atoms[learn].command", command); err != nil {
+				return out, err
+			}
+		}
+		if role, declared := active.Formula.RoleBinding(formula.MetaHarness); declared && (binding != role.Binding || !slices.Equal(command, role.Command)) {
+			return out, fmt.Errorf("harnesses.meta is declared (binding %q); a learn Atom with binding %q and command %v would conflict with it and learning would refuse to run; request the declared binding and command, or change harnesses.meta through a reviewed Formula change; no proposal saved", role.Binding, binding, command)
 		}
 		r := DescribeMeta(command, binding, 900000, candidate)
 		r.BeforeYAML = before

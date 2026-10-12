@@ -274,7 +274,13 @@ func readIssue(ctx context.Context, repo string, number int64, cwd string) (Issu
 // Generated bindings invoke the adapter in-process so a single managed process group
 // owns the provider and its descendants. An outer wrapper must not orphan that group.
 func invokeHarness(ctx context.Context, command []string, dir string, timeout time.Duration, request map[string]any) process.Result {
-	return harness.InvokeBinding(ctx, command, dir, timeout, request)
+	return invokeHarnessWith(ctx, nil, command, dir, timeout, request)
+}
+
+// invokeHarnessWith runs an attempt that already resolved its saved launcher, so the
+// identity that gates the run is the one the attempt records.
+func invokeHarnessWith(ctx context.Context, id *harness.LauncherIdentity, command []string, dir string, timeout time.Duration, request map[string]any) process.Result {
+	return harness.InvokeBindingWith(ctx, id, command, dir, timeout, request)
 }
 
 func createWorkspace(ctx context.Context, o Options, repo string, number int64) (Workspace, error) {

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
@@ -128,10 +130,13 @@ func TestDoctorRoleReadinessSingleBindingKeepsResult(t *testing.T) {
 func olderBuild(t *testing.T, protocol string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"version":"0.2.0","protocolVersion":"`+protocol+`"}`), 0600); err != nil {
+	body := "#!/bin/sh\nexit 1\n"
+	tool := writeTool(t, dir, "forgecell", body)
+	sum := sha256.Sum256([]byte(body))
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"version":"0.2.0","sha256":"`+hex.EncodeToString(sum[:])+`","protocolVersion":"`+protocol+`"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return writeTool(t, dir, "forgecell", "#!/bin/sh\nexit 1\n")
+	return tool
 }
 
 func TestDoctorStaleMetaLauncherPointsAtRebindOfTheCodingBinding(t *testing.T) {

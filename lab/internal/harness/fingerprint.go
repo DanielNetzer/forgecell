@@ -42,6 +42,9 @@ func fingerprint(command []string, protocol string) (string, error) {
 		return "", err
 	}
 	if native {
+		if !filepath.IsAbs(command[3]) {
+			return "", fmt.Errorf("native harness provider %q must be an absolute path", command[3])
+		}
 		if err := addExecutable(command[3]); err != nil {
 			return "", err
 		}

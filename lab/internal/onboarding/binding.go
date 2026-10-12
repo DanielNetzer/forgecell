@@ -2,10 +2,12 @@ package onboarding
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -92,7 +94,7 @@ func ProbeBinding(ctx context.Context, b formula.Binding, cwd string, run Runner
 		d.LauncherProtocol = harness.AdapterProtocolVersion
 	} else {
 		statePath := id.Path
-		if id.Class == harness.LauncherMissing {
+		if statePath == "" {
 			statePath = b.Command[0]
 		}
 		d.States = append(d.States, BindingState{State: "launcher-" + id.Class, Path: statePath, Detail: id.Describe(b.Command[2])})
@@ -102,8 +104,15 @@ func ProbeBinding(ctx context.Context, b formula.Binding, cwd string, run Runner
 	if mismatch {
 		d.States = append(d.States, BindingState{State: "adapter-mismatch", Detail: fmt.Sprintf("Saved adapter %q differs from the Formula binding %q (launcher %s, provider %s).", b.Command[2], b.Binding, b.Command[0], b.Command[3])})
 	}
-	provider, providerErr := exec.LookPath(b.Command[3])
-	if providerErr != nil {
+	var provider string
+	var providerErr error
+	if !filepath.IsAbs(b.Command[3]) {
+		// A bare or relative provider would resolve against the working directory or PATH.
+		detail := fmt.Sprintf("Bound provider %q must be an absolute path; it was not resolved or run.", b.Command[3])
+		providerErr = errors.New(detail)
+		d.States = append(d.States, BindingState{State: "provider-not-absolute", Path: b.Command[3], Detail: detail})
+		c.Installed = harness.Capability{State: "blocked", Reason: detail}
+	} else if provider, providerErr = exec.LookPath(b.Command[3]); providerErr != nil {
 		d.States = append(d.States, BindingState{State: "provider-missing", Path: b.Command[3], Detail: fmt.Sprintf("Bound provider %s was not found or is not an executable file.", b.Command[3])})
 		c.Installed = harness.Capability{State: "missing", Reason: fmt.Sprintf("Bound provider %s was not found or is not an executable file.", b.Command[3])}
 	} else {
@@ -190,6 +199,9 @@ func roleCapability(role formula.HarnessRole, b formula.Binding) harness.Capabil
 // stay valid. A role that binds extensions is judged on whichever binding it
 // resolves to, including the default.
 func ValidateRoleBindings(f formula.Formula) error {
+	if err := validateAbsoluteNative(f); err != nil {
+		return err
+	}
 	for _, role := range formula.HarnessRoles {
 		b, declared := f.Harnesses[string(role)]
 		if !declared {
@@ -217,6 +229,60 @@ func ValidateRoleBindings(f formula.Formula) error {
 		return err
 	}
 	return f.ValidateHarnessRoles()
+}
+
+// requireAbsoluteNative refuses a native [launcher, "__adapter", adapter, provider]
+// command whose launcher or provider is not an absolute path: either would resolve
+// against the working directory or PATH. key is the command's Formula YAML key
+// path, so the error names the exact element to change, with the absolute path it
+// currently resolves to when it does. Any other command is not judged.
+func requireAbsoluteNative(key string, command []string) error {
+	if len(command) != 4 || command[1] != "__adapter" {
+		return nil
+	}
+	for _, part := range []struct {
+		index int
+		name  string
+	}{{0, "launcher"}, {3, "provider"}} {
+		if path := command[part.index]; !filepath.IsAbs(path) {
+			return fmt.Errorf("%s[%d]: native %s %q must be an absolute path%s", key, part.index, part.name, path, absoluteHint(path))
+		}
+	}
+	return nil
+}
+
+// absoluteHint names the absolute path a non-absolute command element resolves to
+// here. It looks the path up and runs nothing; the Formula is never rewritten from it.
+func absoluteHint(path string) string {
+	if found, err := exec.LookPath(path); err == nil {
+		if abs, err := filepath.Abs(found); err == nil {
+			return fmt.Sprintf("; set it to %q", abs)
+		}
+	}
+	return "; it does not resolve to an executable here, so set the absolute path of the installed executable"
+}
+
+// validateAbsoluteNative applies requireAbsoluteNative to the default harness, every
+// declared role and every learn Atom command.
+func validateAbsoluteNative(f formula.Formula) error {
+	if err := requireAbsoluteNative("harness.command", f.Harness.Command); err != nil {
+		return err
+	}
+	for _, role := range append(slices.Clone(formula.HarnessRoles), formula.ReviewHarness) {
+		if b, declared := f.Harnesses[string(role)]; declared {
+			if err := requireAbsoluteNative("harnesses."+string(role)+".command", b.Command); err != nil {
+				return err
+			}
+		}
+	}
+	for _, a := range f.Atoms {
+		if a.Type == "learn" {
+			if err := requireAbsoluteNative("atoms["+a.ID+"].command", a.Command); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ReviewResolution is the binding a review Atom runs under and where it came from.
@@ -401,6 +467,11 @@ func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner
 		case formula.MetaHarness:
 			item.Capability = c.Capabilities.Meta
 			item.Ready = c.Readiness == "ready" && item.Capability.State == "supported"
+			if learnID, conflict := MetaConflict(f); conflict {
+				reason := metaConflictReason(learnID)
+				item.Readiness, item.Detail, item.Ready = "blocked", reason, false
+				item.Capability = harness.Capability{State: "blocked", Reason: reason}
+			}
 		default:
 			item.Capability = c.Capabilities.Coding
 			item.Ready = c.Readiness == "ready" && item.Capability.State == "supported"
@@ -421,11 +492,9 @@ func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner
 	return roles
 }
 
-// MetaBinding resolves the separate meta binding learning runs. A declared
-// harnesses.meta role supplies it, and a commandless learn Atom is enough; the
-// Atom's own timeoutMs still wins, as learning runs it. Without a role the
-// command of a learn Atom is the binding. Source is "override" or "learn-atom".
-func MetaBinding(f formula.Formula) (b formula.Binding, source string, bound bool) {
+// metaLearnAtom is the learn Atom learning is bound through: the first one,
+// preferring one that carries a command.
+func metaLearnAtom(f formula.Formula) *formula.Atom {
 	var learn *formula.Atom
 	for i := range f.Atoms {
 		a := &f.Atoms[i]
@@ -433,7 +502,39 @@ func MetaBinding(f formula.Formula) (b formula.Binding, source string, bound boo
 			learn = a
 		}
 	}
+	return learn
+}
+
+// MetaConflict reports a declared harnesses.meta command that differs from the
+// command of the learn Atom, and that Atom's id. Learning refuses to run in that
+// state, so it is never a usable meta binding.
+func MetaConflict(f formula.Formula) (learnID string, conflict bool) {
+	learn := metaLearnAtom(f)
 	if learn == nil {
+		return "", false
+	}
+	role, declared := f.RoleBinding(formula.MetaHarness)
+	if !declared || len(learn.Command) == 0 || slices.Equal(learn.Command, role.Command) {
+		return "", false
+	}
+	return learn.ID, true
+}
+
+func metaConflictReason(learnID string) string {
+	return fmt.Sprintf("harnesses.meta command conflicts with the command of learn Atom %s; learn invokes no learner until they are equal or one is removed through a reviewed Formula change.", learnID)
+}
+
+// MetaBinding resolves the separate meta binding learning runs. A declared
+// harnesses.meta role supplies it, and a commandless learn Atom is enough; the
+// Atom's own timeoutMs still wins, as learning runs it. Without a role the
+// command of a learn Atom is the binding. Source is "override" or "learn-atom". A
+// role whose command conflicts with the learn Atom's is not bound (MetaConflict).
+func MetaBinding(f formula.Formula) (b formula.Binding, source string, bound bool) {
+	learn := metaLearnAtom(f)
+	if learn == nil {
+		return formula.Binding{}, "", false
+	}
+	if _, conflict := MetaConflict(f); conflict {
 		return formula.Binding{}, "", false
 	}
 	if role, declared := f.RoleBinding(formula.MetaHarness); declared {
@@ -513,10 +614,21 @@ func metaSubject(f formula.Formula) (command []string, binding string, timeout i
 	return nil, "", 0, false
 }
 
+// withMetaConflict reports a harnesses.meta/learn Atom command conflict instead of
+// the capability of whichever command was named, so it never reads as healthy.
+func withMetaConflict(f formula.Formula, r MetaReport) MetaReport {
+	if learnID, conflict := MetaConflict(f); conflict {
+		reason := metaConflictReason(learnID)
+		r.Capability = harness.Capability{State: "blocked", Reason: reason}
+		r.NextAction = reason
+	}
+	return r
+}
+
 // DescribeFormulaMeta reports the declared meta binding without probing anything.
 func DescribeFormulaMeta(f formula.Formula) MetaReport {
 	command, binding, timeout, _ := metaSubject(f)
-	return DescribeMeta(command, binding, timeout, Candidate{})
+	return withMetaConflict(f, DescribeMeta(command, binding, timeout, Candidate{}))
 }
 
 func InspectMeta(ctx context.Context, f formula.Formula, cwd string, run Runner) MetaReport {
@@ -524,5 +636,5 @@ func InspectMeta(ctx context.Context, f formula.Formula, cwd string, run Runner)
 	if !found {
 		return DescribeMeta(nil, "", 0, Candidate{})
 	}
-	return DescribeMeta(command, binding, timeout, ProbeBinding(ctx, formula.Binding{Binding: binding, Command: command}, cwd, run))
+	return withMetaConflict(f, DescribeMeta(command, binding, timeout, ProbeBinding(ctx, formula.Binding{Binding: binding, Command: command}, cwd, run)))
 }
