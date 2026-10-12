@@ -283,7 +283,7 @@ func TestAnalysisWrapperFailuresStopIntakeWithZeroCodingOrFallback(t *testing.T)
 		{"credential overriding the environment", wrapperOptions{mutate: func(m *harness.AnalysisWrapperManifest) { m.Controls.Credentials = []string{"LD_PRELOAD"} }}, nil, "denied", false, "refused"},
 		{"process failure with stderr", wrapperOptions{body: "cat >/dev/null\necho secret-stderr-detail >&2\nexit 3\n"}, nil, "analysis failed", true, "approved"},
 		{"process failure", wrapperOptions{body: "cat >/dev/null\nexit 3\n"}, nil, "analysis failed", true, "approved"},
-		{"timeout", wrapperOptions{body: "cat >/dev/null\nsleep 30 &\nwait\n", timeoutMS: 2000}, nil, "deadline", true, "approved"},
+		{"timeout", wrapperOptions{body: "cat >/dev/null\nsleep 60 &\nwait\n", timeoutMS: stallTimeoutMS}, nil, "deadline", true, "approved"},
 		{"output overflow", wrapperOptions{body: "cat >/dev/null\nhead -c 300000 /dev/zero | tr '\\0' a\n"}, nil, "byte limit", true, "approved"},
 		{"malformed analysis", wrapperOptions{body: "cat >/dev/null\nprintf 'not json'\n"}, nil, "invalid readiness analysis", true, "approved"},
 		{"unknown analysis field", wrapperOptions{body: "cat >/dev/null\nprintf '%s' '{\"summary\":\"x\",\"approved\":true}'\n"}, nil, "invalid readiness analysis", true, "approved"},

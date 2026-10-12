@@ -13,9 +13,13 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
+// The Formula timeouts in these tests are at least 10 s, so start-up scheduling on
+// a loaded machine cannot race them. slowCompletingHarness outlasts the 10 s
+// Formula timeout but finishes well inside the reviewed 20 s plan timeout, and
+// stuckHarness outlasts every timeout used here.
 const (
-	slowCompletingHarness = "#!/bin/sh\ncat >/dev/null\nsleep 1\nprintf changed > code.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"Implemented and tested\",\"paths\":[]}'\n"
-	stuckHarness          = "#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nsleep 10\n"
+	slowCompletingHarness = "#!/bin/sh\ncat >/dev/null\nsleep 11\nprintf changed > code.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"Implemented and tested\",\"paths\":[]}'\n"
+	stuckHarness          = "#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nsleep 60\n"
 )
 
 // timeoutFixture approves a Formula with the given timeouts and a harness script,
@@ -129,7 +133,8 @@ func TestHarnessTimeoutIntakeProposesFromScopeAndOmitsItOtherwise(t *testing.T) 
 // The control run proves the harness needs more than the Formula timeout: the only
 // difference between the two runs is the reviewed plan value.
 func TestHarnessTimeoutPlanValueIsHonouredAndRecorded(t *testing.T) {
-	control := timeoutFixture(t, 300, 30000, 0, slowCompletingHarness)
+	t.Parallel()
+	control := timeoutFixture(t, 10000, 20000, 0, slowCompletingHarness)
 	r, err := runApprovedFixture(t, control)
 	if err != nil {
 		t.Fatal(err)
@@ -137,26 +142,26 @@ func TestHarnessTimeoutPlanValueIsHonouredAndRecorded(t *testing.T) {
 	if r.Readiness.Plans[0].Plan.HarnessTimeoutMS != 0 || len(r.HarnessAttempts) != 1 || !r.HarnessAttempts[0].Result.TimedOut || r.Status != "failed" {
 		t.Fatalf("control did not time out at the Formula timeout: %s %+v", r.Status, r.HarnessAttempts)
 	}
-	o := timeoutFixture(t, 300, 30000, 9, slowCompletingHarness)
+	o := timeoutFixture(t, 10000, 20000, 9, slowCompletingHarness)
 	r, err = runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan := r.Readiness.Plans[0].Plan
-	if plan.HarnessTimeoutMS != 30000 {
+	if plan.HarnessTimeoutMS != 20000 {
 		t.Fatalf("proposal %d", plan.HarnessTimeoutMS)
 	}
 	if len(r.HarnessAttempts) != 1 || r.HarnessAttempts[0].Result.TimedOut || !r.HarnessAttempts[0].Result.OK || r.Status != "waiting" || r.Verification == nil || !r.Verification.RequiredChecksPassed {
 		t.Fatalf("the plan timeout was not honoured: %s %+v", r.Status, r.HarnessAttempts)
 	}
-	if !strings.Contains(strings.Join(r.Notes, "\n"), "harnessTimeoutMs 30000") {
+	if !strings.Contains(strings.Join(r.Notes, "\n"), "harnessTimeoutMs 20000") {
 		t.Fatalf("effective timeout not recorded: %v", r.Notes)
 	}
 	raw, err := os.ReadFile(filepath.Join(o.LabDir, "ledgers", r.ID+".json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"harnessTimeoutMs": 30000`) {
+	if !strings.Contains(string(raw), `"harnessTimeoutMs": 20000`) {
 		t.Fatal("reviewed timeout is not part of the immutable plan record")
 	}
 }
@@ -229,6 +234,7 @@ func TestHarnessTimeoutAboveMaximumIsRejectedBeforeCoding(t *testing.T) {
 }
 
 func TestHarnessTimeoutGateMessageListsRecoverAndAmendCommands(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		maxMS     int
@@ -236,11 +242,12 @@ func TestHarnessTimeoutGateMessageListsRecoverAndAmendCommands(t *testing.T) {
 		wantMS    int
 		wantAudit string
 	}{
-		{"formula timeout", 0, 0, 300, "Formula timeoutMs"},
-		{"plan timeout", 600, 9, 600, "plan harnessTimeoutMs"},
+		{"formula timeout", 0, 0, 10000, "Formula timeoutMs"},
+		{"plan timeout", 12000, 9, 12000, "plan harnessTimeoutMs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			o := timeoutFixture(t, 300, tc.maxMS, tc.extra, stuckHarness)
+			t.Parallel()
+			o := timeoutFixture(t, 10000, tc.maxMS, tc.extra, stuckHarness)
 			r, err := runApprovedFixture(t, o)
 			if err != nil {
 				t.Fatal(err)
@@ -255,6 +262,7 @@ func TestHarnessTimeoutGateMessageListsRecoverAndAmendCommands(t *testing.T) {
 				"Harness timed out",
 				fmt.Sprintf("timeoutMs=%d (%s)", tc.wantMS, tc.wantAudit),
 				fmt.Sprintf("elapsedMs=%d", attempt.Result.ElapsedMS),
+				fmt.Sprintf("Diagnostics: elapsedMs=%d; terminal state: timeout; output observed: stdout 0 B, stderr 0 B, last output at: none; reconnect evidence: unknown.", attempt.Result.ElapsedMS),
 				"retained tree " + r.Capture.Tree,
 				fmt.Sprintf("%d changed path(s)", len(r.Capture.Changes)),
 				"violations: none",
@@ -287,6 +295,7 @@ func TestHarnessTimeoutGateMessageListsRecoverAndAmendCommands(t *testing.T) {
 }
 
 func TestHarnessTimeoutNonTimeoutFailureMessageIsUnchanged(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf failed >&2\nexit 7\n"), 0700); err != nil {

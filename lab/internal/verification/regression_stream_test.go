@@ -166,6 +166,7 @@ func TestEvaluatorRefusesATruncatedRetainedStream(t *testing.T) {
 	}
 	for i, bad := range []process.Result{
 		{Reconciled: true, Code: 1, TimedOut: true},
+		{Reconciled: true, Code: 1, ParentDeadline: true},
 		{Reconciled: true, Code: 1, Interrupted: true},
 		{Reconciled: true, Code: 1, Overflow: true},
 		{Code: 1},

@@ -40,7 +40,7 @@ type Observation struct {
 // protected regression observation matches only when the approved plan's declared
 // deltas cover its entire failing set.
 func MatchesCheckObservation(p readiness.Plan, check readiness.Check, obs Observation, tree string, protected bool) bool {
-	if obs.ID != check.ID || obs.SourceTree != tree || obs.Result.TimedOut || obs.Result.Interrupted || obs.Result.Overflow {
+	if obs.ID != check.ID || obs.SourceTree != tree || obs.Result.Incomplete() {
 		return false
 	}
 	if !obs.Result.OK && !(protected && acceptedProtectedFailure(p, check, obs)) {

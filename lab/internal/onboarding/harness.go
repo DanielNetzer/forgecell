@@ -110,6 +110,8 @@ func resultClass(r process.Result) string {
 	switch {
 	case r.TimedOut:
 		return "timeout"
+	case r.ParentDeadline:
+		return "parent-deadline"
 	case r.Overflow:
 		return "output-limit"
 	case r.Interrupted:

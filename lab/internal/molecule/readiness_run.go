@@ -874,6 +874,8 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		processOutcome = "process-interrupted"
 	} else if result.TimedOut {
 		processOutcome = "process-timed-out"
+	} else if result.ParentDeadline {
+		processOutcome = "process-parent-deadline"
 	}
 	observeAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, "invoke-coding-harness", processOutcome, fileProvenance(ref))
 	if err = save(r); err != nil {
@@ -909,7 +911,7 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	}
 	if !result.OK {
 		summary := harnessOutcomeSummary(result, ref)
-		if result.TimedOut {
+		if result.TimedOut || result.ParentDeadline {
 			summary = harnessTimeoutSummary(timeoutGate{Molecule: r.ID, Lab: r.LabDir, Digest: o.Approve, Attempt: attemptID, TimeoutMS: timeoutMS, Source: timeoutSource, CeilingMS: codingBinding.TimeoutCeilingMS()}, result, ref, capture, captureErr)
 		}
 		r, err = finishFailed(r, summary)
@@ -1078,7 +1080,14 @@ func harnessOutcomeSummary(result process.Result, ref VerificationFile) string {
 	if len(message) > 512 {
 		message = message[:512] + " (truncated; see evidence)"
 	}
-	return fmt.Sprintf("Harness failed: exit=%d elapsedMs=%d timeout=%t interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s).", result.Code, result.ElapsedMS, result.TimedOut, result.Interrupted, result.Overflow, result.Reconciled, message, ref.Path, ref.SHA256)
+	return fmt.Sprintf("Harness failed: exit=%d elapsedMs=%d timeout=%t interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s). %s", result.Code, result.ElapsedMS, result.TimedOut, result.Interrupted, result.Overflow, result.Reconciled, message, ref.Path, ref.SHA256, gateDiagnostics(result))
+}
+
+// gateDiagnostics is the single-line ledger diagnostics sentence for a gate
+// message. It comes from the same renderer as the Markdown ledger, so it carries
+// only the enumerated terminal state, byte counts and millisecond offsets.
+func gateDiagnostics(result process.Result) string {
+	return strings.TrimSuffix(renderHarnessDiagnostics(result), "\n")
 }
 
 type timeoutGate struct {
@@ -1100,17 +1109,22 @@ func harnessTimeoutSummary(g timeoutGate, result process.Result, ref Verificatio
 		}
 		tree = fmt.Sprintf("retained tree %s: %d changed path(s), violations: %s", capture.Tree, len(capture.Changes), violations)
 	}
+	head := fmt.Sprintf("Harness timed out: elapsedMs=%d timeoutMs=%d (%s)", result.ElapsedMS, g.TimeoutMS, g.Source)
 	extend := "The Formula declares no maxTimeoutMs above timeoutMs, so a longer coding timeout needs a reviewed Formula change."
 	if g.CeilingMS > g.TimeoutMS {
 		extend = fmt.Sprintf("To continue coding instead, omit continuation and set harnessTimeoutMs up to %d.", g.CeilingMS)
 	}
-	return fmt.Sprintf("Harness timed out: elapsedMs=%d timeoutMs=%d (%s) interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s).\n"+
+	if result.ParentDeadline {
+		head = fmt.Sprintf("Harness stopped by a caller deadline before its own timeout: elapsedMs=%d timeoutMs=%d (%s)", result.ElapsedMS, g.TimeoutMS, g.Source)
+		extend = "The caller's deadline expired first, so a longer harnessTimeoutMs would not have helped; run again with a longer caller deadline."
+	}
+	return fmt.Sprintf("%s interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s). %s\n"+
 		"Nothing is retried automatically. To keep the retained work, run in order:\n"+
 		"  recover: forgecell recover %s --plan %s --confirm-stopped --lab %q\n"+
 		"  export:  forgecell ledger %s --lab %q   (copy readiness.plans[last].plan into FILE and set \"continuation\":\"adopt-failed-tree\" and \"adoptAttempt\":%q)\n"+
 		"  amend:   forgecell amend %s --parent %s --plan FILE --lab %q\n"+
 		"Then review and approve the new digest.%s %s",
-		result.ElapsedMS, g.TimeoutMS, g.Source, result.Interrupted, result.Overflow, result.Reconciled, tree, ref.Path, ref.SHA256,
+		head, result.Interrupted, result.Overflow, result.Reconciled, tree, ref.Path, ref.SHA256, gateDiagnostics(result),
 		g.Molecule, g.Digest, g.Lab, g.Molecule, g.Lab, g.Attempt, g.Molecule, g.Digest, g.Lab, review, extend)
 }
 

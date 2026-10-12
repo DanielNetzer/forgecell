@@ -390,7 +390,7 @@ func Run(ctx context.Context, o RunOptions) (report Report, err error) {
 					if c.Name == "acceptance" {
 						r := observe(ctx, c, w.Path, acceptance)
 						a.Preflight = append(a.Preflight, r)
-						if r.Result.Code != 1 || r.Result.TimedOut || r.Result.Interrupted || r.Result.Overflow {
+						if r.Result.Code != 1 || r.Result.Incomplete() {
 							return fmt.Errorf("original snapshot did not produce expected acceptance failure")
 						}
 					}

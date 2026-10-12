@@ -491,6 +491,7 @@ func TestProtectedDeltaEvaluatorRejectsIncompleteResults(t *testing.T) {
 	}
 	bad := []process.Result{
 		{Reconciled: true, Code: 1, TimedOut: true, Stdout: stream},
+		{Reconciled: true, Code: 1, ParentDeadline: true, Stdout: stream},
 		{Reconciled: true, Code: 1, Interrupted: true, Stdout: stream},
 		{Reconciled: true, Code: 1, Overflow: true, Stdout: stream},
 		{Code: 1, Stdout: stream},

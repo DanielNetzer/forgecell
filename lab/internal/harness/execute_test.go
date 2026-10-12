@@ -129,7 +129,9 @@ func TestProviderTimeoutFailsClosed(t *testing.T) {
 		// An already expired deadline deterministically exercises the short-timeout
 		// path without depending on process startup speed.
 		{"expired-deadline", time.Nanosecond, false},
-		{"stuck-after-result", 5 * time.Second, true},
+		// The helper prints its result and then sleeps 30 s, so only this timeout can
+		// end it; it is long enough for the helper to start and print under load.
+		{"stuck-after-result", 10 * time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: t.TempDir(), Request: map[string]any{"kind": "molecule"}, Env: append(os.Environ(), "FORGECELL_STUCK_PROVIDER=1", "FORGECELL_PROVIDER_TEST_BINARY="+binary), Timeout: tc.timeout})

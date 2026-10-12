@@ -50,14 +50,19 @@ func atomicWrite(file string, data []byte) error {
 // carries only an enumerated state, byte counts and millisecond offsets, never
 // output text. A nil Activity reads as not recorded, which differs from silent.
 func renderHarnessDiagnostics(r process.Result) string {
+	return renderDiagnostics(r.Diagnostics())
+}
+
+// renderDiagnostics is shared by harness and analysis attempts so both read alike.
+func renderDiagnostics(d process.Diagnostics) string {
 	output := "not recorded"
-	if a := r.Activity; a != nil {
+	if a := d.Activity; a != nil {
 		output = fmt.Sprintf("stdout %d B, stderr %d B, last output at: none", a.StdoutBytes, a.StderrBytes)
 		if a.LastOutputMS != nil {
 			output = fmt.Sprintf("stdout %d B, stderr %d B, last output at: %d ms", a.StdoutBytes, a.StderrBytes, *a.LastOutputMS)
 		}
 	}
-	return fmt.Sprintf("Diagnostics: elapsedMs=%d; terminal state: %s; output observed: %s; reconnect evidence: %s. Observed pipe bytes only: no output is not proof of a stall and output is not proof of progress.\n", r.ElapsedMS, r.TerminalState(), output, process.ReconnectUnknown)
+	return fmt.Sprintf("Diagnostics: elapsedMs=%d; terminal state: %s; output observed: %s; reconnect evidence: %s. Observed pipe bytes only: no output is not proof of a stall and output is not proof of progress.\n", d.ElapsedMS, d.TerminalState, output, d.Reconnect)
 }
 func known(value string) string {
 	if value == "" {
@@ -121,6 +126,9 @@ func save(r Record) error {
 	for _, attempt := range r.AnalysisAttempts {
 		raw, _ := json.MarshalIndent(attempt, "", "  ")
 		fmt.Fprintf(&b, "\n## Analysis attempt %d\n\n```json\n%s\n```\n", attempt.Ordinal, raw)
+		if attempt.Diagnostics != nil {
+			fmt.Fprintf(&b, "\n%s", renderDiagnostics(*attempt.Diagnostics))
+		}
 	}
 	for _, a := range r.Atoms {
 		fmt.Fprintf(&b, "\n### %s (%s) — %s\n\n%s\n", a.ID, a.Type, a.Status, a.Detail)

@@ -67,6 +67,11 @@ type Result struct {
 	TimedOut    bool   `json:"timedOut"`
 	Interrupted bool   `json:"interrupted"`
 	Overflow    bool   `json:"overflow"`
+	// ParentDeadline means the caller's context deadline expired before
+	// Options.Timeout could. It is exclusive with TimedOut, which is only the
+	// process's own timeout. A parent cancelled with a deadline cause but carrying
+	// no deadline cannot be told apart and stays TimedOut.
+	ParentDeadline bool `json:"parentDeadline,omitempty"`
 	// Truncated means a streamed run produced more stdout than MaxOutputBytes, so
 	// Stdout is only its prefix. Overflow stays false unless a stream bound failed.
 	Truncated bool   `json:"truncated,omitempty"`
@@ -79,6 +84,13 @@ type Result struct {
 	// process that never started). A non-nil value with zero bytes is a recorded
 	// silent run.
 	Activity *Activity `json:"activity,omitempty"`
+}
+
+// Incomplete reports a run that was cut short by its own timeout, a caller
+// deadline, cancellation or the output cap; its output cannot be trusted as the
+// process's full answer.
+func (r Result) Incomplete() bool {
+	return r.TimedOut || r.ParentDeadline || r.Interrupted || r.Overflow
 }
 
 // Activity counts bytes observed on the child's stdout and stderr pipes,
@@ -97,29 +109,33 @@ type Activity struct {
 type TerminalState string
 
 const (
-	StateSucceeded    TerminalState = "succeeded"
-	StateTimeout      TerminalState = "timeout"
-	StateInterrupted  TerminalState = "interrupted"
-	StateOutputLimit  TerminalState = "output-limit"
-	StateUnreconciled TerminalState = "unreconciled"
-	StateFailed       TerminalState = "failed"
-	StateUnknown      TerminalState = "unknown"
+	StateSucceeded      TerminalState = "succeeded"
+	StateTimeout        TerminalState = "timeout"
+	StateParentDeadline TerminalState = "parent-deadline"
+	StateInterrupted    TerminalState = "interrupted"
+	StateOutputLimit    TerminalState = "output-limit"
+	StateUnreconciled   TerminalState = "unreconciled"
+	StateFailed         TerminalState = "failed"
+	StateUnknown        TerminalState = "unknown"
 )
 
 // ReconnectUnknown is the only reconnect evidence reported: no provider-neutral
 // reconnect signal exists, so none is invented.
 const ReconnectUnknown = "unknown"
 
-// TerminalState classifies the run from its existing flags alone. An unreconciled
+// TerminalState classifies the run from its recorded flags alone. An unreconciled
 // process outranks the cause that stopped it, because it may still be running.
-// Timeout and interruption come from the first context cause, so they outrank the
-// output cap, which can also be reached while the process is being stopped.
+// Timeout, parent deadline and interruption come from the first context cause, so
+// they outrank the output cap, which can also be reached while the process is
+// being stopped.
 func (r Result) TerminalState() TerminalState {
 	switch {
 	case !r.Reconciled && r.Uncertainty != "":
 		return StateUnreconciled
 	case r.TimedOut:
 		return StateTimeout
+	case r.ParentDeadline:
+		return StateParentDeadline
 	case r.Interrupted:
 		return StateInterrupted
 	case r.Overflow:
@@ -298,7 +314,12 @@ func Run(parent context.Context, o Options) (result Result) {
 	if o.MaxOutputBytes <= 0 {
 		o.MaxOutputBytes = 1_000_000
 	}
-	timed, stop := context.WithTimeout(parent, o.Timeout)
+	// WithDeadline starts no timer of its own when the parent's deadline is earlier
+	// than ours, so a deadline cause then can only have come from the caller.
+	deadline := time.Now().Add(o.Timeout)
+	parentDeadline, hasParentDeadline := parent.Deadline()
+	callerDeadlineFirst := hasParentDeadline && parentDeadline.Before(deadline)
+	timed, stop := context.WithDeadline(parent, deadline)
 	defer stop()
 	ctx, cancel := context.WithCancelCause(timed)
 	defer cancel(nil)
@@ -344,7 +365,9 @@ func Run(parent context.Context, o Options) (result Result) {
 	}
 	c.Unlock()
 	cause := context.Cause(ctx)
-	result.TimedOut = errors.Is(cause, context.DeadlineExceeded)
+	expired := errors.Is(cause, context.DeadlineExceeded)
+	result.TimedOut = expired && !callerDeadlineFirst
+	result.ParentDeadline = expired && callerDeadlineFirst
 	result.Interrupted = errors.Is(cause, context.Canceled)
 	result.OK = err == nil && cause == nil && !result.Overflow && result.Reconciled
 	if err != nil {

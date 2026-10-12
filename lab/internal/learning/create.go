@@ -284,7 +284,7 @@ func yamlDiff(ctx context.Context, before, after string) (string, error) {
 		}
 	}
 	diff := process.Run(ctx, process.Options{Argv: []string{"git", "diff", "--no-index", "--no-ext-diff", "--no-color", "--", "before.yaml", "after.yaml"}, Dir: tmp, Timeout: 10 * time.Second})
-	if diff.Code != 1 || diff.TimedOut || diff.Interrupted || diff.Overflow {
+	if diff.Code != 1 || diff.Incomplete() {
 		return "", fmt.Errorf("unable to render Formula diff: %s", diff.Error)
 	}
 	return diff.Stdout, nil

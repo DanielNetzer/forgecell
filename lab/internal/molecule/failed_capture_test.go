@@ -250,16 +250,17 @@ func TestInterruptedHarnessCapturesUsingUncancelledContext(t *testing.T) {
 }
 
 func TestTimedOutHarnessRetainsPartialTree(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	recipePath := filepath.Join(o.LabDir, "formulas", "sample.yaml")
 	recipe, err := os.ReadFile(recipePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := strings.Replace(string(recipe), "harness:\n", "harness:\n  timeoutMs: 100\n", 1)
+	text := strings.Replace(string(recipe), "harness:\n", "harness:\n  timeoutMs: 10000\n", 1)
 	approveFixture(t, o.LabDir, text, "timeout-fixture")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nsleep 10\n"), 0700)
+	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nsleep 60\n"), 0700)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)

@@ -13,6 +13,11 @@ import (
 
 const secretSentinel = "sk-forgecell-test-secret-7f3a"
 
+// stallTimeout is the timeout under test for every fixture that stalls on purpose.
+// It is long enough that process start-up and output scheduling under a loaded
+// machine never race it; the fixtures sleep well past it.
+const stallTimeout = 10 * time.Second
+
 func shell(script string, timeout time.Duration) Options {
 	return Options{Argv: []string{"sh", "-c", script}, Timeout: timeout}
 }
@@ -39,15 +44,16 @@ func requireLastOutputWithinRun(t *testing.T, r Result) {
 }
 
 func TestSilentStallTimesOutWithRecordedSilence(t *testing.T) {
-	r := Run(context.Background(), shell("exec sleep 30", 400*time.Millisecond))
-	if r.OK || !r.TimedOut || r.Interrupted || r.Overflow {
+	t.Parallel()
+	r := Run(context.Background(), shell("exec sleep 60", stallTimeout))
+	if r.OK || !r.TimedOut || r.ParentDeadline || r.Interrupted || r.Overflow {
 		t.Fatalf("not a pure timeout: %+v", r)
 	}
 	if r.TerminalState() != StateTimeout {
 		t.Fatalf("terminal state %q", r.TerminalState())
 	}
-	if r.ElapsedMS < 400 || r.ElapsedMS > 10000 {
-		t.Fatalf("elapsed %d ms is not bounded by the 400 ms timeout", r.ElapsedMS)
+	if r.ElapsedMS < stallTimeout.Milliseconds() || r.ElapsedMS >= 60000 {
+		t.Fatalf("elapsed %d ms is not bounded by the %d ms timeout", r.ElapsedMS, stallTimeout.Milliseconds())
 	}
 	if a := requireActivity(t, r, 0, 0); a.LastOutputMS != nil {
 		t.Fatalf("a silent run reported a last-output offset %d", *a.LastOutputMS)
@@ -62,7 +68,8 @@ func TestSilentStallTimesOutWithRecordedSilence(t *testing.T) {
 }
 
 func TestPartialOutputThenStallRecordsLastOutput(t *testing.T) {
-	r := Run(context.Background(), shell("printf partial; printf err >&2; exec sleep 30", 1500*time.Millisecond))
+	t.Parallel()
+	r := Run(context.Background(), shell("printf partial; printf err >&2; exec sleep 60", stallTimeout))
 	if r.OK || !r.TimedOut || r.TerminalState() != StateTimeout {
 		t.Fatalf("not a timeout: %+v", r)
 	}
@@ -167,6 +174,9 @@ func TestTerminalStateClassifierUsesOnlyExistingFlags(t *testing.T) {
 	}{
 		{"clean exit", Result{OK: true, Reconciled: true}, StateSucceeded},
 		{"timeout", Result{TimedOut: true, Reconciled: true, Code: -1}, StateTimeout},
+		{"parent deadline", Result{ParentDeadline: true, Reconciled: true, Code: -1}, StateParentDeadline},
+		{"parent deadline then output cap is still the parent deadline", Result{ParentDeadline: true, Overflow: true, Reconciled: true}, StateParentDeadline},
+		{"unreconciled outranks a parent deadline", Result{ParentDeadline: true, Reconciled: false, Uncertainty: "managed process group remains active"}, StateUnreconciled},
 		{"interruption", Result{Interrupted: true, Reconciled: true, Code: -1}, StateInterrupted},
 		{"output limit", Result{Overflow: true, Reconciled: true, Code: -1}, StateOutputLimit},
 		{"timeout then output cap is still the timeout", Result{TimedOut: true, Overflow: true, Reconciled: true}, StateTimeout},
@@ -220,8 +230,9 @@ func TestRecordedSilenceIsDistinguishableFromNoRecord(t *testing.T) {
 }
 
 func TestDiagnosticsNeverContainOutputText(t *testing.T) {
-	script := fmt.Sprintf("printf %s; printf %s >&2; exec sleep 30", secretSentinel, secretSentinel)
-	r := Run(context.Background(), shell(script, 1500*time.Millisecond))
+	t.Parallel()
+	script := fmt.Sprintf("printf %s; printf %s >&2; exec sleep 60", secretSentinel, secretSentinel)
+	r := Run(context.Background(), shell(script, stallTimeout))
 	if !r.TimedOut || !strings.Contains(r.Stdout, secretSentinel) || !strings.Contains(r.Stderr, secretSentinel) {
 		t.Fatalf("fixture did not observe the sentinel on both pipes: %+v", r)
 	}
@@ -257,4 +268,121 @@ func TestActivityTrackingIsRaceFreeAcrossBothPipes(t *testing.T) {
 	}
 	requireActivity(t, r, 2000, 1000)
 	requireLastOutputWithinRun(t, r)
+}
+
+func TestExpiredParentDeadlineIsNotTheProcessTimeout(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	r := Run(ctx, shell("exec sleep 60", stallTimeout))
+	if r.OK || r.TimedOut || !r.ParentDeadline || r.Interrupted || r.Overflow || !r.Reconciled || r.Uncertainty != "" {
+		t.Fatalf("not a pure parent deadline: %+v", r)
+	}
+	if r.TerminalState() != StateParentDeadline || r.Error != context.DeadlineExceeded.Error() {
+		t.Fatalf("terminal state %q, error %q", r.TerminalState(), r.Error)
+	}
+	d := r.Diagnostics()
+	if d.TerminalState != StateParentDeadline || d.Reconnect != ReconnectUnknown {
+		t.Fatalf("diagnostics %+v", d)
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err = json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for key := range fields {
+		switch key {
+		case "elapsedMs", "activity", "terminalState", "reconnect":
+		default:
+			t.Fatalf("the parent-deadline distinction must travel in terminalState only, got field %q", key)
+		}
+	}
+	if fields["terminalState"] != "parent-deadline" {
+		t.Fatalf("diagnostics JSON %s", raw)
+	}
+}
+
+func TestParentDeadlineWhileRunningStopsTheProcessGroup(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), stallTimeout)
+	defer cancel()
+	r := Run(ctx, shell("printf partial; exec sleep 60", time.Hour))
+	if r.OK || r.TimedOut || !r.ParentDeadline || r.Interrupted || r.Overflow || !r.Reconciled || r.Uncertainty != "" {
+		t.Fatalf("not a pure parent deadline: %+v", r)
+	}
+	if r.TerminalState() != StateParentDeadline || r.Error != context.DeadlineExceeded.Error() {
+		t.Fatalf("terminal state %q, error %q", r.TerminalState(), r.Error)
+	}
+	requireActivity(t, r, 7, 0)
+	requireLastOutputWithinRun(t, r)
+	if r.ElapsedMS >= 60000 {
+		t.Fatalf("elapsed %d ms: the parent deadline did not stop the process", r.ElapsedMS)
+	}
+}
+
+func TestOwnTimeoutAndCancellationKeepTheirLabelsUnderAParentDeadline(t *testing.T) {
+	t.Run("own timeout before a later parent deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
+		r := Run(ctx, shell("exec sleep 60", time.Nanosecond))
+		if r.OK || !r.TimedOut || r.ParentDeadline || r.Interrupted || r.Overflow || r.TerminalState() != StateTimeout || r.Error != context.DeadlineExceeded.Error() {
+			t.Fatalf("the process's own timeout lost its label: %+v", r)
+		}
+	})
+	t.Run("cancelling a deadline-bearing parent is an interruption", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		cancel()
+		r := Run(ctx, shell("exec sleep 60", 2*time.Hour))
+		if r.OK || r.TimedOut || r.ParentDeadline || !r.Interrupted || r.TerminalState() != StateInterrupted {
+			t.Fatalf("a cancelled parent is not a deadline: %+v", r)
+		}
+	})
+}
+
+func TestIncompleteCoversEveryWayARunIsCutShort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    Result
+		want bool
+	}{
+		{"clean exit", Result{OK: true, Reconciled: true}, false},
+		{"plain failure", Result{Reconciled: true, Code: 1}, false},
+		{"own timeout", Result{TimedOut: true, Reconciled: true, Code: -1}, true},
+		{"caller deadline", Result{ParentDeadline: true, Reconciled: true, Code: 1}, true},
+		{"interruption", Result{Interrupted: true, Reconciled: true, Code: 1}, true},
+		{"output cap", Result{Overflow: true, Reconciled: true, Code: 1}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.Incomplete(); got != tc.want {
+				t.Fatalf("Incomplete() = %t, want %t for %+v", got, tc.want, tc.r)
+			}
+		})
+	}
+}
+
+func TestParentDeadlineFlagIsAdditiveInTheRecord(t *testing.T) {
+	plain, err := json.Marshal(Result{Reconciled: true, TimedOut: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "parentDeadline") {
+		t.Fatalf("an ordinary result must keep its earlier encoding: %s", plain)
+	}
+	var older Result
+	if err = json.Unmarshal(plain, &older); err != nil || older.ParentDeadline || older.TerminalState() != StateTimeout {
+		t.Fatalf("older records must decode unchanged: %v %+v", err, older)
+	}
+	flagged, err := json.Marshal(Result{Reconciled: true, ParentDeadline: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(flagged), `"parentDeadline":true`) || !strings.Contains(string(flagged), `"timedOut":false`) {
+		t.Fatalf("the flag is not recorded: %s", flagged)
+	}
+	var decoded Result
+	if err = json.Unmarshal(flagged, &decoded); err != nil || decoded.TerminalState() != StateParentDeadline {
+		t.Fatalf("the flag did not round-trip: %v %+v", err, decoded)
+	}
 }
