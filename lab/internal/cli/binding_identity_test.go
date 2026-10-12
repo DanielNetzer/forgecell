@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/install"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ func TestDoctorTreatsADifferentBuildWithTheSameProtocolAsCompatible(t *testing.T
 	launcherDir := t.TempDir()
 	sentinel := filepath.Join(launcherDir, "executed")
 	launcher := writeTool(t, launcherDir, "forgecell", "#!/bin/sh\ntouch '"+sentinel+"'\n")
-	os.WriteFile(filepath.Join(launcherDir, "manifest.json"), []byte(`{"version":"0.2.0","sha256":"x","protocolVersion":"1"}`), 0600)
+	os.WriteFile(filepath.Join(launcherDir, "manifest.json"), []byte(`{"version":"0.2.0","sha256":"x","protocolVersion":"`+harness.AdapterProtocolVersion+`"}`), 0600)
 	saveBinding(t, lab, "codex", []string{launcher, "__adapter", "codex", provider})
 	saved := savedBindingOf(t, lab)
 	states := bindingStates(saved)
@@ -51,7 +52,7 @@ func TestDoctorTreatsADifferentBuildWithTheSameProtocolAsCompatible(t *testing.T
 		t.Fatalf("a compatible different build must not block: %v", saved)
 	}
 	diagnostics := saved["binding"].(map[string]any)
-	if diagnostics["launcherVersion"] != "0.2.0" || diagnostics["launcherProtocol"] != "1" || diagnostics["runningVersion"] != "0.3.0" || diagnostics["runningProtocol"] != "1" {
+	if diagnostics["launcherVersion"] != "0.2.0" || diagnostics["launcherProtocol"] != harness.AdapterProtocolVersion || diagnostics["runningVersion"] != "0.3.0" || diagnostics["runningProtocol"] != harness.AdapterProtocolVersion {
 		t.Fatalf("%v", diagnostics)
 	}
 	if _, err := os.Stat(sentinel); err == nil {
@@ -72,7 +73,7 @@ func TestDoctorBlocksAnIncompatibleProtocolAndOffersTheReviewedRebind(t *testing
 	if saved["readiness"] != "blocked" || len(states) != 1 || states[0]["state"] != "launcher-incompatible" {
 		t.Fatalf("%v", saved)
 	}
-	for _, want := range []string{launcher, "version 0.2.0", "adapter protocol 7", "adapter protocol 1", "version 0.3.0"} {
+	for _, want := range []string{launcher, "version 0.2.0", "adapter protocol 7", "adapter protocol " + harness.AdapterProtocolVersion, "version 0.3.0"} {
 		if !strings.Contains(states[0]["detail"].(string), want) {
 			t.Fatalf("detail omits %q: %v", want, states[0]["detail"])
 		}
@@ -82,7 +83,7 @@ func TestDoctorBlocksAnIncompatibleProtocolAndOffersTheReviewedRebind(t *testing
 		t.Fatalf("next command %v, want the reviewed rebind %s", saved["nextCommand"], want)
 	}
 	_, human := runDoctor(t, lab, "--verbose")
-	for _, want := range []string{"launcher-incompatible", "Launcher (saved): " + launcher, "adapter protocol 7", "adapter protocol 1"} {
+	for _, want := range []string{"launcher-incompatible", "Launcher (saved): " + launcher, "adapter protocol 7", "adapter protocol " + harness.AdapterProtocolVersion} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human view omits %q:\n%s", want, human)
 		}
@@ -121,7 +122,7 @@ func TestNewBindingsUseTheManagedLauncherAndSurviveAnUpgrade(t *testing.T) {
 		saved := savedBindingOf(t, lab)
 		states := bindingStates(saved)
 		diagnostics := saved["binding"].(map[string]any)
-		if saved["readiness"] != "ready" || len(states) != 1 || states[0]["state"] != "launcher-compatible" || diagnostics["launcherVersion"] != version || diagnostics["launcherProtocol"] != "1" {
+		if saved["readiness"] != "ready" || len(states) != 1 || states[0]["state"] != "launcher-compatible" || diagnostics["launcherVersion"] != version || diagnostics["launcherProtocol"] != harness.AdapterProtocolVersion {
 			t.Fatalf("binding blocked after installing %s: %v", version, saved)
 		}
 	}

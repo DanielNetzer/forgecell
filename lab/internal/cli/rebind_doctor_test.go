@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,9 +144,9 @@ func TestDoctorStaleMetaLauncherPointsAtRebindOfTheCodingBinding(t *testing.T) {
 		wantRebind   bool
 	}{
 		{name: "learn atom on an incompatible build", source: "learn-atom", launcher: func(t *testing.T) string { return olderBuild(t, "7") }, wantRebind: true},
-		{name: "learn atom on a compatible build", source: "learn-atom", launcher: func(t *testing.T) string { return olderBuild(t, "1") }, ready: true, wantRebind: true},
+		{name: "learn atom on a compatible build", source: "learn-atom", launcher: func(t *testing.T) string { return olderBuild(t, harness.AdapterProtocolVersion) }, ready: true, wantRebind: true},
 		{name: "meta override on an incompatible build", source: "override", override: true, launcher: func(t *testing.T) string { return olderBuild(t, "7") }, wantRebind: true},
-		{name: "meta override on a compatible build", source: "override", override: true, launcher: func(t *testing.T) string { return olderBuild(t, "1") }, ready: true, wantRebind: true},
+		{name: "meta override on a compatible build", source: "override", override: true, launcher: func(t *testing.T) string { return olderBuild(t, harness.AdapterProtocolVersion) }, ready: true, wantRebind: true},
 		{name: "learn atom on a tool that is not Forgecell", source: "learn-atom", launcher: func(t *testing.T) string { return writeTool(t, t.TempDir(), "custom-tool", "#!/bin/sh\nexit 1\n") }},
 		{name: "coding harness that init cannot discover ready", source: "learn-atom", launcher: func(t *testing.T) string { return olderBuild(t, "7") }, noCoding: true},
 	} {
