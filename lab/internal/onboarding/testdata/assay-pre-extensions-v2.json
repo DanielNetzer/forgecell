@@ -1,0 +1,119 @@
+{
+  "capabilityVersion": "v2",
+  "capabilityEvidence": {
+    "workflow": {
+      "state": "conditional",
+      "reason": "Ticket analysis can be attempted with verified controls; model access and end-to-end workflow remain unverified."
+    },
+    "command": [
+      "/cli",
+      "__adapter",
+      "codex",
+      "/codex"
+    ],
+    "candidate": {
+      "id": "codex",
+      "executable": "/codex",
+      "readiness": "ready",
+      "detail": "Ready.",
+      "project": false,
+      "capabilities": {
+        "coding": {
+          "state": "supported",
+          "reason": "Adapter implements this operation; authentication and model access are separate."
+        },
+        "ticketAnalysis": {
+          "state": "supported",
+          "reason": "Adapter implements this operation; authentication and model access are separate."
+        },
+        "metaLearning": {
+          "state": "supported",
+          "reason": "Adapter implements this operation; authentication and model access are separate."
+        },
+        "analysisControls": {
+          "state": "supported",
+          "reason": "Existing runtime isolation controls verified; model access remains unverified."
+        },
+        "modelAccess": {
+          "state": "unknown",
+          "reason": "Model access is unverified without a run."
+        }
+      },
+      "installed": {
+        "state": "verified",
+        "reason": "CLI identity verified by version and help."
+      },
+      "authentication": {
+        "state": "verified",
+        "reason": "CLI reports authenticated; model access remains unverified."
+      }
+    },
+    "learnBound": false,
+    "meta": {
+      "command": [
+        "/cli",
+        "__adapter",
+        "codex",
+        "/codex"
+      ],
+      "binding": "codex",
+      "timeoutMs": 900000,
+      "candidate": {
+        "id": "codex",
+        "executable": "/codex",
+        "readiness": "ready",
+        "detail": "Ready.",
+        "project": false,
+        "capabilities": {
+          "coding": {
+            "state": "supported",
+            "reason": "Adapter implements this operation; authentication and model access are separate."
+          },
+          "ticketAnalysis": {
+            "state": "supported",
+            "reason": "Adapter implements this operation; authentication and model access are separate."
+          },
+          "metaLearning": {
+            "state": "supported",
+            "reason": "Adapter implements this operation; authentication and model access are separate."
+          },
+          "analysisControls": {
+            "state": "supported",
+            "reason": "Existing runtime isolation controls verified; model access remains unverified."
+          },
+          "modelAccess": {
+            "state": "unknown",
+            "reason": "Model access is unverified without a run."
+          }
+        },
+        "installed": {
+          "state": "verified",
+          "reason": "CLI identity verified by version and help."
+        },
+        "authentication": {
+          "state": "verified",
+          "reason": "CLI reports authenticated; model access remains unverified."
+        }
+      },
+      "capability": {
+        "state": "supported",
+        "reason": "Adapter implements this operation; authentication and model access are separate."
+      },
+      "containment": {
+        "state": "unknown",
+        "reason": "Installed containment and integrations are unverified; coding permissions do not establish meta permissions."
+      },
+      "restrictions": "Adapter requests read-only sandbox and approval_policy=never; meta does not receive ticket-analysis tool/MCP/plugin isolation or its temporary working directory. Installed enforcement is unverified. No-edit and supplied-evidence-only prompts are declarations.",
+      "evidenceInputs": "A separate learn invocation selects eligible finished ticket Molecule ledgers from the same intact approved Formula snapshot: Atom outcomes, verification evidence and limitations. Pending attempts, mixed snapshots, damaged evidence and uncertain publication are rejected.",
+      "nextAction": "Opt in with init --meta-harness ID or init --meta-command '[\"/absolute/command\",\"arg\"]'. Review exact before/after YAML and approve separately. Activation invokes no model. Later learn MOLECULE_ID saves only a pending suggestion; Formula mutation requires separate human suggestion approval."
+    }
+  },
+  "configBefore": "absent",
+  "id": "assay-775531666e6bd834cbebb881024a864f3850aa77b7ddc54c77a21ac6e617dcb3",
+  "yaml": "schemaVersion: v0\nkind: formula\nid: sample\nharness: {binding: codex, command: [/cli, __adapter, codex, /codex]}\natoms: [{id: intake, type: intake}, {id: work, type: harness}, {id: gate, type: gate}, {id: learn, type: learn, binding: codex, command: [/cli, __adapter, codex, /codex], timeoutMs: 900000}]\n",
+  "yamlHash": "9cd3e9ac7ec4277a4d393945f6914312b33ac18f1caa4e11f1516531876bf909",
+  "baseline": "e8f74f5c97505020d27138e170ba62503fea4a3308d6a6cdbd8623e18a90dba2",
+  "targetBefore": "absent",
+  "createdAt": "2026-09-20T10:00:00.123456789Z",
+  "status": "pending"
+}

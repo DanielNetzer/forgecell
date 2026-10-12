@@ -36,7 +36,7 @@ type Capabilities struct {
 	Meta             Capability `json:"metaLearning"`
 	AnalysisControls Capability `json:"analysisControls"`
 	ModelAccess      Capability `json:"modelAccess"`
-	Extensions       Capability `json:"extensions"`
+	Extensions       Capability `json:"extensions,omitzero"`
 }
 
 func AdapterCapabilities(id string) Capabilities {
