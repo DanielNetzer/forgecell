@@ -548,3 +548,107 @@ func TestSavedCapabilitiesRefusedOnApprovedRetry(t *testing.T) {
 		t.Fatal("changed active bytes")
 	}
 }
+
+// The fixtures are saved proposals in the shape written before capability
+// evidence recorded `extensions`; their literal IDs were derived from that shape,
+// so a re-marshalled `extensions` key shows up as a changed identity.
+func TestPreExtensionsProposalsKeepIdentity(t *testing.T) {
+	for _, c := range []struct{ file, id, version string }{
+		{"assay-pre-extensions-v1.json", "assay-b12a1e069c3c74ac82d7cbf20231144b7ffc3c68b7a45e93794d022f31a716e4", "v1"},
+		{"assay-pre-extensions-v2.json", "assay-775531666e6bd834cbebb881024a864f3850aa77b7ddc54c77a21ac6e617dcb3", "v2"},
+	} {
+		t.Run(c.version, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", c.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "extensions") {
+				t.Fatal("fixture must predate the extensions capability")
+			}
+			dir := t.TempDir()
+			saved := filepath.Join(dir, "assays", c.id+".json")
+			if err = os.MkdirAll(filepath.Dir(saved), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(saved, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			p, err := InspectProposal(dir, c.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.ID != c.id || proposalID(p) != c.id || p.CapabilityVersion != c.version || p.Status != "pending" {
+				t.Fatalf("identity changed: %s %s %+v", p.ID, proposalID(p), p.CapabilityVersion)
+			}
+			evidence, err := json.Marshal(p.CapabilityEvidence)
+			if err != nil || strings.Contains(string(evidence), "extensions") {
+				t.Fatalf("decoded evidence gained extensions: %s %v", evidence, err)
+			}
+			if again, e := json.MarshalIndent(p, "", "  "); e != nil || string(again)+"\n" != string(raw) {
+				t.Fatalf("re-marshalling changed the saved record: %v", e)
+			}
+			pending, err := pendingProposal(dir)
+			if err != nil || pending == nil || pending.ID != c.id {
+				t.Fatalf("%+v %v", pending, err)
+			}
+			if after, _ := os.ReadFile(saved); string(after) != string(raw) {
+				t.Fatal("inspection rewrote the saved record")
+			}
+			if _, err = Review(dir, c.id, "dismiss"); err != nil {
+				t.Fatal(err)
+			}
+			if got, e := InspectProposal(dir, c.id); e != nil || got.Status != "dismissed" || got.ID != c.id {
+				t.Fatalf("%+v %v", got, e)
+			}
+		})
+	}
+}
+
+func TestFreshProposalsRecordExtensionsCapability(t *testing.T) {
+	const learn = "{id: gate, type: gate}, {id: learn, type: learn, binding: codex, command: [/cli, __adapter, codex, /codex], timeoutMs: 900000}]"
+	for _, c := range []struct{ name, adapter, yaml, version, state string }{
+		{"codex", "codex", recipe, "v1", "unsupported"},
+		{"claude-code", "claude-code", strings.NewReplacer("binding: codex", "binding: claude-code", "/codex", "/claude", "__adapter, codex", "__adapter, claude-code").Replace(recipe), "v1", "supported"},
+		{"codex with meta", "codex", strings.Replace(recipe, "{id: gate, type: gate}]", learn, 1), "v2", "unsupported"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f, err := formula.Parse([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := harness.AdapterCapabilities(c.adapter).Extensions
+			if want.State != c.state || want.Reason == "" {
+				t.Fatalf("unexpected adapter extensions capability %+v", want)
+			}
+			candidate := Candidate{ID: c.adapter, Executable: f.Harness.Command[3], Readiness: "ready", Capabilities: harness.AdapterCapabilities(c.adapter)}
+			report := BindingReport{Command: f.Harness.Command, Candidate: candidate}
+			if c.version == "v2" {
+				meta := DescribeMeta(f.Harness.Command, c.adapter, 900000, candidate)
+				report.Meta = &meta
+			}
+			dir := t.TempDir()
+			p, err := saveWithEvidence(dir, c.yaml, nil, &report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "assays", p.ID+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record Proposal
+			if err = json.Unmarshal(raw, &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.CapabilityVersion != c.version || record.CapabilityEvidence.Candidate.Capabilities.Extensions != want {
+				t.Fatalf("saved evidence lost the extensions capability: %s", raw)
+			}
+			if c.version == "v2" && (record.CapabilityEvidence.Meta == nil || record.CapabilityEvidence.Meta.Candidate.Capabilities.Extensions != want) {
+				t.Fatalf("saved meta evidence lost the extensions capability: %s", raw)
+			}
+			got, err := InspectProposal(dir, p.ID)
+			if err != nil || got.ID != p.ID || proposalID(got) != p.ID || got.CapabilityEvidence.Candidate.Capabilities.Extensions != want {
+				t.Fatalf("%+v %v", got, err)
+			}
+		})
+	}
+}

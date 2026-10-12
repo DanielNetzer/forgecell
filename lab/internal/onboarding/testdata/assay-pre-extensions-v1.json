@@ -1,0 +1,61 @@
+{
+  "capabilityVersion": "v1",
+  "capabilityEvidence": {
+    "workflow": {
+      "state": "conditional",
+      "reason": "Ticket analysis can be attempted with verified controls; model access and end-to-end workflow remain unverified."
+    },
+    "command": [
+      "/cli",
+      "__adapter",
+      "codex",
+      "/codex"
+    ],
+    "candidate": {
+      "id": "codex",
+      "executable": "/codex",
+      "readiness": "ready",
+      "detail": "Ready.",
+      "project": false,
+      "capabilities": {
+        "coding": {
+          "state": "supported",
+          "reason": "Adapter implements this operation; authentication and model access are separate."
+        },
+        "ticketAnalysis": {
+          "state": "supported",
+          "reason": "Adapter implements this operation; authentication and model access are separate."
+        },
+        "metaLearning": {
+          "state": "supported",
+          "reason": "Adapter implements this operation; authentication and model access are separate."
+        },
+        "analysisControls": {
+          "state": "supported",
+          "reason": "Existing runtime isolation controls verified; model access remains unverified."
+        },
+        "modelAccess": {
+          "state": "unknown",
+          "reason": "Model access is unverified without a run."
+        }
+      },
+      "installed": {
+        "state": "verified",
+        "reason": "CLI identity verified by version and help."
+      },
+      "authentication": {
+        "state": "verified",
+        "reason": "CLI reports authenticated; model access remains unverified."
+      }
+    },
+    "learnBound": false
+  },
+  "configBefore": "absent",
+  "id": "assay-b12a1e069c3c74ac82d7cbf20231144b7ffc3c68b7a45e93794d022f31a716e4",
+  "yaml": "schemaVersion: v0\nkind: formula\nid: sample\nharness: {binding: codex, command: [/cli, __adapter, codex, /codex]}\natoms: [{id: intake, type: intake}, {id: work, type: harness}, {id: gate, type: gate}]\n",
+  "yamlHash": "d111640b15b56c522e9afb6913241b678db7cfb1eb6c3135bedbf73ebaaf0523",
+  "baseline": "e8f74f5c97505020d27138e170ba62503fea4a3308d6a6cdbd8623e18a90dba2",
+  "targetBefore": "absent",
+  "createdAt": "2026-09-20T10:00:00.123456789Z",
+  "status": "pending"
+}
