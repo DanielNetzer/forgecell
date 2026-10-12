@@ -142,6 +142,9 @@ type Record struct {
 	AnalysisAttempts              []AnalysisAttempt `json:"analysisAttempts,omitempty"`
 	HarnessAttempts               []HarnessAttempt  `json:"harnessAttempts,omitempty"`
 	Extensions                    []ExtensionRecord `json:"extensions,omitempty"`
+	// ReviewAttempts is additive: a Lab older than the review Atom decodes it but drops
+	// it on the next save. See ReviewAttempt.
+	ReviewAttempts []ReviewAttempt `json:"reviewAttempts,omitempty"`
 
 	VerificationAttempts []VerificationAttempt         `json:"verificationAttempts,omitempty"`
 	Readiness            *readiness.State              `json:"readiness,omitempty"`
@@ -184,6 +187,12 @@ type Options struct {
 	Analyze                                    func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error)
 	ReadIssue                                  func(context.Context, string, int64, string) (Issue, error)
 	PrepareWorkspace                           func(context.Context, Workspace) error
+	// InvokeReview and ReviewDiff replace the review process and the diff read, so
+	// tests never start a provider. InvokeReview receives the resolved binding, the
+	// directory for project-configuration checks, the timeout, the request and the
+	// environment names the review must never see.
+	InvokeReview func(context.Context, formula.Binding, string, time.Duration, map[string]any, []string) process.Result
+	ReviewDiff   func(context.Context, Workspace, string, string) (string, error)
 }
 
 func stamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }

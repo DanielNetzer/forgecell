@@ -879,7 +879,65 @@ func presentRun(out io.Writer, r molecule.Record) {
 			fmt.Fprintf(out, "Warning: %s\n", w)
 		}
 	}
+	presentReview(out, r)
 	fmt.Fprintf(out, "Ledger: %s\n", filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
+}
+
+const (
+	maxPresentedFindings = 10
+	maxPresentedDrafts   = 5
+	presentedFieldRunes  = 300
+)
+
+// presentReview shows the latest adversarial review pass at the gate, preceded by
+// one line for each earlier pass so a blocked pass is not hidden behind a later
+// clean one. Findings come from model output, so each field is cut and stripped of
+// control characters and terminal escape sequences again here, whatever the ledger
+// holds. A review is evidence for the reviewer; it never approves delivery.
+func presentReview(out io.Writer, r molecule.Record) {
+	if len(r.ReviewAttempts) == 0 {
+		return
+	}
+	text := func(s string) string { return harness.ReviewDisplayText(s, presentedFieldRunes) }
+	last := len(r.ReviewAttempts) - 1
+	a := r.ReviewAttempts[last]
+	for i, e := range r.ReviewAttempts[:last] {
+		tree := "a different tree"
+		if e.Tree == a.Tree {
+			tree = "the same retained tree"
+		}
+		fmt.Fprintf(out, "Earlier review pass %d of %d: %s · %d high · %d medium · %d low · on %s\n", i+1, len(r.ReviewAttempts), text(e.Status), e.High, e.Medium, e.Low, tree)
+	}
+	fmt.Fprintf(out, "Adversarial review: %s · %d high · %d medium · %d low · evidence only, never an approval\n", text(a.Status), a.High, a.Medium, a.Low)
+	if a.Binding != "" {
+		fmt.Fprintf(out, "  Reviewer binding: %s (%s)\n", text(a.Binding), text(a.BindingSource))
+	}
+	if a.SameCommandAsCoding {
+		fmt.Fprintln(out, "  NOTICE: the review binding runs the same command as the coding binding, so the coding harness reviewed its own change.")
+	}
+	if a.Redactions > 0 {
+		fmt.Fprintf(out, "  NOTICE: %d secret-like value(s) were redacted from what the reviewer saw, so its view was incomplete.\n", a.Redactions)
+	}
+	if a.ChangedFiles > 0 {
+		fmt.Fprintf(out, "  Coverage: the reviewer listed %d file(s) as reviewed for %d changed path(s)\n", a.ReviewedFiles, a.ChangedFiles)
+	}
+	if a.Reason != "" {
+		fmt.Fprintf(out, "  Reason: %s\n", text(a.Reason))
+	}
+	for i, f := range a.Findings {
+		if i == maxPresentedFindings {
+			fmt.Fprintf(out, "  … %d more finding(s) are in the ledger\n", len(a.Findings)-i)
+			break
+		}
+		fmt.Fprintf(out, "  [%s · %s] %s:%d — %s\n      Scenario: %s\n      Fix: %s\n", text(f.Severity), text(f.Status), text(f.File), f.Line, text(f.Claim), text(f.Scenario), text(f.Fix))
+	}
+	for i, d := range a.FollowUps {
+		if i == maxPresentedDrafts {
+			fmt.Fprintf(out, "  … %d more draft follow-up(s) are in the ledger\n", len(a.FollowUps)-i)
+			break
+		}
+		fmt.Fprintf(out, "  Draft follow-up (not filed): %s\n", text(d.Title))
+	}
 }
 
 // protectedFailures lists the tests that failed in the protected regression run

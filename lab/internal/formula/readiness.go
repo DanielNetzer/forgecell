@@ -17,19 +17,26 @@ const (
 	Publication    ExecutionRole = "publication"
 	Documentation  ExecutionRole = "documentation"
 	Learning       ExecutionRole = "learning"
+	Review         ExecutionRole = "review"
 )
 
 // ExecutionRoles validates the Stage 1 execution contract. Intake and exact human
 // scope approval precede coding; post-coding verification and human review precede
 // publication. An optional pre-coding check requires a subsequent contract stage.
+// One optional adversarial review Atom sits between the check and the human review
+// gate; a Formula without it resolves exactly as before.
 // Parsing historical recipes is deliberately separate from execution validation.
 func (f Formula) ExecutionRoles() (map[ExecutionRole]Atom, error) {
-	required := []struct {
+	type step struct {
 		role         ExecutionRole
 		typ, purpose string
-	}{
+	}
+	required := []step{
 		{IntakeRole, "intake", ""}, {ScopeApproval, "gate", "scope"}, {Coding, "harness", ""},
 		{Verification, "check", ""}, {ReviewApproval, "gate", "review"}, {Publication, "ship", ""}, {Documentation, "document", ""},
+	}
+	if len(f.Atoms) > 4 && f.Atoms[4].Type == "review" {
+		required = append(required[:4], append([]step{{Review, "review", ""}}, required[4:]...)...)
 	}
 	if len(f.Atoms) != len(required) && !(len(f.Atoms) == len(required)+1 && f.Atoms[len(required)].Type == "learn" && f.Atoms[len(required)].Purpose == "") {
 		return nil, fmt.Errorf("ticket readiness requires intake → scope gate → harness → check → review gate → ship → document; review a Formula change explicitly")

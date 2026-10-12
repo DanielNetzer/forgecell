@@ -186,8 +186,13 @@ func save(r Record) error {
 			fmt.Fprintf(&b, "- Complete result: `%s` (SHA-256 `%s`)\n", a.Result.Path, a.Result.SHA256)
 		}
 	}
+	for _, a := range r.ReviewAttempts {
+		renderReviewAttempt(&b, a)
+	}
 	if r.Verification != nil {
-		fmt.Fprintf(&b, "\n## Independent verification\n\nTree: `%s`\nRequired checks passed: %t\nIndependent acceptance verified: %t\n\n%s\n", r.Verification.SourceTree, r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified, r.Verification.Error)
+		fmt.Fprintf(&b, "\n## Independent verification\n\nTree: `%s`\nRequired checks passed: %t\nIndependent acceptance verified: %t\n", r.Verification.SourceTree, r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified)
+		b.WriteString(reviewVerdictLine(r))
+		fmt.Fprintf(&b, "\n%s\n", r.Verification.Error)
 	}
 	fmt.Fprintln(&b, "\n## Notes")
 	for _, note := range r.Notes {
