@@ -394,7 +394,10 @@ func TestPrepareCacheRefusesAnExecutableChangedAfterPinning(t *testing.T) {
 func TestPrepareCacheTimeoutLeavesNoPartialEntry(t *testing.T) {
 	e := newCacheEnv(t)
 	commit := e.commitFile("a.txt", "committed")
-	m := e.manifestWith(1500, fmt.Sprintf("echo run >> %s\necho \"$2\" > %s\nprintf x > \"$2/partial\"\nsleep 30", e.rec("runs"), e.rec("cache")), "{{SOURCE}}", "{{CACHE}}")
+	// The cache path is renamed into place, so a marker proves the process started,
+	// and no marker means that the timeout beat a process that was slow to start.
+	m := e.manifestWith(3000, fmt.Sprintf("echo run >> %s\necho \"$2\" > %s && mv %s %s\nprintf x > \"$2/partial\"\nsleep 30",
+		e.rec("runs"), e.rec("cache.tmp"), e.rec("cache.tmp"), e.rec("cache")), "{{SOURCE}}", "{{CACHE}}")
 
 	started := time.Now()
 	res := e.prepare(m, commit)
@@ -405,11 +408,14 @@ func TestPrepareCacheTimeoutLeavesNoPartialEntry(t *testing.T) {
 	if time.Since(started) > 20*time.Second {
 		t.Fatal("the hung prepare process was not stopped")
 	}
-	if e.runs() != 1 {
-		t.Fatalf("prepare ran %d times", e.runs())
+	cache := strings.TrimSpace(e.read("cache"))
+	if runs := e.runs(); runs > 1 || (cache != "" && runs != 1) {
+		t.Fatalf("prepare ran %d times, with the cache path recorded as %q", runs, cache)
 	}
-	if _, err := os.Lstat(strings.TrimSpace(e.read("cache"))); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("the partial cache directory was left behind (%v)", err)
+	if cache != "" {
+		if _, err := os.Lstat(cache); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("the partial cache directory was left behind (%v)", err)
+		}
 	}
 }
 
@@ -442,15 +448,36 @@ func TestPrepareCacheNonZeroExitIsUnavailable(t *testing.T) {
 func TestPrepareCacheOversizeOutputIsUnavailable(t *testing.T) {
 	e := newCacheEnv(t)
 	commit := e.commitFile("a.txt", "committed")
-	// One byte past the limit, as a sparse file. The tool then makes the file
-	// unreadable, so only a size check that runs before hashing can name the limit.
+	// One byte past the limit, as a sparse file. Either the in-build watcher stops
+	// the process or the post-build check refuses its output, depending on whether
+	// a poll lands before the process exits, so the exit code is not asserted. Each
+	// path has its own deterministic test.
 	body := `dd if=/dev/zero of="$2/index.bin" bs=1 count=1 seek=1073741824 2>/dev/null
 chmod 000 "$2/index.bin"`
 	res := e.prepare(e.scripted(body), commit)
 	e.requireUnavailable(res, "exceeds")
-	if res.Code != 0 {
-		t.Fatalf("the process itself succeeded, got code %d", res.Code)
+	if res.TimedOut {
+		t.Fatalf("an oversize output is not a prepare timeout: %+v", res)
 	}
+}
+
+func TestPrepareCacheFinishRefusesOversizeOutputBeforeHashing(t *testing.T) {
+	unixOnly(t)
+	lowerLimits(t, 16, 1000)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	partial := filepath.Join(e.keyParent(), partialPrefix+"test")
+	// One byte past the limit. The file is unreadable, so only a size check that
+	// runs before hashing can name the limit.
+	file := writeFile(t, filepath.Join(partial, "index.bin"), strings.Repeat("x", 17), 0o600)
+	if err := os.Chmod(file, 0); err != nil {
+		t.Fatal(err)
+	}
+	b := &cacheBuild{key: CacheKey(e.name, e.manifestSHA, commit), dir: e.entryDir(commit), partial: partial}
+
+	res := b.finish()
+	removeTree(partial)
+	e.requireUnavailable(res, "exceeds")
 }
 
 func TestCheckTreeLimitsAreExclusiveAndRefuseLinks(t *testing.T) {
@@ -1146,6 +1173,8 @@ func TestPrepareCacheRunsGitWithAMinimalEnvironment(t *testing.T) {
 	}
 }
 
+const growthSteps = 400
+
 func TestPrepareCacheStopsAnOutputThatKeepsGrowing(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1162,17 +1191,26 @@ func TestPrepareCacheStopsAnOutputThatKeepsGrowing(t *testing.T) {
 			lowerLimits(t, tc.bytes, tc.entries)
 			e := newCacheEnv(t)
 			commit := e.commitFile("a.txt", "committed")
-			// A bounded loop, so that a missing guard shows up as full progress.
-			m := e.scripted("i=0\nwhile [ $i -lt 400 ]; do\n" + tc.step + "\necho $i > " + e.rec("progress") + "\ni=$((i+1))\nsleep 0.01\ndone")
+			// A bounded loop, so that a missing guard shows up as full progress. The
+			// step marker is renamed into place, so a kill never leaves it half written.
+			m := e.scripted(fmt.Sprintf("i=0\nwhile [ $i -lt %d ]; do\n%s\necho $i > %s && mv %s %s\ni=$((i+1))\nsleep 0.01\ndone",
+				growthSteps, tc.step, e.rec("progress.tmp"), e.rec("progress.tmp"), e.rec("progress")))
 
 			res := e.prepare(m, commit)
 			e.requireUnavailable(res, tc.reason)
 			if res.TimedOut || res.ElapsedMS > 30000 {
 				t.Fatalf("the output was not stopped early: %+v", res)
 			}
-			progress, err := strconv.Atoi(strings.TrimSpace(e.read("progress")))
-			if err != nil || progress > 300 {
-				t.Fatalf("the prepare process kept running to step %q (%v), want it stopped as soon as the limit was passed", e.read("progress"), err)
+			// No marker means the process was stopped before it recorded a step.
+			progress := 0
+			if raw := strings.TrimSpace(e.read("progress")); raw != "" {
+				var err error
+				if progress, err = strconv.Atoi(raw); err != nil {
+					t.Fatalf("the step marker %q is not a number: %v", raw, err)
+				}
+			}
+			if progress >= growthSteps*3/4 {
+				t.Fatalf("the prepare process kept running to step %d of %d, want it stopped as soon as the limit was passed", progress, growthSteps)
 			}
 		})
 	}
