@@ -21,6 +21,9 @@ type ExecuteOptions struct {
 	Dir        string
 	Env        []string
 	Timeout    time.Duration
+	// WithheldEnv names variables a review process never receives, such as plan
+	// credential names. Review always runs under ReviewEnvironment.
+	WithheldEnv []string
 }
 type Execution struct {
 	Coding  *CodingOutcome `json:"coding,omitempty"`
@@ -63,16 +66,27 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 	if o.Request["kind"] == "ticket-analysis" {
 		schema = readiness.AnalysisSchema()
 	}
+	review := o.Request["kind"] == ReviewKind
+	if review {
+		schema = ReviewSchema()
+		// A nil environment would inherit the whole parent environment, so a review
+		// process always gets an explicit, filtered one.
+		base := o.Env
+		if base == nil {
+			base = os.Environ()
+		}
+		o.Env = ReviewEnvironment(base, o.WithheldEnv)
+	}
 	if err = os.WriteFile(output+".schema.json", []byte(schema), 0600); err != nil {
 		return fail(err.Error())
 	}
-	if o.Request["kind"] == "ticket-analysis" {
+	if o.Request["kind"] == "ticket-analysis" || review {
 		call.Args, err = constrainAnalysis(ctx, o, call.Args)
 		if err != nil {
 			return fail(err.Error())
 		}
-		// Analysis has no access to the coding working directory. Evidence is supplied
-		// through stdin; no host configuration or credentials are copied here.
+		// Analysis and review have no access to the coding working directory. Evidence
+		// is supplied through stdin; no host configuration or credentials are copied here.
 		o.Dir = dir
 	}
 	result.Process = process.Run(ctx, process.Options{Argv: append([]string{o.Executable}, call.Args...), Dir: o.Dir, Env: o.Env, Stdin: []byte(call.Input), Timeout: o.Timeout})
@@ -123,6 +137,11 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 				result.Process.Stdout = result.Text
 			}
 			return fail(InvalidAnalysisPrefix + err.Error())
+		}
+	}
+	if review {
+		if _, err = DecodeReview([]byte(result.Text)); err != nil {
+			return fail(InvalidReviewPrefix + err.Error())
 		}
 	}
 	if coding {

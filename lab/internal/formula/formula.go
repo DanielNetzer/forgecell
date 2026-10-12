@@ -188,18 +188,23 @@ const (
 // HarnessRoles lists the roles a Formula may bind, in display order.
 var HarnessRoles = []HarnessRole{AnalysisHarness, CodingHarness, MetaHarness}
 
+// ReviewHarness binds the read-only adversarial review. It is deliberately not in
+// HarnessRoles: it has no default, so it never resolves to the coding binding, and
+// a Formula without a review Atom has no review role at all.
+const ReviewHarness HarnessRole = "review"
+
 func validateHarnessRoles(value any) error {
 	roles, ok := value.(map[string]any)
 	if !ok {
 		return fmt.Errorf("harnesses must be a mapping of role to binding")
 	}
 	for name, v := range roles {
-		known := false
+		known := name == string(ReviewHarness)
 		for _, role := range HarnessRoles {
 			known = known || name == string(role)
 		}
 		if !known {
-			return fmt.Errorf("harnesses.%s: unknown role; use analysis, coding or meta", name)
+			return fmt.Errorf("harnesses.%s: unknown role; use analysis, coding, meta or review", name)
 		}
 		m, ok := v.(map[string]any)
 		if !ok {
@@ -233,6 +238,10 @@ func validateHarnessRoles(value any) error {
 func (f Formula) RoleBinding(role HarnessRole) (Binding, bool) {
 	b, ok := f.Harnesses[string(role)]
 	if !ok {
+		if role == ReviewHarness {
+			// The coding harness must not review its own change, so review has no default.
+			return Binding{}, false
+		}
 		return f.Harness, false
 	}
 	if role == CodingHarness && b.Instructions == "" {
@@ -267,9 +276,55 @@ func (f Formula) ExecutionBinding(role ExecutionRole) (Binding, bool) {
 	return Binding{}, false
 }
 
+// ReviewAtom returns the Formula's review Atom, found by type. More than one is an
+// error. A Formula without one has no review.
+func (f Formula) ReviewAtom() (Atom, bool, error) {
+	var found []Atom
+	for _, a := range f.Atoms {
+		if a.Type == "review" {
+			found = append(found, a)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return Atom{}, false, nil
+	case 1:
+		return found[0], true, nil
+	}
+	return Atom{}, false, fmt.Errorf("a Formula can have only one review Atom; found %d", len(found))
+}
+
+// ValidateReviewAtom checks the review Atom and the harnesses.review role against
+// each other. The Atom takes its binding from harnesses.review or the meta binding,
+// so it cannot carry a command; a role without the Atom is refused. A Formula with
+// neither passes.
+func (f Formula) ValidateReviewAtom() error {
+	atom, present, err := f.ReviewAtom()
+	if err != nil {
+		return err
+	}
+	role, declared := f.Harnesses[string(ReviewHarness)]
+	if declared && !present {
+		return fmt.Errorf("harnesses.review: the Formula has no review Atom; add the review Atom or remove the role binding")
+	}
+	if !present {
+		return nil
+	}
+	if len(atom.Command) > 0 {
+		return fmt.Errorf("review Atom %s cannot declare a command; bind harnesses.review or the meta binding instead", atom.ID)
+	}
+	if declared && atom.Binding != "" && atom.Binding != role.Binding {
+		return fmt.Errorf("harnesses.review binding %q conflicts with Atom %s binding %q", role.Binding, atom.ID, atom.Binding)
+	}
+	return nil
+}
+
 // ValidateHarnessRoles checks that each declared role has its Atom and does not
 // contradict that Atom's own binding. A Formula without `harnesses` always passes.
 func (f Formula) ValidateHarnessRoles() error {
+	if err := f.ValidateReviewAtom(); err != nil {
+		return err
+	}
 	if len(f.Harnesses) == 0 {
 		return nil
 	}

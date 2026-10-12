@@ -6,6 +6,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -212,7 +213,82 @@ func ValidateRoleBindings(f formula.Formula) error {
 			return fmt.Errorf("%s: binding %q cannot be used with extensions %s: %s", where, b.Binding, strings.Join(names, ", "), c.Reason)
 		}
 	}
+	if err := validateReviewBinding(f); err != nil {
+		return err
+	}
 	return f.ValidateHarnessRoles()
+}
+
+// ReviewResolution is the binding a review Atom runs under and where it came from.
+// SameCommandAsCoding is recorded and shown, never a refusal by itself.
+type ReviewResolution struct {
+	Binding             formula.Binding
+	Source              string
+	SameCommandAsCoding bool
+}
+
+// ReviewMissingBindingInstruction tells the operator how to bind a review.
+const ReviewMissingBindingInstruction = "configure harnesses.review, or a meta binding (harnesses.meta with a learn Atom, or a learn Atom command); the default coding harness is never used to review its own change"
+
+// ResolveReviewBinding resolves the binding of a Formula's review Atom: the
+// declared harnesses.review role first, else the meta binding as MetaBinding
+// resolves it (harnesses.meta with a learn Atom, else the learn Atom's command),
+// else an error. The default `harness` binding is never used. A Formula with no
+// review Atom and no review role is not configured: configured is false and the
+// error is nil. Source is "review-role", "meta-override" or "learn-atom".
+func ResolveReviewBinding(f formula.Formula) (res ReviewResolution, configured bool, err error) {
+	_, present, err := f.ReviewAtom()
+	if err != nil {
+		return ReviewResolution{}, false, err
+	}
+	role, declared := f.RoleBinding(formula.ReviewHarness)
+	if !present && !declared {
+		return ReviewResolution{}, false, nil
+	}
+	switch {
+	case declared:
+		res = ReviewResolution{Binding: role, Source: "review-role"}
+	default:
+		meta, source, bound := MetaBinding(f)
+		if !bound {
+			return ReviewResolution{}, true, fmt.Errorf("the review Atom has no usable binding: %s", ReviewMissingBindingInstruction)
+		}
+		res = ReviewResolution{Binding: meta, Source: "learn-atom"}
+		if source == "override" {
+			res.Source = "meta-override"
+		}
+	}
+	if len(res.Binding.Command) == 0 {
+		return ReviewResolution{}, true, fmt.Errorf("the resolved review binding %q has no command: %s", res.Binding.Binding, ReviewMissingBindingInstruction)
+	}
+	coding, _ := f.RoleBinding(formula.CodingHarness)
+	res.SameCommandAsCoding = slices.Equal(res.Binding.Command, coding.Command)
+	return res, true, nil
+}
+
+// reviewRoleCapability is the adapter's static support for read-only review. It
+// executes nothing.
+func reviewRoleCapability(b formula.Binding) harness.Capability {
+	if !nativeAdapter(b) {
+		return harness.Capability{State: "unsupported", Reason: "Custom binding has no verified read-only review protocol; it was preserved and not invoked."}
+	}
+	return harness.ReviewCapability(b.Command[2])
+}
+
+// validateReviewBinding fails closed at Formula proposal: a review Atom needs a
+// resolvable binding whose adapter can run the read-only review.
+func validateReviewBinding(f formula.Formula) error {
+	if err := f.ValidateReviewAtom(); err != nil {
+		return err
+	}
+	res, configured, err := ResolveReviewBinding(f)
+	if err != nil || !configured {
+		return err
+	}
+	if c := reviewRoleCapability(res.Binding); c.State != "supported" {
+		return fmt.Errorf("review binding %q (%s) cannot be used for read-only review (%s): %s; %s", res.Binding.Binding, res.Source, c.State, c.Reason, ReviewMissingBindingInstruction)
+	}
+	return nil
 }
 
 // CheckAnalysisFallback refuses a new default binding that would silently become
@@ -252,6 +328,11 @@ func RoleCapabilities(f formula.Formula) []RoleCapability {
 			}
 		}
 		roles = append(roles, RoleCapability{Role: string(role), Binding: b.Binding, Source: source, Capability: roleCapability(role, b)})
+	}
+	// Review appears only for a Formula that has a review Atom or role, so the saved
+	// evidence and proposal identity of every other Formula stay unchanged.
+	if res, configured, err := ResolveReviewBinding(f); configured && err == nil {
+		roles = append(roles, RoleCapability{Role: string(formula.ReviewHarness), Binding: res.Binding.Binding, Source: res.Source, Capability: reviewRoleCapability(res.Binding)})
 	}
 	return roles
 }
@@ -323,6 +404,17 @@ func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner
 		default:
 			item.Capability = c.Capabilities.Coding
 			item.Ready = c.Readiness == "ready" && item.Capability.State == "supported"
+		}
+		roles = append(roles, item)
+	}
+	if res, configured, err := ResolveReviewBinding(f); configured && err == nil {
+		c := probe(res.Binding)
+		item := RoleReadiness{Role: string(formula.ReviewHarness), Binding: res.Binding.Binding, Source: res.Source, Readiness: c.Readiness, Detail: c.Detail, Candidate: c}
+		if static := reviewRoleCapability(res.Binding); static.State != "supported" {
+			item.Capability = static
+		} else {
+			item.Capability = c.WorkflowCapability()
+			item.Ready = item.Capability.State == "conditional"
 		}
 		roles = append(roles, item)
 	}

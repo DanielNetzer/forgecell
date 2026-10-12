@@ -8,6 +8,7 @@ longer-term ticket-to-production flow.
 | `intake` | Reads a GitHub Issue with `gh`; records provenance | No automatic clarification conversation |
 | `harness` | Executes explicit `harness.command` with issue and recipe guidance | Requires approved Formula and exact ticket scope; exit zero is not proof of shipping |
 | `check` | Runs approved local verification of the captured source tree in a fresh checkout | Required failure stops the run; exact-head CI is a separate gate |
+| `review` | Read-only adversarial review of the captured change; findings are ledger evidence | Optional; one Atom after `check` and before the review `gate`; see [Review Atom](#review-atom-adversarial-review) |
 | `gate` | Waits for exact scope approval before coding and human review after successful verification | Formula approval does not approve ticket execution or publication |
 | `ship` | Skipped | Explicit draft-PR delivery is separate; merge and deploy are not implemented |
 | `document` | Skipped | Issue write-back is not implemented |
@@ -151,3 +152,79 @@ are development-build features until a new release is published; see [Install](i
 
 The coding harness implements the ticket. The learn Atom invokes the distinct meta harness,
 which proposes improvements to the process. See [Learning](learning.md).
+
+## Review Atom (adversarial review)
+
+A `review` Atom runs a separately bound review harness once per coding attempt, after
+`check` and before the human review `gate`. It exists because the Lab's own checks passed
+for changes that an outside adversarial review found defective.
+
+- **Read-only, no tools.** The adapter invocation is the ticket-analysis isolation: Codex
+  runs `--sandbox read-only` with approval `never`, `--ephemeral`, `--strict-config`,
+  `--ignore-rules`, web search disabled and each tool, app, plugin, hook and agent feature
+  disabled; Claude Code runs with `--tools ""`, `--strict-mcp-config` and an empty MCP
+  configuration, `dontAsk`, `--safe-mode`, `--no-chrome` and slash commands disabled, and
+  never an allowlist. Cursor is unsupported and a custom command is refused without being
+  executed. A request carrying extensions is rejected. The provider's controls are probed
+  before it starts, as for ticket analysis. At Formula proposal only an adapter whose review
+  support is known to be `supported` is accepted; an unsupported or unknown adapter id is
+  refused.
+- **No credentials.** The review process runs in an explicit environment built from an
+  allow-list: system basics and the provider's own authentication and configuration
+  (`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`, proxy and CA settings, `AWS_PROFILE`
+  style routing). Plan `credentialNames`, `GH_TOKEN`, `GITHUB_TOKEN`, other GitHub, GitLab
+  and CI variables, static cloud keys and agent sockets never pass, even when set in the
+  Lab's environment. Ticket analysis does not yet filter its environment the same way.
+- **Binding.** `harnesses.review` if declared, else the meta binding as `MetaBinding`
+  resolves it (`harnesses.meta` with a learn Atom, else the learn Atom's command), else the
+  Formula proposal fails with an instruction to configure one. The default coding binding is
+  never used, because the coding harness must not review its own change. At run time the
+  same resolution fails closed with no process started. If the review command equals the
+  coding command, that is recorded as `sameCommandAsCoding` and shown at the gate; it is
+  not refused. A `review` Atom cannot declare its own `command`.
+- **Input.** The issue, the approved plan without credential names, the diff from the base
+  commit to the captured tree, check results with bounded output tails, and a bounded
+  ledger view. Every string passes the secret redaction rules, and the number of values
+  replaced is counted, sent to the reviewer as `redactions` and recorded on the attempt; the
+  gate and the Markdown ledger show a notice when it is not zero. The diff is capped at
+  400,000 bytes and is never truncated: a larger diff means the review is not run and the
+  attempt fails closed. The diff is not stored in the ledger. The request carries no text the
+  coding harness wrote about its own change: its outcome reason, the coding Atom's detail and
+  any note that repeats it are left out, so the reviewer judges the diff, not the author's
+  account of it.
+- **Output.** Strict JSON `{findings:[{severity, file, line, claim, scenario, status, fix}],
+  verifiedSound:[], reviewedFiles:[]}` with `high|medium|low` and `confirmed|plausible`. The
+  decoder rejects malformed JSON, duplicate or case-variant keys, unknown or missing fields,
+  nulls, wrong enumerations and oversize values. `reviewedFiles` must list every changed
+  path, spelled as supplied; a pass that omits one, or a change with more paths than a review
+  can list (1,000), is a failed review and blocks delivery even when it reports no findings.
+  Malformed output, an empty result, a provider failure or a timeout is a failed review. It is
+  never read as "no findings".
+- **Effect.** One or more `high` findings block delivery. Medium and low findings draft
+  follow-up issue text and never file it. A review with no high finding is evidence, not an
+  approval: the human review gate, every gate policy and merge stay as they were.
+- **Ledger and gate.** `reviewAttempts` records the binding, its source, the reviewed tree,
+  the counts, the redaction count, the changed and reviewed file counts, the sanitized
+  findings, `verifiedSound`, the drafts and secret-free process diagnostics. Text is stripped
+  of control characters and terminal escape sequences, bounded per field, and the gate shows
+  at most 10 findings and 5 drafts, escaped again. The gate lists one line for every earlier
+  review pass before the latest, with its verdict and high-finding count, so a blocked pass is
+  never hidden behind a later clean one. The Markdown ledger renders every review pass, and
+  its verification summary says when the review blocked delivery instead of reporting only
+  that the required checks passed.
+
+`reviewAttempts` is an additive ledger field. As with `policyDecisions`, an older Lab binary
+decodes it but drops it on the next save, so do not run an older binary on a ledger that holds
+a review.
+
+**Position.** `Formula.ExecutionRoles` accepts one optional `review` Atom, with no purpose,
+immediately after `check` and before the review `gate`, and still accepts a trailing `learn`
+Atom. The review runs once the required checks have passed, before readiness records the
+verification. A blocking or failed review records the verification as not passed, marks the
+`review` Atom failed, skips the later Atoms and stops the Molecule as blocked, so delivery is
+not offered. A Formula without a `review` Atom resolves and runs exactly as before. A checks-only
+or failed-tree continuation is its own attempt, so it gets its own single pass.
+
+Deferred, each a separate reviewed change: the Formula review-policy grammar (`block` and
+`issue`), returning a blocked Molecule to coding with findings as acceptance criteria, the gate
+policy readiness condition "no high findings", learn integration, and rebind of the review role.

@@ -184,6 +184,19 @@ func BindingExtensionCapability(command []string) Capability {
 	return AdapterCapabilities(id).Extensions
 }
 
+// ReviewCapability is the adapter's static support for the read-only review
+// request. It is kept apart from Capabilities so saved capability evidence and
+// proposal identities of Formulas without a review Atom stay unchanged.
+func ReviewCapability(id string) Capability {
+	if id != "codex" && id != "claude-code" && id != "cursor" {
+		return Capability{"unknown", "Adapter support is unknown."}
+	}
+	if _, err := BuildInvocation(id, map[string]any{"kind": ReviewKind}, "capability-output"); err != nil {
+		return Capability{"unsupported", err.Error()}
+	}
+	return Capability{"supported", "Adapter implements read-only review; authentication and model access are separate."}
+}
+
 type Invocation struct {
 	Args  []string
 	Input string
@@ -193,8 +206,12 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	kind, _ := request["kind"].(string)
 	meta := kind == "formula-improvement"
 	analysis := kind == "ticket-analysis"
-	if !meta && !analysis && kind != "molecule" {
+	review := kind == ReviewKind
+	if !meta && !analysis && !review && kind != "molecule" {
 		return Invocation{}, fmt.Errorf("unknown Forgecell adapter request")
+	}
+	if _, attached := request["mcpServers"]; review && attached {
+		return Invocation{}, fmt.Errorf("extensions are not supported for review requests")
 	}
 	schema := CodingOutcomeSchema()
 	if meta {
@@ -203,12 +220,18 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	if analysis {
 		schema = readiness.AnalysisSchema()
 	}
+	if review {
+		schema = ReviewSchema()
+	}
 	prompt := codingInstruction
 	if meta {
 		prompt = metaInstruction
 	}
 	if analysis {
 		prompt = analysisInstruction
+	}
+	if review {
+		prompt = reviewInstruction
 	}
 	servers, err := requestMCPServers(request)
 	if err != nil {
@@ -232,12 +255,12 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	switch id {
 	case "codex":
 		sandbox := "workspace-write"
-		if meta || analysis {
+		if meta || analysis || review {
 			sandbox = "read-only"
 		}
 		result.Args = []string{"exec", "-c", `approval_policy="never"`, "--sandbox", sandbox, "--ephemeral", "--color", "never", "--output-last-message", output}
 		result.Args = append(result.Args, "--output-schema", output+".schema.json")
-		if analysis {
+		if analysis || review {
 			result.Args = append(result.Args, "--strict-config", "--skip-git-repo-check", "--ignore-rules", "-c", `web_search="disabled"`, "-c", `notify=[]`)
 			for _, feature := range []string{"shell_tool", "unified_exec", "apps", "plugins", "hooks", "multi_agent", "browser_use", "computer_use", "image_generation", "view_image", "code_mode_host", "skill_mcp_dependency_install", "shell_snapshot"} {
 				result.Args = append(result.Args, "--disable", feature)
@@ -253,7 +276,7 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			return Invocation{}, err
 		}
 		result.Args = []string{"--print", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk"}
-		if meta || analysis {
+		if meta || analysis || review {
 			result.Args = append(result.Args, "--tools", "", "--strict-mcp-config", "--mcp-config", mcpConfig)
 			if len(servers) > 0 {
 				result.Args = append(result.Args, "--setting-sources", "user", "--allowedTools", strings.Join(mcpAllowed, ","))
@@ -270,9 +293,9 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			// checkout's .claude (an Edit deny also covers Write).
 			result.Args = append(result.Args, "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--disallowedTools", "Edit(/.claude/**)", "--json-schema", schema, "--allowedTools", strings.Join(slices.Concat(tools, mcpAllowed), ","))
 		}
-		if analysis {
+		if analysis || review {
 			// Claude Code ignores an explicit --mcp-config under --safe-mode, so
-			// analysis with extensions runs without it.
+			// analysis with extensions runs without it. Review never has extensions.
 			if len(servers) == 0 {
 				result.Args = append(result.Args, "--safe-mode")
 			}
@@ -281,6 +304,9 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	case "cursor":
 		if analysis {
 			return Invocation{}, fmt.Errorf("Cursor ticket analysis is unavailable: action-capable MCP/plugin isolation has not been verified; coding binding is preserved")
+		}
+		if review {
+			return Invocation{}, fmt.Errorf("Cursor review is unavailable: action-capable MCP/plugin isolation has not been verified; no review was started")
 		}
 		result.Args = []string{"--print", "--output-format", "json", "--sandbox", "enabled", "--trust"}
 		if meta {

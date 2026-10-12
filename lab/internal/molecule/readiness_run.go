@@ -235,6 +235,8 @@ func plannedAtomAction(a formula.Atom) string {
 		return "invoke-coding-harness"
 	case "check":
 		return "run-approved-checks"
+	case "review":
+		return "run-adversarial-review"
 	case "ship":
 		return "separate-approved-publication"
 	case "document":
@@ -1063,7 +1065,30 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	observeAtomAction(&r, checkID, attemptID, "run-approved-checks", outcome, refs...)
 	projection := compactVerification(verified)
 	r.Verification = &projection
-	state, err := r.Readiness.RecordVerification(verified.RequiredChecksPassed, verified.Error, stamp())
+	reviewIndex, hasReview := roles.atoms[formula.Review]
+	var review ReviewDecision
+	if hasReview && verified.RequiredChecksPassed {
+		atom(&r, roles.atoms[formula.Verification], "done", "Required checks passed on "+verified.SourceTree+". Independent acceptance verified: "+fmt.Sprint(verified.IndependentAcceptanceVerified))
+		atom(&r, reviewIndex, "active", "Running adversarial review of the captured tree")
+		if err := save(r); err != nil {
+			return r, err
+		}
+		f, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))
+		if err != nil {
+			return r, fmt.Errorf("invalid execution Formula snapshot: %w", err)
+		}
+		in := ReviewInputs{HarnessAttemptID: reviewAttemptKey(r, p), PlanDigest: digest, Plan: p, Capture: capture, Verified: verified}
+		r, review, err = runReviewAtom(ctx, o, r, f, in)
+		if err != nil {
+			review = ReviewDecision{Blocked: true, Status: ReviewFailed, Detail: reviewText("Adversarial review could not run: "+err.Error(), reviewReasonRunes)}
+			atom(&r, reviewIndex, "failed", review.Detail+" Delivery is blocked.")
+		}
+	}
+	detail := verified.Error
+	if review.Blocked {
+		detail = review.Detail
+	}
+	state, err := r.Readiness.RecordVerification(verified.RequiredChecksPassed && !review.Blocked, detail, stamp())
 	if err != nil {
 		return r, err
 	}
@@ -1072,7 +1097,12 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 		atom(&r, roles.atoms[formula.Verification], "failed", verified.Error)
 		return finishStopped(r, "Required verification did not pass.")
 	}
-	atom(&r, roles.atoms[formula.Verification], "done", "Required checks passed on "+verified.SourceTree+". Independent acceptance verified: "+fmt.Sprint(verified.IndependentAcceptanceVerified))
+	if review.Blocked {
+		return finishStopped(r, "Adversarial review blocked delivery: "+review.Detail)
+	}
+	if !hasReview {
+		atom(&r, roles.atoms[formula.Verification], "done", "Required checks passed on "+verified.SourceTree+". Independent acceptance verified: "+fmt.Sprint(verified.IndependentAcceptanceVerified))
+	}
 	atom(&r, roles.atoms[formula.ReviewApproval], "waiting", "Human review required before explicit delivery approval.")
 	for _, i := range roles.after(formula.ReviewApproval) {
 		atom(&r, i, "skipped", "Publication is a separate approved action.")
