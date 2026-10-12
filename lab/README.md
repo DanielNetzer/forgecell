@@ -225,6 +225,147 @@ Go onboarding does not silently configure a learn binding. Approval changes the
 recipe; it does not prove improvement. Evaluation remains manual. See
 [Learning](../docs/learning.md).
 
+## Extensions (development build)
+
+Extensions let a Lab attach a pinned, out-of-process capability provider, such as a
+Graphify code index, to the analysis and coding roles without changing Forgecell. They are
+**not in the published `0.2.0-preview.1`**, and on this branch only part of the v1 design
+exists. The manifest verifier, the Formula grammar, the prepare step and the cache are
+built; Codex and Cursor bindings are rejected at proposal. The Claude Code run-time wiring
+(and its adapter protocol bump), the scope-gate and ledger records, the `doctor` section and
+the `extensionCacheKeep` setting are **planned, not current behaviour**, and until they land
+no run attaches an extension. Design:
+[extensions design](../docs/design/2026-10-11-extensions-design.md).
+
+Extension output is a hint, never frozen evidence, and never a gate input. An extension
+cannot approve, decline, deliver, merge or change a gate, and it does not write to the
+coding checkout or the ledger. The "no MCP servers" statement for Claude Code under
+[Harnesses and learning](#harnesses-and-learning) is true today for every Formula; once the
+wiring lands it will apply to Formulas that attach no extension.
+
+### Declaration
+
+A Formula declares extensions once, then binds them by name to roles:
+
+```yaml
+extensions:
+  graphify:
+    manifest: extensions/graphify.json   # Lab-relative, clean path, no symlinks
+    sha256: <64 lowercase hex>           # exact manifest bytes
+    required: false                      # default; true blocks a role when unavailable
+harness:                                 # the coding role
+  binding: claude-code
+  command: [...]
+  extensions: [graphify]
+harnesses:
+  analysis:
+    binding: claude-code
+    command: [...]
+    extensions: [graphify]
+```
+
+- A name matches `^[a-z][a-z0-9-]{0,31}$`. A role may reference only declared names, and
+  only the analysis and coding roles may bind extensions. A `harnesses.coding` override
+  replaces the default `harness` list instead of inheriting it.
+- The manifest path must stay inside the Lab and not under `workspaces/`, `verification/`
+  or `ledgers/`. Parsing is syntactic; it never reads or hashes the manifest.
+- Formulas without `extensions` keep their exact bytes and SHA. Adding or changing an
+  extension, its digest, `required` or a role's list changes the Formula SHA, so it needs
+  human Formula approval. The learn Atom may attach, detach or retune an already declared
+  extension; it cannot add a manifest or change a digest.
+
+The manifest is strict JSON of at most 64 KiB (unknown fields, duplicate keys and trailing
+data are rejected), `schemaVersion` `v1` and `kind` `mcp-provider`:
+
+- `server`: a pinned `executable` (`path` and `sha256`), an optional pinned `interpreter`
+  and `args`.
+- `prepare` (optional): the same command shape, plus `timeoutMs` (1 to 1800000) and
+  `network` (`none` or `declared`). It builds the provider's cache.
+- `tools`: at most 32 exact names matching `^[A-Za-z0-9_-]{1,64}$`, each `read-only` or
+  `read-write`.
+- `roles`: `analysis`, `coding` or both. Analysis gets only `read-only` tools.
+- `dependencies`: pinned files, each with `path`, `sha256`, `role` and `state: "pinned"`.
+- `limitations`: free text saying how far to trust the answers.
+
+In `args`, `{{CACHE}}` and `{{SOURCE}}` are the only placeholders, allowed as a whole
+argument or as a path prefix such as `{{CACHE}}/graph.json`. The literal path of a pinned
+file must not appear in `args`.
+
+[`internal/extension/testdata/graphify.example.json`](internal/extension/testdata/graphify.example.json)
+is an AST-only Graphify manifest. Its paths (`/ABSOLUTE/PATH/TO/...`) and digests
+(`REPLACE_WITH_SHA256_...`) are placeholders, and its subcommands and flags are
+illustrative: confirm them with `graphify --help` before use. Copy it to
+`<Lab>/extensions/graphify.json`, replace every placeholder and put that file's SHA-256 in
+the Formula. `TestExampleManifestDecodes` decodes it with the placeholders swapped for
+temporary pinned files.
+
+### Trust model
+
+- **Pinned files.** The server and prepare executables, their interpreters and every
+  dependency are pinned by absolute path and SHA-256. A pinned file is refused when it is a
+  symlink, is group- or world-writable, sits in a directory others can write to without the
+  sticky bit, or does not match its digest. The manifest bytes themselves must match the
+  Formula's `sha256`.
+- **Copied before exec.** Prepare copies the verified bytes of the executable and
+  interpreter into a private directory and runs the copy, so a swap after verification is
+  never executed. The planned wiring does the same for the server. A pinned path in `args`
+  is refused so that nothing can point back at the original.
+- **Read-only analysis.** Analysis may use only tools the manifest marks `read-only`; coding
+  gets every declared tool of a role the manifest lists. A role the manifest does not list
+  gets none, and any other role gets none.
+- **Declared network.** `prepare.network` is a claim, `none` or `declared`, recorded as one.
+  Forgecell does not sandbox it, and approving a prepare step approves running its pinned
+  code with your user's permissions.
+- **Isolated build.** Prepare reads a snapshot of the plan's base commit (tracked files
+  only, no `.git`, read-only) and never the coding workspace. Its environment is a minimal
+  `PATH`, a temporary `HOME` and `TMPDIR`, and `LANG=C.UTF-8`; its working directory is
+  private and its time and output are bounded.
+
+### Cache and pruning
+
+The cache key is the extension name, the manifest SHA-256 and the base commit. An entry
+lives at `<Lab>/extensions/<name>/<manifest-sha>/<base-commit>/` with private permissions.
+Prepare builds in a `.partial-<nonce>` directory under a per-key lock. On success a
+completion marker records the output tree's SHA-256 and the entry is renamed into place
+and made read-only (directories 0500, files 0400). Reuse needs a marker whose digest still
+matches the tree, and a failed or timed-out prepare leaves no entry.
+
+Pruning keeps the most recent completed entries of an extension and removes the rest. It
+never removes an entry a Molecule still references, an entry whose lock is held, or a
+partial build. The planned `extensionCacheKeep` Lab setting (default 5) will choose how
+many base commits to keep, and `forgecell doctor` will report cache usage; neither exists
+yet.
+
+When an optional (`required: false`) extension cannot be verified or prepared, the planned
+behaviour is that it is unavailable for that Molecule and each role runs without it. When
+it is `required: true`, the Molecule stops at intake with an actionable message.
+
+### v1 limits
+
+- Claude Code only. Codex and Cursor report `extensions: unsupported`, and a Formula that
+  binds an extension to either is rejected at proposal.
+- No per-call logging: no MCP request or response is recorded, and the planned ledger entry
+  records only identity, cache outcome and tools.
+- Analysis with an extension will run without `--safe-mode` and with `--setting-sources
+  user`, because Claude Code drops an explicit `--mcp-config` under safe mode. Without
+  built-in tools user-level settings cannot touch the filesystem, but they can steer the
+  analysis; full isolation is tracked in #36.
+- Only the `mcp-provider` kind exists. Lab-run evidence, repository-artifact, memory and
+  knowledge providers are later kinds.
+
+### Computing digests
+
+Pin a file by its SHA-256 as 64 lowercase hex characters:
+
+```sh
+shasum -a 256 /ABSOLUTE/PATH/TO/graphify
+shasum -a 256 <Lab>/extensions/graphify.json   # the Formula's `sha256` for the manifest
+```
+
+On Linux, `sha256sum FILE` prints the same digest. Compute each digest from the exact file
+you pin. Changing a byte of any pinned file, or of the manifest, needs a new digest and,
+for the manifest, a Formula change that a human approves.
+
 ## Contribute
 
 From a source checkout with the Go toolchain required by `go.mod`:

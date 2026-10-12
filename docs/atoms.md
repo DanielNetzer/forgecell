@@ -113,6 +113,15 @@ not a Formula baseline or a derived regression check, because that would decline
 model-proposed candidate check. Passing candidate checks is not independent acceptance. A
 stricter rule is a reviewed policy change.
 
+### Extensions are hints, never gate inputs
+
+Output from an extension (an MCP provider attached to the analysis or coding role) is a hint.
+It is never frozen evidence and never an input to a gate. An extension cannot approve,
+decline, deliver, merge or change a gate, and it does not affect any `auto-when-ready`
+condition above or the sensitive-path list: the policy evaluates the plan, the Formula
+snapshot and the ledger pointers it records, never what a provider said. See
+[Extensions](../lab/README.md#extensions-development-build).
+
 ### Downgrade behaviour
 
 `policyDecisions` is an additive ledger field. A Lab binary that predates it still decodes a

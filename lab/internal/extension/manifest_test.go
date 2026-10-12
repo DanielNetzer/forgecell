@@ -181,6 +181,60 @@ func TestDecodeAcceptsValidManifest(t *testing.T) {
 	}
 }
 
+func TestExampleManifestDecodes(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "graphify.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(raw); err == nil {
+		t.Fatal("the example must not decode until its placeholder paths and digests are replaced")
+	}
+	fx := newFixture(t)
+	swap := func(file map[string]any, where, name string) {
+		t.Helper()
+		path, _ := file["path"].(string)
+		digest, _ := file["sha256"].(string)
+		if !strings.HasPrefix(path, "/ABSOLUTE/PATH/TO/") || !strings.HasPrefix(digest, "REPLACE_WITH_SHA256_") {
+			t.Fatalf("%s must keep its placeholder path and digest, got %q and %q", where, path, digest)
+		}
+		pin := fx.pin(t, name)
+		file["path"], file["sha256"] = pin.Path, pin.SHA256
+	}
+	filled := mutateJSON(t, raw, func(m map[string]any) {
+		swap(section(section(m, "server"), "executable"), "server executable", fileServer)
+		swap(section(section(m, "prepare"), "executable"), "prepare executable", filePrepare)
+		deps := m["dependencies"].([]any)
+		if len(deps) != 1 {
+			t.Fatalf("the example pins %d dependencies, want 1", len(deps))
+		}
+		swap(deps[0].(map[string]any), "dependency", fileDependency)
+	})
+	got, err := Decode(filled)
+	if err != nil {
+		t.Fatalf("the example must decode once its placeholders are swapped for pinned files: %v", err)
+	}
+	if got.Name != "graphify" || got.Kind != "mcp-provider" || !reflect.DeepEqual(got.Roles, []string{"analysis", "coding"}) {
+		t.Fatalf("unexpected example identity: %+v", got)
+	}
+	if got.Prepare == nil || got.Prepare.Network != "none" {
+		t.Fatalf("the example builds its graph with no declared network: %+v", got.Prepare)
+	}
+	analysis := got.ToolsFor("analysis")
+	if len(analysis) == 0 {
+		t.Fatal("analysis must receive at least one tool")
+	}
+	names := map[string]bool{}
+	for _, tool := range analysis {
+		if tool.Access != "read-only" {
+			t.Fatalf("analysis must receive only read-only tools, got %+v", tool)
+		}
+		names[tool.Name] = true
+	}
+	if !names["query_graph"] || !names["find_callers"] {
+		t.Fatalf("analysis tools %v must include query_graph and find_callers", analysis)
+	}
+}
+
 func TestDecodeAcceptsPlaceholdersAndOtherAbsolutePaths(t *testing.T) {
 	fx := newFixture(t)
 	good := marshal(t, fx.manifest(t))

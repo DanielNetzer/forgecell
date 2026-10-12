@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "v1",
+  "kind": "mcp-provider",
+  "name": "graphify",
+  "server": {
+    "executable": {
+      "path": "/ABSOLUTE/PATH/TO/graphify",
+      "sha256": "REPLACE_WITH_SHA256_OF_GRAPHIFY"
+    },
+    "args": ["mcp", "--graph", "{{CACHE}}/graph.json"]
+  },
+  "prepare": {
+    "executable": {
+      "path": "/ABSOLUTE/PATH/TO/graphify",
+      "sha256": "REPLACE_WITH_SHA256_OF_GRAPHIFY"
+    },
+    "args": ["build", "{{SOURCE}}", "--out", "{{CACHE}}", "--no-semantic"],
+    "timeoutMs": 600000,
+    "network": "none"
+  },
+  "tools": [
+    { "name": "query_graph", "access": "read-only" },
+    { "name": "find_callers", "access": "read-only" }
+  ],
+  "roles": ["analysis", "coding"],
+  "dependencies": [
+    {
+      "path": "/ABSOLUTE/PATH/TO/graphify-dependency",
+      "sha256": "REPLACE_WITH_SHA256_OF_DEPENDENCY",
+      "role": "library",
+      "state": "pinned"
+    }
+  ],
+  "limitations": "AST-only graph built with --no-semantic; there is no LLM semantic pass, so answers are hints and are not authoritative."
+}
