@@ -159,10 +159,10 @@ func TestInScopeDefinitionSharesTheSingleRetry(t *testing.T) {
 		blocked  bool
 		attempts []string
 	}{
-		{"definition then violation", []string{"def", "policy"}, true, []string{"failed", "failed"}},
-		{"violation then definition", []string{"policy", "def"}, true, []string{"failed", "failed"}},
-		{"definition then cap", []string{"def", "cap"}, true, []string{"failed", "failed"}},
-		{"cap then definition", []string{"cap", "def"}, true, []string{"failed", "failed"}},
+		{"definition then violation", []string{"def", "policy", "valid"}, false, []string{"failed", "failed", "completed"}},
+		{"violation then definition", []string{"policy", "def", "valid"}, false, []string{"failed", "failed", "completed"}},
+		{"definition then cap", []string{"def", "cap", "valid"}, false, []string{"failed", "failed", "completed"}},
+		{"cap then definition", []string{"cap", "def", "valid"}, false, []string{"failed", "failed", "completed"}},
 		{"evidence then definition twice", []string{"evidence", "def", "def"}, true, []string{"completed", "failed", "failed"}},
 		{"definition then evidence then definition", []string{"def", "evidence", "def"}, true, []string{"failed", "completed", "failed"}},
 		{"definition then evidence twice is exhausted", []string{"def", "evidence", "evidence"}, true, []string{"failed", "completed", "completed"}},

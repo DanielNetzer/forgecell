@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -209,7 +210,16 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		for _, id := range command.Definitions {
 			e, ok := refs[id]
 			if !ok {
-				return fail(fmt.Errorf("command %s has missing definition %s", command.ID, id))
+				if command.Category != "candidate" || !slices.Contains(p.NewFiles, id) {
+					return fail(fmt.Errorf("command %s has missing definition %s", command.ID, id))
+				}
+				// A new-file definition has no frozen bytes to hash. Its absence from the
+				// base commit is the only thing that makes it safe to run unhashed.
+				existing, lsErr := git(ctx, source, "", nil, "ls-tree", "-z", p.Inputs.BaseCommit, "--", id)
+				if lsErr != nil || existing != "" {
+					return fail(fmt.Errorf("command %s cites new file %s, but the base commit already contains it", command.ID, id))
+				}
+				continue
 			}
 			if err := readiness.ValidatePath(e.Path); err != nil {
 				return fail(err)
@@ -342,14 +352,27 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		// is read as a stream so a large suite is not cut off by the capture cap. Every
 		// other check keeps the cap, and exceeding it still fails the check.
 		var parser *failedTestParser
+		candidateStream := false
 		if i >= len(p.Setup) && command.Required && command.Category == "regression" && len(declared) > 0 && readiness.RequestsGoTestJSON(command.Argv) {
 			options.StdoutLines = &process.LineSink{Line: func([]byte) error { return nil }}
 			if protected {
 				parser = newFailedTestParser()
 				options.StdoutLines.Line = parser.Line
+			} else {
+				candidateStream = true
 			}
 		}
 		result := process.Run(ctx, options)
+		// The no-op sink above lifts the capture cap, so only this check keeps the
+		// candidate view's overflow guard: a truncated stream is not a pass.
+		var truncatedErr error
+		if candidateStream && result.Truncated {
+			truncatedErr = fmt.Errorf("output exceeded the %d byte limit and was truncated; the candidate view cannot pass a truncated check", options.MaxOutputBytes)
+			result.OK = false
+			if result.Error == "" {
+				result.Error = truncatedErr.Error()
+			}
+		}
 		category := command.Category
 		if repaired[command.ID] {
 			category = "candidate"
@@ -415,6 +438,9 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if !result.OK && (i < len(p.Setup) || command.Required) && !(evaluated && deltaErr == nil) {
 			if deltaErr != nil {
 				return fail(fmt.Errorf("required command %s did not pass: %w", command.ID, deltaErr))
+			}
+			if truncatedErr != nil {
+				return fail(fmt.Errorf("required command %s did not pass: %w", command.ID, truncatedErr))
 			}
 			return fail(fmt.Errorf("required command %s did not pass", command.ID))
 		}

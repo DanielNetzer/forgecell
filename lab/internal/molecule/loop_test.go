@@ -40,6 +40,14 @@ func loopFixture(t *testing.T, scopeAtom, reviewAtom, delay string) (Options, st
 		text = strings.Replace(text, defaultReviewAtom, reviewAtom, 1)
 		approveFixture(t, o.LabDir, text, "policy")
 	}
+	// The default fixture check reads code.txt, a scope file, which auto-when-ready
+	// declines because a check names it. Read a file outside the scope instead.
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		a, err := analyze(ctx, b, i, s)
+		a.Checks[0].Argv = []string{"/bin/sh", "-c", "test -f package.json"}
+		return a, err
+	}
 	o.ReadIssue = func(_ context.Context, _ string, number int64, _ string) (Issue, error) {
 		return loopIssue(number), nil
 	}

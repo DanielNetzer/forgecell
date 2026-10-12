@@ -48,6 +48,15 @@ func analysisCorrectionFrom(ctx context.Context) (analysisCorrection, bool) {
 	return c, ok
 }
 
+const (
+	// maxCorrectiveAnalyses bounds the corrective retries of one intake, one per
+	// policy violation class. The same class twice stops intake.
+	maxCorrectiveAnalyses = 3
+	// maxAnalysisInvocations is the initial analysis, every corrective retry and the
+	// single analysis that follows the supplemental evidence pass.
+	maxAnalysisInvocations = 1 + maxCorrectiveAnalyses + 1
+)
+
 // analysisRequest is the ticket-analysis payload. A corrective pass adds the exact
 // validator message and the rejected response; the first pass never carries one.
 func analysisRequest(ctx context.Context, i Issue, s readiness.RepositorySnapshot, inputs readiness.VerificationInputs) map[string]any {
@@ -56,6 +65,9 @@ func analysisRequest(ctx context.Context, i Issue, s readiness.RepositorySnapsho
 		correction := map[string]string{"validatorMessage": c.ValidatorMessage, "previousResponse": c.PreviousResponse}
 		if c.ValidatorMessage == readiness.EvidenceRequestCapMessage() {
 			correction["instruction"] = fmt.Sprintf("Return the complete analysis again with at most %d evidenceRequests, ordered by importance to the ticket scope, most important first. Drop the least important requests; do not relax or reword the limit.", readiness.MaxEvidenceRequests)
+		}
+		if strings.HasPrefix(c.ValidatorMessage, readiness.InScopeDefinitionMessage) || strings.HasPrefix(c.ValidatorMessage, readiness.DefinitionReferenceMessage) {
+			correction["instruction"] = "Return the complete analysis again. A check may be defined by an existing frozen evidence ID that this plan does not edit (for example the parent manifest or workflow), or by a scope entry that is a new file absent from the repository tree, cited in definitions by its exact scope path. A check may never be defined by an existing in-scope file or by the issue. For a new package, `go test ./path/to/package/ -run <pattern>` defined by the parent manifest is also valid. Do not relax or reword the rule."
 		}
 		request["correction"] = correction
 	}
@@ -420,13 +432,14 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		}
 	}
 
-	// At most one supplemental evidence pass and one corrective retry per intake,
-	// so three analysis invocations is the hard bound. Every invocation has its own
-	// ordinal and therefore its own provenance action id.
+	// At most one supplemental evidence pass and one corrective retry per policy
+	// class, up to maxCorrectiveAnalyses in all, so maxAnalysisInvocations is the
+	// hard bound. Every invocation has its own ordinal and therefore its own
+	// provenance action id.
 	var a readiness.Analysis
 	var correction *analysisCorrection
-	retried, supplemented := false, false
-	for ordinal := 1; ordinal <= 3; ordinal++ {
+	retried, supplemented := map[string]bool{}, false
+	for ordinal := 1; ordinal <= maxAnalysisInvocations; ordinal++ {
 		if err = formula.Revalidate(o.LabDir, loaded); err != nil {
 			return stopIntake(r, err.Error())
 		}
@@ -463,7 +476,11 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		}
 		if err == nil && len(a.EvidenceRequests) == 0 {
 			// Intake-time rejection; Plan.ValidateForCoding stays as the run-time backstop.
-			err = readiness.ValidateInScopeDefinitions(a, snapshot.References())
+			// A scope entry absent from the frozen tree may define a check; the Lab, not
+			// the model, decides which entries are new.
+			if err = readiness.ValidateDefinitionReferences(a); err == nil {
+				err = readiness.ValidateInScopeDefinitionsForNewFiles(a, snapshot.References(), readiness.NewScopeFiles(a.Scope, snapshot.Files))
+			}
 		}
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
@@ -494,16 +511,20 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			if !errors.As(err, &violation) {
 				return stopIntake(r, err.Error())
 			}
-			if retried {
+			class := readiness.PolicyClass(violation)
+			if retried[class] {
 				return stopIntake(r, err.Error()+" (the corrective analysis retry was also rejected; no coding harness was invoked)")
+			}
+			if len(retried) >= maxCorrectiveAnalyses {
+				return stopIntake(r, err.Error()+fmt.Sprintf(" (the limit of %d corrective analysis retries was reached; no coding harness was invoked)", maxCorrectiveAnalyses))
 			}
 			previous, e := json.Marshal(a)
 			if e != nil {
 				return stopIntake(r, e.Error())
 			}
-			retried = true
+			retried[class] = true
 			correction = &analysisCorrection{ValidatorMessage: violation.Reason, PreviousResponse: string(previous)}
-			r.Notes = append(r.Notes, fmt.Sprintf("Analysis attempt %d was rejected by the unchanged policy validator (%s); one corrective analysis retry receives that message and the rejected response.", ordinal, violation.Reason))
+			r.Notes = append(r.Notes, fmt.Sprintf("Analysis attempt %d was rejected by the unchanged policy validator (%s); one corrective analysis retry receives that message and the rejected response. Rejection class %s has now used its retry (%d of %d).", ordinal, violation.Reason, class, len(retried), maxCorrectiveAnalyses))
 			continue
 		}
 		correction = nil
@@ -543,6 +564,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	}
 	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: w.Repo, TargetBranch: target, BaseCommit: w.BaseCommit, FormulaSHA256: f.SHA256, EvidenceSHA256: evidenceHash, BindingSHA256: bindingDigest, Issue: issueInput(issue), MandatoryConstraints: o.MandatoryConstraints}, Evidence: snapshot.References(), Analysis: a, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
 	p.Analysis.Checks = append(p.Analysis.Checks, o.Checks...)
+	p.NewFiles = readiness.CitedNewFiles(p.Analysis.Checks, readiness.NewScopeFiles(a.Scope, snapshot.Files))
 	p.HarnessTimeoutMS = proposeHarnessTimeoutMS(codingBinding, len(p.Analysis.Scope))
 	if o.Policy != nil {
 		p.Policy = *o.Policy
@@ -575,6 +597,12 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	}
 	if advisory := p.ProtectedDeltaAdvisory(); advisory != "" {
 		r.Notes = append(r.Notes, advisory)
+	}
+	if note, ok := newFilesNote(p); ok {
+		r.Notes = append(r.Notes, note)
+	}
+	if note, ok := scopeGateSensitivePathsNote(f); ok {
+		r.Notes = append(r.Notes, note)
 	}
 	atom(&r, roles.atoms[formula.IntakeRole], "done", a.Summary)
 	atom(&r, roles.atoms[formula.ScopeApproval], "waiting", "Review exact scope, checks and process limits before approving the digest.")

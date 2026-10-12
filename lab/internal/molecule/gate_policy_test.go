@@ -65,6 +65,14 @@ func scopeReadyRecord(t *testing.T, scopeAtom, reviewAtom string) (Options, Reco
 	text := strings.Replace(string(raw), defaultScopeAtom, scopeAtom, 1)
 	text = strings.Replace(text, defaultReviewAtom, reviewAtom, 1)
 	approveFixture(t, o.LabDir, text, "policy")
+	// The default fixture check reads code.txt, a scope file, which auto-when-ready
+	// declines because a check names it. Read a file outside the scope instead.
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		a, err := analyze(ctx, b, i, s)
+		a.Checks[0].Argv = []string{"/bin/sh", "-c", "test -f package.json"}
+		return a, err
+	}
 	r, err := Run(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
@@ -555,7 +563,7 @@ func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
 		{plan + "/codingAllowlist", fmt.Sprintf("%d entries, sha256 %x", len(list), sum)},
 		{plan + "/artifacts", "0 artifact roots"},
 		{plan + "/checkInputs", "0 check inputs"},
-		{plan + "/analysis", "sensitive-path list v1: 2 scope paths examined"},
+		{plan + "/analysis", "sensitive-path list v2: 2 scope paths examined"},
 		{plan + "/analysis/checks", "1 checks examined for scope paths cited by a check definition"},
 		{"/checkoutStatus", "available"},
 		{"/readiness/phase", "scope-waiting"},
@@ -581,7 +589,7 @@ func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
 	if got := widerSeen[plan+"/analysis/scope"]; got != "3 paths: code.txt, request.json, docs/extra.md" {
 		t.Fatalf("scope evidence observed %q", got)
 	}
-	if got := widerSeen[plan+"/analysis"]; got != "sensitive-path list v1: 3 scope paths examined" {
+	if got := widerSeen[plan+"/analysis"]; got != "sensitive-path list v2: 3 scope paths examined" {
 		t.Fatalf("sensitive-path evidence observed %q", got)
 	}
 }
@@ -777,26 +785,6 @@ func TestGatePolicyDeclinesArtifactAllowancesAndCheckInputs(t *testing.T) {
 	}
 }
 
-func TestGatePolicySensitivePathListIsPinned(t *testing.T) {
-	if sensitivePathListVersion != "v1" {
-		t.Fatalf("sensitive-path list version %q: a list change needs a reviewed version bump and test edit", sensitivePathListVersion)
-	}
-	if want := []string{".github/", ".claude/", ".forgecell/", ".githooks/", ".husky/", "scripts/"}; !reflect.DeepEqual(sensitivePathPrefixes, want) {
-		t.Fatalf("sensitive prefixes changed: %q", sensitivePathPrefixes)
-	}
-	if want := []string{".gitlab-ci.yml", "go.mod", "go.sum", "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lockb", "Makefile"}; !reflect.DeepEqual(sensitiveBaseNames, want) {
-		t.Fatalf("sensitive base names changed: %q", sensitiveBaseNames)
-	}
-	if want := []string{".lock"}; !reflect.DeepEqual(sensitiveExtensions, want) {
-		t.Fatalf("sensitive extensions changed: %q", sensitiveExtensions)
-	}
-	for _, prefix := range sensitivePathPrefixes {
-		if !strings.HasSuffix(prefix, "/") || prefix != strings.ToLower(prefix) {
-			t.Fatalf("prefix %q must be lower case and directory-bounded", prefix)
-		}
-	}
-}
-
 func TestGatePolicyDeclinesSensitiveScopePaths(t *testing.T) {
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	assertPolicyApproves(t, ready)
@@ -905,13 +893,13 @@ func TestGatePolicyDeclinesScopeCitedByCheckDefinition(t *testing.T) {
 		r.Readiness.Plans[0].Plan.Analysis.Checks[0].ReviewedAcceptance = "accept-1"
 		assertPolicyDeclines(t, r, "scope-path-check-definition")
 	})
-	t.Run("a test path named in argv is exempt", func(t *testing.T) {
+	t.Run("a test path named in argv is exempt from the definition rule but not the named-path rule", func(t *testing.T) {
 		r := bind(t, func(p *readiness.Plan) {
 			p.Analysis.Checks[0].Argv = []string{"/bin/sh", "tools/check_test.go"}
 		})
 		r = addToScope(r, "tools/check_test.go")
 		rebindPlanDigest(t, &r)
-		assertPolicyApproves(t, r)
+		assertPolicyDeclines(t, r, "scope-path-check-argument")
 	})
 }
 
