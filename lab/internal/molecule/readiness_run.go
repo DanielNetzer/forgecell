@@ -370,6 +370,33 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		policy := readiness.ReadRemotePolicy(ctx, w.Repo, target, w.SourceRoot, nil)
 		r.RemotePolicy = &policy
 	}
+	// Extensions are resolved once, before the first analysis invocation and before
+	// any harness starts, so the supplemental and corrective passes reuse them and
+	// coding reuses the build. A required extension that is unavailable stops intake.
+	var analysisServers []harness.MCPServer
+	if declared := f.RoleExtensions(formula.AnalysisHarness); len(declared) > 0 {
+		if binding := roles.bindings[formula.IntakeRole]; o.Analyze != nil || binding.AnalysisWrapper != nil {
+			how := "an analysis wrapper"
+			if o.Analyze != nil {
+				how = "a supplied analysis function"
+			}
+			if extErr := skipExtensions(&r, f, formula.AnalysisHarness, "analysis runs through "+how+", which cannot attach extensions"); extErr != nil {
+				return stopIntake(r, extErr.Error())
+			}
+		} else {
+			servers, cleanup, extErr := attachExtensions(ctx, &r, f, formula.AnalysisHarness)
+			defer cleanup()
+			if extErr != nil {
+				return stopIntake(r, extErr.Error())
+			}
+			if analysisServers = servers; len(servers) > 0 {
+				r.Notes = append(r.Notes, AnalysisWithoutSafeModeDisclosure)
+			}
+		}
+	}
+	if _, extErr := useExtensions(ctx, &r, f, formula.CodingHarness, ""); extErr != nil {
+		return stopIntake(r, extErr.Error())
+	}
 	analysis := o.Analyze
 	var wrapperEvidence []ProvenanceEvidence
 	var analysisDiagnostics *process.Diagnostics
@@ -383,7 +410,11 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			}
 			// Resolve configuration from the source checkout, then Execute constrains the
 			// provider and moves analysis to a temporary directory before the model runs.
-			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, analysisRequest(ctx, i, s, inputs))
+			request := analysisRequest(ctx, i, s, inputs)
+			if len(analysisServers) > 0 {
+				request["mcpServers"] = analysisServers
+			}
+			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, request)
 			analysisDiagnostics = resultDiagnostics(result)
 			return decodeAnalysisResult(result)
 		}
@@ -833,6 +864,13 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if len(r.HarnessAttempts) >= 100 {
 		return finishFailed(r, "harness history capacity reached; no process started")
 	}
+	// The approval may come long after intake, so the extensions are verified again
+	// here. A required one that is no longer usable starts no coding harness.
+	codingServers, cleanupExtensions, extErr := attachExtensions(ctx, &r, f, formula.CodingHarness)
+	defer cleanupExtensions()
+	if extErr != nil {
+		return finishFailed(r, "Extensions unavailable: "+extErr.Error())
+	}
 	attemptID, err := token()
 	if err != nil {
 		return r, err
@@ -848,7 +886,12 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if err = save(r); err != nil {
 		return r, err
 	}
-	result := invokeHarness(ctx, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."})
+	codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
+	if len(codingServers) > 0 {
+		codingRequest["mcpServers"] = codingServers
+	}
+	result := invokeHarness(ctx, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, codingRequest)
+	cleanupExtensions()
 	r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
 	r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
 
