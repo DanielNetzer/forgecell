@@ -255,6 +255,9 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 		{Pointer: base + "/plan/analysis", Observed: fmt.Sprintf("sensitive-path list %s: %d scope paths examined", sensitivePathListVersion, len(paths))},
 		{Pointer: base + "/plan/analysis/checks", Observed: fmt.Sprintf("%d checks examined for scope paths cited by a check definition", len(plan.Analysis.Checks))},
 	}
+	if evidence, ok := extensionEvidence(r); ok {
+		eval.Evidence = append(eval.Evidence, evidence)
+	}
 	return eval
 }
 

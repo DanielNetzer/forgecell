@@ -159,6 +159,9 @@ func save(r Record) error {
 			}
 		}
 	}
+	if len(r.Extensions) > 0 {
+		renderExtensions(&b, r)
+	}
 	for _, a := range r.HarnessAttempts {
 		if a.Coding != nil {
 			fmt.Fprintf(&b, "\nImplementation outcome: %s\nReason: %s\n", a.Coding.Outcome, a.Coding.Reason)

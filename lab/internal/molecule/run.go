@@ -141,6 +141,7 @@ type Record struct {
 	CheckoutStatus                string            `json:"checkoutStatus,omitempty"`
 	AnalysisAttempts              []AnalysisAttempt `json:"analysisAttempts,omitempty"`
 	HarnessAttempts               []HarnessAttempt  `json:"harnessAttempts,omitempty"`
+	Extensions                    []ExtensionRecord `json:"extensions,omitempty"`
 
 	VerificationAttempts []VerificationAttempt         `json:"verificationAttempts,omitempty"`
 	Readiness            *readiness.State              `json:"readiness,omitempty"`

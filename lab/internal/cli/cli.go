@@ -9,6 +9,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/checks"
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
 	"github.com/DanielNetzer/forgecell/lab/internal/evaluation"
+	"github.com/DanielNetzer/forgecell/lab/internal/extension"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/install"
@@ -24,6 +25,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 )
@@ -559,7 +562,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		firstRoleCommand := ""
 		rolesReady := true
+		extensions := inspectExtensions(labDir, active.Formula)
 		for i := range roles {
+			describeAnalysisWithExtensions(&roles[i], active.Formula)
 			if !roles[i].Ready {
 				rolesReady = false
 				roles[i].NextCommand = commands.candidate(roles[i].Candidate)
@@ -600,11 +605,14 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if next != "" {
 				report["nextCommand"] = next
 			}
+			if len(extensions) > 0 {
+				report["extensions"] = extensions
+			}
 			if err = json.NewEncoder(out).Encode(report); err != nil {
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Next: next, Note: note})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, Next: next, Note: note})
 		}
 		if !ready {
 			return 2
@@ -839,6 +847,7 @@ func presentRun(out io.Writer, r molecule.Record) {
 				}
 			}
 		}
+		presentExtensions(out, r)
 		for _, i := range p.Analysis.Impacts {
 			fmt.Fprintf(out, "Impact assessment: %s\n", i.Description)
 		}
@@ -849,6 +858,9 @@ func presentRun(out io.Writer, r molecule.Record) {
 		if r.Readiness.Phase == "scope-waiting" {
 			fmt.Fprintf(out, "\nReview the full ledger, then approve exactly this plan:\nforgecell run %d --lab %q --formula %q --base %s --target %q --approve %s\n", r.Issue.Number, r.LabDir, r.FormulaID, p.Inputs.BaseCommit, p.Inputs.TargetBranch, proposal.Digest)
 		}
+	}
+	if r.Readiness == nil || len(r.Readiness.Plans) == 0 {
+		presentExtensions(out, r)
 	}
 	for _, a := range r.Atoms {
 		if a.Status == "blocked" || a.Status == "failed" {
@@ -908,6 +920,95 @@ func codingTimeoutLine(snapshot string, planMS int) string {
 		return fmt.Sprintf("Coding harness timeout: %dms (Formula timeoutMs; maximum %d, no per-Molecule extension proposed)", b.TimeoutMS, b.TimeoutCeilingMS())
 	}
 	return fmt.Sprintf("Coding harness timeout: %dms (Formula timeoutMs; the Formula declares no maximum, so no extension is possible)", b.TimeoutMS)
+}
+
+// presentExtensions shows what each pinned extension grants and how its cache
+// came to be. The disclosure appears only when a server was passed to analysis.
+func presentExtensions(out io.Writer, r molecule.Record) {
+	if len(r.Extensions) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "Extensions (pinned MCP servers; the declared network claim is not enforced by Forgecell):")
+	for _, e := range r.Extensions {
+		for _, line := range e.Lines() {
+			fmt.Fprintf(out, "  %s\n", line)
+		}
+	}
+	if len(r.AnalysisExtensionsAttached()) > 0 {
+		fmt.Fprintln(out, molecule.AnalysisWithoutSafeModeDisclosure)
+	}
+}
+
+type doctorExtensionRole struct {
+	Role    string             `json:"role"`
+	Binding string             `json:"binding"`
+	Adapter harness.Capability `json:"adapter"`
+}
+
+type doctorExtension struct {
+	Name       string                `json:"name"`
+	Manifest   string                `json:"manifest"`
+	SHA256     string                `json:"sha256"`
+	Required   bool                  `json:"required,omitempty"`
+	Status     string                `json:"status"`
+	Detail     string                `json:"detail,omitempty"`
+	FixCommand string                `json:"fixCommand,omitempty"`
+	Roles      []doctorExtensionRole `json:"roles"`
+}
+
+// inspectExtensions loads and verifies each declared extension and reports the
+// adapter support of every binding that attaches it. It reads manifests and
+// pinned files only; it never runs prepare, a server or a model.
+func inspectExtensions(labDir string, f formula.Formula) []doctorExtension {
+	names := make([]string, 0, len(f.Extensions))
+	for name := range f.Extensions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	report := []doctorExtension{}
+	for _, name := range names {
+		ref := f.Extensions[name]
+		e := doctorExtension{Name: name, Manifest: ref.Manifest, SHA256: ref.SHA256, Required: ref.Required, Status: "verified", Roles: []doctorExtensionRole{}}
+		path := filepath.Join(labDir, filepath.FromSlash(ref.Manifest))
+		m, _, err := extension.Load(labDir, ref.Manifest, ref.SHA256)
+		switch {
+		case err != nil:
+			e.Status, e.Detail = "problem", err.Error()
+			if strings.HasPrefix(err.Error(), "extension manifest "+ref.Manifest+" changed") {
+				e.FixCommand = "shasum -a 256 " + shellWord(path)
+				e.Detail += "; review the manifest, then update extensions." + name + ".sha256 through a reviewed Formula change"
+			} else {
+				e.FixCommand = "grep -n '\"path\"' " + shellWord(path)
+				e.Detail += "; repair or re-pin the file the message names through a reviewed manifest and Formula change"
+			}
+		case m.Name != name:
+			e.Status, e.Detail = "problem", fmt.Sprintf("the manifest names the extension %q but the Formula declares %q", m.Name, name)
+			e.FixCommand = "grep -n '\"name\"' " + shellWord(path)
+		}
+		for _, role := range []formula.HarnessRole{formula.AnalysisHarness, formula.CodingHarness} {
+			if !slices.Contains(f.RoleExtensions(role), name) {
+				continue
+			}
+			b, _ := f.RoleBinding(role)
+			e.Roles = append(e.Roles, doctorExtensionRole{Role: string(role), Binding: b.Binding, Adapter: harness.BindingExtensionCapability(b.Command)})
+		}
+		report = append(report, e)
+	}
+	return report
+}
+
+// describeAnalysisWithExtensions replaces the analysis role description when
+// extensions are attached: that analysis runs without safe mode, so the usual
+// controls description would overstate it.
+func describeAnalysisWithExtensions(role *onboarding.RoleReadiness, f formula.Formula) {
+	if role.Role != string(formula.AnalysisHarness) || role.Capability.State != "conditional" || len(f.RoleExtensions(formula.AnalysisHarness)) == 0 {
+		return
+	}
+	b, _ := f.RoleBinding(formula.AnalysisHarness)
+	if b.AnalysisWrapper != nil || harness.BindingExtensionCapability(b.Command).State != "supported" {
+		return
+	}
+	role.Capability.Reason = "Ticket analysis can be attempted, but with extensions attached it runs without safe mode (--setting-sources user instead of --safe-mode): user-level Claude settings can load, built-in tools stay disabled and only the attached servers' read-only tools are allowed. Model access and the end-to-end workflow remain unverified."
 }
 
 func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, jsonMode bool) int {
@@ -1002,6 +1103,7 @@ type doctorView struct {
 	Saved                      *doctorCandidate
 	Candidates                 []doctorCandidate
 	Roles                      []onboarding.RoleReadiness
+	Extensions                 []doctorExtension
 }
 
 // doctorCommands chooses the one next command for a non-ready state, using only
@@ -1148,6 +1250,25 @@ func renderDoctor(out io.Writer, v doctorView) {
 			fmt.Fprintf(out, "  %s: %s (%s binding) — %s; %s: %s\n", r.Role, r.Binding, r.Source, state, r.Capability.State, r.Capability.Reason)
 			if r.NextCommand != "" {
 				fmt.Fprintf(out, "    Next: %s\n", r.NextCommand)
+			}
+		}
+	}
+	if len(v.Extensions) > 0 {
+		fmt.Fprintln(out, "\nExtensions (manifest and pinned files are verified; prepare and the server are never run by doctor):")
+		for _, e := range v.Extensions {
+			required := ""
+			if e.Required {
+				required = ", required"
+			}
+			fmt.Fprintf(out, "  %s (%s%s): %s\n", e.Name, e.Manifest, required, e.Status)
+			if e.Detail != "" {
+				fmt.Fprintf(out, "    %s\n", e.Detail)
+			}
+			if e.FixCommand != "" {
+				fmt.Fprintf(out, "    Fix: %s\n", e.FixCommand)
+			}
+			for _, r := range e.Roles {
+				fmt.Fprintf(out, "    %s role (%s binding): adapter support %s — %s\n", r.Role, r.Binding, r.Adapter.State, r.Adapter.Reason)
 			}
 		}
 	}
