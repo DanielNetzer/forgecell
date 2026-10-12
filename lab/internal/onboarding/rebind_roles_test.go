@@ -1,6 +1,8 @@
 package onboarding
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -62,12 +64,14 @@ func rebindToNewLauncher(o *InitOptions) { o.Launcher = "/new-cli" }
 func forgecellBuild(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	manifest := `{"version":"0.2.0","protocolVersion":"` + harness.AdapterProtocolVersion + `"}`
-	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0600); err != nil {
+	body := []byte("#!/bin/sh\nexit 1\n")
+	path := filepath.Join(dir, "forgecell")
+	if err := os.WriteFile(path, body, 0700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "forgecell")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+	sum := sha256.Sum256(body)
+	manifest := `{"version":"0.2.0","sha256":"` + hex.EncodeToString(sum[:]) + `","protocolVersion":"` + harness.AdapterProtocolVersion + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -459,7 +463,7 @@ func TestRebindRepointsOnlyEstablishedForgecellLaunchers(t *testing.T) {
 		want           bool
 	}{
 		{"release build beside its manifest", forgecellBuild(t), true},
-		{"manifest of a build whose executable was removed", filepath.Join(manifestOnly, "forgecell"), true},
+		{"manifest of a build whose executable was removed", filepath.Join(manifestOnly, "forgecell"), false},
 		{"managed launcher without an active release", managed, true},
 		{"running executable", running, true},
 		{"launcher the approved Formula records", "/cli", true},

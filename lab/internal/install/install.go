@@ -30,6 +30,7 @@ type Result struct {
 	Home    string `json:"home"`
 }
 type manifest struct {
+	Kind            string `json:"kind,omitempty"`
 	Version         string `json:"version"`
 	SHA256          string `json:"sha256"`
 	ProtocolVersion string `json:"protocolVersion,omitempty"`
@@ -145,7 +146,9 @@ func verify(dir string) (manifest, error) {
 	if err = json.Unmarshal(raw, &m); err != nil {
 		return m, err
 	}
-	if !versionPattern.MatchString(m.Version) || filepath.Base(dir) != m.Version {
+	if !versionPattern.MatchString(m.Version) || filepath.Base(dir) != m.Version ||
+		m.Kind != "" && m.Kind != harness.ReleaseKind ||
+		m.ProtocolVersion != "" && !harness.ValidProtocolVersion(m.ProtocolVersion) {
 		return m, fmt.Errorf("invalid installed release metadata")
 	}
 	file := filepath.Join(dir, "forgecell")
@@ -185,7 +188,7 @@ func stageRelease(ctx context.Context, o Options) (string, error) {
 	if protocol == "" {
 		protocol = harness.AdapterProtocolVersion
 	}
-	m := manifest{o.Version, sum(raw), protocol}
+	m := manifest{Kind: harness.ReleaseKind, Version: o.Version, SHA256: sum(raw), ProtocolVersion: protocol}
 	stage, err := os.MkdirTemp(o.Home, ".install-")
 	if err != nil {
 		return "", err
@@ -211,8 +214,21 @@ func stageRelease(ctx context.Context, o Options) (string, error) {
 		if e != nil {
 			return "", e
 		}
-		if existing.Version != m.Version || existing.SHA256 != m.SHA256 || (o.Protocol != "" && existing.ProtocolVersion != m.ProtocolVersion) {
+		if existing.Version != m.Version || existing.SHA256 != m.SHA256 || (o.Protocol != "" && existing.ProtocolVersion != "" && existing.ProtocolVersion != m.ProtocolVersion) {
 			return "", fmt.Errorf("release version already exists with different content")
+		}
+		if existing.Kind == "" || existing.ProtocolVersion == "" {
+			protocol := ""
+			if existing.ProtocolVersion == "" {
+				// The staged copy is byte-identical to the stored release, so it reports
+				// the stored release's protocol; the running installer's says nothing about it.
+				if protocol = o.Protocol; protocol == "" {
+					protocol, _ = builtProtocol(ctx, file)
+				}
+			}
+			if err = backfillManifest(dest, existing, protocol); err != nil {
+				return "", err
+			}
 		}
 	} else if !os.IsNotExist(e) {
 		return "", e
@@ -220,6 +236,43 @@ func stageRelease(ctx context.Context, o Options) (string, error) {
 		return "", err
 	}
 	return dest, nil
+}
+
+// backfillManifest fills the kind a release installed by an earlier build lacks, and
+// its protocolVersion when one is established (protocol is empty when it is not, and
+// the release then stays unknown), and replaces manifest.json atomically. Fields the
+// release already records stay.
+func backfillManifest(dir string, existing manifest, protocol string) error {
+	next := existing
+	if next.Kind == "" {
+		next.Kind = harness.ReleaseKind
+	}
+	if next.ProtocolVersion == "" {
+		next.ProtocolVersion = protocol
+	}
+	if next == existing {
+		return nil
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".manifest-")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err = tmp.Write(raw); err == nil {
+		err = tmp.Chmod(0600)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(name, filepath.Join(dir, "manifest.json"))
 }
 
 // Stage stores a verified release beside the active ones without activating it:

@@ -905,7 +905,8 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if err != nil {
 		return r, err
 	}
-	forgecell := harness.RecordProvenance(codingBinding.Command)
+	launcher := harness.ResolveAttempt(codingBinding.Command)
+	forgecell := harness.RecordProvenanceWith(codingBinding.Command, launcher)
 	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell})
 	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+codingBinding.Binding, "invoke-coding-harness")
 	recordExecutedBinding(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, codingBinding.Binding)
@@ -920,7 +921,7 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if len(codingServers) > 0 {
 		codingRequest["mcpServers"] = codingServers
 	}
-	result := invokeHarness(ctx, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, codingRequest)
+	result := invokeHarnessWith(ctx, launcher, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, codingRequest)
 	cleanupExtensions()
 	r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
 	r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
