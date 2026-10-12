@@ -44,6 +44,35 @@ func (q *QueueInventory) problem(message string) {
 }
 func (q *QueueInventory) truncate(message string) { q.Truncated = true; q.problem(message) }
 
+// maxLoopLockFiles bounds how many advisory lock files the scan will step over.
+const maxLoopLockFiles = 1 << 20
+
+// readLedgerNames lists the directory without keeping the loop's advisory lock
+// files, which are never removed and would otherwise crowd real ledgers out of
+// the entry cap. It stops reading once more than 4096 other entries, or more
+// than maxLoopLockFiles lock files, have been seen; callers apply the caps.
+func readLedgerNames(dir *os.File) (names []string, locks int, err error) {
+	for {
+		batch, e := dir.Readdirnames(512)
+		for _, name := range batch {
+			if strings.HasSuffix(name, loopLockSuffix) {
+				locks++
+				continue
+			}
+			names = append(names, name)
+		}
+		if e == io.EOF {
+			return names, locks, nil
+		}
+		if e != nil {
+			return nil, 0, e
+		}
+		if len(names) > 4096 || locks > maxLoopLockFiles {
+			return names, locks, nil
+		}
+	}
+}
+
 // ReadQueueInventory never recovers or rewrites evidence. Counts report ledgers,
 // not process liveness. Directory entries, files and bytes are bounded.
 func ReadQueueInventory(lab string) QueueInventory {
@@ -72,13 +101,17 @@ func ReadQueueInventory(lab string) QueueInventory {
 		q.problem("ledger directory identity changed")
 		return q
 	}
-	names, err := dir.Readdirnames(4097)
-	if err != nil && err != io.EOF {
+	names, locks, err := readLedgerNames(dir)
+	if err != nil {
 		q.problem(fmt.Sprintf("ledger directory unreadable: %v", err))
 		return q
 	}
 	if len(names) > 4096 {
 		q.truncate("directory scan truncated at 4096 entries")
+		return q
+	}
+	if locks > maxLoopLockFiles {
+		q.truncate(fmt.Sprintf("lock file scan truncated at %d entries", maxLoopLockFiles))
 		return q
 	}
 	sort.Strings(names)

@@ -2,10 +2,13 @@ package molecule
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"os"
 	"path/filepath"
@@ -13,15 +16,19 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"unicode"
+	"time"
 )
 
 const (
-	LoopWaiting     = "waiting"
-	LoopActive      = "active"
-	LoopStopped     = "stopped"
-	LoopLocked      = "locked"
-	LoopUnknown     = "unknown"
+	LoopWaiting = "waiting"
+	LoopActive  = "active"
+	LoopStopped = "stopped"
+	LoopLocked  = "locked"
+	LoopUnknown = "unknown"
+	// LoopStalled marks an Issue the loop could not move forward although it should
+	// have: an approval that never applied, or a ledger intake never finished. It is
+	// counted as non-progress, unlike a wait at a human gate.
+	LoopStalled     = "stalled"
 	LoopInterrupted = "interrupted"
 )
 
@@ -72,6 +79,26 @@ func (r LoopReport) Failed() bool {
 	return false
 }
 
+// NonProgress counts the Issues of the final pass that ended stalled or in a state
+// the loop could not determine. Earlier passes are not counted: an Issue that
+// stalled and then advanced made progress.
+func (r LoopReport) NonProgress() int {
+	if len(r.Passes) == 0 {
+		return 0
+	}
+	return r.Passes[len(r.Passes)-1].NonProgress()
+}
+
+func (p LoopPass) NonProgress() int {
+	n := 0
+	for _, item := range p.Items {
+		if item.State == LoopStalled || item.State == LoopUnknown {
+			n++
+		}
+	}
+	return n
+}
+
 func (p LoopPass) progressed() bool {
 	for _, item := range p.Items {
 		if item.Started || item.Approved {
@@ -101,25 +128,18 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 	if err != nil {
 		return report, err
 	}
-	loaded, err := formula.Load(lab, lo.Template.FormulaID)
+	loaded, err := loadLoopFormula(lab, lo.Template.FormulaID)
 	if err != nil {
 		return report, err
 	}
-	if !loaded.Approved {
-		return report, fmt.Errorf("approve a Formula with init before running")
-	}
-	f := loaded.Formula
-	if err = f.ValidateReadiness(); err != nil {
-		return report, err
-	}
-	if f.Intake.Source != "github-issues" {
-		return report, fmt.Errorf("unsupported intake source")
-	}
 	if lo.ListIssues == nil {
-		lo.ListIssues = intake.ReadOpenIssues
+		selector := lo.Select
+		lo.ListIssues = func(ctx context.Context, repository string) (intake.OpenIssues, error) {
+			return intake.ReadSelectedOpenIssues(ctx, repository, selector)
+		}
 	}
 	lo.Template.LabDir = lab
-	l := &loopRun{o: lo, lab: lab, repo: f.Intake.Repo, loaded: loaded}
+	l := &loopRun{o: lo, lab: lab, repo: loaded.Formula.Intake.Repo, loaded: loaded}
 	report.Repository = l.repo
 	for {
 		pass, err := l.pass(ctx)
@@ -133,11 +153,51 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 	}
 }
 
+func loadLoopFormula(lab, id string) (formula.Loaded, error) {
+	loaded, err := formula.Load(lab, id)
+	if err != nil {
+		return loaded, err
+	}
+	if !loaded.Approved {
+		return loaded, fmt.Errorf("approve a Formula with init before running")
+	}
+	f := loaded.Formula
+	if err = f.ValidateReadiness(); err != nil {
+		return loaded, err
+	}
+	if f.Intake.Source != "github-issues" {
+		return loaded, fmt.Errorf("unsupported intake source")
+	}
+	return loaded, nil
+}
+
+// reloadFormula re-reads the approved Formula before every pass. Each Molecule
+// snapshots the Formula it started under and an approval needs the live Formula
+// to match that snapshot, so a Formula approved again during a long run must be
+// the one later approvals compare against. The run stays bound to one repository.
+func (l *loopRun) reloadFormula() error {
+	loaded, err := loadLoopFormula(l.lab, l.o.Template.FormulaID)
+	if err != nil {
+		return fmt.Errorf("the approved Formula could not be reloaded, so nothing was started or advanced: %w", err)
+	}
+	if !strings.EqualFold(loaded.Formula.Intake.Repo, l.repo) {
+		return fmt.Errorf("the approved Formula's intake.repo changed from %s to %s during the run; restart the loop", l.repo, loaded.Formula.Intake.Repo)
+	}
+	l.loaded = loaded
+	return nil
+}
+
 func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 	var pass LoopPass
 	listed, err := l.o.ListIssues(ctx, l.repo)
 	if err != nil {
 		return pass, err
+	}
+	if err = l.reloadFormula(); err != nil {
+		return pass, err
+	}
+	if listed.Truncated && l.o.Select.Kind != "" && l.o.Select.Kind != intake.SelectOldest {
+		return pass, fmt.Errorf("the open Issue listing was truncated after %d Issues, so %s cannot be applied to every open Issue; nothing was started or advanced", len(listed.Issues), l.o.Select)
 	}
 	if listed.Truncated {
 		pass.Notes = append(pass.Notes, fmt.Sprintf("open Issue listing truncated after %d Issues; later Issues were not considered", len(listed.Issues)))
@@ -192,6 +252,10 @@ func (l *loopRun) existing(ctx context.Context, item LoopItem, summary QueueSumm
 			if a.Status == "running" || a.Status == "allocating" {
 				item.MoleculeID, item.Status = a.ID, a.Status
 				item.Reason = activeReason(a.Status, a.ID)
+				if reason, stuck := l.interruptedLedger(a, item); stuck {
+					item.State, item.Reason = LoopStalled, reason
+					return item
+				}
 				break
 			}
 		}
@@ -204,6 +268,75 @@ func (l *loopRun) existing(ctx context.Context, item LoopItem, summary QueueSumm
 		return l.advance(ctx, item)
 	}
 	return item
+}
+
+// defaultAnalysisTimeout is the harness timeout when the Formula declares none.
+const defaultAnalysisTimeout = 10 * time.Minute
+
+// analysisTimeout is how long a ledger may go unwritten while intake or analysis
+// is still working: the Formula's analysis binding timeout.
+func (l *loopRun) analysisTimeout() time.Duration {
+	if b, _ := l.loaded.Formula.ExecutionBinding(formula.IntakeRole); b.TimeoutMS > 0 {
+		return time.Duration(b.TimeoutMS) * time.Millisecond
+	}
+	return defaultAnalysisTimeout
+}
+
+// interruptedLedger recognises a ledger a crash left running or allocating. It
+// reports one only when nothing could still be working on it: the ledger has not
+// been written for longer than the analysis timeout (a live manual forgecell run
+// keeps writing it), no live process owns its approval lock, and, for a ledger
+// that never reached a scope plan, no loop holds the Issue's start lock, which a
+// live loop holds for the whole of its intake. Anything uncertain keeps the plain
+// active report.
+func (l *loopRun) interruptedLedger(a QueueAttempt, item LoopItem) (string, bool) {
+	if a.Status != "running" && a.Status != "allocating" {
+		return "", false
+	}
+	timeout := l.analysisTimeout()
+	info, err := os.Lstat(filepath.Join(l.lab, "ledgers", a.ID+".json"))
+	if err != nil || !info.Mode().IsRegular() || time.Since(info.ModTime()) <= timeout {
+		return "", false
+	}
+	if approvalOwnerMayBeLive(l.lab, a.ID) {
+		return "", false
+	}
+	if a.Phase != "" {
+		return interruptedApprovalReason(a, timeout), true
+	}
+	unlock, err := lockIssue(l.lab, item.Repository, item.Issue)
+	if err != nil {
+		return "", false
+	}
+	unlock()
+	return unfinishedIntakeReason(a, timeout), true
+}
+
+// approvalOwnerMayBeLive reads the approval lock directory's owner file. Anything
+// it cannot read or parse counts as a live owner, so a state it does not
+// understand is never reported as abandoned.
+func approvalOwnerMayBeLive(lab, id string) bool {
+	lock := filepath.Join(lab, "ledgers", id+".lock")
+	if _, err := os.Lstat(lock); err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	raw, err := os.ReadFile(filepath.Join(lock, "owner"))
+	if err != nil {
+		return true
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid < 1 {
+		return true
+	}
+	return confirmProcessExited(pid) != nil
+}
+
+func unfinishedIntakeReason(a QueueAttempt, timeout time.Duration) string {
+	return fmt.Sprintf("the ledger reports status %s but holds no scope plan, so intake never reached the scope gate; it has not been written for over %s, and no loop is starting this Issue, so a crash most likely interrupted it. forgecell recover needs a plan digest and does not apply to a ledger without a plan, so inspect it with forgecell ledger %s once no Lab process is running. The loop started no other Molecule for this Issue", a.Status, timeout, a.ID)
+}
+
+func interruptedApprovalReason(a QueueAttempt, timeout time.Duration) string {
+	return fmt.Sprintf("the ledger reports status %s in readiness phase %s, but it has not been written for over %s and no live Lab process owns its approval lock, so a crash most likely interrupted it. The loop did not start, approve or invoke anything; inspect it with forgecell ledger %s, and if every Lab process has stopped, forgecell recover %s --plan DIGEST --confirm-stopped may apply", a.Status, oneLine(a.Phase), timeout, a.ID, a.ID)
 }
 
 // start creates a Molecule only while holding the Issue's start lock and only if
@@ -288,8 +421,35 @@ func (l *loopRun) advance(ctx context.Context, item LoopItem) LoopItem {
 		item.Reason = fmt.Sprintf("the scope gate needs a human (%s): %s: %s", eval.Outcome, eval.Reason, oneLine(eval.Detail))
 		return item
 	}
+	item.Status, item.Phase = r.Status, statePhase(r)
+	// The approval compares the source checkout against the plan's frozen base. An
+	// empty base means HEAD, which moves whenever the checkout does, so the loop pins
+	// the base to the plan's own. A plan frozen on a different base than the
+	// Molecule's workspace could never be applied.
+	if len(r.Readiness.Plans) == 0 {
+		item.State = LoopStalled
+		item.Reason = "the policy approved this plan but the ledger holds no plan to pin the approval's base to, so the approval was not applied"
+		return item
+	}
+	planBase := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan.Inputs.BaseCommit
+	if planBase == "" || planBase != r.Workspace.BaseCommit {
+		item.State = LoopStalled
+		item.Reason = fmt.Sprintf("the policy approved this plan but its frozen base %s differs from the Molecule workspace base %s, so the approval was refused; inspect forgecell ledger %s", oneLine(planBase), oneLine(r.Workspace.BaseCommit), r.ID)
+		return item
+	}
+	lock := filepath.Join(l.lab, "ledgers", r.ID+".lock")
+	if _, err = os.Lstat(lock); !errors.Is(err, os.ErrNotExist) {
+		item.State = LoopStalled
+		if err != nil {
+			item.Reason = "the policy approved this plan but its approval lock " + oneLine(lock) + " could not be checked: " + oneLine(err.Error())
+			return item
+		}
+		item.Reason = fmt.Sprintf("the policy approved this plan but its approval lock %s exists, so the approval was not applied: another approval, amend or recover holds it, or an interrupted approval left it behind. The loop never removes it; if no Lab process is running, inspect it and forgecell ledger %s", oneLine(lock), r.ID)
+		return item
+	}
 	o := l.o.Template
-	o.Issue, o.Approve = strconv.FormatInt(r.Issue.Number, 10), eval.PlanDigest
+	o.Issue, o.Approve, o.Base = strconv.FormatInt(r.Issue.Number, 10), eval.PlanDigest, planBase
+	moved := l.sourceMovedNote(ctx, r)
 	decisions := len(r.PolicyDecisions)
 	_, applyErr := resumeByPolicy(ctx, o, l.loaded, r.Issue.Number, r.Issue.Repo)
 	after, err := readMolecule(l.lab, item.MoleculeID)
@@ -298,16 +458,31 @@ func (l *loopRun) advance(ctx context.Context, item LoopItem) LoopItem {
 	}
 	item.Approved = len(after.PolicyDecisions) > decisions
 	item = settle(item, after)
-	if applyErr == nil {
-		return item
-	}
-	if item.Approved || statePhase(after) != "scope-waiting" {
+	switch {
+	case applyErr == nil:
+	case item.Approved || statePhase(after) != "scope-waiting":
 		item.Failed = true
 		item.Reason += "; the approval transaction reported: " + oneLine(applyErr.Error())
-	} else {
+	default:
+		item.State = LoopStalled
 		item.Reason = "the policy approved this plan but the approval was not applied: " + oneLine(applyErr.Error())
 	}
+	if moved != "" {
+		item.Reason += "; " + moved
+	}
 	return item
+}
+
+// sourceMovedNote reports a source checkout whose HEAD is no longer the base the
+// Molecule was frozen on. It is information, never a refusal: the loop's approval
+// is pinned to the plan's base, unlike a manual approval, which checks the current
+// HEAD.
+func (l *loopRun) sourceMovedNote(ctx context.Context, r Record) string {
+	head, err := git(ctx, r.Workspace.SourceRoot, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+	if err != nil || head == r.Workspace.BaseCommit {
+		return ""
+	}
+	return fmt.Sprintf("the source checkout's HEAD (%s) has moved since the plan froze base %s; the loop's approval is pinned to the plan's base, so it was not affected, but a manual approval would be refused until intake is refreshed", oneLine(head), oneLine(r.Workspace.BaseCommit))
 }
 
 func unreadable(item LoopItem, err error, failed bool) LoopItem {
@@ -368,18 +543,11 @@ func stoppedReason(r Record) string {
 	return "no detail was recorded"
 }
 
-// oneLine bounds ledger text for a terminal report and removes control characters.
+// oneLine bounds ledger text for a terminal report. It removes terminal escape
+// sequences and replaces control, line-break and direction-override characters,
+// like every other text shown from an untrusted source.
 func oneLine(s string) string {
-	s = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, s)), " ")
-	if runes := []rune(s); len(runes) > 300 {
-		return string(runes[:300]) + "…"
-	}
-	return s
+	return harness.ReviewDisplayText(s, 300)
 }
 
 func readMolecule(lab, id string) (Record, error) {
@@ -414,24 +582,42 @@ func safeLoopID(id string) bool {
 
 var errLocked = errors.New("locked by another loop")
 
+// lockedByLoop explains a failed Molecule flock to a manual command. The flock is
+// always taken before the approval lock directory, never after it.
+func lockedByLoop(err error) error {
+	if errors.Is(err, errLocked) {
+		return fmt.Errorf("Molecule is locked by a running loop or another command; wait for it to finish, then run this again: %w", err)
+	}
+	return fmt.Errorf("the Molecule lock could not be taken: %w", err)
+}
+
+// loopLockSuffix names the advisory lock files in the ledgers directory. They
+// are never removed, so the ledger inventory does not count them toward its
+// directory entry cap.
+const loopLockSuffix = ".loop-lock"
+
 // lockMolecule takes an exclusive advisory lock on the Molecule. It is separate
 // from the approval transaction's own lock directory.
 func lockMolecule(lab, id string) (func(), error) {
 	if !safeLoopID(id) {
 		return nil, fmt.Errorf("invalid Molecule id")
 	}
-	return flockLedgerFile(lab, id+".loop-lock")
+	return flockLedgerFile(lab, id+loopLockSuffix)
 }
 
 // lockIssue takes an exclusive advisory lock on starting a Molecule for one
-// Issue. GitHub names are case-insensitive, so the lock name is lowercased to
-// match the inventory's case-insensitive join.
+// Issue. GitHub names are case-insensitive, so the repository is lowercased to
+// match the inventory's case-insensitive join. The lock name carries a hash of
+// the repository, not the repository itself: joining owner and repository with a
+// separator that GitHub names also contain would give a-b/c and a/b-c one lock.
 func lockIssue(lab, repository string, number int64) (func(), error) {
-	name := "issue-" + strings.ReplaceAll(strings.ToLower(repository), "/", "-") + "-" + strconv.FormatInt(number, 10)
-	if !safeLoopID(strings.ReplaceAll(name, ".", "_")) {
+	lower := strings.ToLower(repository)
+	owner, repo, ok := strings.Cut(lower, "/")
+	if !ok || !safeLoopID(strings.ReplaceAll(owner, ".", "_")) || !safeLoopID(strings.ReplaceAll(repo, ".", "_")) {
 		return nil, fmt.Errorf("invalid Issue identity")
 	}
-	return flockLedgerFile(lab, name+".loop-lock")
+	sum := sha256.Sum256([]byte(lower))
+	return flockLedgerFile(lab, "issue-"+hex.EncodeToString(sum[:16])+"-"+strconv.FormatInt(number, 10)+loopLockSuffix)
 }
 
 // flockLedgerFile never blocks. The operating system drops the lock when the file

@@ -715,6 +715,15 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if _, err = resolveExecutionRoles(r); err != nil {
 		return r, err
 	}
+	if !byPolicy {
+		// The loop holds the Molecule flock for a policy approval; a human approval
+		// takes it here, before the lock directory, so it cannot race a loop.
+		unlockLoop, lockErr := lockMolecule(o.LabDir, r.ID)
+		if lockErr != nil {
+			return r, lockedByLoop(lockErr)
+		}
+		defer unlockLoop()
+	}
 	lock := filepath.Join(o.LabDir, "ledgers", r.ID+".lock")
 	if err = os.Mkdir(lock, 0700); err != nil {
 		return r, fmt.Errorf("Molecule is locked; inspect an interrupted attempt before recovery: %w", err)

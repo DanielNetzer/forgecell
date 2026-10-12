@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -116,29 +117,47 @@ type remoteOpenIssue struct {
 	Milestone *remoteMilestone `json:"milestone"`
 }
 
-// ReadOpenIssues reads open Issues, oldest first, in at most openIssueMaxPages
-// bounded read-only GETs. Pull requests are skipped. Any malformed or
-// inconsistent page fails the whole read rather than yielding a guess.
+// ReadOpenIssues reads open Issues, oldest first, without a selection. See
+// ReadSelectedOpenIssues.
 func ReadOpenIssues(ctx context.Context, repository string) (OpenIssues, error) {
+	return ReadSelectedOpenIssues(ctx, repository, Selector{})
+}
+
+// ReadSelectedOpenIssues reads open Issues, oldest first, in at most
+// openIssueMaxPages bounded read-only GETs. Pull requests are skipped. A label or
+// milestone selection is part of the query, so the page cap applies to the Issues
+// that match it, and reaching the cap under a selection is an error: the matches
+// beyond it are unknown. An Issue that moves between pages while they are read
+// appears once, at its first occurrence. Any other malformed or inconsistent page
+// fails the whole read rather than yielding a guess.
+func ReadSelectedOpenIssues(ctx context.Context, repository string, selector Selector) (OpenIssues, error) {
 	var result OpenIssues
 	bound, err := BindRepository(IssueRef{Number: 1}, repository)
 	if err != nil {
 		return result, err
 	}
+	filter := ""
+	switch selector.Kind {
+	case SelectLabel:
+		if strings.Contains(selector.Value, ",") {
+			return result, fmt.Errorf("label %q cannot be selected: GitHub's labels filter treats a comma as a separator", selector.Value)
+		}
+		filter = "&labels=" + url.QueryEscape(selector.Value)
+	case SelectMilestone:
+		number, err := readMilestoneNumber(ctx, bound, selector.Value)
+		if err != nil {
+			return result, err
+		}
+		filter = fmt.Sprintf("&milestone=%d", number)
+	}
 	seen := map[int64]bool{}
 	for page := 1; page <= openIssueMaxPages; page++ {
-		endpoint := fmt.Sprintf("repos/%s/%s/issues?state=open&sort=created&direction=asc&per_page=%d&page=%d", bound.Owner, bound.Repo, openIssuePageSize, page)
-		remote := process.Run(ctx, process.Options{Argv: []string{"gh", "api", "--hostname", "github.com", "--method", "GET", endpoint}, Stdin: []byte{}, Timeout: 20 * time.Second, MaxOutputBytes: 4_000_000})
-		if remote.Overflow {
-			return result, fmt.Errorf("GitHub data unavailable: response exceeds 4000000 bytes")
+		endpoint := fmt.Sprintf("repos/%s/%s/issues?state=open&sort=created&direction=asc&per_page=%d%s&page=%d", bound.Owner, bound.Repo, openIssuePageSize, filter, page)
+		items, err := readPage[remoteOpenIssue](ctx, endpoint, openIssuePageSize)
+		if err != nil {
+			return result, err
 		}
-		if !remote.OK {
-			return result, fmt.Errorf("GitHub data unavailable: %s", remote.Error)
-		}
-		var items []remoteOpenIssue
-		if err = json.Unmarshal([]byte(remote.Stdout), &items); err != nil || items == nil || len(items) > openIssuePageSize {
-			return result, fmt.Errorf("GitHub data unavailable: malformed or oversized page")
-		}
+		onPage := map[int64]bool{}
 		for _, item := range items {
 			if len(item.PR) > 0 && string(item.PR) != "null" {
 				var pr map[string]json.RawMessage
@@ -151,8 +170,12 @@ func ReadOpenIssues(ctx context.Context, repository string) (OpenIssues, error) 
 			if err != nil {
 				return result, err
 			}
+			if onPage[issue.Number] {
+				return result, fmt.Errorf("GitHub data unavailable: duplicate Issue %d within one page", issue.Number)
+			}
+			onPage[issue.Number] = true
 			if seen[issue.Number] {
-				return result, fmt.Errorf("GitHub data unavailable: duplicate Issue %d across pages", issue.Number)
+				continue
 			}
 			seen[issue.Number] = true
 			result.Issues = append(result.Issues, issue)
@@ -161,8 +184,73 @@ func ReadOpenIssues(ctx context.Context, repository string) (OpenIssues, error) 
 			return result, nil
 		}
 	}
+	if filter != "" {
+		return result, fmt.Errorf("%s matches more than %d open Issues, so the listing is incomplete and nothing was selected; narrow the selection", selector, openIssuePageSize*openIssueMaxPages)
+	}
 	result.Truncated = true
 	return result, nil
+}
+
+const (
+	milestonePageSize = 100
+	milestoneMaxPages = 5
+)
+
+type remoteMilestoneNumber struct {
+	Number int64  `json:"number"`
+	Title  string `json:"title"`
+}
+
+// readMilestoneNumber resolves an exact, case-sensitive milestone title to its
+// number with bounded read-only GETs. Closed milestones are included because an
+// open Issue can still belong to one.
+func readMilestoneNumber(ctx context.Context, bound IssueRef, title string) (int64, error) {
+	var found []int64
+	for page := 1; page <= milestoneMaxPages; page++ {
+		endpoint := fmt.Sprintf("repos/%s/%s/milestones?state=all&per_page=%d&page=%d", bound.Owner, bound.Repo, milestonePageSize, page)
+		items, err := readPage[remoteMilestoneNumber](ctx, endpoint, milestonePageSize)
+		if err != nil {
+			return 0, err
+		}
+		for _, item := range items {
+			if item.Number < 1 || item.Title == "" {
+				return 0, fmt.Errorf("GitHub data unavailable: invalid milestone metadata")
+			}
+			if item.Title == title {
+				found = append(found, item.Number)
+			}
+		}
+		if len(items) < milestonePageSize {
+			break
+		}
+		if page == milestoneMaxPages && len(found) == 0 {
+			return 0, fmt.Errorf("milestone %q was not found in the first %d milestones, so it cannot be selected", title, milestonePageSize*milestoneMaxPages)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return 0, fmt.Errorf("milestone %q does not exist in %s/%s", title, bound.Owner, bound.Repo)
+	case 1:
+		return found[0], nil
+	}
+	return 0, fmt.Errorf("milestone %q is ambiguous: GitHub returned %d milestones with that title", title, len(found))
+}
+
+// readPage makes one bounded read-only GET and decodes a JSON array of at most
+// limit items.
+func readPage[T any](ctx context.Context, endpoint string, limit int) ([]T, error) {
+	remote := process.Run(ctx, process.Options{Argv: []string{"gh", "api", "--hostname", "github.com", "--method", "GET", endpoint}, Stdin: []byte{}, Timeout: 20 * time.Second, MaxOutputBytes: 4_000_000})
+	if remote.Overflow {
+		return nil, fmt.Errorf("GitHub data unavailable: response exceeds 4000000 bytes")
+	}
+	if !remote.OK {
+		return nil, fmt.Errorf("GitHub data unavailable: %s", remote.Error)
+	}
+	var items []T
+	if err := json.Unmarshal([]byte(remote.Stdout), &items); err != nil || items == nil || len(items) > limit {
+		return nil, fmt.Errorf("GitHub data unavailable: malformed or oversized page")
+	}
+	return items, nil
 }
 
 func openIssue(repository string, item remoteOpenIssue) (OpenIssue, error) {

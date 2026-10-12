@@ -512,8 +512,11 @@ func TestLoopReportsAnApprovalThatCouldNotBeApplied(t *testing.T) {
 	}
 	report := loopOnce(t, o, loopFixedList(loopOpen(12, 0)))
 	item := loopItem(t, report.Passes[0], 12)
-	if !item.Started || item.Approved || item.Failed || item.State != LoopWaiting || !strings.Contains(item.Reason, "not applied") {
+	if !item.Started || item.Approved || item.Failed || item.State != LoopStalled || !strings.Contains(item.Reason, "not applied") {
 		t.Fatalf("%+v", item)
+	}
+	if report.Failed() || report.NonProgress() != 1 {
+		t.Fatalf("an unapplied approval must be non-progress, not a failure: failed %t, non-progress %d", report.Failed(), report.NonProgress())
 	}
 	assertNothingApproved(t, loadRecord(t, o.LabDir, item.MoleculeID))
 	if loopStarts(loopLines(t, harnessLog)) != 0 {

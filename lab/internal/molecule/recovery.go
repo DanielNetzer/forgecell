@@ -37,6 +37,11 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 	if r.ID != id {
 		return r, fmt.Errorf("Molecule and plan mismatch")
 	}
+	unlockLoop, err := lockMolecule(lab, r.ID)
+	if err != nil {
+		return r, lockedByLoop(err)
+	}
+	defer unlockLoop()
 	recoveryLock := filepath.Join(lab, "ledgers", r.ID+".recovery-lock")
 	if err = os.Mkdir(recoveryLock, 0700); err != nil {
 		return r, fmt.Errorf("recovery already active: %w", err)

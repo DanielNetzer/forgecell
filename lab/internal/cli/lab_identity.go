@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -36,6 +38,21 @@ var originRemote = func(ctx context.Context, root string) (string, error) {
 type labResolution struct {
 	Dir    string
 	Notice string
+}
+
+// shown makes a directory name or an error text read from disk safe for a
+// terminal: escape sequences, control and direction-override characters are gone.
+// Only messages use it; a resolved directory is always returned as it is.
+func shown(s string) string {
+	return harness.ReviewDisplayText(s, 1024)
+}
+
+func shownAll(items []string) []string {
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = shown(item)
+	}
+	return out
 }
 
 // labArgs separates --lab-name from the command's own flags and reports whether
@@ -72,6 +89,9 @@ func labArgs(args []string) (rest []string, name string, explicitLab bool, err e
 		}
 		rest = append(rest, arg)
 	}
+	if named && explicitLab {
+		return nil, "", false, fmt.Errorf("--lab and --lab-name cannot be combined: --lab DIR already chooses the Lab, so --lab-name would be ignored; drop one of them")
+	}
 	return rest, strings.ToLower(name), explicitLab, nil
 }
 
@@ -79,6 +99,9 @@ func labArgs(args []string) (rest []string, name string, explicitLab bool, err e
 // rather than its path. It only reads local state and never creates anything.
 func resolveDefaultLab(ctx context.Context, name string) (labResolution, error) {
 	if os.Getenv("FORGECELL_LAB") != "" {
+		if name != "" {
+			return labResolution{}, fmt.Errorf("--lab-name cannot be combined with FORGECELL_LAB, which already chooses the Lab; unset FORGECELL_LAB or drop --lab-name")
+		}
 		dir, err := defaultLabDir()
 		return labResolution{Dir: dir}, err
 	}
@@ -95,7 +118,7 @@ func resolveDefaultLab(ctx context.Context, name string) (labResolution, error) 
 		if err != nil {
 			return labResolution{}, err
 		}
-		return labResolution{Dir: dir, Notice: fmt.Sprintf("%s; using path-keyed Lab %s", why, dir)}, nil
+		return labResolution{Dir: dir, Notice: fmt.Sprintf("%s; using path-keyed Lab %s", why, shown(dir))}, nil
 	}
 	home, err := forgecellHome(root)
 	if err != nil {
@@ -103,35 +126,119 @@ func resolveDefaultLab(ctx context.Context, name string) (labResolution, error) 
 	}
 	labs := filepath.Join(home, "labs")
 	identity := filepath.Join(labs, identityLabName(repo, name))
+	info, statErr := os.Lstat(identity)
+	switch {
+	case statErr == nil && !info.IsDir():
+		return labResolution{}, fmt.Errorf("Lab path %s exists but is not a real directory (a symbolic link or file is never followed); remove it or choose a Lab with --lab DIR", shown(identity))
+	case statErr != nil && !os.IsNotExist(statErr):
+		return labResolution{}, fmt.Errorf("Lab path %s cannot be inspected (%s); choose a Lab with --lab DIR", shown(identity), shown(statErr.Error()))
+	}
+	// A Lab created before owner--repo naming sits under the ambiguous legacy name.
+	// While the new-format directory is absent, a legacy directory that might be
+	// this repository's must be settled before anything is chosen or created, so a
+	// second Lab never appears beside it.
+	legacy := filepath.Join(labs, legacyLabName(repo, name))
+	legacyMatch := false
+	if statErr != nil {
+		if legacyMatch, err = legacyLabFor(legacy, repo, identity); err != nil {
+			return labResolution{}, err
+		}
+	}
+	var notice string
 	if name == "" {
 		entries, truncated, err := scanLabs(labs)
 		if err != nil {
-			return labResolution{}, fmt.Errorf("cannot scan Labs under %s (%v); use --lab DIR to choose one", labs, err)
+			return labResolution{}, fmt.Errorf("cannot scan Labs under %s (%s); use --lab DIR to choose one", shown(labs), shown(err.Error()))
 		}
 		if truncated {
-			return labResolution{}, fmt.Errorf("more than %d entries under %s, so a unique Lab for %s cannot be established; use --lab DIR to choose one", maxLabEntries, labs, repo)
+			return labResolution{}, fmt.Errorf("more than %d entries under %s, so a unique Lab for %s cannot be established; use --lab DIR to choose one", maxLabEntries, shown(labs), repo)
 		}
-		var matches []string
+		var matches, unreadable []string
 		for _, e := range entries {
-			if e.Err == "" && strings.EqualFold(e.Repo, repo) {
+			switch {
+			case e.Err != "":
+				unreadable = append(unreadable, fmt.Sprintf("%s (%s)", shown(e.Dir), shown(e.Err)))
+			case strings.EqualFold(e.Repo, repo):
 				matches = append(matches, e.Dir)
 			}
 		}
+		if len(unreadable) > 0 {
+			notice = fmt.Sprintf("these Labs could not be read, so none was considered for %s: %s; fix or remove them, or choose a Lab with --lab DIR", repo, strings.Join(unreadable[:min(len(unreadable), 5)], "; "))
+			if more := len(unreadable) - 5; more > 0 {
+				notice += fmt.Sprintf(" (and %d more)", more)
+			}
+		}
+		identityMatches := slices.Contains(matches, identity)
 		switch {
+		case identityMatches && len(matches) == 1:
+			return labResolution{Dir: identity, Notice: notice}, nil
+		case identityMatches:
+			return labResolution{Dir: identity, Notice: joinNotices(notice, fmt.Sprintf("using Lab %s for %s; other Labs also match it: %s", shown(identity), repo, strings.Join(shownAll(withoutDir(matches, identity)), ", ")))}, nil
+		case legacyMatch && len(matches) > 1 && slices.Contains(matches, legacy):
+			return labResolution{Dir: legacy, Notice: joinNotices(notice, fmt.Sprintf("using Lab %s for %s, which uses the earlier Lab naming, so consider renaming it to %s; other Labs also match it: %s", shown(legacy), repo, shown(identity), strings.Join(shownAll(withoutDir(matches, legacy)), ", ")))}, nil
 		case len(matches) > 1:
-			return labResolution{}, fmt.Errorf("repository %s matches more than one Lab; choose one with --lab DIR (or --lab-name NAME):\n  %s", repo, strings.Join(matches, "\n  "))
-		case len(matches) == 1 && matches[0] == identity:
-			return labResolution{Dir: identity}, nil
+			return labResolution{}, fmt.Errorf("repository %s matches more than one Lab; choose one with --lab DIR:\n  %s", repo, strings.Join(shownAll(matches), "\n  "))
 		case len(matches) == 1:
-			return labResolution{Dir: matches[0], Notice: fmt.Sprintf("using existing Lab %s for %s (its Formula's intake.repo matches); pass --lab DIR to choose another", matches[0], repo)}, nil
+			found := fmt.Sprintf("using existing Lab %s for %s (its Formula's intake.repo matches); pass --lab DIR to choose another", shown(matches[0]), repo)
+			if matches[0] == legacy {
+				found += fmt.Sprintf("; it uses the earlier Lab naming, so consider renaming it to %s", shown(identity))
+			}
+			return labResolution{Dir: matches[0], Notice: joinNotices(notice, found)}, nil
 		}
+	} else if legacyMatch {
+		return labResolution{Dir: legacy, Notice: fmt.Sprintf("using existing Lab %s for %s (its Formula's intake.repo matches); it uses the earlier Lab naming, so consider renaming it to %s", shown(legacy), repo, shown(identity))}, nil
 	}
-	if info, err := os.Lstat(identity); err == nil && info.IsDir() {
+	if statErr == nil {
 		if e := inspectLab(identity); e.Err == "" && e.Repo != "" && !strings.EqualFold(e.Repo, repo) {
-			return labResolution{}, fmt.Errorf("Lab directory %s belongs to repository %s, not %s; choose a different Lab with --lab-name NAME or --lab DIR", identity, e.Repo, repo)
+			return labResolution{}, fmt.Errorf("Lab directory %s belongs to repository %s, not %s; choose a different Lab with --lab-name NAME or --lab DIR", shown(identity), shown(e.Repo), repo)
 		}
 	}
-	return labResolution{Dir: identity}, nil
+	return labResolution{Dir: identity, Notice: notice}, nil
+}
+
+// legacyLabFor probes the exact legacy directory for a repository directly, not
+// through the Lab scan. It reports whether that directory is this repository's
+// Lab. A directory that might be, but cannot be confirmed (unreadable, corrupt,
+// linked, or without a lab.json yet because onboarding is pending), is refused:
+// returning the new-format sibling there would split one repository's state
+// across two Labs.
+func legacyLabFor(legacy, repo, identity string) (bool, error) {
+	refuse := func(why string) (bool, error) {
+		return false, fmt.Errorf("%s uses the earlier Lab naming and %s, so it may be the Lab for %s, and no new Lab %s was chosen beside it; choose a Lab with --lab DIR, repair it, or rename it to %s", shown(legacy), shown(why), repo, shown(identity), shown(identity))
+	}
+	info, err := os.Lstat(legacy)
+	switch {
+	case os.IsNotExist(err):
+		return false, nil
+	case err != nil:
+		return refuse("cannot be inspected (" + err.Error() + ")")
+	case info.Mode()&os.ModeSymlink != 0:
+		return refuse("is a symbolic link, which is never followed")
+	case !info.IsDir():
+		return false, nil
+	}
+	if _, err = os.Lstat(filepath.Join(legacy, "lab.json")); os.IsNotExist(err) {
+		return refuse("has no lab.json yet (an onboarding proposal may be pending)")
+	}
+	e := inspectLab(legacy)
+	if e.Err != "" {
+		return refuse("cannot be read (" + e.Err + ")")
+	}
+	return strings.EqualFold(e.Repo, repo), nil
+}
+
+func withoutDir(items []string, drop string) []string {
+	return slices.DeleteFunc(slices.Clone(items), func(item string) bool { return item == drop })
+}
+
+func joinNotices(parts ...string) string {
+	var kept []string
+	for _, part := range parts {
+		if part != "" {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // checkoutRepository returns OWNER/REPO from origin, or why none is available.
@@ -150,7 +257,22 @@ func checkoutRepository(ctx context.Context, root string) (repo, why string) {
 	return repo, ""
 }
 
+// identityLabName joins owner and repository with "--" and a Lab name with "@".
+// GitHub owner names cannot contain "--" or "@", so no two distinct repository
+// and name pairs share a directory the way owner "a-b" with repository "c" and
+// owner "a" with repository "b-c" once did.
 func identityLabName(repo, name string) string {
+	label := strings.ToLower(strings.Replace(repo, "/", "--", 1))
+	if name != "" {
+		label += "@" + strings.ToLower(name)
+	}
+	return label
+}
+
+// legacyLabName is the directory name Labs were given before owner--repo naming.
+// It is ambiguous, so a Lab found under it is used only after its lab.json
+// confirms the repository.
+func legacyLabName(repo, name string) string {
 	label := strings.ToLower(strings.Replace(repo, "/", "-", 1))
 	if name != "" {
 		label += "-" + strings.ToLower(name)

@@ -134,29 +134,81 @@ same repository finds the same default Lab, because the default is keyed by
 URLs are normalized), not by its path. Resolution reads local git configuration
 only: no network, no `gh`, no model.
 
-- **Default directory:** `~/.forgecell/labs/<owner>-<repo>` (lowercase), or
-  `FORGECELL_HOME/labs/…` when set. `--lab-name NAME` appends `-<name>` and is
-  accepted by every command that takes a Lab (`init`, `doctor`, `run`, `ledger`,
-  `amend`, `recover`, `issues`, `learn`, `suggestion`, `deliver`, `checks`). A name is
-  1–32 letters, digits, `-` or `_` and is lowercased; anything else exits 1 before
-  any filesystem access.
+- **Default directory:** `~/.forgecell/labs/<owner>--<repo>` (lowercase), or
+  `FORGECELL_HOME/labs/…` when set. `--lab-name NAME` appends `@<name>`
+  (`<owner>--<repo>@<name>`) and is accepted by every command that takes a Lab
+  (`init`, `doctor`, `run`, `ledger`, `amend`, `recover`, `issues`, `learn`,
+  `suggestion`, `deliver`, `checks`, `loop`). A name is 1–32 letters, digits, `-` or
+  `_` and is lowercased; anything else exits 1 before any filesystem access. GitHub
+  owner names contain neither `--` nor `@`, so no two repositories (or repository and
+  Lab name pairs) share a directory.
+- **Legacy directory names:** Labs created as `<owner>-<repo>` or
+  `<owner>-<repo>-<name>` keep resolving. When the new-format directory does not
+  exist, the old-named Lab is used only if its `lab.json` Formula names the same
+  repository (never by its name alone), and stderr suggests renaming it. A new Lab is
+  never created beside it. When both exist, the new-format directory wins. If the
+  exact old-named directory for this repository exists but cannot be confirmed
+  (corrupt or unreadable `lab.json` or Formula, a symbolic link, or no `lab.json` yet
+  because onboarding is pending), the CLI exits 1 naming that directory and points to
+  `--lab DIR`, a repair or a rename; it never chooses or creates the new-format
+  sibling. A legacy-named Lab that belongs to another repository is ignored. When
+  several Labs match and one is the exact old name, it is chosen.
 - **Reusing an existing Lab:** if exactly one Lab under `FORGECELL_HOME/labs` has an
   active Formula whose `intake.repo` matches the checkout's repository
   (case-insensitive), it is used even when its directory has another name, such as
   an older path-keyed `forgecell-core-<hash>`. The chosen directory is printed on
   stderr; stdout (a `ledger` dump, `doctor --json`) is unchanged.
-- **Ambiguity is never guessed:** with more than one match, including a legacy
-  path-keyed Lab plus an identity Lab, the command exits 1 before any side effect,
-  lists every candidate and asks for `--lab DIR` (or `--lab-name NAME`).
-- **Name collisions:** `foo-bar/baz` and `foo/bar-baz` both map to `foo-bar-baz`. If
-  the default directory exists for a different repository, the CLI refuses and
-  points to `--lab-name` or `--lab`; it never reuses another repository's Lab.
+- **Ambiguity is never guessed:** with more than one match, the command exits 1
+  before any side effect, lists every candidate and asks for `--lab DIR`.
+  `--lab-name` cannot select the unnamed Lab, so it is not suggested. When the
+  repository's own identity directory is among the matches it is chosen, and stderr
+  names the other matching Labs.
+- **Unreadable Labs:** a Lab with a corrupt `lab.json` or Formula is never matched.
+  Stderr names every such Lab, so a new Lab beside one is not created silently. Every
+  directory name and error shown this way has terminal escape sequences, control and
+  direction-override characters removed.
+- **Not a real directory:** if the identity path is a symbolic link (valid or
+  dangling) or a file, the CLI refuses and points to `--lab DIR`; it never follows
+  the link and creates nothing. If the identity directory belongs to another
+  repository, the CLI refuses too and never reuses that Lab.
 - **Fallback:** with no `origin`, a non-GitHub remote, an unreadable remote or no git
   executable, the legacy path-keyed default is used and stderr says so;
   `--lab-name` is refused there because there is no identity to name. Repository
   renames and transfers are not tracked.
 - **Explicit choices win:** `--lab DIR` (and `FORGECELL_LAB`) skip the remote lookup,
-  the Lab scan and the notice.
+  the Lab scan and the notice. `--lab-name` together with `FORGECELL_LAB`, or with
+  `--lab DIR`, is an error naming both rather than a silently ignored name.
+
+## Lab loop
+
+`forgecell loop` starts intake for eligible open Issues of the Formula's repository
+and approves a scope gate only where the Formula's policy approves that exact plan.
+It never delivers, merges or approves a human gate.
+
+- **Base pinning:** a loop approval is pinned to the plan's frozen base commit, which
+  must equal the Molecule workspace's base or the approval is refused and reported.
+  The source checkout's `HEAD` may move after intake without stopping the loop; the
+  report notes the move. A manual `forgecell run --approve` still checks the current
+  `HEAD` and refuses until intake is refreshed.
+- **Locks:** the loop holds a per-Molecule advisory lock (`ledgers/<id>.loop-lock`)
+  and then the approval lock directory (`ledgers/<id>.lock`). Manual approval,
+  `amend` and `recover` take the same advisory lock first, so they fail fast with a
+  locked error while a loop works on that Molecule. The loop never removes a lock
+  directory.
+- **Selection:** `label:` and `milestone:` selections are part of the GitHub query. A
+  selection that reaches the 300-Issue cap is an error and starts nothing.
+- **Exit codes:** 1 for a loop-level error, 2 when a Molecule this run started or
+  approved failed or blocked, and 3 when the final pass left an Issue stalled (an
+  approval that never applied, for example because its lock directory is held or left
+  behind, or a ledger left running by a crash) or in a state the loop could not
+  determine. Otherwise 0: waiting at a human gate, questions and Molecules skipped
+  because another loop holds the lock still exit 0. The report ends with the count of
+  Issues that made no progress.
+- **Interrupted ledgers:** a ledger reported `running` or `allocating` is called
+  stalled, not active, only when it has not been written for longer than the
+  Formula's analysis timeout and no live process owns its approval lock (and, before
+  a scope plan exists, no loop holds the Issue's start lock). The report then points
+  to `forgecell ledger <id>`. Anything uncertain keeps the plain active report.
 
 `forgecell labs [--json]` lists every directory under `FORGECELL_HOME/labs`, legacy
 path-keyed Labs included, sorted by name. Each entry shows the repository, active
