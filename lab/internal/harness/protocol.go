@@ -8,8 +8,12 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
+	"maps"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -23,7 +27,111 @@ const analysisInstruction = "You are assessing ticket readiness during the intak
 // `launcher __adapter ID PROVIDER` argv and the provider invocation BuildInvocation
 // builds. Change it when either changes incompatibly. A saved binding whose launcher
 // reports another or no version needs a reviewed rebind; nothing else gates approval.
-const AdapterProtocolVersion = "1"
+const AdapterProtocolVersion = "2"
+
+// MCPServer is one verified, pinned MCP provider attached to a Claude invocation
+// through request["mcpServers"]. Command and Args name private copies, never
+// anything resolved from the checkout.
+type MCPServer struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	Tools   []string `json:"tools"`
+}
+
+var mcpServerName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var mcpToolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// mcpAllowedToolMax bounds the full mcp__<name>__<tool> allowlist entry.
+const mcpAllowedToolMax = 64
+
+func hasControlRune(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsControl)
+}
+
+// requestMCPServers reads request["mcpServers"] from its Go form or its
+// JSON-decoded form, validates it and returns private copies ordered by server
+// name, with tools ordered by name. Any malformed value is an error.
+func requestMCPServers(request map[string]any) ([]MCPServer, error) {
+	var decoded []MCPServer
+	switch value := request["mcpServers"].(type) {
+	case nil:
+	case []MCPServer:
+		decoded = value
+	case []any:
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid extension server list")
+		}
+		d := json.NewDecoder(bytes.NewReader(raw))
+		d.DisallowUnknownFields()
+		if err := d.Decode(&decoded); err != nil {
+			return nil, fmt.Errorf("invalid extension server entry")
+		}
+	default:
+		return nil, fmt.Errorf("invalid extension server list")
+	}
+	servers := make([]MCPServer, 0, len(decoded))
+	seen := map[string]bool{}
+	for _, s := range decoded {
+		if !mcpServerName.MatchString(s.Name) {
+			return nil, fmt.Errorf("invalid extension server name")
+		}
+		if seen[s.Name] {
+			return nil, fmt.Errorf("duplicate extension server %s", s.Name)
+		}
+		seen[s.Name] = true
+		if s.Command == "" || !filepath.IsAbs(s.Command) || filepath.Clean(s.Command) != s.Command {
+			return nil, fmt.Errorf("extension server %s needs a clean absolute command path", s.Name)
+		}
+		if hasControlRune(s.Command) || slices.ContainsFunc(s.Args, hasControlRune) {
+			return nil, fmt.Errorf("extension server %s has a control character in its command line", s.Name)
+		}
+		if len(s.Tools) == 0 {
+			return nil, fmt.Errorf("extension server %s lists no tools", s.Name)
+		}
+		tools := slices.Clone(s.Tools)
+		slices.Sort(tools)
+		for i, tool := range tools {
+			if !mcpToolName.MatchString(tool) || len("mcp__"+s.Name+"__"+tool) > mcpAllowedToolMax {
+				return nil, fmt.Errorf("invalid tool name for extension server %s", s.Name)
+			}
+			if i > 0 && tools[i-1] == tool {
+				return nil, fmt.Errorf("duplicate tool %s for extension server %s", tool, s.Name)
+			}
+		}
+		servers = append(servers, MCPServer{Name: s.Name, Command: s.Command, Args: append([]string{}, s.Args...), Tools: tools})
+	}
+	slices.SortFunc(servers, func(a, b MCPServer) int { return strings.Compare(a.Name, b.Name) })
+	return servers, nil
+}
+
+// claudeMCPConfig renders the --mcp-config value and the --allowedTools entries
+// for validated, ordered servers. Struct field order and map key order keep the
+// JSON deterministic.
+func claudeMCPConfig(servers []MCPServer) (string, []string, error) {
+	if len(servers) == 0 {
+		return `{"mcpServers":{}}`, nil, nil
+	}
+	type serverConfig struct {
+		Args    []string          `json:"args"`
+		Command string            `json:"command"`
+		Env     map[string]string `json:"env"`
+	}
+	config := map[string]serverConfig{}
+	var allowed []string
+	for _, s := range servers {
+		config[s.Name] = serverConfig{Args: s.Args, Command: s.Command, Env: map[string]string{}}
+		for _, tool := range s.Tools {
+			allowed = append(allowed, "mcp__"+s.Name+"__"+tool)
+		}
+	}
+	raw, err := json.Marshal(map[string]map[string]serverConfig{"mcpServers": config})
+	if err != nil {
+		return "", nil, err
+	}
+	return string(raw), allowed, nil
+}
 
 // Capability describes adapter support, not authentication or verified model access.
 type Capability struct {
@@ -102,7 +210,21 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	if analysis {
 		prompt = analysisInstruction
 	}
-	payload, err := json.Marshal(request)
+	servers, err := requestMCPServers(request)
+	if err != nil {
+		return Invocation{}, err
+	}
+	if len(servers) > 0 && (id == "codex" || id == "cursor") {
+		return Invocation{}, fmt.Errorf("extensions are not supported for %s in v1", id)
+	}
+	// Server commands and paths are private to the Lab, so they never enter the
+	// model-visible request. An absent or empty list leaves the prompt unchanged.
+	visible := request
+	if _, ok := request["mcpServers"]; ok {
+		visible = maps.Clone(request)
+		delete(visible, "mcpServers")
+	}
+	payload, err := json.Marshal(visible)
 	if err != nil {
 		return Invocation{}, err
 	}
@@ -123,9 +245,20 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 		}
 		result.Args = append(result.Args, "-")
 	case "claude-code":
+		if meta && len(servers) > 0 {
+			return Invocation{}, fmt.Errorf("extensions are not supported for formula-improvement requests")
+		}
+		mcpConfig, mcpAllowed, err := claudeMCPConfig(servers)
+		if err != nil {
+			return Invocation{}, err
+		}
 		result.Args = []string{"--print", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk"}
 		if meta || analysis {
-			result.Args = append(result.Args, "--tools", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--json-schema", schema)
+			result.Args = append(result.Args, "--tools", "", "--strict-mcp-config", "--mcp-config", mcpConfig)
+			if len(servers) > 0 {
+				result.Args = append(result.Args, "--setting-sources", "user", "--allowedTools", strings.Join(mcpAllowed, ","))
+			}
+			result.Args = append(result.Args, "--json-schema", schema)
 		} else {
 			tools, err := requestAllowlist(request)
 			if err != nil {
@@ -135,10 +268,15 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			// run must not be able to widen its own permissions or add hooks: load user
 			// settings only, ignore project MCP servers, and deny edits under the
 			// checkout's .claude (an Edit deny also covers Write).
-			result.Args = append(result.Args, "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--disallowedTools", "Edit(/.claude/**)", "--json-schema", schema, "--allowedTools", strings.Join(tools, ","))
+			result.Args = append(result.Args, "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--disallowedTools", "Edit(/.claude/**)", "--json-schema", schema, "--allowedTools", strings.Join(slices.Concat(tools, mcpAllowed), ","))
 		}
 		if analysis {
-			result.Args = append(result.Args, "--safe-mode", "--no-chrome", "--disable-slash-commands")
+			// Claude Code ignores an explicit --mcp-config under --safe-mode, so
+			// analysis with extensions runs without it.
+			if len(servers) == 0 {
+				result.Args = append(result.Args, "--safe-mode")
+			}
+			result.Args = append(result.Args, "--no-chrome", "--disable-slash-commands")
 		}
 	case "cursor":
 		if analysis {
