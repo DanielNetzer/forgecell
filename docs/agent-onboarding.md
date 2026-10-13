@@ -129,12 +129,16 @@ Adapters, providers, timeouts and custom commands are kept, and nothing activate
 
 ## Adapter boundaries
 
-Native adapters are compiled into the Go CLI and preserve the harness's configured model.
+Native adapters are compiled into the Go CLI and preserve the harness's configured model unless the Formula pins one.
 
 - Codex: non-interactive `exec`, workspace-write for coding and read-only for learning.
-- Claude Code: print mode, `dontAsk`, user-level settings only (`--setting-sources user`), no MCP
-  servers (`--strict-mcp-config`), edits under the checkout's `.claude/` denied (Claude Code
-  hot-reloads settings, so a run cannot widen its own permissions), and an exact tool allowlist for coding: file/read tools,
+- Claude Code: print mode, `dontAsk`, project settings only (`--setting-sources project`, so
+  user settings, plugins and hooks are excluded; a user-level `CLAUDE.md` and managed policy
+  settings are unverified, so doctor reports isolation as `partial`), no MCP servers beyond the approved set
+  (`--strict-mcp-config`), an optional Formula-pinned `--model`, edits under the checkout's `.claude/` denied (Claude Code
+  hot-reloads settings, so a run cannot widen its own permissions; a coding run is refused when the base commit
+  carries `.claude/settings*.json`, hooks or agents, and it fails as a scope violation if `.claude/**` changes),
+  and an exact tool allowlist for coding: file/read tools,
   `git status`/`git diff`, plus the approved plan's check commands and the Formula's
   `repositoryContext` suggested checks (see the [lab README](../lab/README.md#harnesses-and-learning)).
   Commit, push and publishing commands are never added. A denied tool call is never

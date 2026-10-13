@@ -225,13 +225,54 @@ tracked separately in #54.
 ## Harnesses and learning
 
 Native bindings support Codex, Claude Code and Cursor, retaining the harness's
-configured model. Choose explicitly with `init --harness codex`, `claude-code` or
-`cursor`. Codex coding uses workspace-write and learning uses read-only mode;
-Claude Code uses print mode with an exact tool allowlist, user-level settings only, no MCP
-servers and edits under the checkout's `.claude/` denied (personal user hooks still apply;
-see #36); Cursor uses print mode with
-its sandbox enabled. These permission modes provide different guarantees;
+configured model unless the Formula pins one (see below). Choose explicitly with
+`init --harness codex`, `claude-code` or `cursor`. Codex coding uses workspace-write and
+learning uses read-only mode; Claude Code uses print mode with an exact tool allowlist,
+project settings only (`--setting-sources project`), no MCP servers beyond the approved
+set (`--strict-mcp-config`) and edits under the checkout's `.claude/` denied; Cursor uses
+print mode with its sandbox enabled. These permission modes provide different guarantees;
 arbitrary adapters retain their process permissions.
+
+Claude Code coding, formula-improvement (meta) and analysis with extensions attached run
+with `--setting-sources project`, so the operator's user settings, plugins and hooks (including
+hooks that rewrite tool output) do not change what the harness sees or what the ledger
+records. Analysis and review without extensions keep `--safe-mode`. Whether a user-level
+`CLAUDE.md`, user agents or user skills still load under `--setting-sources project`, and
+whether managed (enterprise) policy settings reach the run, have not been verified.
+
+Project `.claude` files can still load, so they are guarded. The binding fingerprint
+covers the project `.claude/settings.json` and `.claude/settings.local.json` committed at
+the plan's base commit (never the source checkout's working tree), while edits to
+user-level Claude settings no longer change it. A coding run, and a formula-improvement
+run started from a directory that holds them, is refused with no harness started when the
+base commit carries `.claude/settings*.json`, `.claude/hooks/**` or `.claude/agents/**`:
+remove them (for example `git rm -r .claude/settings*.json .claude/hooks .claude/agents`),
+commit, and refresh intake. The Formula has no setting that allows project settings. After a
+coding run, and before checks, `.claude/**` in the workspace must be byte-identical to the
+base commit; creating, editing or deleting anything there, including through repository
+code that an allowed Bash entry ran or through a gitignored file, fails the attempt as a
+scope violation that names the paths.
+
+Doctor reports the isolation of each adapter as `isolated`, `partial` or `unknown`, each
+with its reason. Claude Code is `partial`, because of the unverified items above; Codex is
+`partial` (it still reads `CODEX_HOME/config.toml`); Cursor and any custom command are
+`unknown`. Codex and Cursor isolation is documented, not changed.
+
+Migration: adapter protocol 3 changes every binding fingerprint, so a plan reviewed
+before the upgrade cannot be approved. After upgrading, run `forgecell init --rebind ID`
+and refresh intake for each pending ticket; approving such a plan stops with "approved
+under adapter protocol N; refresh intake after rebinding" (`2 or earlier` for a ledger
+that did not record its protocol), and nothing is started.
+
+A Formula may pin the provider model with an optional `harness.model` and per-role
+`harnesses.<role>.model`. A role override never inherits the default's model, because a
+model name only means something to the provider that binding names. A pinned model is
+passed as `--model` to the native Claude Code adapter only; Codex and Cursor refuse it,
+and a custom command receives it in the request without Forgecell enforcing it. Without
+a pin behaviour is unchanged and provenance records `model unpinned`. Each harness
+attempt in the Molecule ledger records its `model` and `isolation` mode. Setting or
+changing a model is a Formula change, so it needs human approval; no Lab Formula sets
+one.
 
 Bootstrap Formulas set `harness.timeoutMs` (default 900000) and a reviewed ceiling
 `harness.maxTimeoutMs` (default 3600000); override them with `init --harness-timeout-ms MS`
@@ -399,9 +440,10 @@ it is `required: true`, the Molecule stops at intake with an actionable message.
 - No per-call logging: no MCP request or response is recorded, and the planned ledger entry
   records only identity, cache outcome and tools.
 - Analysis with an extension will run without `--safe-mode` and with `--setting-sources
-  user`, because Claude Code drops an explicit `--mcp-config` under safe mode. Without
-  built-in tools user-level settings cannot touch the filesystem, but they can steer the
-  analysis; full isolation is tracked in #36.
+  project`, because Claude Code drops an explicit `--mcp-config` under safe mode. User
+  settings, plugins and hooks are excluded. Without built-in tools project settings
+  cannot touch the filesystem, but they can steer the analysis; analysis is refused when
+  the checkout carries `.claude/settings.json` or `.claude/settings.local.json`.
 - Only the `mcp-provider` kind exists. Lab-run evidence, repository-artifact, memory and
   knowledge providers are later kinds.
 

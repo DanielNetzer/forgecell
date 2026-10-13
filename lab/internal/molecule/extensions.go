@@ -24,7 +24,7 @@ const (
 
 // AnalysisWithoutSafeModeDisclosure is the plain statement the scope gate and the
 // ledger carry when analysis ran with extensions attached.
-const AnalysisWithoutSafeModeDisclosure = "Analysis ran without safe mode (--safe-mode omitted, --setting-sources user added) because extensions were attached. User-level Claude settings can load during analysis; built-in tools stay disabled."
+const AnalysisWithoutSafeModeDisclosure = "Analysis ran without safe mode (--safe-mode omitted, --setting-sources project added) because extensions were attached. User settings, plugins and hooks are excluded, but project-level Claude settings can load during analysis; built-in tools stay disabled."
 
 // ExtensionTool is one tool a role may call and its declared access.
 type ExtensionTool struct {

@@ -14,6 +14,7 @@ import (
 // Claude isolation flag, must bump AdapterProtocolVersion and record a new digest.
 var adapterContractDigests = map[string]string{
 	"2": "cfd20646d39c5596c499bc60e99fa529731920ea47e0ce64f790b00539ca6c5e",
+	"3": "e6b8d50990a38664b0fa8c5248a4f1ed734ad4e20c208b7fc496fb05f1c5bf41",
 }
 
 func adapterContractDigest(t *testing.T) string {
@@ -24,6 +25,7 @@ func adapterContractDigest(t *testing.T) string {
 	servers := []MCPServer{{Name: "graphify", Command: "/priv/graphify", Args: []string{"mcp", "--graph", "/cache/graph.json"}, Tools: []string{"query_graph"}}}
 	codingWithExtensions := map[string]any{"kind": "molecule", "codingAllowlist": allowlist, "mcpServers": servers}
 	analysisWithExtensions := map[string]any{"kind": "ticket-analysis", "mcpServers": servers}
+	codingWithModel := map[string]any{"kind": "molecule", "codingAllowlist": allowlist, "harnessModel": "model-fixture"}
 	for _, id := range []string{"codex", "claude-code", "cursor"} {
 		for _, c := range []struct {
 			label   string
@@ -31,6 +33,8 @@ func adapterContractDigest(t *testing.T) string {
 		}{
 			{"molecule", coding}, {"ticket-analysis", map[string]any{"kind": "ticket-analysis"}}, {"formula-improvement", map[string]any{"kind": "formula-improvement"}},
 			{"molecule+extensions", codingWithExtensions}, {"ticket-analysis+extensions", analysisWithExtensions},
+			{"molecule+model", codingWithModel}, {"ticket-analysis+model", map[string]any{"kind": "ticket-analysis", "harnessModel": "model-fixture"}},
+			{"formula-improvement+model", map[string]any{"kind": "formula-improvement", "harnessModel": "model-fixture"}},
 		} {
 			call, err := BuildInvocation(id, c.request, "/fixture/result")
 			if err != nil {
