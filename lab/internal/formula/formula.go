@@ -124,8 +124,11 @@ type Formula struct {
 	// Extensions declares pinned extension manifests by name; roles bind them by name.
 	// Absent keeps the Formula bytes, SHA and behaviour of earlier Formulas unchanged.
 	Extensions map[string]ExtensionRef `yaml:"extensions" json:"extensions,omitempty"`
-	YAML       string                  `yaml:"-"`
-	SHA256     string                  `yaml:"-"`
+	// Learning holds optional learning settings. Absent keeps the Formula bytes,
+	// SHA and behaviour of earlier Formulas unchanged.
+	Learning *LearningSettings `yaml:"learning" json:"learning,omitempty"`
+	YAML     string            `yaml:"-"`
+	SHA256   string            `yaml:"-"`
 }
 type Loaded struct {
 	Formula  Formula
@@ -484,6 +487,11 @@ func Parse(data []byte) (Formula, error) {
 	}
 	if value, exists := raw["requiredChecks"]; exists {
 		if err := validateRequiredChecks(value); err != nil {
+			return f, err
+		}
+	}
+	if value, exists := raw["learning"]; exists {
+		if err := validateLearning(value); err != nil {
 			return f, err
 		}
 	}

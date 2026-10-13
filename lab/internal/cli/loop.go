@@ -47,6 +47,7 @@ func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, 
 	}
 	report, err := runLoop(ctx, molecule.LoopOptions{Template: molecule.Options{LabDir: *lab, SourceRoot: cwd}, Select: selector, MaxConcurrent: *concurrent, Once: *once})
 	renderLoop(out, report, selector, *concurrent)
+	renderLearnNotices(out, stderr, *lab)
 	if err != nil {
 		return fail(err)
 	}

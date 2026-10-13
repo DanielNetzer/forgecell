@@ -138,6 +138,94 @@ stale recipe bytes and persists an intent before replacement so an interrupted
 approval can finish its record. Dismissal does not replace the Formula. Learning
 rejects mixed snapshots, damaged evidence, and cosmetic changes to unused fields.
 
+### Recurring failures queue a learn request
+
+Nothing used to start learning, so the same failure could repeat until a person noticed.
+After `run` and `loop`, Forgecell evaluates cheap, deterministic rules over the Lab's
+recent finished ledgers. A rule fires when the newest finished Molecules of the current
+approved Formula snapshot exhibit the same failure class the threshold number of times
+in a row. Each class is a pure function of the finished ledger; no failure-class field
+is stored:
+
+- `process-timed-out`: the Molecule's final coding harness attempt hit its timeout and
+  verification did not pass afterwards. A timeout that a later attempt or a passing
+  verification superseded does not count, and neither does a timeout that only an
+  analysis or review attempt mentions. Ledgers from before attempt results were
+  recorded are simply not counted.
+- `analysis-policy-violation`: intake stopped because the unchanged policy validator
+  rejected the analysis, including the per-class corrective retry stops.
+- `protected-regression-failed`: verification ran the protected view and its required
+  checks did not pass.
+
+The streak is the newest run of finished Molecules of the current Formula snapshot,
+ordered by finish time and then Molecule id, among the 128 most recently modified
+ledgers. Every Molecule in it exhibits the class and is one that `learn` itself would
+accept. What each kind of Molecule does to a streak:
+
+- Counts: a finished Molecule that exhibits the class. The newest `threshold` of them
+  become the request's evidence.
+- Ends it: a finished Molecule of the same snapshot that does not exhibit the class
+  (a success, a different class, a plain failure), or that `learn` would refuse (not an
+  approved ticket Molecule, a damaged Formula snapshot, evidence it cannot classify).
+- Invisible, neither counts nor ends it: unfinished Molecules and Molecules waiting at a
+  gate, Molecules of another Formula or snapshot, non-ticket Molecules, and ledgers that
+  cannot be read. An unreadable ledger is skipped and reported in one diagnostic line
+  instead of stopping the evaluation, so a streak can span a Molecule the Lab could not
+  read.
+
+The threshold is an optional Formula setting and defaults to 3:
+
+```yaml
+learning:
+  recurrenceThreshold: 3   # integer from 1 to 50
+```
+
+Formulas without it keep their exact bytes and SHA-256. The threshold in force is the one
+in the current approved Formula.
+
+When a rule fires and a learn Atom is bound, Forgecell records one durable, deduplicated
+**pending learn request** under `learn-requests/` in the Lab, holding the class, the
+triggering Molecule ids and the Formula SHA-256. When no learn Atom is bound, it only
+prints one line that names the class and the Molecules and recommends
+`forgecell init --meta-harness`. **No model is called automatically.** Evaluation, `run`,
+`loop` and `doctor` never start the learn command.
+
+`doctor` (also in `--json` as `learnRequests`), the end of `run` and the `loop` report show
+pending requests and the suggestions saved from them, so they are not missed. Exit codes are
+unchanged.
+
+```sh
+forgecell learn --pending
+```
+
+runs each pending request through the normal `learn` path over exactly that request's
+Molecules. A success saves a pending suggestion and records its id on the request; a failed
+or timed-out run is reported with a bounded, redacted message, the request stays pending and
+the exit status is nonzero. `learn --pending` cannot be combined with Molecule ids and never
+approves or dismisses anything. Approval, stale-Formula protection and every other
+`learn` guard are unchanged. Running it automatically from the loop is left to a later slice.
+
+While the Formula SHA-256 is unchanged, a class never fires again while a request or a
+suggestion from it is pending. After a suggestion is dismissed, or a learn run fails and
+saves nothing, the class fires again only after the threshold number of **new** occurrences
+since that event; a failed request is superseded by the fresh one, and the old request is
+retired first so a crash never leaves two pending requests for one class. A Formula change
+resets the counters and retires requests tied to the old Formula.
+
+`learn --pending` writes a durable intent (with a random nonce) on the request before it
+starts the learn command. If the process dies before the outcome is recorded, the next
+`learn --pending` finds the intent, adopts a suggestion that run already saved for exactly
+the same Molecules and Formula (no second model call), and only calls the learn command
+again when there is none.
+
+A request, suggestion or ledger that cannot be read is skipped and reported once; it never
+stops the other failure classes from being evaluated. A class whose own suggestion cannot
+be read does not fire until that is fixed. `learn-requests/` stays bounded: the oldest
+terminal requests (stale, superseded, or replaced by a newer one) beyond 20 and run locks
+of finished requests are removed. Failure text from a learn run and any other untrusted
+text is shown on one line with terminal escapes, control, bidirectional and other format
+characters removed, and is cut by characters, not bytes.
+
 ### Exact activation and suggestion freshness
 
 Learning requires the current Lab's completed exact-byte Formula approval before
