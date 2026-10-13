@@ -154,6 +154,7 @@ func saveBinding(t *testing.T, lab, binding string, command []string) {
 	if err := os.WriteFile(filepath.Join(lab, "formulas", "f.yaml"), []byte(recipe), 0600); err != nil {
 		t.Fatal(err)
 	}
+	approveSavedFormula(t, lab)
 }
 
 func runDoctor(t *testing.T, lab string, extra ...string) (int, string) {
@@ -344,7 +345,7 @@ func TestDoctorProbesCodexBoundOutsidePathAtItsBoundPathAndNeverRunsTheForeignLa
 					t.Fatalf("unexpected provider call %q", call)
 				}
 			}
-			want := fmt.Sprintf("forgecell init --lab %q --harness codex", lab)
+			want := fmt.Sprintf("forgecell init --lab %s --harness codex", shellWord(lab))
 			if !onPath {
 				want = "PATH='" + filepath.Dir(provider) + "':\"$PATH\" " + want
 			}
@@ -370,7 +371,7 @@ func TestDoctorPrintsOneConcreteNextCommandForEveryNonReadyState(t *testing.T) {
 				t.Fatalf("%s: %v", id, c)
 			}
 		}
-		if code != 2 || report["nextCommand"] != fmt.Sprintf("forgecell doctor --lab %q", lab) {
+		if code != 2 || report["nextCommand"] != "forgecell doctor --lab "+shellWord(lab) {
 			t.Fatalf("%d %v", code, report["nextCommand"])
 		}
 		assertOnlyExistingCommands(t, report)
@@ -380,7 +381,7 @@ func TestDoctorPrintsOneConcreteNextCommandForEveryNonReadyState(t *testing.T) {
 		code, out := runDoctor(t, lab)
 		report := decodeDoctor(t, out)
 		for _, id := range []string{"codex", "claude-code", "cursor"} {
-			if want := fmt.Sprintf("forgecell doctor --lab %q --harness %s", lab, id); candidateByID(t, report, id)["nextCommand"] != want {
+			if want := fmt.Sprintf("forgecell doctor --lab %s --harness %s", shellWord(lab), id); candidateByID(t, report, id)["nextCommand"] != want {
 				t.Fatalf("%s: %v", id, candidateByID(t, report, id))
 			}
 		}
@@ -408,7 +409,7 @@ func TestDoctorPrintsOneConcreteNextCommandForEveryNonReadyState(t *testing.T) {
 		report := decodeDoctor(t, out)
 		saved := report["savedBinding"].(map[string]any)
 		states := saved["binding"].(map[string]any)["states"].([]any)
-		want := fmt.Sprintf("forgecell init --lab %q --harness codex", lab)
+		want := fmt.Sprintf("forgecell init --lab %s --harness codex", shellWord(lab))
 		if code != 2 || len(states) != 1 || states[0].(map[string]any)["state"] != "provider-missing" || states[0].(map[string]any)["path"] != "/missing/saved-codex" || saved["nextCommand"] != want || saved["executable"] != nil {
 			t.Fatalf("%d %s", code, out)
 		}
@@ -422,7 +423,7 @@ func TestDoctorPrintsOneConcreteNextCommandForEveryNonReadyState(t *testing.T) {
 		if code != 2 || len(states) != 2 || states[0].(map[string]any)["state"] != "launcher-missing" || states[1].(map[string]any)["state"] != "provider-missing" {
 			t.Fatalf("%d %s", code, out)
 		}
-		if want := fmt.Sprintf("forgecell doctor --lab %q --harness codex", lab); report["nextCommand"] != want {
+		if want := fmt.Sprintf("forgecell doctor --lab %s --harness codex", shellWord(lab)); report["nextCommand"] != want {
 			t.Fatalf("no ready provider exists, so the re-check is the next command: %v", report["nextCommand"])
 		}
 	})
@@ -604,7 +605,7 @@ func TestSavedReviewActivationCrashWindows(t *testing.T) {
 					if strings.Contains(next, "--approve") || strings.Contains(next, "--dismiss") {
 						t.Fatalf("completed activation requests decision: %s", next)
 					}
-				} else if !strings.Contains(next, fmt.Sprintf("forgecell init --lab %q --approve %s", dir, p.ID)) || strings.Contains(next, "--dismiss") {
+				} else if !strings.Contains(next, fmt.Sprintf("forgecell init --lab %s --approve %s", shellWord(dir), p.ID)) || strings.Contains(next, "--dismiss") {
 					t.Fatalf("incomplete activation lacks exact resume action: %s", next)
 				}
 			}

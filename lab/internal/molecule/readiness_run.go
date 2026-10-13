@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
@@ -54,12 +57,58 @@ func refuseProjectClaudeConfig(command []string, root, base string) error {
 }
 
 // listPaths names at most five paths and counts the rest.
-func listPaths(paths []string) string {
-	if len(paths) <= 5 {
-		return strings.Join(paths, ", ")
+func listPaths(paths []string) string { return boundedPaths(paths, 5) }
+
+// maxListedViolations bounds how many harness-written paths one guidance line,
+// note or event names.
+const maxListedViolations = 10
+
+// maxListedPathBytes cuts a single path so one name cannot dominate a line.
+const maxListedPathBytes = 200
+
+// boundedPaths names at most limit paths and counts the rest. A path comes from
+// the checkout, so it may hold newlines or terminal escapes that could forge a
+// guidance line; such a path is shown in Go-quoted form.
+func boundedPaths(paths []string, limit int) string {
+	shown := paths
+	if len(shown) > limit {
+		shown = shown[:limit]
 	}
-	return fmt.Sprintf("%s, and %d more", strings.Join(paths[:5], ", "), len(paths)-5)
+	items := make([]string, len(shown))
+	for i, p := range shown {
+		if len(p) > maxListedPathBytes {
+			p = strings.ToValidUTF8(p[:maxListedPathBytes], "") + "…"
+		}
+		// ReviewDisplayText strips terminal escapes and turns controls, line
+		// separators, zero-width and direction-override characters into spaces,
+		// so any change means the path cannot be printed verbatim.
+		if strings.ContainsFunc(p, unicode.IsControl) || !utf8.ValidString(p) || harness.ReviewDisplayText(p, len(p)+1) != p {
+			p = strconv.QuoteToASCII(p)
+		}
+		items[i] = p
+	}
+	out := strings.Join(items, ", ")
+	if len(paths) > limit {
+		out += fmt.Sprintf(", and %d more", len(paths)-limit)
+	}
+	return out
 }
+
+// BoundedViolations lists scope violations for one printed line: capped, with
+// unsafe characters quoted.
+func BoundedViolations(paths []string) string { return boundedPaths(paths, maxListedViolations) }
+
+// displayError renders an error from captured output as one bounded, control-free
+// line, since its text may embed harness-written paths.
+func displayError(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return harness.ReviewDisplayText(err.Error(), 1024)
+}
+
+// shellWord quotes s as one literal word for a POSIX shell.
+func shellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // staleBindingError explains a binding fingerprint mismatch that an adapter protocol
 // change caused. Protocol 3 changed every binding fingerprint, so a plan reviewed
@@ -110,6 +159,9 @@ func analysisRequest(ctx context.Context, i Issue, s readiness.RepositorySnapsho
 		}
 		if strings.HasPrefix(c.ValidatorMessage, readiness.InScopeDefinitionMessage) || strings.HasPrefix(c.ValidatorMessage, readiness.DefinitionReferenceMessage) {
 			correction["instruction"] = "Return the complete analysis again. A check may be defined by an existing frozen evidence ID that this plan does not edit (for example the parent manifest or workflow), or by a scope entry that is a new file absent from the repository tree, cited in definitions by its exact scope path. A check may never be defined by an existing in-scope file or by the issue. For a new package, `go test ./path/to/package/ -run <pattern>` defined by the parent manifest is also valid. Do not relax or reword the rule."
+		}
+		if strings.HasPrefix(c.ValidatorMessage, readiness.BaselineIDMessage) {
+			correction["instruction"] = "Return the complete analysis again. The Lab already includes every Formula baseline check, so drop any proposed check whose id equals a baseline check id, or give that check a different id. Do not rename the baseline checks or relax the rule."
 		}
 		request["correction"] = correction
 	}
@@ -169,6 +221,9 @@ func codingTimeout(b formula.Binding, p readiness.Plan) (int, string) {
 		return p.HarnessTimeoutMS, "plan harnessTimeoutMs"
 	}
 	if b.TimeoutMS == 0 {
+		if ms := b.EffectiveTimeoutMS(); ms > 0 {
+			return ms, "Formula maxTimeoutMs (no timeoutMs declared)"
+		}
 		return 0, "Formula timeoutMs unset; process default applies"
 	}
 	return b.TimeoutMS, "Formula timeoutMs"
@@ -227,7 +282,7 @@ func analyzeWithWrapper(ctx context.Context, r *Record, f formula.Formula, b for
 		}
 	}
 	request["formulaCheckContract"] = contract
-	result := harness.InvokeAnalysisWrapper(ctx, r.LabDir, decision, request, time.Duration(b.TimeoutMS)*time.Millisecond)
+	result := harness.InvokeAnalysisWrapper(ctx, r.LabDir, decision, request, time.Duration(b.EffectiveTimeoutMS())*time.Millisecond)
 	a, err := decodeAnalysisResult(result)
 	return a, evidence, resultDiagnostics(result), err
 }
@@ -471,7 +526,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 				request["mcpServers"] = analysisServers
 			}
 			request = harness.WithModel(request, b.Model)
-			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, request)
+			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.EffectiveTimeoutMS())*time.Millisecond, request)
 			analysisDiagnostics = resultDiagnostics(result)
 			return decodeAnalysisResult(result)
 		}
@@ -526,6 +581,13 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			if err = readiness.ValidateDefinitionReferences(a); err == nil {
 				err = readiness.ValidateInScopeDefinitionsForNewFiles(a, snapshot.References(), readiness.NewScopeFiles(a.Scope, snapshot.Files))
 			}
+			if err == nil {
+				baselineIDs := make([]string, len(f.RequiredChecks))
+				for i, rc := range f.RequiredChecks {
+					baselineIDs[i] = rc.ID
+				}
+				err = readiness.ValidateBaselineIDs(a, baselineIDs)
+			}
 		}
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
@@ -541,7 +603,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			attempt.Status = "completed"
 			response := a
 			attempt.Response = &response
-			r.Analysis = &a
+			// a is reused by the next invocation, so the ledger keeps its own copy.
+			validated := a
+			r.Analysis = &validated
 		}
 		analysisResult := "analysis-completed"
 		if err != nil {
@@ -623,7 +687,8 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if err = applyFormulaBaseline(f, &p); err != nil {
 		return stopIntake(r, err.Error())
 	}
-	if p.CodingAllowlist, err = harness.DeriveCodingAllowlist(f.YAML, p.Analysis.Checks, p.Analysis.Scope...); err != nil {
+	var allowlistNote string
+	if p.CodingAllowlist, allowlistNote, err = harness.DeriveCodingAllowlistNoted(f.YAML, p.Analysis.Checks, p.Analysis.Scope...); err != nil {
 		return stopIntake(r, err.Error())
 	}
 	if err = snapshot.ValidateScope(a.Scope); err != nil {
@@ -649,6 +714,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	}
 	if note, ok := scopeGateSensitivePathsNote(f); ok {
 		r.Notes = append(r.Notes, note)
+	}
+	if allowlistNote != "" {
+		r.Notes = append(r.Notes, allowlistNote)
 	}
 	atom(&r, roles.atoms[formula.IntakeRole], "done", a.Summary)
 	atom(&r, roles.atoms[formula.ScopeApproval], "waiting", "Review exact scope, checks and process limits before approving the digest.")
@@ -1079,7 +1147,7 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		return r, save(r)
 	}
 	if captureErr != nil || !result.Reconciled || len(capture.Violations) > 0 {
-		detail := fmt.Sprintf("Scope audit failed: %v; process uncertainty: %s; observed violations: %v", captureErr, result.Uncertainty, capture.Violations)
+		detail := fmt.Sprintf("Scope audit failed: %v; process uncertainty: %s; observed violations: %s", displayError(captureErr), result.Uncertainty, boundedPaths(capture.Violations, maxListedViolations))
 		if coding.Outcome == "blocked" || coding.Outcome == "unknown" || coding.Outcome == "scope-change" {
 			state, e := r.Readiness.FinishAttempt(coding.Outcome, coding.Reason, stamp())
 			if e != nil {
@@ -1281,12 +1349,12 @@ type timeoutGate struct {
 // what ran, what was retained, and the exact commands that keep the retained work.
 // Other failures keep harnessOutcomeSummary unchanged.
 func harnessTimeoutSummary(g timeoutGate, result process.Result, ref VerificationFile, capture verification.CaptureResult, captureErr error) string {
-	tree := fmt.Sprintf("tree capture failed: %v", captureErr)
+	tree := "tree capture failed: " + displayError(captureErr)
 	review := ""
 	if captureErr == nil {
 		violations := "none"
 		if len(capture.Violations) > 0 {
-			violations = strings.Join(capture.Violations, ", ")
+			violations = boundedPaths(capture.Violations, maxListedViolations)
 			review = fmt.Sprintf(" Out-of-scope writes need exact-diff review: add --accept-existing-tree %s to amend after inspecting the diff.", capture.Tree)
 		}
 		tree = fmt.Sprintf("retained tree %s: %d changed path(s), violations: %s", capture.Tree, len(capture.Changes), violations)
@@ -1302,12 +1370,12 @@ func harnessTimeoutSummary(g timeoutGate, result process.Result, ref Verificatio
 	}
 	return fmt.Sprintf("%s interrupted=%t overflow=%t reconciled=%t; %s. Complete outcome: %s (SHA-256 %s). %s\n"+
 		"Nothing is retried automatically. To keep the retained work, run in order:\n"+
-		"  recover: forgecell recover %s --plan %s --confirm-stopped --lab %q\n"+
-		"  export:  forgecell ledger %s --lab %q   (copy readiness.plans[last].plan into FILE and set \"continuation\":\"adopt-failed-tree\" and \"adoptAttempt\":%q)\n"+
-		"  amend:   forgecell amend %s --parent %s --plan FILE --lab %q\n"+
+		"  recover: forgecell recover %s --plan %s --confirm-stopped --lab %s\n"+
+		"  export:  forgecell ledger %s --lab %s   (copy readiness.plans[last].plan into FILE and set \"continuation\":\"adopt-failed-tree\" and \"adoptAttempt\":%q)\n"+
+		"  amend:   forgecell amend %s --parent %s --plan FILE --lab %s\n"+
 		"Then review and approve the new digest.%s %s",
 		head, result.Interrupted, result.Overflow, result.Reconciled, tree, ref.Path, ref.SHA256, gateDiagnostics(result),
-		g.Molecule, g.Digest, g.Lab, g.Molecule, g.Lab, g.Attempt, g.Molecule, g.Digest, g.Lab, review, extend)
+		g.Molecule, g.Digest, shellWord(g.Lab), g.Molecule, shellWord(g.Lab), g.Attempt, g.Molecule, g.Digest, shellWord(g.Lab), review, extend)
 }
 
 // An explicit checker repair cannot shed earlier protected gates or rebind their

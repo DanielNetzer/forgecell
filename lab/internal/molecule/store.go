@@ -174,7 +174,7 @@ func save(r Record) error {
 			fmt.Fprintf(&b, "Complete bounded result: `%s` (SHA-256 `%s`)\n", a.Evidence.Path, a.Evidence.SHA256)
 		}
 		if a.Capture != nil {
-			fmt.Fprintf(&b, "Tree: `%s`; violations: %v\n", a.Capture.Tree, a.Capture.Violations)
+			fmt.Fprintf(&b, "Tree: `%s`; violations: %s\n", a.Capture.Tree, boundedPaths(a.Capture.Violations, maxListedViolations))
 		}
 	}
 	for _, a := range r.VerificationAttempts {

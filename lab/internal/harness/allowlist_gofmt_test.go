@@ -185,8 +185,8 @@ func TestUnrecognisedGofmtShapesFailClosed(t *testing.T) {
 		}
 	}
 	got := derive(t, emptyFormula, []readiness.Check{{Argv: []string{"gofmt", "-l", "."}, Dir: ".", Required: true}}, scope)
-	if !reflect.DeepEqual(got, joinEntries(wantBase, []string{"Bash(gofmt -l .)"})) {
-		t.Fatalf("a root path that is not an exact repository path must not grant formatter entries: %q", got)
+	if !reflect.DeepEqual(got, joinEntries(wantBase, []string{"Bash(gofmt -l .)", "Bash(gofmt -w lab/a.go)"})) {
+		t.Fatalf("a root-level gofmt check must list the root and format each in-scope .go file: %q", got)
 	}
 	for _, entry := range derive(t, emptyFormula, []readiness.Check{shellGofmtCheck("lab")}, scope) {
 		if strings.HasPrefix(entry, "Bash(sh") {
@@ -302,8 +302,12 @@ func TestMatchCodingAllowlistKeepsEarlierPlansVerifyingAtTheEntryBound(t *testin
 		paths = append(paths, fmt.Sprintf("lab/f%d.go", i))
 	}
 	scope := scopeOf(paths...)
-	if _, err := DeriveCodingAllowlist(emptyFormula, checks, scope...); err == nil {
-		t.Fatal("the fixture no longer exceeds the entry bound")
+	derived, err := DeriveCodingAllowlist(emptyFormula, checks, scope...)
+	if err != nil {
+		t.Fatalf("formatter overflow must be dropped, not fail derivation: %v", err)
+	}
+	if n := countPrefix(derived, "Bash(gofmt -w "); n != 0 {
+		t.Fatalf("the fixture no longer exceeds the entry bound: %d formatter entries kept", n)
 	}
 	legacy := preFormatter(t, emptyFormula, checks)
 	got, ok, err := MatchCodingAllowlist(emptyFormula, checks, scope, legacy)

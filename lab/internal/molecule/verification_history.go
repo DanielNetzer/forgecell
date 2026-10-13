@@ -181,7 +181,44 @@ func beginVerification(r *Record, p readiness.Plan, tree string) error {
 	r.VerificationAttempts = append(r.VerificationAttempts, VerificationAttempt{PlanDigest: digest, SourceTree: tree, StartedAt: stamp(), Status: "started"})
 	return nil
 }
+
+// redactFailedNames returns a copy of ids with secret-shaped names redacted, for
+// persisted copies only; callers keep the original names for matching declared deltas.
+func redactFailedNames(ids []verification.TestID) []verification.TestID {
+	if len(ids) == 0 {
+		return ids
+	}
+	out := make([]verification.TestID, len(ids))
+	for i, id := range ids {
+		out[i] = verification.TestID{Package: harness.RedactSecrets(id.Package), Test: harness.RedactSecrets(id.Test)}
+	}
+	return out
+}
+
+// redactResultNames copies v with every observation's failing test names redacted.
+func redactResultNames(v verification.Result) verification.Result {
+	redactAll := func(in []verification.Observation) []verification.Observation {
+		if len(in) == 0 {
+			return in
+		}
+		out := make([]verification.Observation, len(in))
+		for i, o := range in {
+			o.FailedTests = redactFailedNames(o.FailedTests)
+			out[i] = o
+		}
+		return out
+	}
+	v.Setup = redactAll(v.Setup)
+	v.Checks = redactAll(v.Checks)
+	if v.Protected != nil {
+		protected := redactResultNames(*v.Protected)
+		v.Protected = &protected
+	}
+	return v
+}
+
 func recordObservation(r *Record, obs verification.Observation) error {
+	obs.FailedTests = redactFailedNames(obs.FailedTests)
 	i := len(r.VerificationAttempts) - 1
 	a := &r.VerificationAttempts[i]
 	if len(a.Observations) >= 32 {
@@ -196,7 +233,7 @@ func recordObservation(r *Record, obs verification.Observation) error {
 }
 func completeVerification(r *Record, result verification.Result) error {
 	i := len(r.VerificationAttempts) - 1
-	ref, err := historyFile(*r, fmt.Sprintf("%03d-result.json", i+1), result)
+	ref, err := historyFile(*r, fmt.Sprintf("%03d-result.json", i+1), redactResultNames(result))
 	if err != nil {
 		return err
 	}
@@ -247,7 +284,7 @@ func compactVerification(v verification.Result) verification.Result {
 		}
 	}
 	compact(&out)
-	return out
+	return redactResultNames(out)
 }
 
 func ValidateVerificationHistory(r Record) error {

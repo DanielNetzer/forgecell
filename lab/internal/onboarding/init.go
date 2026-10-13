@@ -133,7 +133,7 @@ func checkRebindTarget(candidates []Candidate, id, launcher string, active formu
 			continue
 		}
 		if c.Readiness != "ready" || c.Executable == "" {
-			return fmt.Errorf("cannot rebind to %s: %s; run forgecell doctor --lab %q to see what is missing", id, c.Detail, lab)
+			return fmt.Errorf("cannot rebind to %s: %s; run forgecell doctor --lab %s to see what is missing", id, c.Detail, formula.ShellWord(lab))
 		}
 		if launcher == "" {
 			return fmt.Errorf("cannot rebind to %s: the Forgecell launcher is unknown; set FORGECELL_LAUNCHER to its path", id)
@@ -145,7 +145,7 @@ func checkRebindTarget(candidates []Candidate, id, launcher string, active formu
 		}
 		return CheckAnalysisFallback(active, formula.Binding{Binding: id, Command: command})
 	}
-	return fmt.Errorf("cannot rebind to %q: no such harness was discovered; run forgecell doctor --lab %q to list the available harnesses", id, lab)
+	return fmt.Errorf("cannot rebind to %q: no such harness was discovered; run forgecell doctor --lab %s to list the available harnesses", id, formula.ShellWord(lab))
 }
 
 // maskLauncher blanks the launcher of a native command held under m["command"].
@@ -425,7 +425,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, e
 	} else if pending != nil {
 		if o.Rebind != "" {
-			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %q --review/--approve/--dismiss %s before --rebind", o.LabDir, pending.ID)
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before --rebind", formula.ShellWord(o.LabDir), pending.ID)
 		}
 		if budgetRequested {
 			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it before proposing a new harness timeout budget")
@@ -457,13 +457,13 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, nil
 	}
 	if o.Rebind != "" && active.Formula.ID == "" {
-		return out, fmt.Errorf("--rebind needs an approved Formula; run init --lab %q and approve the bootstrap proposal first", o.LabDir)
+		return out, fmt.Errorf("--rebind needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
 	}
 	if active.Formula.ID != "" {
 		approved, e := formula.Load(o.LabDir, "")
 		if e != nil || !approved.Approved {
 			if o.Rebind != "" {
-				return out, fmt.Errorf("--rebind needs a current exact approval of the active Formula; run init --lab %q to review it, then init --lab %q --approve PROPOSAL_ID", o.LabDir, o.LabDir)
+				return out, fmt.Errorf("--rebind needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
 			}
 			checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 			out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}

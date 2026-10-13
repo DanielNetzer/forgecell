@@ -37,12 +37,22 @@ var baselineComplexWords = map[string]bool{
 	"if": true, "then": true, "else": true, "elif": true, "fi": true, "for": true, "while": true, "until": true,
 	"do": true, "done": true, "case": true, "esac": true, "function": true, "select": true, "trap": true,
 	"cd": true, "pushd": true, "popd": true, "{": true, "}": true, "(": true, ")": true,
+	// They change the environment, options or sourced code of every later line.
+	"export": true, "set": true, "source": true, ".": true, "unset": true,
+	"eval": true, "exec": true, "exit": true, "readonly": true, "declare": true,
 }
+
+// baselineAssignment matches a leading VAR=value word, which sets the environment
+// of the line or of every later line.
+var baselineAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 func baselineComplex(lines []string) bool {
 	for _, line := range lines {
-		word, _, _ := strings.Cut(line, " ")
-		if baselineComplexWords[word] || strings.Contains(line, "<<") {
+		word := ""
+		if fields := strings.Fields(line); len(fields) > 0 {
+			word = fields[0]
+		}
+		if baselineComplexWords[word] || baselineAssignment.MatchString(word) || strings.Contains(line, "<<") {
 			return true
 		}
 		for _, suffix := range []string{"\\", "&&", "||", "|", ";", "&"} {
@@ -59,6 +69,22 @@ type baselineCommand struct {
 	argv      []string
 	timeoutMS int
 	display   string
+}
+
+// trackedFromDir re-keys the committed files relative to dir, because a script line
+// runs from the step's working directory: script S is tracked when dir/S is.
+// A root directory returns tracked unchanged.
+func trackedFromDir(tracked map[string]bool, dir string) map[string]bool {
+	if dir == "." || dir == "" {
+		return tracked
+	}
+	scoped := map[string]bool{}
+	for file := range tracked {
+		if rel, ok := strings.CutPrefix(file, path.Clean(dir)+"/"); ok {
+			scoped[rel] = true
+		}
+	}
+	return scoped
 }
 
 func hasParentSegment(p string) bool {
@@ -274,8 +300,9 @@ func deriveFromWorkflow(file, content string, tracked map[string]bool) []formula
 			if baselineJobName.MatchString(jobName) {
 				where += ", job " + jobName
 			}
+			scoped := trackedFromDir(tracked, dir)
 			for _, line := range lines {
-				command, ok := recognizeBaselineLine(line, tracked)
+				command, ok := recognizeBaselineLine(line, scoped)
 				if !ok {
 					continue
 				}

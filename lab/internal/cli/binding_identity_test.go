@@ -78,7 +78,7 @@ func TestDoctorBlocksAnIncompatibleProtocolAndOffersTheReviewedRebind(t *testing
 			t.Fatalf("detail omits %q: %v", want, states[0]["detail"])
 		}
 	}
-	want := fmt.Sprintf("forgecell init --lab %q --harness codex", lab)
+	want := fmt.Sprintf("forgecell init --lab %s --harness codex", shellWord(lab))
 	if saved["nextCommand"] != want {
 		t.Fatalf("next command %v, want the reviewed rebind %s", saved["nextCommand"], want)
 	}

@@ -266,11 +266,11 @@ func TestHarnessTimeoutGateMessageListsRecoverAndAmendCommands(t *testing.T) {
 				"retained tree " + r.Capture.Tree,
 				fmt.Sprintf("%d changed path(s)", len(r.Capture.Changes)),
 				"violations: none",
-				fmt.Sprintf("forgecell recover %s --plan %s --confirm-stopped --lab %q", r.ID, parent.Digest, r.LabDir),
-				fmt.Sprintf("forgecell ledger %s --lab %q", r.ID, r.LabDir),
+				fmt.Sprintf("forgecell recover %s --plan %s --confirm-stopped --lab %s", r.ID, parent.Digest, shellWord(r.LabDir)),
+				fmt.Sprintf("forgecell ledger %s --lab %s", r.ID, shellWord(r.LabDir)),
 				`"continuation":"adopt-failed-tree"`,
 				fmt.Sprintf(`"adoptAttempt":%q`, attempt.ID),
-				fmt.Sprintf("forgecell amend %s --parent %s --plan FILE --lab %q", r.ID, parent.Digest, r.LabDir),
+				fmt.Sprintf("forgecell amend %s --parent %s --plan FILE --lab %s", r.ID, parent.Digest, shellWord(r.LabDir)),
 				attempt.Evidence.Path,
 			} {
 				if !strings.Contains(detail, want) {

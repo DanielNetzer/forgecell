@@ -193,9 +193,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		if p.Status == "pending" {
 			if p.ProposedReady {
-				fmt.Fprintf(out, "Approval changes the future recipe; it does not prove improvement. Inspect commands and permissions.\nforgecell suggestion %s --lab %q --approve\n", p.ID, *lab)
+				fmt.Fprintf(out, "Approval changes the future recipe; it does not prove improvement. Inspect commands and permissions.\nforgecell suggestion %s --lab %s --approve\n", p.ID, shellWord(*lab))
 			}
-			fmt.Fprintf(out, "forgecell suggestion %s --lab %q --dismiss\n", p.ID, *lab)
+			fmt.Fprintf(out, "forgecell suggestion %s --lab %s --dismiss\n", p.ID, shellWord(*lab))
 		}
 		return 0
 	}
@@ -418,7 +418,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			})
 			if !explicitLab {
 				if legacy := existingCheckoutLab(); legacy != "" {
-					return fail(fmt.Errorf("existing checkout Lab at %s; use --lab %q to continue it, or move its contents to the home Lab before retrying", legacy, legacy))
+					return fail(fmt.Errorf("existing checkout Lab at %s; use --lab %s to continue it, or move its contents to the home Lab before retrying", legacy, shellWord(legacy)))
 				}
 			}
 		}
@@ -523,9 +523,27 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		existing := ""
 		var saved *onboarding.Candidate
+		// A Formula without a current exact-byte approval names a provider nobody
+		// has reviewed, so doctor reads it but never executes it.
+		unapproved := false
+		// Probes run what the approved bytes declare, not the file read at inspection.
+		probed := active.Formula
+		if active.Formula.ID != "" {
+			loaded, loadErr := formula.Load(*lab, active.Formula.ID)
+			unapproved = loadErr != nil || !loaded.Approved
+			if !unapproved {
+				probed = loaded.Formula
+			}
+		}
 		if active.Formula.ID != "" {
 			existing = active.Formula.Harness.Binding
-			checked := onboarding.ProbeBinding(ctx, active.Formula.Harness, cwd, nil)
+			var checked onboarding.Candidate
+			if unapproved {
+				checked = onboarding.Candidate{ID: existing, Readiness: "blocked", Detail: notProbedUnapproved}
+				checked = checked.CompleteUnknowns()
+			} else {
+				checked = onboarding.ProbeBinding(ctx, probed.Harness, cwd, nil)
+			}
 			if checked.Binding != nil {
 				checked.Binding.WithRunningVersion(version)
 			}
@@ -548,17 +566,25 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		selection := onboarding.Select(candidates, *preferred, existing, env)
 		git := process.Run(ctx, process.Options{Argv: []string{"git", "--version"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
 		gh := process.Run(ctx, process.Options{Argv: []string{"gh", "auth", "status"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
-		meta := onboarding.InspectMeta(ctx, active.Formula, cwd, nil)
+		var meta onboarding.MetaReport
+		if unapproved {
+			meta = onboarding.DescribeFormulaMeta(active.Formula)
+			if meta.Binding != "" {
+				meta.NextAction = notProbedUnapproved
+			}
+		} else {
+			meta = onboarding.InspectMeta(ctx, probed, cwd, nil)
+		}
 		workflow := selectedWorkflow(candidates, selection.ID)
-		ready := workflow.State == "conditional" && git.OK && gh.OK && selection.Status == "ready" && (saved == nil || saved.Readiness == "ready")
+		ready := !unapproved && workflow.State == "conditional" && git.OK && gh.OK && selection.Status == "ready" && (saved == nil || saved.Readiness == "ready")
 		labDir := *lab
 		if abs, e := filepath.Abs(labDir); e == nil {
 			labDir = abs
 		}
 		commands := doctorCommands{lab: labDir, pathReady: pathReady}
 		roles := []onboarding.RoleReadiness{}
-		if active.Formula.ID != "" {
-			roles = onboarding.InspectRoles(ctx, active.Formula, cwd, nil)
+		if active.Formula.ID != "" && !unapproved {
+			roles = onboarding.InspectRoles(ctx, probed, cwd, nil)
 		}
 		firstRoleCommand := ""
 		rolesReady := true
@@ -582,7 +608,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			}
 		}
 		if len(active.Formula.Harnesses) > 0 {
-			ready = git.OK && gh.OK && rolesReady
+			ready = !unapproved && git.OK && gh.OK && rolesReady
 		}
 		withSteps := *verbose && structured
 		views := make([]doctorCandidate, len(candidates))
@@ -599,6 +625,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			next = commands.overall(savedView, views, selection)
 			if len(active.Formula.Harnesses) > 0 && firstRoleCommand != "" {
 				next = firstRoleCommand
+			}
+			if unapproved {
+				next = "forgecell init --lab " + shellWord(labDir)
 			}
 		}
 		note := "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."
@@ -862,7 +891,7 @@ func presentRun(out io.Writer, r molecule.Record) {
 		}
 		fmt.Fprintln(out, "Check execution: temporary HOME and reviewed environment; filesystem/network access is not OS-sandboxed. Network is unrestricted.")
 		if r.Readiness.Phase == "scope-waiting" {
-			fmt.Fprintf(out, "\nReview the full ledger, then approve exactly this plan:\nforgecell run %d --lab %q --formula %q --base %s --target %q --approve %s\n", r.Issue.Number, r.LabDir, r.FormulaID, p.Inputs.BaseCommit, p.Inputs.TargetBranch, proposal.Digest)
+			fmt.Fprintf(out, "\nReview the full ledger, then approve exactly this plan:\nforgecell run %d --lab %s --formula %s --base %s --target %s --approve %s\n", r.Issue.Number, shellWord(r.LabDir), shellWord(r.FormulaID), shellWord(p.Inputs.BaseCommit), shellWord(p.Inputs.TargetBranch), proposal.Digest)
 		}
 	}
 	if r.Readiness == nil || len(r.Readiness.Plans) == 0 {
@@ -958,7 +987,7 @@ func protectedFailures(r molecule.Record) []readiness.FailingTest {
 			continue
 		}
 		for _, id := range o.FailedTests {
-			failing = append(failing, readiness.FailingTest{Package: id.Package, Test: id.Test})
+			failing = append(failing, readiness.FailingTest{Package: harness.RedactSecrets(id.Package), Test: harness.RedactSecrets(id.Test)})
 		}
 	}
 	return failing
@@ -978,6 +1007,8 @@ func codingTimeoutLine(snapshot string, planMS int) string {
 	switch {
 	case planMS > 0:
 		return fmt.Sprintf("Coding harness timeout: %dms (reviewed per-Molecule harnessTimeoutMs; Formula timeoutMs %d, maximum %d)", planMS, b.TimeoutMS, b.TimeoutCeilingMS())
+	case b.TimeoutMS == 0 && b.EffectiveTimeoutMS() > 0:
+		return fmt.Sprintf("Coding harness timeout: %dms (Formula timeoutMs unset; clamped to maxTimeoutMs)", b.EffectiveTimeoutMS())
 	case b.TimeoutMS == 0:
 		return "Coding harness timeout: Formula timeoutMs unset (process default applies)"
 	case b.TimeoutCeilingMS() > b.TimeoutMS:
@@ -1153,7 +1184,7 @@ func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, js
 	}
 	next := "No further decision; historical proposal remains inspectable."
 	if p.Status == "pending" {
-		next = fmt.Sprintf("forgecell init --lab %q --approve %s (or --dismiss %s); stale state is checked at approval", dir, p.ID, p.ID)
+		next = fmt.Sprintf("forgecell init --lab %s --approve %s (or --dismiss %s); stale state is checked at approval", shellWord(dir), p.ID, p.ID)
 	}
 	if p.Status == "approved" {
 		next = "Approved; no new approval required. Runs retain their human gates."
@@ -1164,14 +1195,14 @@ func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, js
 		return 1
 	}
 	if incomplete {
-		next = fmt.Sprintf("Resume exact approval: forgecell init --lab %q --approve %s", dir, p.ID)
+		next = fmt.Sprintf("Resume exact approval: forgecell init --lab %s --approve %s", shellWord(dir), p.ID)
 	}
 	var process map[string]any
 	if err = yaml.Unmarshal([]byte(p.YAML), &process); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	command := fmt.Sprintf("forgecell init --lab %q --review %s", dir, p.ID)
+	command := fmt.Sprintf("forgecell init --lab %s --review %s", shellWord(dir), p.ID)
 	if jsonMode {
 		return encode(out, stderr, map[string]any{"proposal": p, "verified": true, "repository": f.Intake.Repo, "harness": f.Harness.Binding, "harnesses": f.Harnesses, "atoms": process["atoms"], "repositoryContext": process["repositoryContext"], "reviewCommand": command, "nextAction": next, "metaBinding": proposalMeta(p), "beforeYaml": proposalMeta(p).BeforeYAML, "capabilityEvidence": proposalCapabilities(p), "capabilityEvidenceSource": "saved observation; not current verification"})
 	}
@@ -1220,6 +1251,8 @@ func selectedWorkflow(candidates []onboarding.Candidate, id string) harness.Capa
 
 const doctorSchemaVersion = "v1"
 
+const notProbedUnapproved = "not probed (unapproved)"
+
 // doctorCandidate adds guidance to a probed candidate. Steps appear only when the
 // caller asks for them with --verbose --json.
 type doctorCandidate struct {
@@ -1259,7 +1292,7 @@ func (x doctorCommands) view(c onboarding.Candidate, steps bool) doctorCandidate
 }
 
 func (x doctorCommands) recheck(id string) string {
-	command := fmt.Sprintf("forgecell doctor --lab %q", x.lab)
+	command := "forgecell doctor --lab " + shellWord(x.lab)
 	if id != "" {
 		command += " --harness " + harnessArg(id)
 	}
@@ -1278,7 +1311,7 @@ func (x doctorCommands) staleMeta(f formula.Formula, c onboarding.Candidate, cod
 	}
 	for _, s := range c.Binding.States {
 		if strings.HasPrefix(s.State, "launcher-") {
-			return fmt.Sprintf("forgecell init --lab %q --rebind %s", x.lab, harnessArg(codingID))
+			return fmt.Sprintf("forgecell init --lab %s --rebind %s", shellWord(x.lab), harnessArg(codingID))
 		}
 	}
 	return ""
@@ -1288,7 +1321,7 @@ func harnessArg(id string) string {
 	if safeID.MatchString(id) {
 		return id
 	}
-	return fmt.Sprintf("%q", id)
+	return shellWord(id)
 }
 
 func shellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -1325,7 +1358,7 @@ func (x doctorCommands) candidate(c onboarding.Candidate) string {
 	}
 	if c.Executable != "" {
 		if c.Installed.State == "verified" && c.Authentication.State == "verified" {
-			init := fmt.Sprintf("forgecell init --lab %q --harness %s", x.lab, harnessArg(c.ID))
+			init := fmt.Sprintf("forgecell init --lab %s --harness %s", shellWord(x.lab), harnessArg(c.ID))
 			if !providerOnPath(c.Executable) {
 				init = "PATH=" + shellWord(filepath.Dir(c.Executable)) + `:"$PATH" ` + init
 			}
@@ -1337,7 +1370,7 @@ func (x doctorCommands) candidate(c onboarding.Candidate) string {
 		return x.recheck(c.ID)
 	}
 	if c.Readiness == "blocked" && x.pathReady[c.ID] {
-		return fmt.Sprintf("forgecell init --lab %q --harness %s", x.lab, harnessArg(c.ID))
+		return fmt.Sprintf("forgecell init --lab %s --harness %s", shellWord(x.lab), harnessArg(c.ID))
 	}
 	return x.recheck(c.ID)
 }

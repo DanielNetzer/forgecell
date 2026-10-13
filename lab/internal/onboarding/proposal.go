@@ -141,6 +141,21 @@ func saveProposal(dir string, p Proposal) error {
 func SaveProposal(dir, yaml string) (Proposal, error) {
 	return saveWithEvidence(dir, yaml, nil)
 }
+
+// withoutProbeDetail copies a report for saving without the probe's binding
+// diagnostics and failing steps, which carry absolute launcher and provider
+// paths of this machine. The copy is the saved, identity-covered evidence;
+// proposals saved earlier keep what they recorded and still verify.
+func withoutProbeDetail(report BindingReport) *BindingReport {
+	report.Candidate.Binding, report.Candidate.Failures = nil, nil
+	if report.Meta != nil {
+		meta := *report.Meta
+		meta.Candidate.Binding, meta.Candidate.Failures = nil, nil
+		report.Meta = &meta
+	}
+	return &report
+}
+
 func saveWithEvidence(dir, yaml string, evidence *Repository, reports ...*BindingReport) (Proposal, error) {
 	f, err := formula.Parse([]byte(yaml))
 	if err != nil {
@@ -203,10 +218,10 @@ func saveWithEvidence(dir, yaml string, evidence *Repository, reports ...*Bindin
 		if reports[0].Meta != nil {
 			p.CapabilityVersion = "v2"
 		}
-		p.CapabilityEvidence = reports[0]
-		p.CapabilityEvidence.Candidate = p.CapabilityEvidence.Candidate.CompleteUnknowns()
-		p.CapabilityEvidence.Workflow = p.CapabilityEvidence.Candidate.WorkflowCapability()
-		p.CapabilityEvidence.Roles = RoleCapabilities(f)
+		reports[0].Candidate = reports[0].Candidate.CompleteUnknowns()
+		reports[0].Workflow = reports[0].Candidate.WorkflowCapability()
+		reports[0].Roles = RoleCapabilities(f)
+		p.CapabilityEvidence = withoutProbeDetail(*reports[0])
 		if !reflect.DeepEqual(p.CapabilityEvidence.Command, f.Harness.Command) || p.CapabilityEvidence.Candidate.ID != f.Harness.Binding {
 			return Proposal{}, fmt.Errorf("capability binding mismatch")
 		}

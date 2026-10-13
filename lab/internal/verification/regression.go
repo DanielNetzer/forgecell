@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"os"
@@ -176,6 +177,33 @@ type goTestEvent struct {
 // be allowed to stand in for them.
 var abortMarkers = []string{"panic: ", "fatal error: ", "test timed out after", "[build failed]", "[setup failed]"}
 
+// runtimeAbortPrefixes are what the Go runtime prints at the start of a line when
+// it stops a test binary. Output attributed to a test is only an abort when a line
+// starts with one; t.Log output is indented and a test may log any text.
+var runtimeAbortPrefixes = []string{"panic: ", "fatal error: ", "test timed out after"}
+
+// abortMarker returns the marker in an output event that shows its package stopped
+// early. Package-level output (no test) keeps the broad match; test-attributed
+// output must begin a line with a runtime prefix.
+func abortMarker(test, output string) (string, bool) {
+	if test == "" {
+		for _, marker := range abortMarkers {
+			if strings.Contains(output, marker) {
+				return strings.TrimSpace(marker), true
+			}
+		}
+		return "", false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		for _, prefix := range runtimeAbortPrefixes {
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimSpace(prefix), true
+			}
+		}
+	}
+	return "", false
+}
+
 // abnormalExitMarker recognizes the whole line go test prints when its test binary
 // is killed by a signal ("signal: killed") or exits with a status other than 1
 // ("exit status 2" after os.Exit(2)). Every ordinary failing package also prints
@@ -235,10 +263,8 @@ func (p *failedTestParser) Line(raw []byte) error {
 	}
 	p.events++
 	if ev.Action == "output" {
-		for _, marker := range abortMarkers {
-			if strings.Contains(ev.Output, marker) {
-				p.aborted[ev.Package] = strings.TrimSpace(marker)
-			}
+		if marker, ok := abortMarker(ev.Test, ev.Output); ok {
+			p.aborted[ev.Package] = marker
 		}
 		if marker, ok := abnormalExitMarker(ev.Output); ok {
 			p.aborted[ev.Package] = marker
@@ -307,7 +333,7 @@ func (p *failedTestParser) Finish() ([]TestID, error) {
 		}
 	}
 	if unfinished := sortedTests(p.started); len(unfinished) > 0 {
-		return nil, fmt.Errorf("test %s in %q started but never finished; no delta can be accepted", unfinished[0].Test, unfinished[0].Package)
+		return nil, fmt.Errorf("test %s in %q started but never finished; no delta can be accepted", harness.RedactSecrets(unfinished[0].Test), harness.RedactSecrets(unfinished[0].Package))
 	}
 	for _, pkg := range sortedPackages(p.failedPackages) {
 		found := false
@@ -358,7 +384,7 @@ func describeUncovered(declared []readiness.ProtectedDelta, failed, uncovered []
 	}
 	names := make([]string, 0, len(uncovered))
 	for _, id := range uncovered {
-		name := id.Package + " " + id.Test
+		name := harness.RedactSecrets(id.Package + " " + id.Test)
 		for _, d := range declared {
 			if d.Package == id.Package && strings.HasPrefix(d.Test, id.Test+"/") && failedSet[TestID{Package: d.Package, Test: d.Test}] {
 				name += " (parent of declared failing subtest " + d.Test + "; it must be declared explicitly)"
