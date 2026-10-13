@@ -22,6 +22,25 @@ import (
 // project configuration, exactly as for `forgecell learn`.
 type PendingOptions struct {
 	LabDir, Dir string
+	// MaxAttempts and RetryAfter, when positive, make RunPending skip a request
+	// that already failed that many times or failed less than RetryAfter ago. A
+	// skipped request stays pending and is reported with Skipped set. The zero
+	// value runs every pending request, as `forgecell learn --pending` does.
+	MaxAttempts int
+	RetryAfter  time.Duration
+}
+
+// throttled says why a request must wait for a person or for the cooldown.
+func (o PendingOptions) throttled(r Request) string {
+	if o.MaxAttempts > 0 && r.Attempts >= o.MaxAttempts {
+		return fmt.Sprintf("waiting for operator: %d failed attempts", r.Attempts)
+	}
+	if o.RetryAfter > 0 && r.LastFailureAt != "" {
+		if at, err := parseTime(r.LastFailureAt); err == nil && clock().Sub(at) < o.RetryAfter {
+			return fmt.Sprintf("retrying after %s: the last of %d failed attempt(s) was under %s ago", at.Add(o.RetryAfter).Format(time.RFC3339), r.Attempts, o.RetryAfter)
+		}
+	}
+	return ""
 }
 
 // PendingResult reports one request. Err is a bounded, redacted message.
@@ -31,6 +50,7 @@ type PendingResult struct {
 	MoleculeIDs  []string `json:"moleculeIds"`
 	SuggestionID string   `json:"suggestionId,omitempty"`
 	Err          string   `json:"error,omitempty"`
+	Skipped      string   `json:"skipped,omitempty"`
 }
 
 type invokeFunc = func(context.Context, []string, string, time.Duration, map[string]any) process.Result
@@ -68,6 +88,11 @@ func runPending(ctx context.Context, o PendingOptions, invoke invokeFunc) ([]Pen
 			continue
 		}
 		result := PendingResult{RequestID: r.ID, Class: r.Class, MoleculeIDs: r.MoleculeIDs}
+		if why := o.throttled(r); why != "" {
+			result.Skipped = why
+			results = append(results, result)
+			continue
+		}
 		release, e := lockRun(o.LabDir, r.ID)
 		if e != nil {
 			result.Err = "another learn run holds this request; it stays pending"
@@ -228,16 +253,24 @@ func runRequest(ctx context.Context, o PendingOptions, id string, invoke invokeF
 	if err != nil {
 		return saved, boundedMessage(err.Error())
 	}
-	current.Attempts++
 	current.RunNonce, current.RunStartedAt = "", ""
-	if runErr != nil {
+	// A run the caller cancelled (a stop signal) did not fail: it is not an attempt.
+	interrupted := runErr != nil && ctx.Err() != nil
+	switch {
+	case interrupted:
+	case runErr != nil:
+		current.Attempts++
 		current.LastFailure = boundedMessage(runErr.Error())
 		current.LastFailureAt = clock().Format(time.RFC3339Nano)
-	} else {
+	default:
+		current.Attempts++
 		current.Status, current.SuggestionID, current.LastFailure, current.LastFailureAt = requestSuggested, p.ID, "", ""
 	}
 	if err = saveRequest(o.LabDir, current); err != nil {
 		return saved, boundedMessage(fmt.Sprintf("learn request could not be updated (suggestion %s was saved): %v", p.ID, err))
+	}
+	if interrupted {
+		return "", "learn run interrupted; the request stays pending"
 	}
 	if runErr != nil {
 		return "", current.LastFailure
