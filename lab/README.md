@@ -282,6 +282,41 @@ attempt in the Molecule ledger records its `model` and `isolation` mode. Setting
 changing a model is a Formula change, so it needs human approval; no Lab Formula sets
 one.
 
+`forgecell init --lab DIR --model ID [--role analysis|coding|meta|review]` proposes that
+change as a reviewed Formula proposal, like `--rebind`: it saves a pending proposal, shows
+the before/after YAML, and takes effect only after `init --lab DIR --approve PROPOSAL_ID`.
+It needs a current exact approval and no pending proposal, and cannot be combined with
+`--harness`, `--rebind`, `--meta-harness`, `--meta-command`, the timeout flags, `--review`,
+`--approve` or `--dismiss`. The proposal differs from the approved Formula only in `model`
+keys; atoms, checks, instructions and timeouts are preserved. Only the `model:` lines of
+the approved text are inserted, changed or removed; comments, blank lines, anchors, key
+order and quoting everywhere else stay byte for byte. An exact check refuses any other
+change, and a binding written in flow style (`harness: {...}`) is refused rather than
+rewritten. `ID` is validated with the same rules as `harness.model`.
+
+- Without `--role` it sets `model` on the default `harness` and on every declared
+  `harnesses.<role>` override. A role without an override resolves to the default harness
+  and inherits its model (analysis and coding); meta without an override runs the learn
+  Atom's command, which has no model, and does not inherit it. The proposal summary states
+  this for each such role, derived from the resolution code.
+- With `--role ROLE` it changes only `harnesses.ROLE`. If that override is not declared the
+  proposal is refused, naming the role; run without `--role` or declare the override first.
+  Init never creates an override.
+- Setting a pin on a binding that is not native Claude Code is refused: the message names
+  each Codex, Cursor or custom command binding (Forgecell cannot enforce a pin on a custom
+  command), and without `--role` the whole proposal is refused. A Formula that declares no
+  `harness` is refused with that reason, not as a custom command.
+- `--model ""` removes the pin from every targeted binding that carries one, including
+  Codex, Cursor and custom bindings, and lists each one. If none carries a model there is
+  nothing to change and no proposal is saved.
+- Changing the pin changes the binding fingerprint of the native Claude binding each role
+  runs; the summary names only the roles (analysis, coding, meta, review) whose binding's
+  model actually changes, and in-flight plans for those roles need a fresh intake.
+
+`doctor` shows each role's pinned model after its readiness text, or `unpinned`; the JSON
+role entries carry an additive `model` key that is omitted when unpinned. Doctor makes no
+model call.
+
 Bootstrap Formulas set `harness.timeoutMs` (default 900000) and a reviewed ceiling
 `harness.maxTimeoutMs` (default 3600000); override them with `init --harness-timeout-ms MS`
 and `--max-timeout-ms MS`. Intake may then propose a longer per-Molecule `harnessTimeoutMs`

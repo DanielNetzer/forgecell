@@ -428,6 +428,9 @@ type RoleReadiness struct {
 	Readiness  string             `json:"readiness"`
 	Capability harness.Capability `json:"capability"`
 	Detail     string             `json:"detail"`
+	// Model is the pinned model of the binding the role resolves to; empty when
+	// unpinned.
+	Model string `json:"model,omitempty"`
 	// Candidate is the probe result, for callers that derive next commands.
 	Candidate   Candidate `json:"-"`
 	NextCommand string    `json:"nextCommand,omitempty"`
@@ -459,7 +462,7 @@ func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner
 			}
 		}
 		c := probe(b)
-		item := RoleReadiness{Role: string(role), Binding: b.Binding, Source: source, Readiness: c.Readiness, Detail: c.Detail, Candidate: c}
+		item := RoleReadiness{Role: string(role), Binding: b.Binding, Source: source, Readiness: c.Readiness, Detail: c.Detail, Model: b.Model, Candidate: c}
 		switch role {
 		case formula.AnalysisHarness:
 			item.Capability = c.WorkflowCapability()
@@ -480,7 +483,7 @@ func InspectRoles(ctx context.Context, f formula.Formula, cwd string, run Runner
 	}
 	if res, configured, err := ResolveReviewBinding(f); configured && err == nil {
 		c := probe(res.Binding)
-		item := RoleReadiness{Role: string(formula.ReviewHarness), Binding: res.Binding.Binding, Source: res.Source, Readiness: c.Readiness, Detail: c.Detail, Candidate: c}
+		item := RoleReadiness{Role: string(formula.ReviewHarness), Binding: res.Binding.Binding, Source: res.Source, Readiness: c.Readiness, Detail: c.Detail, Model: res.Binding.Model, Candidate: c}
 		if static := reviewRoleCapability(res.Binding); static.State != "supported" {
 			item.Capability = static
 		} else {

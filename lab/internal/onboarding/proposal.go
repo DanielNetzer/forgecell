@@ -26,6 +26,9 @@ type BindingReport struct {
 	// Roles is the static per-role adapter support of the proposed Formula; the
 	// proposal identity covers it. Proposals saved before it was added carry none.
 	Roles []RoleCapability `json:"roles,omitempty"`
+	// BeforeYAML is the exact approved Formula a model pin proposal changes. It is
+	// omitted, so no historical proposal identity moves, when it is absent.
+	BeforeYAML string `json:"beforeYaml,omitempty"`
 }
 type Proposal struct {
 	CapabilityVersion  string         `json:"capabilityVersion,omitempty"`
@@ -517,6 +520,14 @@ func ProposalActivationIncomplete(dir string, p Proposal) (bool, error) {
 }
 
 func validateMetaReport(f formula.Formula, p Proposal) error {
+	if p.CapabilityEvidence != nil && p.CapabilityEvidence.BeforeYAML != "" {
+		if _, err := formula.Parse([]byte(p.CapabilityEvidence.BeforeYAML)); err != nil {
+			return err
+		}
+		if p.ActiveHashBefore == "" || hash([]byte(p.CapabilityEvidence.BeforeYAML)) != p.ActiveHashBefore {
+			return fmt.Errorf("original YAML mismatch")
+		}
+	}
 	if p.CapabilityVersion == "v2" && (p.CapabilityEvidence == nil || p.CapabilityEvidence.Meta == nil) {
 		return fmt.Errorf("missing saved meta evidence")
 	}

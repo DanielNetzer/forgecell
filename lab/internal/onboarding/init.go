@@ -25,6 +25,10 @@ type InitOptions struct {
 	// HarnessTimeoutMS and MaxTimeoutMS set the reviewed coding budget and the
 	// ceiling for per-Molecule timeouts; zero selects the defaults below.
 	HarnessTimeoutMS, MaxTimeoutMS int
+	// ModelSet marks an explicit --model, so an empty Model proposes removing the
+	// pin. Role limits the proposal to the named harnesses.<role> override.
+	Model, Role string
+	ModelSet    bool
 }
 
 // Bootstrap budgets: a 15-minute default coding attempt that intake may raise,
@@ -375,6 +379,34 @@ func codingOverrideNote(active formula.Formula, target string, command []string)
 	return fmt.Sprintf(" The harnesses.coding override was overwritten although it was %s; confirm the new default binding should replace it.", what)
 }
 
+// proposalEvidence is the detached repository evidence a proposal carries: the
+// observed repository for a bootstrap, else the evidence the approved bootstrap
+// proposal saved.
+func proposalEvidence(dir string, active formula.Loaded, observed *Repository) (*Repository, error) {
+	if !active.Approved {
+		return observed, nil
+	}
+	if active.Approval.SourceKind != "bootstrap-assay" {
+		return nil, nil
+	}
+	previous, err := InspectProposal(dir, active.Approval.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	if previous.EvidencePath == "" {
+		return nil, nil
+	}
+	data, err := readArtifact(dir, previous.EvidencePath)
+	if err != nil {
+		return nil, err
+	}
+	var original Repository
+	if err = json.Unmarshal(data, &original); err != nil {
+		return nil, err
+	}
+	return &original, nil
+}
+
 // learnCommand is the command learning runs, from harnesses.meta or the learn Atom.
 func learnCommand(f formula.Formula) []string {
 	b, _, _ := MetaBinding(f)
@@ -393,6 +425,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			return out, fmt.Errorf("--rebind changes only the binding; do not combine it with --harness, --meta-harness, --meta-command or the timeout flags")
 		}
 		o.Preferred = o.Rebind
+	}
+	if err = checkModelPinOptions(o, budgetRequested); err != nil {
+		return out, err
 	}
 	if o.MetaHarness != "" && o.MetaCommand != nil {
 		return out, fmt.Errorf("choose meta-harness or meta-command")
@@ -430,6 +465,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if budgetRequested {
 			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it before proposing a new harness timeout budget")
 		}
+		if o.ModelSet {
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before --model", formula.ShellWord(o.LabDir), pending.ID)
+		}
 		f, e := formula.Parse([]byte(pending.YAML))
 		if e != nil {
 			return out, e
@@ -459,11 +497,17 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if o.Rebind != "" && active.Formula.ID == "" {
 		return out, fmt.Errorf("--rebind needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
 	}
+	if o.ModelSet && active.Formula.ID == "" {
+		return out, fmt.Errorf("--model needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
+	}
 	if active.Formula.ID != "" {
 		approved, e := formula.Load(o.LabDir, "")
 		if e != nil || !approved.Approved {
 			if o.Rebind != "" {
 				return out, fmt.Errorf("--rebind needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
+			}
+			if o.ModelSet {
+				return out, fmt.Errorf("--model needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
 			}
 			checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 			out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
@@ -478,6 +522,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			return out, nil
 		}
 		active = approved
+	}
+	if o.ModelSet {
+		return proposeModelPin(ctx, o, out, active)
 	}
 	out.Candidates = o.Candidates
 	if out.Candidates == nil {
@@ -676,25 +723,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			out.Meta = &refreshed
 		}
 	}
-	var evidence *Repository
-	if !active.Approved {
-		evidence = &out.Repository
-	} else if active.Approval.SourceKind == "bootstrap-assay" {
-		previous, e := InspectProposal(o.LabDir, active.Approval.SourceID)
-		if e != nil {
-			return out, e
-		}
-		if previous.EvidencePath != "" {
-			data, e := readArtifact(o.LabDir, previous.EvidencePath)
-			if e != nil {
-				return out, e
-			}
-			var original Repository
-			if e = json.Unmarshal(data, &original); e != nil {
-				return out, e
-			}
-			evidence = &original
-		}
+	evidence, err := proposalEvidence(o.LabDir, active, &out.Repository)
+	if err != nil {
+		return out, err
 	}
 	out.Binding = &BindingReport{Command: command, Candidate: selected, Workflow: selected.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
 	if o.MetaHarness != "" || o.MetaCommand != nil || LearnBound(active.Formula) {
