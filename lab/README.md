@@ -483,6 +483,24 @@ go build ./cmd/forgecell
 The build writes `lab/forgecell`; `--help` lists the development CLI commands.
 For the wider project, see the [repository README](../README.md).
 
+### Gate scenario suite
+
+`TestGateScenarios` in `lab/internal/cli/gate_scenarios_test.go` is one table that
+runs every approval and digest gate command against malformed, stale or missing
+state and expects it to fail closed with an actionable message and no changes to
+the Lab. Every new or changed approval, digest or handoff gate must add rows to
+that table and register its command in `gsGates`; the coverage test fails when a
+registered gate has no deny row or when the CLI help shows an approval or digest
+flag on an unregistered command. Rows must stay offline and deterministic: fake
+`git`/`gh`/harness scripts in temporary directories, no network, credentials or
+model, and concurrent attempts simulated by pre-creating the lock directory. Run
+it with:
+
+```sh
+cd lab
+go test -run '^TestGateScenarios' ./internal/cli
+```
+
 ### Exact current Formula approval
 
 Only the currently active, explicitly approved YAML bytes can execute. `lab.json`
