@@ -42,6 +42,7 @@ type ExtensionCache struct {
 	ElapsedMS  int64  `json:"elapsedMs,omitempty"`
 	TimedOut   bool   `json:"timedOut,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 // ExtensionRecord is the ledger evidence for one declared extension. Roles lists
@@ -117,6 +118,9 @@ func (e ExtensionRecord) Lines() []string {
 		cache += ": " + e.Cache.Reason
 	}
 	lines = append(lines, cache)
+	if e.Cache.Note != "" {
+		lines = append(lines, "  cache note: "+e.Cache.Note)
+	}
 	lines = append(lines, "  network claim (declared by the manifest, not enforced by Forgecell): "+e.Network)
 	return lines
 }
@@ -164,6 +168,9 @@ type extensionOutcome struct {
 	tools   []ExtensionTool
 	server  *harness.MCPServer
 	reason  string
+	// release gives up the lease on the cache entry the server was built from. It
+	// is nil when no entry is held.
+	release func()
 }
 
 func declaredNetwork(m extension.Manifest) string {
@@ -174,11 +181,12 @@ func declaredNetwork(m extension.Manifest) string {
 }
 
 func cacheRecord(c extension.CacheResult) ExtensionCache {
-	return ExtensionCache{Key: c.Key, Outcome: string(c.Outcome), TreeSHA256: c.TreeSHA256, Code: c.Code, ElapsedMS: c.ElapsedMS, TimedOut: c.TimedOut, Reason: c.Reason}
+	return ExtensionCache{Key: c.Key, Outcome: string(c.Outcome), TreeSHA256: c.TreeSHA256, Code: c.Code, ElapsedMS: c.ElapsedMS, TimedOut: c.TimedOut, Reason: c.Reason, Note: c.Note}
 }
 
 // serverArgs substitutes {{CACHE}} and refuses any placeholder left over, because
-// {{SOURCE}} exists only while the prepare step runs.
+// {{SOURCE}} exists only while the prepare step runs. A suffix after {{CACHE}}/
+// must be clean and stay inside the cache.
 func serverArgs(args []string, cacheDir string) ([]string, error) {
 	out := make([]string, 0, len(args))
 	for _, arg := range args {
@@ -186,7 +194,11 @@ func serverArgs(args []string, cacheDir string) ([]string, error) {
 		case arg == "{{CACHE}}":
 			arg = cacheDir
 		case strings.HasPrefix(arg, "{{CACHE}}/"):
-			arg = cacheDir + strings.TrimPrefix(arg, "{{CACHE}}")
+			rest := strings.TrimPrefix(arg, "{{CACHE}}/")
+			if !extension.CleanPlaceholderSuffix(rest) {
+				return nil, fmt.Errorf("server argument %q needs a clean relative path after {{CACHE}}/ that stays inside the cache", arg)
+			}
+			arg = cacheDir + "/" + rest
 		}
 		if strings.Contains(arg, "{{") {
 			return nil, fmt.Errorf("server argument %q uses a placeholder that cannot be resolved while the server runs ({{SOURCE}} exists only during prepare)", arg)
@@ -294,22 +306,28 @@ func resolveExtension(ctx context.Context, r *Record, name string, ref formula.E
 		out.reason = "the cache is unavailable: " + result.Reason
 		return out
 	}
+	// The entry stays leased only when a server is built from it; every other
+	// path gives the lease up before returning.
 	args, err := serverArgs(m.Server.Args, result.Dir)
 	if err != nil {
+		result.Release()
 		out.reason = err.Error()
 		return out
 	}
 	out.tools = records
 	if privateDir == "" {
+		result.Release()
 		return out
 	}
 	server, err := copyServer(m, name, privateDir, args, names)
 	if err != nil {
+		result.Release()
 		out.reason = err.Error()
 		out.tools = nil
 		return out
 	}
 	out.server = &server
+	out.release = result.Release
 	return out
 }
 
@@ -366,15 +384,33 @@ func recordExtension(r *Record, name string, ref formula.ExtensionRef, role form
 // it and returns the servers to pass. With an empty privateDir it only resolves,
 // so intake can show what coding would receive without attaching anything. An
 // extension that is unavailable is recorded and left out; the error is returned
-// only when a required extension is unavailable.
+// only when a required extension is unavailable. Any cache lease the servers hold
+// is released before it returns, so a caller that keeps the servers running must
+// use leaseExtensions.
 func useExtensions(ctx context.Context, r *Record, f formula.Formula, role formula.HarnessRole, privateDir string) ([]harness.MCPServer, error) {
+	servers, release, err := leaseExtensions(ctx, r, f, role, privateDir)
+	release()
+	return servers, err
+}
+
+// leaseExtensions is useExtensions that keeps the cache entries leased, so that
+// Prune leaves them alone, until the returned release is called. The release is
+// never nil, and every lease is already given up when an error is returned.
+func leaseExtensions(ctx context.Context, r *Record, f formula.Formula, role formula.HarnessRole, privateDir string) ([]harness.MCPServer, func(), error) {
 	names := f.RoleExtensions(role)
 	if len(names) == 0 {
-		return nil, nil
+		return nil, func() {}, nil
 	}
 	binding, _ := f.RoleBinding(role)
 	support := harness.BindingExtensionCapability(binding.Command)
 	var servers []harness.MCPServer
+	var releases []func()
+	release := func() {
+		for _, give := range releases {
+			give()
+		}
+		releases = nil
+	}
 	var required []error
 	for _, name := range names {
 		ref := f.Extensions[name]
@@ -383,11 +419,18 @@ func useExtensions(ctx context.Context, r *Record, f formula.Formula, role formu
 		if out.server != nil {
 			servers = append(servers, *out.server)
 		}
+		if out.release != nil {
+			releases = append(releases, out.release)
+		}
 		if out.reason != "" && ref.Required {
 			required = append(required, fmt.Errorf("required extension %q is unavailable for the %s role: %s. Repair or re-pin the manifest %s through a reviewed Formula change, or set required to false for %q", name, role, out.reason, ref.Manifest, name))
 		}
 	}
-	return servers, errors.Join(required...)
+	if err := errors.Join(required...); err != nil {
+		release()
+		return servers, func() {}, err
+	}
+	return servers, release, nil
 }
 
 // skipExtensions records every extension the Formula binds to the role as not
@@ -412,7 +455,8 @@ func skipExtensions(r *Record, f formula.Formula, role formula.HarnessRole, reas
 
 // attachExtensions creates a private, absolute directory outside the checkouts
 // and the Lab, attaches the role's extensions into it and returns the servers and
-// a cleanup that removes the directory. The cleanup is never nil.
+// a cleanup that releases the cache leases and removes the directory. The cleanup
+// is never nil.
 func attachExtensions(ctx context.Context, r *Record, f formula.Formula, role formula.HarnessRole) ([]harness.MCPServer, func(), error) {
 	noop := func() {}
 	if len(f.RoleExtensions(role)) == 0 {
@@ -437,10 +481,14 @@ func attachExtensions(ctx context.Context, r *Record, f formula.Formula, role fo
 			return nil, noop, fmt.Errorf("the private extension directory %s lies inside %s; set TMPDIR to a directory outside the checkouts and the Lab", dir, forbidden)
 		}
 	}
-	servers, err := useExtensions(ctx, r, f, role, dir)
+	servers, release, err := leaseExtensions(ctx, r, f, role, dir)
 	if err != nil {
 		cleanup()
 		return nil, noop, err
 	}
-	return servers, cleanup, nil
+	// The cache entries stay leased until the role has finished with its servers.
+	return servers, func() {
+		release()
+		cleanup()
+	}, nil
 }

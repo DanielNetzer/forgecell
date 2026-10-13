@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -204,5 +207,82 @@ func TestExtensionDoctorAnalysisRoleMakesNoSafeModeClaim(t *testing.T) {
 		if unchanged.Capability != before {
 			t.Fatalf("%s: description changed to %q", name, unchanged.Capability.Reason)
 		}
+	}
+}
+
+func TestDoctorExplainsWhyAFormulaFailsToLoad(t *testing.T) {
+	_, lab := doctorFixture(t)
+	if err := os.MkdirAll(filepath.Join(lab, "formulas"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lab, "lab.json"), []byte(`{"schemaVersion":"v0","activeFormulaId":"f"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An approved Formula that used `extensions` for something else before the key was reserved.
+	recipe := "kind: formula\nid: f\nextensions: [notes, todo]\nharness:\n  binding: codex\n  command: [/x]\natoms:\n  - type: harness\n"
+	if err := os.WriteFile(filepath.Join(lab, "formulas", "f.yaml"), []byte(recipe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"doctor", "--lab", lab}, strings.NewReader(""), &out, &stderr, "dev")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stdout %s", code, out.String())
+	}
+	for _, want := range []string{"active Formula", "cannot be loaded", "extensions", "reserved", "mapping of name to declaration", lab} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr lacks %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+func TestDoctorReportsStaleExtensionLocksWithoutRemovingThem(t *testing.T) {
+	_, lab := doctorFixture(t)
+	lab, err := filepath.EvalSymlinks(lab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveBinding(t, lab, "codex", []string{"/x"})
+	exited := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := exited.Run(); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(lab, "extensions", "graphify", strings.Repeat("a", 64))
+	stale := filepath.Join(parent, strings.Repeat("b", 40)+".lock")
+	live := filepath.Join(parent, strings.Repeat("c", 40)+".lock")
+	for lock, owner := range map[string]string{stale: strconv.Itoa(exited.Process.Pid), live: strconv.Itoa(os.Getpid())} {
+		if err := os.MkdirAll(lock, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(lock, "owner"), []byte(owner), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, out := runDoctor(t, lab)
+	report := decodeDoctor(t, out)
+	locks, _ := report["extensionLocks"].([]any)
+	if len(locks) != 1 {
+		t.Fatalf("want exactly the stale lock reported, got %v", report["extensionLocks"])
+	}
+	entry, _ := locks[0].(map[string]any)
+	if entry["path"] != stale || !strings.Contains(entry["reason"].(string), "stale") || !strings.HasPrefix(entry["fixCommand"].(string), "rm -r -- ") || !strings.Contains(entry["fixCommand"].(string), stale) {
+		t.Fatalf("%v", entry)
+	}
+	_, text := runDoctor(t, lab, "--verbose")
+	if !strings.Contains(text, "Stale extension cache locks") || !strings.Contains(text, "Fix: rm -r -- ") || !strings.Contains(text, stale) {
+		t.Fatalf("the text report lacks the stale lock:\n%s", text)
+	}
+	for _, lock := range []string{stale, live} {
+		if _, err := os.Stat(lock); err != nil {
+			t.Fatalf("doctor must never remove a lock: %v", err)
+		}
+	}
+
+	if err := os.RemoveAll(filepath.Join(lab, "extensions")); err != nil {
+		t.Fatal(err)
+	}
+	_, out = runDoctor(t, lab)
+	if _, present := decodeDoctor(t, out)["extensionLocks"]; present {
+		t.Fatalf("a Lab without stale locks gained a key:\n%s", out)
 	}
 }

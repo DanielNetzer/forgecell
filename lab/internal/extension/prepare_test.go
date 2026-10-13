@@ -2,6 +2,7 @@ package extension
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -181,7 +182,10 @@ func (e *cacheEnv) requireOnlyEntries(commits ...string) {
 	e.t.Helper()
 	want := slices.Clone(commits)
 	slices.Sort(want)
-	if got := listNames(e.t, e.keyParent()); !slices.Equal(got, want) {
+	// Lease files record callers that have not released their result; they are
+	// not entries.
+	got := slices.DeleteFunc(listNames(e.t, e.keyParent()), func(n string) bool { return strings.Contains(n, leaseInfix) })
+	if !slices.Equal(got, want) {
 		e.t.Fatalf("cache directory holds %v, want exactly %v", got, want)
 	}
 	if left := listNames(e.t, e.tmp); len(left) != 0 {
@@ -947,9 +951,11 @@ func (e *cacheEnv) entriesFor(m Manifest, n int) []string {
 	base := time.Now().Add(-10 * time.Hour)
 	for i := range n {
 		commit := e.commitFile(fmt.Sprintf("f%d.txt", i), fmt.Sprint(i))
-		if res := e.prepare(m, commit); res.Outcome != CacheBuilt {
+		res := e.prepare(m, commit)
+		if res.Outcome != CacheBuilt {
 			e.t.Fatalf("entry %d: %q (%s)", i, res.Outcome, res.Reason)
 		}
+		res.Release()
 		stamp := base.Add(time.Duration(i) * time.Hour)
 		if err := os.Chtimes(filepath.Join(e.entryDir(commit), ".complete"), stamp, stamp); err != nil {
 			e.t.Fatal(err)
@@ -1428,5 +1434,788 @@ func TestExtractSnapshotRefusesUnsafeNames(t *testing.T) {
 				t.Fatalf("extraction wrote outside the snapshot directory: %v", names)
 			}
 		})
+	}
+}
+
+func leaseFiles(dir string) []string {
+	names, _ := os.ReadDir(filepath.Dir(dir))
+	var found []string
+	for _, n := range names {
+		if strings.HasPrefix(n.Name(), filepath.Base(dir)+leaseInfix) {
+			found = append(found, filepath.Join(filepath.Dir(dir), n.Name()))
+		}
+	}
+	return found
+}
+
+func leasedFor(dir string) int { return len(leaseFiles(dir)) }
+
+func exitedPID(t *testing.T) int {
+	t.Helper()
+	exited := exec.Command("sh", "-c", "exit 0")
+	if err := exited.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return exited.Process.Pid
+}
+
+func TestPruneLeavesALeasedEntryUntilItIsReleased(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	m := e.scripted(`printf x > "$2/graph.json"`)
+
+	built := e.prepare(m, commit)
+	if built.Outcome != CacheBuilt {
+		t.Fatalf("outcome = %q (%s)", built.Outcome, built.Reason)
+	}
+	removed, err := Prune(e.lab, e.name, 0, nil)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("a built entry is leased to its caller, got removed %v, %v", removed, err)
+	}
+	if _, err := verifyEntry(built.Dir); err != nil {
+		t.Fatalf("the returned directory must still verify after Prune ran: %v", err)
+	}
+
+	reused := e.prepare(m, commit)
+	if reused.Outcome != CacheReused {
+		t.Fatalf("outcome = %q (%s)", reused.Outcome, reused.Reason)
+	}
+	built.Release()
+	if removed, err = Prune(e.lab, e.name, 0, nil); err != nil || len(removed) != 0 {
+		t.Fatalf("a reused entry is leased to its caller too, got removed %v, %v", removed, err)
+	}
+	reused.Release()
+	reused.Release()
+	built.Release()
+	if n := leasedFor(e.entryDir(commit)); n != 0 {
+		t.Fatalf("%d leases remain after every result was released", n)
+	}
+	removed, err = Prune(e.lab, e.name, 0, nil)
+	if err != nil || !slices.Equal(removed, []string{e.key(commit)}) {
+		t.Fatalf("after release the entry is removable, got %v, %v", removed, err)
+	}
+}
+
+func TestUnavailableResultHoldsNoLease(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	res := e.prepare(e.scripted(`exit 3`), commit)
+	e.requireUnavailable(res, "code 3")
+	res.Release()
+	if n := leasedFor(e.entryDir(commit)); n != 0 {
+		t.Fatalf("an unavailable result holds %d leases", n)
+	}
+}
+
+func TestPruneRacingPrepareNeverRemovesALeasedEntry(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	m := e.scripted(`printf x > "$2/graph.json"`)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = Prune(e.lab, e.name, 0, nil)
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	for i := range 5 {
+		res := e.prepare(m, commit)
+		if res.Outcome == CacheUnavailable {
+			t.Fatalf("round %d: %s", i, res.Reason)
+		}
+		if _, err := verifyEntry(res.Dir); err != nil {
+			t.Fatalf("round %d: a leased entry was removed or changed under its caller: %v", i, err)
+		}
+		res.Release()
+	}
+}
+
+func TestPrepareCacheRecordsItsBuilderOutsideTheEntry(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	res := e.prepare(e.scripted(`cp "$2/.builder" `+e.rec("builder")+`; printf x > "$2/graph.json"`), commit)
+	if res.Outcome != CacheBuilt {
+		t.Fatalf("outcome = %q (%s)", res.Outcome, res.Reason)
+	}
+	pid, _, err := parseOwner(e.read("builder"))
+	if err != nil || pid != os.Getpid() {
+		t.Fatalf("the build directory recorded builder %q (%v), want this process %d", e.read("builder"), err, os.Getpid())
+	}
+	if got := listNames(t, res.Dir); !slices.Equal(got, []string{".complete", "graph.json"}) {
+		t.Fatalf("the builder record must not be part of the entry: %v", got)
+	}
+}
+
+func TestPrepareCacheGivesHardLinkedOutputItsOwnCopy(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	outside := writeFile(t, filepath.Join(e.fx.root, "outside.txt"), "precious", 0o640)
+	res := e.prepare(e.scripted(`ln `+shellQuote(outside)+` "$2/linked"; mkdir "$2/sub"; ln "$2/linked" "$2/sub/again"`), commit)
+	if res.Outcome != CacheBuilt {
+		t.Fatalf("outcome = %q (%s), want a hard link to be de-linked, not refused", res.Outcome, res.Reason)
+	}
+	defer res.Release()
+	before, err := os.Lstat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := pinned.LinkCount(before); n != 1 || before.Mode().Perm() != 0o640 {
+		t.Fatalf("the file outside the cache has %d links and mode %v, want it untouched", n, before.Mode().Perm())
+	}
+	for _, rel := range []string{"linked", "sub/again"} {
+		entry := filepath.Join(res.Dir, filepath.FromSlash(rel))
+		info, err := os.Lstat(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := pinned.LinkCount(info); n != 1 || os.SameFile(info, before) {
+			t.Fatalf("%s still shares its inode (%d links)", rel, n)
+		}
+		if info.Mode().Perm() != 0o400 {
+			t.Fatalf("%s has mode %v, want read-only", rel, info.Mode().Perm())
+		}
+		if got, err := os.ReadFile(entry); err != nil || string(got) != "precious" {
+			t.Fatalf("%s holds %q, %v", rel, got, err)
+		}
+	}
+	if _, err := verifyEntry(res.Dir); err != nil {
+		t.Fatalf("a de-linked entry must verify: %v", err)
+	}
+	again := e.prepare(e.scripted(`ln `+shellQuote(outside)+` "$2/linked"; mkdir "$2/sub"; ln "$2/linked" "$2/sub/again"`), commit)
+	if again.Outcome != CacheReused {
+		t.Fatalf("outcome = %q (%s), want the de-linked entry reused", again.Outcome, again.Reason)
+	}
+	again.Release()
+}
+
+func TestPrepareCacheRefusesAnEntryWhoseFileGainedAHardLink(t *testing.T) {
+	unixOnly(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	m := e.scripted(`printf x > "$2/graph.json"`)
+	first := e.prepare(m, commit)
+	if first.Outcome != CacheBuilt {
+		t.Fatalf("outcome = %q (%s)", first.Outcome, first.Reason)
+	}
+	first.Release()
+	if err := os.Link(filepath.Join(first.Dir, "graph.json"), filepath.Join(e.fx.root, "alias")); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	if _, err := verifyEntry(first.Dir); err == nil || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("a completed entry whose file gained another name must not verify: %v", err)
+	}
+}
+
+func TestHashTreeOfAnEmptyTreeIsTheDigestOfNothing(t *testing.T) {
+	for _, locked := range []bool{false, true} {
+		got, err := hashTree(t.TempDir(), locked)
+		if err != nil || got != sum(nil) {
+			t.Fatalf("locked=%t: %q, %v", locked, got, err)
+		}
+	}
+}
+
+func TestPrepareCacheRebuildsAfterAModeOnlyChange(t *testing.T) {
+	unixOnly(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	for name, change := range map[string]func(dir string) error{
+		"file":      func(dir string) error { return os.Chmod(filepath.Join(dir, "graph.json"), 0o600) },
+		"directory": func(dir string) error { return os.Chmod(filepath.Join(dir, "sub"), 0o700) },
+		"root":      func(dir string) error { return os.Chmod(dir, 0o700) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newCacheEnv(t)
+			commit := e.commitFile("a.txt", "committed")
+			m := e.scripted(`mkdir "$2/sub"; printf x > "$2/graph.json"; printf y > "$2/sub/inner.json"`)
+			first := e.prepare(m, commit)
+			if first.Outcome != CacheBuilt {
+				t.Fatalf("outcome = %q (%s)", first.Outcome, first.Reason)
+			}
+			first.Release()
+			if err := change(first.Dir); err != nil {
+				t.Fatal(err)
+			}
+			again := e.prepare(m, commit)
+			if again.Outcome != CacheBuilt || e.runs() != 2 {
+				t.Fatalf("a mode-only change must make the entry rebuild: %+v after %d runs", again, e.runs())
+			}
+			if again.TreeSHA256 != first.TreeSHA256 {
+				t.Fatalf("the same output must give the same digest: %s vs %s", again.TreeSHA256, first.TreeSHA256)
+			}
+		})
+	}
+}
+
+func TestLockDownNeverFollowsALinkPlantedAfterTheCheck(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	outside := writeFile(t, filepath.Join(e.fx.root, "outside.txt"), "precious", 0o644)
+	testHookBeforeChmod = func(p string) {
+		if strings.Contains(p, partialPrefix) && filepath.Base(p) == "target.txt" {
+			_ = os.Chmod(filepath.Dir(p), 0o700)
+			_ = os.Remove(p)
+			_ = os.Symlink(outside, p)
+		}
+	}
+	t.Cleanup(func() { testHookBeforeChmod = nil })
+
+	res := e.prepare(e.scripted(`printf x > "$2/target.txt"`), commit)
+	e.requireUnavailable(res, "read-only")
+	info, err := os.Stat(outside)
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("the file behind the planted link changed: %v, %v", info, err)
+	}
+}
+
+func TestPrepareCacheWorksThroughASymlinkedLab(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	alias := filepath.Join(e.fx.root, "lab-alias")
+	if err := os.Symlink(e.lab, alias); err != nil {
+		t.Fatal(err)
+	}
+	res := PrepareCache(context.Background(), alias, e.name, e.manifestSHA, e.scripted(`printf x > "$2/graph.json"`), e.repo, commit)
+	if res.Outcome != CacheBuilt || res.Dir != e.entryDir(commit) {
+		t.Fatalf("a Lab reached through a link must work and report the resolved directory: %+v", res)
+	}
+	res.Release()
+	removed, err := Prune(alias, e.name, 0, nil)
+	if err != nil || !slices.Equal(removed, []string{e.key(commit)}) {
+		t.Fatalf("Prune through the link: %v, %v", removed, err)
+	}
+}
+
+func TestPrepareCacheRefusesSymlinkedCacheComponents(t *testing.T) {
+	unixOnly(t)
+	for name, link := range map[string]func(e *cacheEnv) string{
+		"extension name": func(e *cacheEnv) string { return filepath.Join(e.lab, "extensions", e.name) },
+		"manifest digest": func(e *cacheEnv) string {
+			if err := os.MkdirAll(filepath.Join(e.lab, "extensions", e.name), 0o700); err != nil {
+				e.t.Fatal(err)
+			}
+			return e.keyParent()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newCacheEnv(t)
+			commit := e.commitFile("a.txt", "committed")
+			outside := filepath.Join(e.fx.root, "outside")
+			if err := os.MkdirAll(outside, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			at := link(e)
+			if err := os.MkdirAll(filepath.Dir(at), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, at); err != nil {
+				t.Fatal(err)
+			}
+			res := e.prepare(e.scripted(`printf x > "$2/graph.json"`), commit)
+			if res.Outcome != CacheUnavailable || !strings.Contains(res.Reason, "symbolic link") {
+				t.Fatalf("result = %+v, want a refusal that names the link", res)
+			}
+			if got := listNames(t, outside); len(got) != 0 {
+				t.Fatalf("something was written through the link: %v", got)
+			}
+			if e.runs() != 0 {
+				t.Fatal("prepare ran")
+			}
+			if _, err := Prune(e.lab, e.name, 0, nil); name == "extension name" && err == nil {
+				t.Fatal("Prune must refuse a symlinked extension directory")
+			}
+		})
+	}
+}
+
+func TestCaseOnlyCollisionsInASnapshotAreRefused(t *testing.T) {
+	unixOnly(t)
+	for name, entries := range map[string][]tarEntry{
+		"files":       {regularEntry("README", "a"), regularEntry("readme", "b")},
+		"directories": {regularEntry("Docs/a.txt", "a"), regularEntry("docs/b.txt", "b")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "source")
+			if err := os.Mkdir(dst, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { makeWritable(dst) })
+			err := extractSnapshot(writeTar(t, entries), dst)
+			if err == nil || !strings.Contains(err.Error(), "differ only by case") {
+				t.Fatalf("expected a case collision, got %v", err)
+			}
+		})
+	}
+	dst := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { makeWritable(dst) })
+	archive := writeTar(t, []tarEntry{
+		{header: tar.Header{Typeflag: tar.TypeDir, Name: "d/", Mode: 0o755}},
+		regularEntry("d/a", "a"), regularEntry("d/b", "b"), regularEntry("D2/a", "c"),
+	})
+	if err := extractSnapshot(archive, dst); err != nil {
+		t.Fatalf("a directory entry followed by its files is not a collision: %v", err)
+	}
+}
+
+func TestSnapshotNamesTheLinksItLeavesOut(t *testing.T) {
+	unixOnly(t)
+	var entries []tarEntry
+	for i := range 7 {
+		entries = append(entries, tarEntry{header: tar.Header{Typeflag: tar.TypeSymlink, Name: fmt.Sprintf("link%d", i), Linkname: "/etc"}})
+	}
+	entries = append(entries, tarEntry{header: tar.Header{Typeflag: tar.TypeLink, Name: "hard", Linkname: "plain"}}, regularEntry("plain", "x"))
+	dst := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { makeWritable(dst) })
+	dropped, err := extractSnapshotNoted(writeTar(t, entries), dst)
+	if err != nil || len(dropped) != 8 || dropped[0] != "link0" || dropped[7] != "hard" {
+		t.Fatalf("dropped = %v, %v", dropped, err)
+	}
+	note := describeDropped(dropped)
+	if !strings.Contains(note, "8 tracked") || !strings.Contains(note, "link4") || strings.Contains(note, "link5") || !strings.Contains(note, "and 3 more") {
+		t.Fatalf("the note must name a bounded number of links: %q", note)
+	}
+	if describeDropped(nil) != "" {
+		t.Fatal("no dropped links, no note")
+	}
+}
+
+func TestPrepareCacheReportsTrackedSymlinksItDropped(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	e.commitFile("a.txt", "committed")
+	if err := os.Symlink("a.txt", filepath.Join(e.repo, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	e.git("add", "alias")
+	e.git("commit", "-q", "-m", "add a link")
+	commit := e.git("rev-parse", "HEAD")
+
+	res := e.prepare(e.scripted(`printf x > "$2/graph.json"`), commit)
+	if res.Outcome != CacheBuilt || !strings.Contains(res.Note, "alias") {
+		t.Fatalf("a built entry must say what the snapshot left out: %+v", res)
+	}
+}
+
+func fakeGit(t *testing.T, e *cacheEnv, body string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(e.fx.root, "fake-git")
+	writeFile(t, filepath.Join(wrapper, "git"), "#!/bin/sh\n"+body+"\nexec "+shellQuote(realGit)+" \"$@\"\n", 0o700)
+	t.Setenv("PATH", wrapper+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestPrepareCacheDoesNotCallAGitErrorAMissingCommit(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	fakeGit(t, e, `case " $* " in *" cat-file "*) echo "fatal: detected dubious ownership in repository at '/x'" >&2; exit 128;; esac`)
+	res := e.prepare(e.scripted(`printf x > "$2/graph.json"`), commit)
+	e.requireUnavailable(res, "dubious ownership")
+	if strings.Contains(res.Reason, "is not available in the source repository") || !strings.Contains(res.Reason, "git error") {
+		t.Fatalf("a git failure was mislabelled: %q", res.Reason)
+	}
+}
+
+func TestPrepareCacheStillCallsASilentGitFailureAMissingCommit(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	// git cat-file -e exits 1 without a message for a missing object.
+	fakeGit(t, e, `case " $* " in *" cat-file "*) exit 1;; esac`)
+	res := e.prepare(e.scripted(`printf x > "$2/graph.json"`), commit)
+	e.requireUnavailable(res, "is not available in the source repository")
+}
+
+func TestPrepareCacheReportsACallerDeadlineAsSuch(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res := e.prepareCtx(ctx, e.scripted("sleep 30"), commit)
+	e.requireUnavailable(res, "caller's deadline")
+	if !res.ParentDeadline || res.TimedOut {
+		t.Fatalf("a caller deadline is not a prepare timeout: %+v", res)
+	}
+}
+
+func TestPrepareCacheDoesNotCallACallerDeadlineAMissingCommit(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	fakeGit(t, e, `case " $* " in *" cat-file "*) sleep 30;; esac`)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res := e.prepareCtx(ctx, e.scripted(`printf x > "$2/graph.json"`), commit)
+	e.requireUnavailable(res, "caller's deadline")
+	if strings.Contains(res.Reason, "not available in the source repository") || !res.ParentDeadline {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestLockOwnerRecordsTheProcessStart(t *testing.T) {
+	unixOnly(t)
+	lock := filepath.Join(t.TempDir(), "entry.lock")
+	release, err := tryLock(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	raw, err := os.ReadFile(filepath.Join(lock, lockOwnerName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, start, err := parseOwner(string(raw))
+	if err != nil || pid != os.Getpid() {
+		t.Fatalf("owner record %q: %d, %v", raw, pid, err)
+	}
+	if _, startErr := processStart(os.Getpid()); startErr == nil && start == "" {
+		t.Fatal("the process start time was available but not recorded")
+	}
+	if reason := staleLock(lock); reason != "" {
+		t.Fatalf("a lock held by this process is not stale: %s", reason)
+	}
+}
+
+func TestStaleLockReportsAReusedProcessID(t *testing.T) {
+	unixOnly(t)
+	now, err := processStart(os.Getpid())
+	if err != nil {
+		t.Skipf("no process start time on this host: %v", err)
+	}
+	scheme, _, _ := strings.Cut(now, ":")
+	lock := filepath.Join(t.TempDir(), "entry.lock")
+	writeFile(t, filepath.Join(lock, lockOwnerName), fmt.Sprintf("%d\n%s:started-long-ago", os.Getpid(), scheme), 0o600)
+	reason := staleLock(lock)
+	if !strings.Contains(reason, "stale") || !strings.Contains(reason, "different process") || !strings.Contains(reason, lock) {
+		t.Fatalf("a live process id with another start time must be reported: %q", reason)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("a stale lock is reported, never removed: %v", err)
+	}
+	writeFile(t, filepath.Join(lock, lockOwnerName), fmt.Sprint(os.Getpid()), 0o600)
+	if reason := staleLock(lock); reason != "" {
+		t.Fatalf("a legacy owner record with a live pid keeps its behaviour: %q", reason)
+	}
+}
+
+func TestAcquireLockGivesUpAfterTheDefaultWaitWithoutADeadline(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	e.holdLock(commit, fmt.Sprint(os.Getpid()))
+	old := lockMaxWait
+	lockMaxWait = 500 * time.Millisecond
+	t.Cleanup(func() { lockMaxWait = old })
+
+	started := time.Now()
+	res := e.prepareCtx(context.Background(), e.scripted(`printf x > "$2/out"`), commit)
+	if res.Outcome != CacheUnavailable || !strings.Contains(res.Reason, "gave up waiting") {
+		t.Fatalf("result = %+v, want a give-up after the maximum wait", res)
+	}
+	if time.Since(started) > 10*time.Second {
+		t.Fatal("the wait was not bounded")
+	}
+	if lockMaxWait < 0 || old < time.Duration(maxPrepareTimeMS)*time.Millisecond+snapshotTimeout {
+		t.Fatalf("the default wait %s is shorter than the longest prepare plus the snapshot", old)
+	}
+}
+
+func TestStaleLocksListsOnlyLeftoverLocks(t *testing.T) {
+	e := newCacheEnv(t)
+	commits := []string{strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)}
+	dead := e.holdLock(commits[0], fmt.Sprint(exitedPID(t)))
+	e.holdLock(commits[1], fmt.Sprint(os.Getpid()))
+	ownerless := e.holdLock(commits[2], "")
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(ownerless, old, old); err != nil {
+		t.Fatal(err)
+	}
+	found := StaleLocks(e.lab)
+	var paths []string
+	for _, s := range found {
+		paths = append(paths, s.Path)
+		if s.Reason == "" {
+			t.Fatalf("a stale lock needs a reason: %+v", s)
+		}
+	}
+	if !slices.Equal(paths, []string{dead, ownerless}) {
+		t.Fatalf("stale locks = %v, want %v", paths, []string{dead, ownerless})
+	}
+	for _, lock := range []string{dead, ownerless} {
+		if _, err := os.Stat(lock); err != nil {
+			t.Fatalf("listing must not remove %s: %v", lock, err)
+		}
+	}
+	if got := StaleLocks(filepath.Join(e.fx.root, "missing")); len(got) != 0 {
+		t.Fatalf("a Lab without a cache has no stale locks: %v", got)
+	}
+}
+
+func TestPruneReportsALockWhoseOwnerIsGone(t *testing.T) {
+	e := newCacheEnv(t)
+	commits := e.entriesFor(e.scripted(`printf x > "$2/graph.json"`), 1)
+	lock := e.holdLock(commits[0], fmt.Sprint(exitedPID(t)))
+	removed, err := Prune(e.lab, e.name, 0, nil)
+	if len(removed) != 0 || err == nil || !strings.Contains(err.Error(), "stale") || !strings.Contains(err.Error(), lock) {
+		t.Fatalf("a dead owner's lock must be reported, not silently skipped: %v, %v", removed, err)
+	}
+}
+
+func TestPruneBetweenVerifyAndReturnCannotRemoveTheEntry(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	m := e.scripted(`printf x > "$2/graph.json"`)
+	first := e.prepare(m, commit)
+	if first.Outcome != CacheBuilt {
+		t.Fatalf("outcome = %q (%s)", first.Outcome, first.Reason)
+	}
+	first.Release()
+
+	for name, run := range map[string]func() CacheResult{
+		"reuse": func() CacheResult { return e.prepare(m, commit) },
+		"build": func() CacheResult {
+			if err := removeEntry(e.entryDir(commit)); err != nil {
+				t.Fatal(err)
+			}
+			return e.prepare(m, commit)
+		},
+	} {
+		var removed []string
+		var pruneErr error
+		hooked := false
+		testHookAfterVerify = func(dir string) {
+			hooked = true
+			removed, pruneErr = Prune(e.lab, e.name, 0, nil)
+		}
+		res := run()
+		testHookAfterVerify = nil
+		if !hooked || res.Outcome == CacheUnavailable {
+			t.Fatalf("%s: hooked=%t, result %+v", name, hooked, res)
+		}
+		if len(removed) != 0 || pruneErr != nil {
+			t.Fatalf("%s: Prune between verify and return removed %v (%v)", name, removed, pruneErr)
+		}
+		if _, err := verifyEntry(res.Dir); err != nil {
+			t.Fatalf("%s: the returned entry no longer verifies: %v", name, err)
+		}
+		res.Release()
+	}
+}
+
+func TestAPanicWhileLeasingReleasesTheLeaseAndTheLock(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	testHookAfterVerify = func(string) { panic("boom") }
+	t.Cleanup(func() { testHookAfterVerify = nil })
+	func() {
+		defer func() { _ = recover() }()
+		e.prepare(e.scripted(`printf x > "$2/graph.json"`), commit)
+	}()
+	if n := leasedFor(e.entryDir(commit)); n != 0 {
+		t.Fatalf("a panic leaked %d lease files", n)
+	}
+	if _, err := os.Lstat(e.entryDir(commit) + lockSuffix); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a panic leaked the entry lock: %v", err)
+	}
+}
+
+func TestHelperProcessHoldsALease(t *testing.T) {
+	dir := os.Getenv("FORGECELL_TEST_LEASE_DIR")
+	if dir == "" {
+		t.Skip("only runs as a helper of another test")
+	}
+	if _, err := takeLease(dir); err != nil {
+		fmt.Println("LEASE-FAILED", err)
+		os.Exit(2)
+	}
+	fmt.Println("LEASE-READY")
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	os.Exit(0)
+}
+
+func TestPruneHonoursALeaseHeldByAnotherProcess(t *testing.T) {
+	unixOnly(t)
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	res := e.prepare(e.scripted(`printf x > "$2/graph.json"`), commit)
+	if res.Outcome != CacheBuilt {
+		t.Fatalf("outcome = %q (%s)", res.Outcome, res.Reason)
+	}
+	res.Release()
+	dir := e.entryDir(commit)
+
+	helper := exec.Command(os.Args[0], "-test.run=^TestHelperProcessHoldsALease$")
+	helper.Env = append(os.Environ(), "FORGECELL_TEST_LEASE_DIR="+dir)
+	stdin, err := helper.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := helper.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = helper.Process.Kill()
+		_ = helper.Wait()
+	}()
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || strings.TrimSpace(line) != "LEASE-READY" {
+		t.Fatalf("the helper did not take its lease: %q, %v", line, err)
+	}
+
+	if removed, err := Prune(e.lab, e.name, 0, nil); err != nil || len(removed) != 0 {
+		t.Fatalf("a lease held by another running process was ignored: removed %v, %v", removed, err)
+	}
+	if n := leasedFor(dir); n != 1 {
+		t.Fatalf("%d lease files, want the live one", n)
+	}
+
+	// A killed process cannot release; its lease is reaped and no longer protects.
+	if err := helper.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdin.Close()
+	_ = helper.Wait()
+	removed, err := Prune(e.lab, e.name, 0, nil)
+	if err != nil || !slices.Equal(removed, []string{e.key(commit)}) {
+		t.Fatalf("the lease of a dead process still protected the entry: removed %v, %v", removed, err)
+	}
+	if n := leasedFor(dir); n != 0 {
+		t.Fatalf("%d lease files remain after the owner died", n)
+	}
+}
+
+func TestLeaseFileNamesTheProcessAndSitsBesideTheEntry(t *testing.T) {
+	e := newCacheEnv(t)
+	commit := e.commitFile("a.txt", "committed")
+	res := e.prepare(e.scripted(`printf x > "$2/graph.json"`), commit)
+	if res.Outcome != CacheBuilt {
+		t.Fatalf("outcome = %q (%s)", res.Outcome, res.Reason)
+	}
+	files := leaseFiles(res.Dir)
+	if len(files) != 1 || !strings.Contains(filepath.Base(files[0]), "."+strconv.Itoa(os.Getpid())+".") {
+		t.Fatalf("lease files = %v", files)
+	}
+	pid, _, err := parseOwner(readFileString(t, files[0]))
+	if err != nil || pid != os.Getpid() {
+		t.Fatalf("lease record: %d, %v", pid, err)
+	}
+	if got := listNames(t, res.Dir); !slices.Equal(got, []string{".complete", "graph.json"}) {
+		t.Fatalf("the lease must not be part of the entry: %v", got)
+	}
+	res.Release()
+	if n := leasedFor(res.Dir); n != 0 {
+		t.Fatalf("%d lease files after Release", n)
+	}
+}
+
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestStartTimesFromDifferentSchemesAreNotCompared(t *testing.T) {
+	if !sameStartScheme("proc:1", "proc:2") || !sameStartScheme("ps:a", "ps:b") {
+		t.Fatal("tokens of one scheme compare")
+	}
+	if sameStartScheme("proc:1", "ps:Mon") {
+		t.Fatal("tokens of different schemes must not compare")
+	}
+	unixOnly(t)
+	now, err := processStart(os.Getpid())
+	if err != nil {
+		t.Skipf("no process start time on this host: %v", err)
+	}
+	other := "ps:"
+	if strings.HasPrefix(now, "ps:") {
+		other = "proc:"
+	}
+	if gone := ownerGone(os.Getpid(), other+"unrelated"); gone != "" {
+		t.Fatalf("an owner whose start time cannot be compared is assumed alive: %q", gone)
+	}
+}
+
+func TestOwnerWatchAsksLivenessEveryPollButStartTimeRarely(t *testing.T) {
+	unixOnly(t)
+	var w ownerWatch
+	if got := w.gone(os.Getpid(), ""); got != "" {
+		t.Fatalf("this process is alive: %q", got)
+	}
+	w.verdict = "cached verdict"
+	if got := w.gone(os.Getpid(), ""); got != "cached verdict" {
+		t.Fatalf("a recent verdict is reused: %q", got)
+	}
+	dead := exitedPID(t)
+	w = ownerWatch{pid: dead, verdict: "", at: time.Now()}
+	if got := w.gone(dead, ""); got != "has exited" {
+		t.Fatalf("a process that exited is noticed on every poll: %q", got)
+	}
+	var none *ownerWatch
+	if got := none.gone(dead, ""); got != "has exited" {
+		t.Fatalf("a nil watch checks directly: %q", got)
+	}
+}
+
+func TestPruneReapsPartialsWhoseBuilderIsGone(t *testing.T) {
+	e := newCacheEnv(t)
+	dead := filepath.Join(e.keyParent(), partialPrefix+"dead")
+	live := filepath.Join(e.keyParent(), partialPrefix+"live")
+	ownerless := filepath.Join(e.keyParent(), partialPrefix+"0123abcd")
+	writeFile(t, filepath.Join(dead, "graph.json"), "x", 0o600)
+	writeFile(t, filepath.Join(dead, builderName), fmt.Sprint(exitedPID(t)), 0o600)
+	writeFile(t, filepath.Join(live, "graph.json"), "x", 0o600)
+	writeFile(t, filepath.Join(live, builderName), string(ownerRecord()), 0o600)
+	writeFile(t, filepath.Join(ownerless, "graph.json"), "x", 0o600)
+	if err := os.Chmod(filepath.Join(dead, "graph.json"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dead, 0o500); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, keep := range []int{5, 0} {
+		if _, err := Prune(e.lab, e.name, keep, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(dead); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("keep=%d: a build whose process is gone must be removed (%v)", keep, err)
+		}
+		for _, kept := range []string{live, ownerless} {
+			if _, err := os.Lstat(kept); err != nil {
+				t.Fatalf("keep=%d: %s must be left alone: %v", keep, kept, err)
+			}
+		}
 	}
 }

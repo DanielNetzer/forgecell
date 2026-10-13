@@ -514,7 +514,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		active, err := formula.Inspect(*lab, "")
 		if err != nil {
-			return fail(err)
+			return fail(describeFormulaLoadFailure(*lab, err))
 		}
 		candidates := onboarding.Discover(ctx, cwd, nil)
 		pathReady := map[string]bool{}
@@ -563,6 +563,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		firstRoleCommand := ""
 		rolesReady := true
 		extensions := inspectExtensions(labDir, active.Formula)
+		extensionLocks := inspectExtensionLocks(labDir)
 		isolation := inspectIsolation(active.Formula)
 		for i := range roles {
 			describeAnalysisWithExtensions(&roles[i], active.Formula)
@@ -609,12 +610,15 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if len(extensions) > 0 {
 				report["extensions"] = extensions
 			}
+			if len(extensionLocks) > 0 {
+				report["extensionLocks"] = extensionLocks
+			}
 			report["isolation"] = isolation
 			if err = json.NewEncoder(out).Encode(report); err != nil {
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, Isolation: isolation, Next: next, Note: note})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note})
 		}
 		if !ready {
 			return 2
@@ -1057,6 +1061,34 @@ func inspectExtensions(labDir string, f formula.Formula) []doctorExtension {
 	return report
 }
 
+// doctorExtensionLock is an extension cache lock that nothing should wait on.
+type doctorExtensionLock struct {
+	Path       string `json:"path"`
+	Reason     string `json:"reason"`
+	FixCommand string `json:"fixCommand"`
+}
+
+// inspectExtensionLocks lists the stale extension cache locks under the Lab. It
+// only reads: it never removes a lock and never runs prepare. The fix is a command
+// for the operator to run once nothing is building.
+func inspectExtensionLocks(labDir string) []doctorExtensionLock {
+	stale := extension.StaleLocks(labDir)
+	report := make([]doctorExtensionLock, 0, len(stale))
+	for _, s := range stale {
+		report = append(report, doctorExtensionLock{Path: s.Path, Reason: s.Reason, FixCommand: "rm -r -- " + shellWord(s.Path)})
+	}
+	return report
+}
+
+// describeFormulaLoadFailure says which Formula failed to load and why, and what to
+// do about it, instead of the bare validation error.
+func describeFormulaLoadFailure(labDir string, err error) error {
+	if strings.HasPrefix(err.Error(), "invalid Lab configuration") {
+		return err
+	}
+	return fmt.Errorf("the active Formula in %s cannot be loaded: %w; fix or replace that Formula (a Formula that already used a top-level `extensions` key for something else must rename it, because `extensions` is now a reserved mapping of name to declaration), then run doctor again", labDir, err)
+}
+
 // describeAnalysisWithExtensions replaces the analysis role description when
 // extensions are attached: that analysis runs without safe mode, so the usual
 // controls description would overstate it.
@@ -1206,6 +1238,7 @@ type doctorView struct {
 	Candidates                 []doctorCandidate
 	Roles                      []onboarding.RoleReadiness
 	Extensions                 []doctorExtension
+	ExtensionLocks             []doctorExtensionLock
 	Isolation                  doctorIsolation
 }
 
@@ -1373,6 +1406,12 @@ func renderDoctor(out io.Writer, v doctorView) {
 			for _, r := range e.Roles {
 				fmt.Fprintf(out, "    %s role (%s binding): adapter support %s — %s\n", r.Role, r.Binding, r.Adapter.State, r.Adapter.Reason)
 			}
+		}
+	}
+	if len(v.ExtensionLocks) > 0 {
+		fmt.Fprintln(out, "\nStale extension cache locks (doctor never removes a lock; run the fix once nothing is building):")
+		for _, l := range v.ExtensionLocks {
+			fmt.Fprintf(out, "  %s\n    %s\n    Fix: %s\n", l.Path, l.Reason, l.FixCommand)
 		}
 	}
 	if len(v.Isolation.Adapters) > 0 {

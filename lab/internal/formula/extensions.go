@@ -99,7 +99,7 @@ func validateExtensions(raw map[string]any) error {
 	if value, exists := raw["extensions"]; exists {
 		var ok bool
 		if declared, ok = value.(map[string]any); !ok {
-			return fmt.Errorf("extensions must be a mapping of name to declaration")
+			return fmt.Errorf("extensions must be a mapping of name to declaration: `extensions` is a reserved top-level Formula key, so a Formula that already used it for something else must rename or remove it")
 		}
 		for name, entry := range declared {
 			if !extensionName.MatchString(name) {

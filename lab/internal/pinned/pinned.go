@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // MaxFileBytes bounds every pinned file.
@@ -83,10 +84,92 @@ func RejectDuplicateKeys(raw []byte) error {
 	return walk()
 }
 
+// OverrideTrustedUIDForTest replaces the rule for which owners are trusted and
+// returns a function that restores it. Creating files owned by another user needs
+// privilege, so tests of the ownership check use this seam instead.
+func OverrideTrustedUIDForTest(trusted func(uid uint32) bool) (restore func()) {
+	previous := trustedUID
+	trustedUID = trusted
+	return func() { trustedUID = previous }
+}
+
+// CleanRelative reports whether p is a clean relative path that stays below the
+// directory it is joined to: no empty, "." or ".." component, no repeated, leading
+// or trailing slash, no backslash or NUL.
+func CleanRelative(p string) bool {
+	return p != "" && !strings.ContainsAny(p, "\x00\\") && filepath.IsLocal(p) && filepath.ToSlash(filepath.Clean(p)) == p
+}
+
+// PathInArg reports whether an argument names the path: it compares cleaned path
+// components, so /opt/x/./tool, /opt//x/tool and /opt/x/../x/tool all name
+// /opt/x/tool, as does --flag=/opt/x/tool or a list such as /a:/opt/x/tool, while
+// /opt/x/tool2 and /opt/x/tool.cfg do not. The leading existing directory of each
+// path is resolved through symlinks on both sides, so /var/x and /private/var/x
+// are the same, and the comparison ignores case on macOS. path must itself be
+// clean and absolute.
+func PathInArg(arg, path string) bool {
+	if path == "" || path == "/" {
+		return false
+	}
+	targets := []string{path}
+	if resolved := resolveLeading(path); resolved != path {
+		targets = append(targets, resolved)
+	}
+	hit := func(candidate string) bool {
+		cleaned := filepath.Clean(candidate)
+		for _, c := range []string{cleaned, resolveLeading(cleaned)} {
+			for _, t := range targets {
+				if pathWithin(c, t) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for i := 0; i < len(arg); i++ {
+		if arg[i] != '/' {
+			continue
+		}
+		tail := arg[i:]
+		if hit(tail) {
+			return true
+		}
+		if end := strings.IndexAny(tail, ":,;=\"' \t\r\n|&()<>{}[]"); end > 0 && hit(tail[:end]) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathWithin reports whether candidate is target or lies below it, comparing
+// whole components and, on macOS, ignoring case.
+func pathWithin(candidate, target string) bool {
+	if runtime.GOOS == "darwin" {
+		candidate, target = strings.ToLower(candidate), strings.ToLower(target)
+	}
+	return candidate == target || strings.HasPrefix(candidate, target+"/")
+}
+
+// resolveLeading resolves symlinks in the longest existing leading directory of
+// an absolute, clean path and keeps the rest as written.
+func resolveLeading(path string) string {
+	rest := ""
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		if filepath.Dir(dir) == dir {
+			return path
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
+}
+
 // CheckPlacement rejects a pinned path that another principal could swap after
 // verification: a symlink (or a path resolved through one), a group- or
-// world-writable file, or any ancestor directory that others can write to
-// without the sticky bit.
+// world-writable file, a file with more than one hard link, a file or ancestor
+// directory owned by anyone but root or the current user, or any ancestor
+// directory that others can write to without the sticky bit.
 func CheckPlacement(path string) error {
 	if runtime.GOOS == "windows" {
 		return fmt.Errorf("%s cannot be checked: permission and symlink checks are unsupported on Windows", path)
@@ -108,10 +191,16 @@ func CheckPlacement(path string) error {
 	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s is group- or world-writable", path)
 	}
+	if err := checkLinksAndOwner(path, info); err != nil {
+		return err
+	}
 	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
 		di, err := os.Lstat(dir)
 		if err != nil {
 			return fmt.Errorf("%s has an unreadable parent: %v", path, err)
+		}
+		if uid, ok := uidOf(di); ok && !trustedUID(uid) {
+			return fmt.Errorf("%s lives in the directory %s owned by uid %d, which is neither root nor the current user (uid %d)", path, dir, uid, os.Geteuid())
 		}
 		if di.Mode().Perm()&0o022 != 0 && di.Mode()&os.ModeSticky == 0 {
 			return fmt.Errorf("%s lives in the writable directory %s", path, dir)
@@ -120,6 +209,40 @@ func CheckPlacement(path string) error {
 			return nil
 		}
 	}
+}
+
+// rootProtected reports whether a multi-link file is out of reach of unprivileged
+// users: root owns it and every ancestor up to /, and no ancestor is group- or
+// world-writable. System tools such as /usr/bin/git are often hard-linked shims
+// that only root can re-link, so they stay usable.
+func rootProtected(path string, info os.FileInfo) bool {
+	if uid, ok := uidOf(info); !ok || uid != 0 {
+		return false
+	}
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		di, err := os.Lstat(dir)
+		if err != nil || di.Mode().Perm()&0o022 != 0 {
+			return false
+		}
+		if uid, ok := uidOf(di); !ok || uid != 0 {
+			return false
+		}
+		if filepath.Dir(dir) == dir {
+			return true
+		}
+	}
+}
+
+func checkLinksAndOwner(path string, info os.FileInfo) error {
+	if info.Mode().IsRegular() {
+		if n, ok := LinkCount(info); ok && n > 1 && !rootProtected(path, info) {
+			return fmt.Errorf("%s has %d hard links; another name for it could change its content. Copy the file to a private location that only you can write, and pin that copy", path, n)
+		}
+	}
+	if uid, ok := uidOf(info); ok && !trustedUID(uid) {
+		return fmt.Errorf("%s is owned by uid %d, which is neither root nor the current user (uid %d)", path, uid, os.Geteuid())
+	}
+	return nil
 }
 
 // Open opens a placement-checked regular file and proves the open handle is the
@@ -140,6 +263,10 @@ func Open(path string) (*os.File, error) {
 	if err != nil || !os.SameFile(before, after) || after.Size() > MaxFileBytes {
 		file.Close()
 		return nil, fmt.Errorf("%s was replaced while it was opened or exceeds %d bytes", path, int64(MaxFileBytes))
+	}
+	if err := checkLinksAndOwner(path, after); err != nil {
+		file.Close()
+		return nil, err
 	}
 	return file, nil
 }

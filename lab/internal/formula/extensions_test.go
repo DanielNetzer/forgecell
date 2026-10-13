@@ -213,3 +213,17 @@ func TestExtensionRoleExtensionsResolve(t *testing.T) {
 		t.Fatal("RoleExtensions returned the stored slice")
 	}
 }
+
+func TestUnrelatedExtensionsKeyExplainsItself(t *testing.T) {
+	for _, value := range []string{"extensions: [a, b]\n", "extensions: some text\n"} {
+		_, err := Parse([]byte(extensionRecipe(value, "", "")))
+		if err == nil {
+			t.Fatalf("%q parsed", value)
+		}
+		for _, want := range []string{"mapping of name to declaration", "reserved top-level"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("%q: error %q lacks %q", value, err, want)
+			}
+		}
+	}
+}

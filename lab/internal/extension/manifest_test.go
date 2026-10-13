@@ -319,7 +319,30 @@ func TestDecodeRejectsInvalidManifests(t *testing.T) {
 		{"placeholder after prefix", func(m map[string]any) { setArgs("prepare", "{{SOURCE}}/{{HOME}}")(m) }},
 		{"NUL in argument", func(m map[string]any) { setArgs("server", "a\x00b")(m) }},
 		{"pinned path in args", func(m map[string]any) { setArgs("server", execPath)(m) }},
-		{"pinned path inside an argument", func(m map[string]any) { setArgs("server", "--config="+execPath+".cfg")(m) }},
+		{"pinned path inside an argument", func(m map[string]any) { setArgs("server", "--config="+execPath)(m) }},
+		{"pinned path in an unclean spelling", func(m map[string]any) { setArgs("server", filepath.Dir(execPath)+"/./"+filepath.Base(execPath))(m) }},
+		{"pinned path with a doubled slash", func(m map[string]any) {
+			setArgs("server", strings.Replace(execPath, "/file", "//file", 1))(m)
+		}},
+		{"pinned path through a parent segment", func(m map[string]any) {
+			setArgs("server", filepath.Dir(execPath)+"/../"+filepath.Base(filepath.Dir(execPath))+"/file")(m)
+		}},
+		{"pinned path in a list", func(m map[string]any) { setArgs("server", "--paths=/usr/bin:"+execPath)(m) }},
+		{"cache placeholder with a parent segment", func(m map[string]any) { setArgs("server", "{{CACHE}}/../x")(m) }},
+		{"cache placeholder with a doubled slash", func(m map[string]any) { setArgs("server", "{{CACHE}}//x")(m) }},
+		{"cache placeholder escaping later", func(m map[string]any) { setArgs("server", "{{CACHE}}/a/../../x")(m) }},
+		{"source placeholder with a dot segment", func(m map[string]any) { setArgs("prepare", "{{SOURCE}}/./x")(m) }},
+		{"cache placeholder with a trailing slash", func(m map[string]any) { setArgs("server", "{{CACHE}}/dir/")(m) }},
+		{"cache placeholder with an empty suffix", func(m map[string]any) { setArgs("server", "{{CACHE}}/")(m) }},
+		{"duplicate dependency path", func(m map[string]any) {
+			d := m["dependencies"].([]any)[0]
+			m["dependencies"] = []any{d, d}
+		}},
+		{"dependencies sharing a file name", func(m map[string]any) {
+			d := m["dependencies"].([]any)[0].(map[string]any)
+			other := map[string]any{"path": execPath, "sha256": d["sha256"], "role": "lib", "state": "pinned"}
+			m["dependencies"] = []any{d, other}
+		}},
 		{"pinned path in prepare args", func(m map[string]any) { setArgs("prepare", "build", execPath)(m) }},
 	}
 	for _, c := range cases {
@@ -706,5 +729,112 @@ func TestLoadRefusesWhenPinnedFilesChanged(t *testing.T) {
 	}
 	if ids != nil || !reflect.DeepEqual(m, Manifest{}) {
 		t.Fatalf("a failed load must return nothing: %+v %+v", m, ids)
+	}
+}
+
+func TestVerifyRefusesPinnedFilesOwnedByAnotherUser(t *testing.T) {
+	fx := newFixture(t)
+	m := fx.manifest(t)
+	if _, err := m.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.OverrideTrustedUIDForTest(func(uint32) bool { return false })()
+	_, err := m.Verify()
+	if err == nil || !strings.Contains(err.Error(), "owned by uid") || !strings.Contains(err.Error(), fx.files[fileServer]) {
+		t.Fatalf("expected an ownership refusal naming the server, got %v", err)
+	}
+}
+
+func TestVerifyRefusesAHardLinkedPinnedFile(t *testing.T) {
+	fx := newFixture(t)
+	m := fx.manifest(t)
+	alias := filepath.Join(fx.root, "alias")
+	if err := os.Link(fx.files[fileDependency], alias); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	if _, err := m.Verify(); err == nil || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("expected a hard-link refusal, got %v", err)
+	}
+}
+
+func TestDecodeComparesPinnedPathsByComponent(t *testing.T) {
+	fx := newFixture(t)
+	good := marshal(t, fx.manifest(t))
+	execPath := fx.files[fileServer]
+	for _, arg := range []string{execPath + ".cfg", execPath + "2", "--config=" + execPath + ".cfg", "{{CACHE}}/a/b.json", "{{SOURCE}}/src/main.go"} {
+		raw := mutateJSON(t, good, setArgs("server", arg))
+		if _, err := Decode(raw); err != nil {
+			t.Fatalf("%q names a different file than the pinned %s: %v", arg, execPath, err)
+		}
+	}
+}
+
+func TestDecodeRejectsRepeatedDependencyNamesWithTheName(t *testing.T) {
+	fx := newFixture(t)
+	good := marshal(t, fx.manifest(t))
+	raw := mutateJSON(t, good, func(m map[string]any) {
+		d := m["dependencies"].([]any)[0].(map[string]any)
+		other := map[string]any{"path": fx.files[fileServer], "sha256": d["sha256"], "role": "lib", "state": "pinned"}
+		m["dependencies"] = []any{d, other}
+	})
+	if _, err := Decode(raw); err == nil || !strings.Contains(err.Error(), `"file"`) {
+		t.Fatalf("expected an error naming the repeated file name, got %v", err)
+	}
+	raw = mutateJSON(t, good, func(m map[string]any) {
+		d := m["dependencies"].([]any)[0].(map[string]any)
+		m["dependencies"] = []any{d, map[string]any{"path": "/opt/other/lib.so", "sha256": d["sha256"], "role": "lib", "state": "pinned"}}
+	})
+	if _, err := Decode(raw); err != nil {
+		t.Fatalf("distinct dependency names must decode: %v", err)
+	}
+}
+
+func TestLoadWorksThroughASymlinkedLabAndRefusesSymlinkedComponents(t *testing.T) {
+	fx := newFixture(t)
+	rel, digest := fx.writeManifest(t, marshal(t, fx.manifest(t)))
+
+	alias := filepath.Join(fx.root, "lab-alias")
+	if err := os.Symlink(fx.lab, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(alias, rel, digest); err != nil {
+		t.Fatalf("a Lab reached through a symlink must load: %v", err)
+	}
+
+	real := filepath.Join(fx.lab, "elsewhere")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(fx.lab, "extensions", "graphify.json"), filepath.Join(real, "graphify.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(fx.lab, "extensions")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(fx.lab, "extensions")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(fx.lab, rel, digest); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("a symlinked extensions directory must be refused: %v", err)
+	}
+}
+
+func TestLoadRefusesManifestsInsideTheCacheRoot(t *testing.T) {
+	fx := newFixture(t)
+	raw := marshal(t, fx.manifest(t))
+	digest := sum(raw)
+	for _, rel := range []string{
+		"extensions/graphify/" + strings.Repeat("a", 64) + "/manifest.json",
+		"extensions/graphify/" + strings.Repeat("a", 64) + "/" + strings.Repeat("b", 40) + "/graph.json",
+		"Extensions/graphify/" + strings.Repeat("a", 64) + "/manifest.json",
+	} {
+		writeFile(t, filepath.Join(fx.lab, filepath.FromSlash(rel)), string(raw), 0o600)
+		if _, _, err := Load(fx.lab, rel, digest); err == nil || !strings.Contains(err.Error(), "extension cache") {
+			t.Fatalf("%s: expected a cache-root refusal, got %v", rel, err)
+		}
+	}
+	other, _ := fx.writeManifest(t, raw)
+	if _, _, err := Load(fx.lab, other, digest); err != nil {
+		t.Fatalf("extensions/graphify.json must still load: %v", err)
 	}
 }

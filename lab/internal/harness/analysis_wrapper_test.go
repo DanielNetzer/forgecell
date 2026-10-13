@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/pinned"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
@@ -625,6 +626,154 @@ func TestAnalysisWrapperManifestDecoderIsStrict(t *testing.T) {
 		if _, err := DecodeAnalysisWrapperManifest([]byte(b[1])); err == nil {
 			t.Errorf("%s: decoder accepted %.120s", b[0], b[1])
 		}
+	}
+}
+
+func TestAnalysisWrapperRefusesAnInterpreterSwappedBeforeExecution(t *testing.T) {
+	unixOnly(t)
+	t.Cleanup(func() { testHookAfterCopy = nil })
+	out := t.TempDir()
+	fx := newWrapperFixture(t, "true\n")
+	raw, err := os.ReadFile(fx.interp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A private copy of the shell stands in for an interpreter the test may change.
+	private := filepath.Join(fx.dir, "sh")
+	if err = os.WriteFile(private, raw, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fx.interp = private
+	fx.manifest.Interpreter.Path = private
+	fx.setScript(fmt.Sprintf("touch %q\nprintf '%%s' '%s'\n", filepath.Join(out, "ran"), wrapperOKAnalysis))
+	fx.pin()
+	d := fx.approve()
+	if err = d.Err(); err != nil {
+		t.Fatal(err)
+	}
+	testHookAfterCopy = func() {
+		file, err := os.OpenFile(private, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = file.WriteString("\n# swapped after the copy\n")
+		file.Close()
+	}
+	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
+	if result.OK || !strings.Contains(result.Error, "interpreter changed") {
+		t.Fatalf("an interpreter swapped after the copy must be refused: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(out, "ran")); !os.IsNotExist(err) {
+		t.Fatal("the wrapper ran under a swapped interpreter")
+	}
+}
+
+func TestAnalysisWrapperRefusesFilesOwnedByAnotherUser(t *testing.T) {
+	unixOnly(t)
+	fx := newWrapperFixture(t, "true\n")
+	if d := fx.approve(); d.Err() != nil {
+		t.Fatal(d.Err())
+	}
+	defer pinned.OverrideTrustedUIDForTest(func(uint32) bool { return false })()
+	d := fx.approve()
+	assertRefused(t, d, "changed")
+	if !strings.Contains(strings.Join(d.Findings, "\n"), "owned by uid") {
+		t.Fatalf("the refusal must name the owner: %v", d.Findings)
+	}
+	if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout); result.OK {
+		t.Fatalf("a refused decision must not run: %+v", result)
+	}
+}
+
+func TestAnalysisWrapperArgvPlaceholderAndPinnedPathRules(t *testing.T) {
+	fx := newWrapperFixture(t, "true\n")
+	decode := func(args ...string) error {
+		m := fx.manifest
+		m.Args = args
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = DecodeAnalysisWrapperManifest(raw)
+		return err
+	}
+	for _, ok := range [][]string{
+		{"--analysis-only"},
+		{WrapperHomePlaceholder},
+		{WrapperHomePlaceholder + "/config/config.json", "--flag"},
+		{fx.config + ".bak"},
+		{fx.script + "2"},
+	} {
+		if err := decode(ok...); err != nil {
+			t.Errorf("%q was refused: %v", ok, err)
+		}
+	}
+	originals := map[string]string{"executable": fx.script, "interpreter": fx.interp, "configuration": fx.config, "policy": fx.policy, "dependency": fx.dep, "evidence": fx.evidence}
+	for role, original := range originals {
+		for spelling, arg := range map[string]string{
+			"exact":        original,
+			"flag":         "--path=" + original,
+			"dot segment":  filepath.Dir(original) + "/./" + filepath.Base(original),
+			"double slash": filepath.Dir(original) + "//" + filepath.Base(original),
+			"parent":       filepath.Dir(original) + "/../" + filepath.Base(filepath.Dir(original)) + "/" + filepath.Base(original),
+		} {
+			if err := decode(arg); err == nil || !strings.Contains(err.Error(), "pinned original") {
+				t.Errorf("%s, %s: expected a refusal, got %v (%q)", role, spelling, err, arg)
+			}
+		}
+	}
+	for _, bad := range []string{
+		WrapperHomePlaceholder + "/../x", WrapperHomePlaceholder + "//x", WrapperHomePlaceholder + "/./x", WrapperHomePlaceholder + "/x/",
+		"--home=" + WrapperHomePlaceholder, WrapperHomePlaceholder + "x", "{{HOME}}", "{{" + "WRAPPER_HOME", WrapperHomePlaceholder + "/{{" + "WRAPPER_HOME}}",
+	} {
+		if err := decode(bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+
+	// A pinned original in argv is refused at approval too, and never runs.
+	marker := filepath.Join(t.TempDir(), "ran")
+	fx = newWrapperFixture(t, fmt.Sprintf("touch %q\nprintf '%%s' '%s'\n", marker, wrapperOKAnalysis))
+	fx.manifest.Args = []string{"--config", fx.config}
+	d := fx.approve()
+	assertRefused(t, d, "malformed")
+	if result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout); result.OK {
+		t.Fatalf("a refused decision must not run: %+v", result)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("the wrapper ran with a pinned original in its argv")
+	}
+}
+
+func TestAnalysisWrapperSubstitutesTheWrapperHomeInArgv(t *testing.T) {
+	unixOnly(t)
+	out := t.TempDir()
+	fx := newWrapperFixture(t, "true\n")
+	fx.manifest.Args = []string{"--analysis-only", WrapperHomePlaceholder + "/config/config.json", WrapperHomePlaceholder}
+	fx.setScript(fmt.Sprintf("cat >/dev/null\nprintf '%%s\\n' \"$@\" > %q\ncp \"$2\" %q\nprintf '%%s' '%s'\n", filepath.Join(out, "argv"), filepath.Join(out, "seen"), wrapperOKAnalysis))
+	fx.pin()
+	d := fx.approve()
+	if err := d.Err(); err != nil {
+		t.Fatal(err)
+	}
+	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
+	if !result.OK {
+		t.Fatalf("%+v", result)
+	}
+	raw, _ := os.ReadFile(filepath.Join(out, "argv"))
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 3 || lines[0] != "--analysis-only" {
+		t.Fatalf("argv = %q", lines)
+	}
+	if !strings.Contains(lines[2], "forgecell-analysis-wrapper-") || lines[1] != lines[2]+"/config/config.json" || strings.Contains(lines[1], "{{") {
+		t.Fatalf("the placeholder must become the private root: %q", lines)
+	}
+	if strings.HasPrefix(lines[1], fx.dir) {
+		t.Fatalf("argv must not reach the original directory: %q", lines[1])
+	}
+	if got, _ := os.ReadFile(filepath.Join(out, "seen")); string(got) != `{"mode":"analysis"}` {
+		t.Fatalf("the script must read the verified copy through argv, read %q", got)
 	}
 }
 
