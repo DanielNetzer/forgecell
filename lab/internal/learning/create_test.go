@@ -122,7 +122,7 @@ func TestExtensionDeclarationsAreProtectedFromLearning(t *testing.T) {
 	}{
 		{"unchanged declarations", func(y string) string { return y }, ""},
 		{"role attachment may change", replace("  extensions: [graphify]\n", "  extensions: [graphify, notes]\n"), ""},
-		{"required may change", replace("required: true", "required: false"), ""},
+		{"required true to false is refused", replace("required: true", "required: false"), "notes"},
 		{"added declaration", replace("harness:\n  command", "  extra: {manifest: extensions/extra.json, sha256: "+digest+"}\nharness:\n  command"), "extra"},
 		{"removed declaration", replace(notes, ""), "notes"},
 		{"changed manifest", replace("extensions/graphify.json", "extensions/other.json"), "graphify"},
@@ -246,9 +246,7 @@ func TestExtensionAttachmentIsWorkflowBehavior(t *testing.T) {
 		{"attach only", detached, attached, true},
 		{"detach only", attached, detached, true},
 		{"role attach only", roleBase(""), roleBase(", extensions: [h]"), true},
-		{"role detach only", roleBase(", extensions: [h]"), roleBase(""), true},
 		{"reorder only", extensionBase(claude+"  extensions: [g, h]\n", ""), extensionBase(claude+"  extensions: [h, g]\n", ""), true},
-		{"required flip only", detached, strings.Replace(detached, "required: true", "required: false", 1), true},
 		{"empty list equals absent", detached, strings.Replace(detached, "  instructions: Check tests.\n", "  instructions: Check tests.\n  extensions: []\n", 1), false},
 		{"comment only", attached, attached + "# pretty\n", false},
 	} {
@@ -264,6 +262,16 @@ func TestExtensionAttachmentIsWorkflowBehavior(t *testing.T) {
 				t.Fatalf("a cosmetic edit was accepted: %v, %d new suggestions", e, saved)
 			}
 		})
+	}
+}
+
+func TestLearningCannotDetachARequiredExtensionFromARole(t *testing.T) {
+	roleBase := func(list string) string {
+		return extensionBase("  command: [echo]\n", "harnesses:\n  coding: {binding: claude-code, command: "+extensionNativeCommand("claude-code")+list+"}\n")
+	}
+	saved, e := proposeFormula(t, roleBase(", extensions: [h]"), roleBase(""))
+	if e == nil || !strings.Contains(e.Error(), `required extension "h"`) || !strings.Contains(e.Error(), "coding role") || saved != 0 {
+		t.Fatalf("detaching a required extension was not refused: %v, %d new suggestions", e, saved)
 	}
 }
 

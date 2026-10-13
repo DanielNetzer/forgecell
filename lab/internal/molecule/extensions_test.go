@@ -401,6 +401,81 @@ func TestExtensionUnusableForRoleIsSkippedNotFatal(t *testing.T) {
 	}
 }
 
+func pruneAll(t *testing.T, e *extEnv) []string {
+	t.Helper()
+	removed, err := extension.Prune(e.o.LabDir, "fake", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return removed
+}
+
+func TestExtensionAttachHoldsTheCacheLeaseUntilCleanup(t *testing.T) {
+	e := newExtensionEnv(t, extCfg{Analysis: true, Coding: true})
+	f, r := e.formula(), e.record()
+	servers, cleanup, err := attachExtensions(context.Background(), r, f, formula.CodingHarness)
+	if err != nil || len(servers) != 1 {
+		t.Fatalf("%v %+v", err, servers)
+	}
+	if removed := pruneAll(t, e); len(removed) != 0 {
+		t.Fatalf("Prune removed the entry of a running role: %v", removed)
+	}
+	cleanup()
+	cleanup()
+	if removed := pruneAll(t, e); len(removed) != 1 {
+		t.Fatalf("after the role finished the entry must be removable, removed %v", removed)
+	}
+}
+
+func TestExtensionResolveOnlyAndFailedAttachHoldNoLease(t *testing.T) {
+	e := newExtensionEnv(t, extCfg{Coding: true})
+	f, r := e.formula(), e.record()
+	if _, err := useExtensions(context.Background(), r, f, formula.CodingHarness, ""); err != nil {
+		t.Fatal(err)
+	}
+	if removed := pruneAll(t, e); len(removed) != 1 {
+		t.Fatalf("a resolve-only call must hold no lease, removed %v", removed)
+	}
+
+	// The cache builds, then the required server cannot be launched.
+	e = newExtensionEnv(t, extCfg{Coding: true, Required: true, ServerArgs: []string{"{{SOURCE}}/x"}})
+	f, r = e.formula(), e.record()
+	if _, cleanup, err := attachExtensions(context.Background(), r, f, formula.CodingHarness); err == nil {
+		t.Fatal("a required extension that cannot be attached must fail")
+	} else {
+		cleanup()
+	}
+	if e.builds() != 1 {
+		t.Fatalf("the cache must have been built once, got %d", e.builds())
+	}
+	if removed := pruneAll(t, e); len(removed) != 1 {
+		t.Fatalf("a failed attach must leave no lease behind, removed %v", removed)
+	}
+}
+
+func TestServerArgsRefuseAnEscapingCacheSuffix(t *testing.T) {
+	for _, arg := range []string{"{{CACHE}}/../x", "{{CACHE}}//x", "{{CACHE}}/a/../../x", "{{CACHE}}/./x", "{{CACHE}}/x/", "{{CACHE}}/"} {
+		if _, err := serverArgs([]string{arg}, "/cache"); err == nil {
+			t.Fatalf("%q was accepted", arg)
+		}
+	}
+	got, err := serverArgs([]string{"{{CACHE}}", "{{CACHE}}/graph.json", "plain"}, "/cache")
+	if err != nil || !slices.Equal(got, []string{"/cache", "/cache/graph.json", "plain"}) {
+		t.Fatalf("%v %v", got, err)
+	}
+}
+
+func TestExtensionLinesShowTheDroppedLinkNote(t *testing.T) {
+	e := ExtensionRecord{Name: "fake", Kind: "mcp-provider", Cache: ExtensionCache{Outcome: "built", Code: 0, Note: "the snapshot left out 1 tracked symbolic or hard links"}}
+	if lines := strings.Join(e.Lines(), "\n"); !strings.Contains(lines, "cache note: the snapshot left out 1 tracked") {
+		t.Fatalf("the note is missing:\n%s", lines)
+	}
+	e.Cache.Note = ""
+	if lines := strings.Join(e.Lines(), "\n"); strings.Contains(lines, "cache note") {
+		t.Fatalf("a record without a note gained a line:\n%s", lines)
+	}
+}
+
 func TestExtensionUnsupportedAdapterIsUnavailable(t *testing.T) {
 	e := newExtensionEnv(t, extCfg{Coding: true})
 	f, r := e.formula(), e.record()

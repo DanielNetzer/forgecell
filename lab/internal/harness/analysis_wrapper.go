@@ -35,6 +35,11 @@ const (
 	// WrapperHomeEnv names the private directory that holds the verified copies:
 	// exec/, config/, policy/, dependencies/ and scratch/.
 	WrapperHomeEnv = "FORGECELL_WRAPPER_HOME"
+
+	// WrapperHomePlaceholder in an argument stands for the private directory that
+	// holds the verified copies. It is allowed as a whole argument or as a path
+	// prefix such as {{WRAPPER_HOME}}/config/config.json.
+	WrapperHomePlaceholder = "{{WRAPPER_HOME}}"
 )
 
 // Test seams between revalidation, copying and execution.
@@ -255,6 +260,44 @@ func (m AnalysisWrapperManifest) validate() error {
 			return err
 		}
 	}
+	return m.validateArgs(config, policy, deps)
+}
+
+// validateArgs allows {{WRAPPER_HOME}} only as a whole argument or a clean path
+// prefix, and refuses any argument that names a pinned original: the wrapper must
+// reach those files through the verified copies, not by their original paths.
+func (m AnalysisWrapperManifest) validateArgs(config, policy, deps []string) error {
+	originals := slices.Concat([]string{m.Executable.Path}, config, policy, deps)
+	if m.Interpreter != nil {
+		originals = append(originals, m.Interpreter.Path)
+	}
+	for _, e := range m.Enforcement {
+		if validWrapperPath(e.Path) {
+			originals = append(originals, e.Path)
+		}
+	}
+	for _, a := range m.Args {
+		rest, usesHome := a, false
+		if a == WrapperHomePlaceholder {
+			rest, usesHome = "", true
+		} else if after, ok := strings.CutPrefix(a, WrapperHomePlaceholder+"/"); ok {
+			if !pinned.CleanRelative(after) {
+				return fmt.Errorf("analysis wrapper argument %q needs a clean relative path after %s/ that stays inside it", a, WrapperHomePlaceholder)
+			}
+			rest, usesHome = after, true
+		}
+		if strings.Contains(rest, "{{") {
+			return fmt.Errorf("analysis wrapper argument %q uses a placeholder other than %s as a whole argument or path prefix", a, WrapperHomePlaceholder)
+		}
+		if usesHome {
+			continue
+		}
+		for _, original := range originals {
+			if pinned.PathInArg(a, original) {
+				return fmt.Errorf("analysis wrapper argument %q names the pinned original %s; use %s to reach the verified copy", a, original, WrapperHomePlaceholder)
+			}
+		}
+	}
 	return nil
 }
 
@@ -463,7 +506,8 @@ type wrapperEnvelope struct {
 // made from the handle that was hash-checked and is hashed again after writing,
 // so the process runs the bytes that were approved, not whatever the original
 // path holds by then. The interpreter is the one identity that cannot be
-// copied; it is verified in place under the same placement rules.
+// copied; it is verified in place under the same placement rules, and
+// InvokeAnalysisWrapper verifies it again right before the process starts.
 func materializeWrapper(root string, m AnalysisWrapperManifest) (string, error) {
 	for _, sub := range []string{"exec", "config", "policy", "dependencies", "scratch"} {
 		if err := os.Mkdir(filepath.Join(root, sub), 0o700); err != nil {
@@ -536,13 +580,27 @@ func InvokeAnalysisWrapper(ctx context.Context, labDir string, d AnalysisWrapper
 	if testHookAfterCopy != nil {
 		testHookAfterCopy()
 	}
+	// The interpreter is reached through the copied script's shebang, so it is the
+	// one pinned file the process can still read from its original path. Hash it
+	// again after everything else was copied and immediately before the start. A
+	// swap in the few instructions between this check and the kernel's exec is not
+	// closed: only copying the interpreter and running the copy would close it.
+	if m.Interpreter != nil {
+		if _, finding := pinned.Verify("interpreter", *m.Interpreter, "changed"); finding != "" {
+			return fail("analysis wrapper interpreter changed after approval and before execution: " + finding)
+		}
+	}
 	scratch := filepath.Join(root, "scratch")
 	env := []string{"PATH=" + wrapperPathEnv, "TMPDIR=" + scratch, WrapperHomeEnv + "=" + root}
+	args := make([]string, len(m.Args))
+	for i, a := range m.Args {
+		args[i] = strings.Replace(a, WrapperHomePlaceholder, root, 1)
+	}
 	input, err := json.Marshal(wrapperEnvelope{Protocol: AnalysisWrapperProtocol, Instruction: analysisInstruction, OutputSchema: json.RawMessage(readiness.AnalysisSchema()), Request: request})
 	if err != nil {
 		return fail(err.Error())
 	}
-	opts := process.Options{Argv: append([]string{executable}, m.Args...), Dir: scratch, Env: env, Stdin: append(input, '\n'), Timeout: timeout, MaxOutputBytes: readiness.MaxAnalysisBytes}
+	opts := process.Options{Argv: append([]string{executable}, args...), Dir: scratch, Env: env, Stdin: append(input, '\n'), Timeout: timeout, MaxOutputBytes: readiness.MaxAnalysisBytes}
 	var result process.Result
 	// A just-written executable can be briefly "text file busy" while a
 	// concurrent fork elsewhere in this process still holds its write handle.

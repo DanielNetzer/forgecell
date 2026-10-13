@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -240,6 +241,172 @@ func TestPinnedRejectDuplicateKeys(t *testing.T) {
 			t.Fatalf("%q: expected a syntax error, got %v", bad, err)
 		}
 	}
+}
+
+func TestPinnedRefusesFilesAndAncestorsOwnedByOthers(t *testing.T) {
+	unixOnly(t)
+	root := tempRoot(t)
+	path := writeFile(t, filepath.Join(root, "dir", "tool"), "x", 0o600)
+	if err := CheckPlacement(path); err != nil {
+		t.Fatal(err)
+	}
+	me := uint32(os.Geteuid())
+
+	restore := OverrideTrustedUIDForTest(func(uint32) bool { return false })
+	err := CheckPlacement(path)
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "owned by uid "+strconv.Itoa(int(me))) {
+		t.Fatalf("a file owned by an untrusted uid must be refused by path and uid: %v", err)
+	}
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open must refuse an untrusted owner")
+	}
+	if _, finding := Verify("tool", File{Path: path, SHA256: sum("x")}, "unavailable"); !strings.HasPrefix(finding, "unavailable:") {
+		t.Fatalf("Verify must refuse an untrusted owner: %q", finding)
+	}
+	restore()
+	if err := CheckPlacement(path); err != nil {
+		t.Fatalf("the override must be undone: %v", err)
+	}
+}
+
+func TestPinnedRefusesHardLinkedFiles(t *testing.T) {
+	unixOnly(t)
+	root := tempRoot(t)
+	path := writeFile(t, filepath.Join(root, "dir", "tool"), "x", 0o600)
+	other := filepath.Join(root, "other", "alias")
+	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, other); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	wantErr(t, CheckPlacement(path), "2 hard links")
+	wantErr(t, CheckPlacement(other), other)
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open must refuse a hard-linked file")
+	}
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPlacement(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPinnedPathInArgComparesCleanedComponents(t *testing.T) {
+	for _, c := range []struct {
+		arg, path string
+		want      bool
+	}{
+		{"/opt/x/tool", "/opt/x/tool", true},
+		{"/opt/x/./tool", "/opt/x/tool", true},
+		{"/opt//x/tool", "/opt/x/tool", true},
+		{"/opt/x/../x/tool", "/opt/x/tool", true},
+		{"--flag=/opt/x/tool", "/opt/x/tool", true},
+		{"--paths=/usr/bin:/opt/x/tool", "/opt/x/tool", true},
+		{"--paths=/opt/x/tool,/usr/bin", "/opt/x/tool", true},
+		{"/abc", "/a", false},
+		{"/opt/x/tool2", "/opt/x/tool", false},
+		{"/opt/x/tool.cfg", "/opt/x/tool", false},
+		{"/opt/x/tool/../other", "/opt/x/tool", false},
+		{"plain", "/opt/x/tool", false},
+	} {
+		if got := PathInArg(c.arg, c.path); got != c.want {
+			t.Errorf("PathInArg(%q, %q) = %t, want %t", c.arg, c.path, got, c.want)
+		}
+	}
+}
+
+func TestPinnedPathInArgCatchesSymlinkAliases(t *testing.T) {
+	unixOnly(t)
+	root := tempRoot(t)
+	real := writeFile(t, filepath.Join(root, "real", "tool"), "x", 0o600)
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(filepath.Join(root, "real"), alias); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	if !PathInArg(filepath.Join(alias, "tool"), real) {
+		t.Error("an argument through a symlinked directory names the pinned file")
+	}
+	if !PathInArg("--cfg="+filepath.Join(alias, "tool"), real) {
+		t.Error("a flag value through a symlinked directory names the pinned file")
+	}
+	if !PathInArg(real, filepath.Join(alias, "tool")) {
+		t.Error("a pinned path through a symlink is resolved too")
+	}
+	if !PathInArg(filepath.Join(alias, "not-yet-created", "x"), filepath.Join(root, "real", "not-yet-created")) {
+		t.Error("a non-existing tail keeps its resolved leading directory")
+	}
+	if PathInArg(filepath.Join(alias, "other"), real) {
+		t.Error("a sibling is not the pinned file")
+	}
+	if runtime.GOOS == "darwin" {
+		if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil && resolved != "/tmp" {
+			if !PathInArg("/tmp/forgecell-x/tool", resolved+"/forgecell-x/tool") {
+				t.Error("/tmp names /private/tmp on macOS")
+			}
+		}
+		if !PathInArg("/OPT/X/Tool", "/opt/x/tool") {
+			t.Error("macOS paths compare case-insensitively")
+		}
+	} else if PathInArg("/OPT/X/Tool", "/opt/x/tool") {
+		t.Error("paths compare case-sensitively off macOS")
+	}
+}
+
+func TestPinnedPathInArgSplitsOnShellDelimiters(t *testing.T) {
+	for _, arg := range []string{
+		"cat</opt/x/tool", "cat>/opt/x/tool", "a|/opt/x/tool", "a&/opt/x/tool",
+		"$(/opt/x/tool)", "(/opt/x/tool)", "{/opt/x/tool}", "[/opt/x/tool]", "a&&/opt/x/tool|b",
+	} {
+		if !PathInArg(arg, "/opt/x/tool") {
+			t.Errorf("%q names the pinned path", arg)
+		}
+	}
+}
+
+func TestPinnedAllowsMultiLinkFilesOnlyUnderRoot(t *testing.T) {
+	unixOnly(t)
+	var system string
+	for _, candidate := range []string{"/usr/bin/git", "/usr/bin/python3", "/bin/sh", "/usr/bin/env"} {
+		info, err := os.Lstat(candidate)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if n, _ := LinkCount(info); n > 1 {
+			system = candidate
+			break
+		}
+	}
+	if system == "" {
+		t.Skip("no root-owned multi-link system file available")
+	}
+	info, _ := os.Lstat(system)
+	if !rootProtected(system, info) {
+		t.Skipf("%s is not root-protected on this machine", system)
+	}
+	if err := CheckPlacement(system); err != nil {
+		t.Fatalf("a root-owned multi-link file under a root-owned path must be accepted: %v", err)
+	}
+	if file, err := Open(system); err != nil {
+		t.Fatalf("Open must accept it too: %v", err)
+	} else {
+		file.Close()
+	}
+}
+
+func TestPinnedRefusesUserOwnedHardLinkWithAdvice(t *testing.T) {
+	unixOnly(t)
+	root := tempRoot(t)
+	path := writeFile(t, filepath.Join(root, "dir", "tool"), "x", 0o600)
+	if err := os.Link(path, filepath.Join(root, "alias")); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	info, _ := os.Lstat(path)
+	if rootProtected(path, info) {
+		t.Skip("running as root: the file is root-owned")
+	}
+	wantErr(t, CheckPlacement(path), "private location")
 }
 
 func TestPinnedJSONShapeIsStable(t *testing.T) {

@@ -99,8 +99,9 @@ func checkExtensionAdapters(f formula.Formula) error {
 
 // checkExtensionDeclarations refuses a proposal that adds or removes an extension
 // declaration or changes its pinned manifest or digest. Those always need a
-// human-authored Formula; `required` and role attachment are behavior, judged
-// by behavior() and checkExtensionAdapters.
+// human-authored Formula. It also refuses lowering `required` and detaching a
+// required extension from a role; other role attachment is behavior, judged by
+// behavior() and checkExtensionAdapters.
 func checkExtensionDeclarations(current, proposed formula.Formula) error {
 	names := slices.Collect(maps.Keys(current.Extensions))
 	names = slices.AppendSeq(names, maps.Keys(proposed.Extensions))
@@ -117,6 +118,16 @@ func checkExtensionDeclarations(current, proposed formula.Formula) error {
 			return fmt.Errorf("learning cannot change the manifest of extension %q; extension declarations need human Formula review", name)
 		case before.SHA256 != after.SHA256:
 			return fmt.Errorf("learning cannot change the sha256 of extension %q; extension declarations need human Formula review", name)
+		case before.Required && !after.Required:
+			return fmt.Errorf("learning cannot change required from true to false for extension %q; that would turn a blocking extension into a best-effort one and needs human Formula review", name)
+		}
+	}
+	for _, role := range formula.HarnessRoles {
+		kept := proposed.RoleExtensions(role)
+		for _, name := range current.RoleExtensions(role) {
+			if current.Extensions[name].Required && !slices.Contains(kept, name) {
+				return fmt.Errorf("learning cannot detach required extension %q from the %s role; that would silently drop a blocking extension and needs human Formula review", name, role)
+			}
 		}
 	}
 	return nil

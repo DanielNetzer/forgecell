@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -290,6 +291,7 @@ func (m Manifest) validate() error {
 		}
 		roles[r] = true
 	}
+	dependencyNames := map[string]string{}
 	for _, d := range m.Dependencies {
 		if err := validPin("dependency", d.File); err != nil {
 			return err
@@ -297,6 +299,14 @@ func (m Manifest) validate() error {
 		if d.State != "pinned" {
 			return fmt.Errorf("dependency %s must have state pinned, not %q", d.Path, d.State)
 		}
+		base := filepath.Base(d.Path)
+		if earlier, repeated := dependencyNames[base]; repeated {
+			if earlier == d.Path {
+				return fmt.Errorf("dependency %s is declared twice", d.Path)
+			}
+			return fmt.Errorf("dependencies %s and %s share the file name %q; verified copies are kept by file name, so each must be distinct", earlier, d.Path, base)
+		}
+		dependencyNames[base] = d.Path
 	}
 	return m.validateArgs()
 }
@@ -316,7 +326,7 @@ func (m Manifest) validateArgs() error {
 				return err
 			}
 			for _, p := range pins {
-				if strings.Contains(arg, p.file.Path) {
+				if pinned.PathInArg(arg, p.file.Path) {
 					return fmt.Errorf("argument %q contains the pinned path %s", arg, p.file.Path)
 				}
 			}
@@ -325,8 +335,15 @@ func (m Manifest) validateArgs() error {
 	return nil
 }
 
+// CleanPlaceholderSuffix reports whether the part after {{CACHE}}/ or {{SOURCE}}/
+// is a clean relative path that stays below the placeholder: no empty, "." or
+// ".." component, no repeated or trailing slash.
+func CleanPlaceholderSuffix(rest string) bool {
+	return pinned.CleanRelative(rest)
+}
+
 // checkPlaceholders allows {{CACHE}} and {{SOURCE}} only as a whole argument or
-// as a path prefix such as {{CACHE}}/graph.json.
+// as a path prefix such as {{CACHE}}/graph.json, followed by a clean suffix.
 func checkPlaceholders(arg string) error {
 	rest := arg
 	for _, p := range []string{placeholderCache, placeholderSource} {
@@ -334,6 +351,9 @@ func checkPlaceholders(arg string) error {
 			return nil
 		}
 		if after, ok := strings.CutPrefix(rest, p+"/"); ok {
+			if !CleanPlaceholderSuffix(after) {
+				return fmt.Errorf("argument %q needs a clean relative path after %s/ that stays inside it (no empty, . or .. component, no trailing slash)", arg, p)
+			}
 			rest = after
 			break
 		}
@@ -370,7 +390,25 @@ func Load(labDir, rel, sha256Hex string) (Manifest, []pinned.Identity, error) {
 	if rel == "" || !filepath.IsLocal(local) || filepath.Clean(local) != local {
 		return Manifest{}, nil, fmt.Errorf("extension manifest path %q must be a clean relative path inside the Lab directory", rel)
 	}
-	file, err := pinned.Open(filepath.Join(labDir, local))
+	if parts := strings.Split(rel, "/"); len(parts) >= 3 && strings.EqualFold(parts[0], cacheRoot) && hex64.MatchString(strings.ToLower(parts[2])) {
+		return Manifest{}, nil, fmt.Errorf("extension manifest path %q is inside the extension cache %s/<name>/<manifest-sha>/, which only Forgecell writes", rel, cacheRoot)
+	}
+	lab, err := resolveLab(labDir)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	at := lab
+	for _, part := range strings.Split(local, string(filepath.Separator)) {
+		at = filepath.Join(at, part)
+		info, statErr := os.Lstat(at)
+		if statErr != nil {
+			break
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return Manifest{}, nil, fmt.Errorf("extension manifest %s: %s is a symlink; a manifest path never passes through one", rel, at)
+		}
+	}
+	file, err := pinned.Open(filepath.Join(lab, local))
 	if err != nil {
 		return Manifest{}, nil, fmt.Errorf("extension manifest %s: %w", rel, err)
 	}
