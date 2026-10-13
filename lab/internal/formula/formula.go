@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -31,6 +32,11 @@ type Binding struct {
 	// Extensions names declared Formula extensions this binding attaches. omitempty
 	// keeps binding hashes of extension-free Formulas unchanged.
 	Extensions []string `yaml:"extensions" json:"extensions,omitempty"`
+	// Model pins the provider model of a native Claude binding. A role override
+	// never inherits the default binding's model, because a model name is only
+	// meaningful for the provider that binding names. omitempty keeps the Formula
+	// bytes, SHA and Binding JSON of unpinned Formulas unchanged.
+	Model string `yaml:"model,omitempty" json:"model,omitempty"`
 }
 
 // AnalysisWrapperRef names a Lab-relative manifest and its exact SHA-256. The
@@ -150,6 +156,25 @@ func validateCommand(m map[string]any) error {
 	return nil
 }
 
+// MaxModelLength bounds a pinned model identifier.
+const MaxModelLength = 128
+
+// ValidateModel checks a pinned model identifier. It is passed to the provider as
+// one argv value, so it must be non-blank, short, free of whitespace and control
+// characters, and must not look like a flag.
+func ValidateModel(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return fmt.Errorf("model must not be empty or blank")
+	}
+	if len(s) > MaxModelLength {
+		return fmt.Errorf("model must be at most %d bytes", MaxModelLength)
+	}
+	if !utf8.ValidString(s) || strings.HasPrefix(s, "-") || strings.ContainsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return fmt.Errorf("model must not start with '-' or contain whitespace or control characters")
+	}
+	return nil
+}
+
 // validateBindingMapping holds the rules shared by `harness` and every `harnesses` role.
 func validateBindingMapping(m map[string]any) error {
 	if _, exists := m["policy"]; exists {
@@ -157,6 +182,15 @@ func validateBindingMapping(m map[string]any) error {
 	}
 	if err := validateCommand(m); err != nil {
 		return err
+	}
+	if value, ok := m["model"]; ok {
+		s, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("model must be a string")
+		}
+		if err := ValidateModel(s); err != nil {
+			return err
+		}
 	}
 	if value, ok := m["maxTimeoutMs"]; ok {
 		n, ok := value.(int)

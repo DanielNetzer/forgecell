@@ -563,6 +563,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		firstRoleCommand := ""
 		rolesReady := true
 		extensions := inspectExtensions(labDir, active.Formula)
+		isolation := inspectIsolation(active.Formula)
 		for i := range roles {
 			describeAnalysisWithExtensions(&roles[i], active.Formula)
 			if !roles[i].Ready {
@@ -608,11 +609,12 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if len(extensions) > 0 {
 				report["extensions"] = extensions
 			}
+			report["isolation"] = isolation
 			if err = json.NewEncoder(out).Encode(report); err != nil {
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, Next: next, Note: note})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, Isolation: isolation, Next: next, Note: note})
 		}
 		if !ready {
 			return 2
@@ -1066,7 +1068,49 @@ func describeAnalysisWithExtensions(role *onboarding.RoleReadiness, f formula.Fo
 	if b.AnalysisWrapper != nil || harness.BindingExtensionCapability(b.Command).State != "supported" {
 		return
 	}
-	role.Capability.Reason = "Ticket analysis can be attempted, but with extensions attached it runs without safe mode (--setting-sources user instead of --safe-mode): user-level Claude settings can load, built-in tools stay disabled and only the attached servers' read-only tools are allowed. Model access and the end-to-end workflow remain unverified."
+	role.Capability.Reason = "Ticket analysis can be attempted, but with extensions attached it runs without safe mode (--setting-sources project instead of --safe-mode): user settings, plugins and hooks are excluded, built-in tools stay disabled and only the attached servers' read-only tools are allowed. Model access and the end-to-end workflow remain unverified."
+}
+
+type doctorAdapterIsolation struct {
+	Adapter string `json:"adapter"`
+	harness.Isolation
+}
+
+type doctorRoleIsolation struct {
+	Role    string `json:"role"`
+	Binding string `json:"binding"`
+	Model   string `json:"model"`
+	harness.Isolation
+}
+
+// doctorIsolation is the static isolation of every native adapter and of each
+// role binding in the active Formula. It reads only the Formula and executes
+// nothing.
+type doctorIsolation struct {
+	Adapters []doctorAdapterIsolation `json:"adapters"`
+	Roles    []doctorRoleIsolation    `json:"roles"`
+}
+
+func inspectIsolation(f formula.Formula) doctorIsolation {
+	report := doctorIsolation{Adapters: []doctorAdapterIsolation{}, Roles: []doctorRoleIsolation{}}
+	for _, id := range []string{"claude-code", "codex", "cursor"} {
+		report.Adapters = append(report.Adapters, doctorAdapterIsolation{Adapter: id, Isolation: harness.AdapterIsolation(id)})
+	}
+	if f.ID == "" {
+		return report
+	}
+	for _, role := range append(slices.Clone(formula.HarnessRoles), formula.ReviewHarness) {
+		b, declared := f.RoleBinding(role)
+		if role == formula.ReviewHarness && !declared {
+			continue
+		}
+		model := b.Model
+		if model == "" {
+			model = harness.ModelUnpinned
+		}
+		report.Roles = append(report.Roles, doctorRoleIsolation{Role: string(role), Binding: b.Binding, Model: model, Isolation: harness.BindingIsolation(b.Command)})
+	}
+	return report
 }
 
 func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, jsonMode bool) int {
@@ -1162,6 +1206,7 @@ type doctorView struct {
 	Candidates                 []doctorCandidate
 	Roles                      []onboarding.RoleReadiness
 	Extensions                 []doctorExtension
+	Isolation                  doctorIsolation
 }
 
 // doctorCommands chooses the one next command for a non-ready state, using only
@@ -1328,6 +1373,15 @@ func renderDoctor(out io.Writer, v doctorView) {
 			for _, r := range e.Roles {
 				fmt.Fprintf(out, "    %s role (%s binding): adapter support %s — %s\n", r.Role, r.Binding, r.Adapter.State, r.Adapter.Reason)
 			}
+		}
+	}
+	if len(v.Isolation.Adapters) > 0 {
+		fmt.Fprintln(out, "\nIsolation from personal Claude/Codex/Cursor customizations (static; nothing is probed):")
+		for _, a := range v.Isolation.Adapters {
+			fmt.Fprintf(out, "  %s: %s — %s\n", a.Adapter, a.State, a.Reason)
+		}
+		for _, r := range v.Isolation.Roles {
+			fmt.Fprintf(out, "  %s role (%s binding): %s; %s\n", r.Role, r.Binding, r.State, r.Model)
 		}
 	}
 	if v.Meta != nil && v.Meta.Binding != "" {

@@ -432,6 +432,7 @@ func runReviewAtom(ctx context.Context, o Options, r Record, f formula.Formula, 
 		return record(ReviewFailed, "Review not run: "+err.Error())
 	}
 	attempt.Redactions = redactions
+	request = harness.WithModel(request, resolution.Binding.Model)
 	invoke := o.InvokeReview
 	if invoke == nil {
 		invoke = defaultInvokeReview

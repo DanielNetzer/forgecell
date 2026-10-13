@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
@@ -27,7 +28,42 @@ const analysisInstruction = "You are assessing ticket readiness during the intak
 // `launcher __adapter ID PROVIDER` argv and the provider invocation BuildInvocation
 // builds. Change it when either changes incompatibly. A saved binding whose launcher
 // reports another or no version needs a reviewed rebind; nothing else gates approval.
-const AdapterProtocolVersion = "2"
+const AdapterProtocolVersion = "3"
+
+// modelRequestKey carries the Formula-pinned model in a request. Like mcpServers it
+// is private to the Lab: it never reaches the model-visible prompt.
+const modelRequestKey = "harnessModel"
+
+// ModelUnpinned is the provenance text of an attempt that pinned no model.
+const ModelUnpinned = "model unpinned"
+
+// requestModel reads the pinned model from a request. An absent key means no
+// model is pinned; a present key must be a valid model identifier.
+func requestModel(request map[string]any) (string, error) {
+	value, present := request[modelRequestKey]
+	if !present {
+		return "", nil
+	}
+	model, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("invalid pinned model")
+	}
+	if err := formula.ValidateModel(model); err != nil {
+		return "", fmt.Errorf("invalid pinned model: %w", err)
+	}
+	return model, nil
+}
+
+// WithModel returns the request with the pinned model attached, or the request
+// itself when no model is pinned. The caller's map is never modified.
+func WithModel(request map[string]any, model string) map[string]any {
+	if model == "" {
+		return request
+	}
+	pinned := maps.Clone(request)
+	pinned[modelRequestKey] = model
+	return pinned
+}
 
 // MCPServer is one verified, pinned MCP provider attached to a Claude invocation
 // through request["mcpServers"]. Command and Args name private copies, never
@@ -197,6 +233,94 @@ func ReviewCapability(id string) Capability {
 	return Capability{"supported", "Adapter implements read-only review; authentication and model access are separate."}
 }
 
+// Isolation states describe how far an adapter keeps the operator's personal
+// customizations (user settings, plugins, hooks) out of a run.
+const (
+	IsolationIsolated = "isolated"
+	IsolationPartial  = "partial"
+	IsolationUnknown  = "unknown"
+)
+
+// Isolation is a static statement about an adapter, never a probe of the machine.
+type Isolation struct {
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+}
+
+// AdapterIsolation is the isolation of a native adapter's runs as BuildInvocation
+// builds them. It executes nothing.
+func AdapterIsolation(id string) Isolation {
+	switch id {
+	case "claude-code":
+		return Isolation{IsolationPartial, "Coding, formula-improvement and analysis with extensions run with --setting-sources project; analysis and review without extensions run with --safe-mode; MCP servers are limited to the Lab-approved set (--strict-mcp-config). User settings, plugins and hooks are excluded, so user hooks that rewrite tool output no longer change what the harness sees (observed in a live probe of --setting-sources user versus project). Not verified, hence partial: managed (enterprise) policy settings, and whether a user-level CLAUDE.md, user agents or user skills still load under --setting-sources project. Project .claude/settings.json can still load: it is fingerprinted from the base commit, a coding or formula-improvement run is refused when .claude holds settings, hooks or agents, and a coding run that changes .claude fails as a scope violation."}
+	case "codex":
+		return Isolation{IsolationPartial, "Codex coding and formula-improvement runs still read the user's CODEX_HOME/config.toml (profiles, hooks, MCP servers); they run with approval_policy never and a sandbox, and config.toml is fingerprinted. Analysis and review add --strict-config, --ignore-rules and disable shell, plugins and hooks. A pinned model is not supported."}
+	case "cursor":
+		return Isolation{IsolationUnknown, "Cursor Agent's user configuration (rules, MCP servers, plugins, hooks) is not verified to be excluded: runs only pass --sandbox enabled and --trust (and --mode ask for formula-improvement), and no Cursor configuration is fingerprinted. Analysis and review are unavailable. A pinned model is not supported."}
+	}
+	return Isolation{IsolationUnknown, "Adapter isolation is unknown."}
+}
+
+// ClaudeBinding reports whether command is a native `launcher __adapter claude-code
+// PROVIDER` binding, the only kind whose runs load Claude Code project settings.
+func ClaudeBinding(command []string) bool {
+	return len(command) == 4 && command[1] == "__adapter" && command[2] == "claude-code"
+}
+
+// BindingIsolation is AdapterIsolation for a saved binding command. Only a native
+// `launcher __adapter ID PROVIDER` command names an adapter; a custom command is
+// not isolated by Forgecell, so it stays unknown.
+func BindingIsolation(command []string) Isolation {
+	if len(command) == 4 && command[1] == "__adapter" {
+		return AdapterIsolation(command[2])
+	}
+	return Isolation{IsolationUnknown, "A custom command is not a native adapter: Forgecell neither isolates it from personal customizations nor passes it a model."}
+}
+
+// InvocationProvenance reports the model and isolation mode recorded for a harness
+// attempt: the pinned model (ModelUnpinned when none), and the isolation derived
+// from the argv BuildInvocation builds for a native binding. A custom command is
+// handed the request unchanged, so its isolation is "custom:unknown" and a pinned
+// model is reported as not enforced.
+func InvocationProvenance(command []string, request map[string]any) (model, isolation string, err error) {
+	model, err = requestModel(request)
+	if err != nil {
+		return "", "", err
+	}
+	if len(command) != 4 || command[1] != "__adapter" {
+		if model == "" {
+			return ModelUnpinned, "custom:unknown", nil
+		}
+		return model + " (passed to a custom command, not enforced)", "custom:unknown", nil
+	}
+	call, err := BuildInvocation(command[2], request, "provenance-output")
+	if err != nil {
+		return "", "", err
+	}
+	if model == "" {
+		model = ModelUnpinned
+	}
+	switch command[2] {
+	case "claude-code":
+		switch {
+		case slices.Contains(call.Args, "--safe-mode"):
+			isolation = "claude-code:safe-mode"
+		case slices.Contains(call.Args, "--setting-sources"):
+			isolation = "claude-code:setting-sources=" + call.Args[slices.Index(call.Args, "--setting-sources")+1]
+		default:
+			isolation = "claude-code:none"
+		}
+	case "codex":
+		isolation = "codex:user-config"
+		if slices.Contains(call.Args, "--strict-config") {
+			isolation = "codex:strict-config"
+		}
+	default:
+		isolation = command[2] + ":unverified"
+	}
+	return model, isolation, nil
+}
+
 type Invocation struct {
 	Args  []string
 	Input string
@@ -240,13 +364,18 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	if len(servers) > 0 && (id == "codex" || id == "cursor") {
 		return Invocation{}, fmt.Errorf("extensions are not supported for %s in v1", id)
 	}
-	// Server commands and paths are private to the Lab, so they never enter the
-	// model-visible request. An absent or empty list leaves the prompt unchanged.
-	visible := request
-	if _, ok := request["mcpServers"]; ok {
-		visible = maps.Clone(request)
-		delete(visible, "mcpServers")
+	model, err := requestModel(request)
+	if err != nil {
+		return Invocation{}, err
 	}
+	if model != "" && (id == "codex" || id == "cursor") {
+		return Invocation{}, fmt.Errorf("a pinned model is not supported for %s in v1", id)
+	}
+	// Server commands, paths and the pinned model are private to the Lab, so they
+	// never enter the model-visible request. Absent keys leave the prompt unchanged.
+	visible := maps.Clone(request)
+	delete(visible, "mcpServers")
+	delete(visible, modelRequestKey)
 	payload, err := json.Marshal(visible)
 	if err != nil {
 		return Invocation{}, err
@@ -276,10 +405,16 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			return Invocation{}, err
 		}
 		result.Args = []string{"--print", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk"}
+		if model != "" {
+			result.Args = append(result.Args, "--model", model)
+		}
 		if meta || analysis || review {
 			result.Args = append(result.Args, "--tools", "", "--strict-mcp-config", "--mcp-config", mcpConfig)
-			if len(servers) > 0 {
-				result.Args = append(result.Args, "--setting-sources", "user", "--allowedTools", strings.Join(mcpAllowed, ","))
+			switch {
+			case meta:
+				result.Args = append(result.Args, "--setting-sources", "project")
+			case len(servers) > 0:
+				result.Args = append(result.Args, "--setting-sources", "project", "--allowedTools", strings.Join(mcpAllowed, ","))
 			}
 			result.Args = append(result.Args, "--json-schema", schema)
 		} else {
@@ -287,11 +422,13 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			if err != nil {
 				return Invocation{}, err
 			}
-			// Workspace .claude settings are hot-reloaded by Claude Code, so a coding
-			// run must not be able to widen its own permissions or add hooks: load user
-			// settings only, ignore project MCP servers, and deny edits under the
-			// checkout's .claude (an Edit deny also covers Write).
-			result.Args = append(result.Args, "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--disallowedTools", "Edit(/.claude/**)", "--json-schema", schema, "--allowedTools", strings.Join(slices.Concat(tools, mcpAllowed), ","))
+			// Personal Claude Code customization (user settings, plugins, hooks that
+			// rewrite tool output, the global CLAUDE.md) must not change what the
+			// harness sees or what the ledger records, so only project settings load.
+			// Workspace .claude settings are hot-reloaded by Claude Code, so edits under
+			// the checkout's .claude are denied (an Edit deny also covers Write), and
+			// the project settings that can still load are part of the fingerprint.
+			result.Args = append(result.Args, "--setting-sources", "project", "--strict-mcp-config", "--mcp-config", mcpConfig, "--disallowedTools", "Edit(/.claude/**)", "--json-schema", schema, "--allowedTools", strings.Join(slices.Concat(tools, mcpAllowed), ","))
 		}
 		if analysis || review {
 			// Claude Code ignores an explicit --mcp-config under --safe-mode, so

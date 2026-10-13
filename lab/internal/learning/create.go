@@ -60,23 +60,24 @@ func behavior(f formula.Formula) any {
 
 // learnInvocation resolves the command learning runs. A declared harnesses.meta
 // supplies the command a commandless learn Atom lacks and must equal the command
-// an Atom carries; without it the Atom's own command is required.
-func learnInvocation(f formula.Formula, learn formula.Atom) ([]string, int, error) {
+// an Atom carries; without it the Atom's own command is required. The pinned
+// model comes only from the declared meta binding: an Atom's own command has none.
+func learnInvocation(f formula.Formula, learn formula.Atom) ([]string, int, string, error) {
 	meta, declared := f.RoleBinding(formula.MetaHarness)
 	if !declared || learn.Type != "learn" {
 		if len(learn.Command) == 0 {
-			return nil, 0, fmt.Errorf("configure an explicit learn Atom command: the meta harness is separate from the coding harness")
+			return nil, 0, "", fmt.Errorf("configure an explicit learn Atom command: the meta harness is separate from the coding harness")
 		}
-		return learn.Command, learn.TimeoutMS, nil
+		return learn.Command, learn.TimeoutMS, "", nil
 	}
 	if len(learn.Command) > 0 && !slices.Equal(learn.Command, meta.Command) {
-		return nil, 0, fmt.Errorf("harnesses.meta command conflicts with the command of learn Atom %s; no learner was invoked", learn.ID)
+		return nil, 0, "", fmt.Errorf("harnesses.meta command conflicts with the command of learn Atom %s; no learner was invoked", learn.ID)
 	}
 	timeoutMS := learn.TimeoutMS
 	if timeoutMS == 0 {
 		timeoutMS = meta.TimeoutMS
 	}
-	return meta.Command, timeoutMS, nil
+	return meta.Command, timeoutMS, meta.Model, nil
 }
 
 // checkExtensionAdapters refuses a proposal that binds extensions to a role whose
@@ -196,7 +197,7 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 			break
 		}
 	}
-	learnCommand, learnTimeoutMS, e := learnInvocation(loaded.Formula, learn)
+	learnCommand, learnTimeoutMS, learnModel, e := learnInvocation(loaded.Formula, learn)
 	if e != nil {
 		return p, e
 	}
@@ -206,7 +207,19 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 	if e = formula.Revalidate(o.LabDir, loaded); e != nil {
 		return p, e
 	}
-	result := invoke(ctx, learnCommand, o.Dir, time.Duration(learnTimeoutMS)*time.Millisecond, request)
+	if harness.ClaudeBinding(learnCommand) {
+		found, e := harness.ClaudeProjectConfigInDir(o.Dir)
+		if e != nil {
+			return p, fmt.Errorf("formula-improvement refused: cannot inspect the Claude project configuration in %s: %w; no meta harness was started", o.Dir, e)
+		}
+		if len(found) > 0 {
+			if len(found) > 5 {
+				found = append(found[:5:5], fmt.Sprintf("and %d more", len(found)-5))
+			}
+			return p, fmt.Errorf("formula-improvement refused: %s carries Claude project configuration (%s) that a --setting-sources project run loads, and it can run hooks the Lab did not review; no meta harness was started. Remove it or run from a directory without it; the Formula has no setting that allows project settings", o.Dir, strings.Join(found, ", "))
+		}
+	}
+	result := invoke(ctx, learnCommand, o.Dir, time.Duration(learnTimeoutMS)*time.Millisecond, harness.WithModel(request, learnModel))
 	if !result.OK {
 		return p, fmt.Errorf("learn Atom failed: %s %s", result.Error, result.Stderr)
 	}

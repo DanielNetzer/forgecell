@@ -317,7 +317,7 @@ func TestExtensionAnalysisReceivesReadOnlyServerWithoutSafeMode(t *testing.T) {
 	if lineAfter(lines, "--allowedTools") != "mcp__fake__query_graph" {
 		t.Fatalf("analysis must get only the read-only tool: %q", lineAfter(lines, "--allowedTools"))
 	}
-	if slices.Contains(lines, "--safe-mode") || lineAfter(lines, "--setting-sources") != "user" || lineAfter(lines, "--tools") != "" || !slices.Contains(lines, "--strict-mcp-config") {
+	if slices.Contains(lines, "--safe-mode") || lineAfter(lines, "--setting-sources") != "project" || lineAfter(lines, "--tools") != "" || !slices.Contains(lines, "--strict-mcp-config") {
 		t.Fatalf("analysis flags %q", lines)
 	}
 	if !strings.Contains(lineAfter(lines, "--mcp-config"), `"fake"`) {

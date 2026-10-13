@@ -21,8 +21,10 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 )
 
-func bindingHash(b formula.Binding) (string, error) {
-	fingerprint, err := harness.Fingerprint(b.Command)
+// bindingHash binds approval to the binding and to the inputs its run can read: the
+// project settings committed at base in the source checkout, not its working tree.
+func bindingHash(b formula.Binding, projectRoot, base string) (string, error) {
+	fingerprint, err := harness.FingerprintWith(b.Command, harness.FingerprintInputs{ProjectRoot: projectRoot, BaseCommit: base, Model: b.Model})
 	if err != nil {
 		return "", err
 	}
@@ -31,6 +33,46 @@ func bindingHash(b formula.Binding) (string, error) {
 		Fingerprint string
 	}{b, fingerprint})
 	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
+}
+
+// refuseProjectClaudeConfig stops a native Claude coding run before approval is
+// consumed when the base commit carries settings, hooks or agents under .claude: a
+// --setting-sources project run would load them, and they can widen permissions or
+// run commands the Lab never reviewed.
+func refuseProjectClaudeConfig(command []string, root, base string) error {
+	if !harness.ClaudeBinding(command) {
+		return nil
+	}
+	found, err := harness.ClaudeProjectConfigAtCommit(root, base)
+	if err != nil {
+		return fmt.Errorf("coding refused: cannot inspect the project Claude configuration at %s: %w; no coding harness was started", base, err)
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf("coding refused: base commit %s carries Claude project configuration (%s) that a --setting-sources project run loads, and it can widen permissions or run hooks the Lab did not review; no coding harness was started. Remove it from the repository (for example git rm -r .claude/settings*.json .claude/hooks .claude/agents), commit that, and refresh intake; the Formula has no setting that allows project settings", base, listPaths(found))
+}
+
+// listPaths names at most five paths and counts the rest.
+func listPaths(paths []string) string {
+	if len(paths) <= 5 {
+		return strings.Join(paths, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(paths[:5], ", "), len(paths)-5)
+}
+
+// staleBindingError explains a binding fingerprint mismatch that an adapter protocol
+// change caused. Protocol 3 changed every binding fingerprint, so a plan reviewed
+// under an earlier protocol cannot be approved until intake is refreshed.
+func staleBindingError(err error, r Record, planned, current readiness.Inputs, digest string) error {
+	if planned.BindingSHA256 == current.BindingSHA256 || r.AdapterProtocol == harness.AdapterProtocolVersion {
+		return err
+	}
+	was := r.AdapterProtocol
+	if was == "" {
+		was = "2 or earlier"
+	}
+	return fmt.Errorf("readiness inputs changed: plan %s was approved under adapter protocol %s; refresh intake after rebinding (the running Forgecell speaks adapter protocol %s)", digest, was, harness.AdapterProtocolVersion)
 }
 
 // analysisCorrection travels in the context so Options.Analyze keeps its signature.
@@ -428,6 +470,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			if len(analysisServers) > 0 {
 				request["mcpServers"] = analysisServers
 			}
+			request = harness.WithModel(request, b.Model)
 			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.TimeoutMS)*time.Millisecond, request)
 			analysisDiagnostics = resultDiagnostics(result)
 			return decodeAnalysisResult(result)
@@ -560,7 +603,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		return stopIntake(r, err.Error())
 	}
 	codingBinding := roles.bindings[formula.Coding]
-	bindingDigest, err := bindingHash(codingBinding)
+	bindingDigest, err := bindingHash(codingBinding, w.SourceRoot, w.BaseCommit)
 	if err != nil {
 		return stopIntake(r, err.Error())
 	}
@@ -591,6 +634,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		return stopIntake(r, err.Error())
 	}
 	r.Readiness = &state
+	r.AdapterProtocol = harness.AdapterProtocolVersion
 	if len(p.FormulaBaseline) > 0 {
 		r.Notes = append(r.Notes, formulaBaselineNote(f))
 	}
@@ -776,6 +820,9 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		if allowlist, err = approvedCodingAllowlist(f, p); err != nil {
 			return r, err
 		}
+		if err = refuseProjectClaudeConfig(codingBinding.Command, r.Workspace.SourceRoot, r.Workspace.BaseCommit); err != nil {
+			return r, err
+		}
 	}
 	if err = validateRepairHistory(r.Readiness.Plans); err != nil {
 		return r, err
@@ -843,7 +890,7 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	current.Issue = issueInput(issue)
 	current.FormulaSHA256 = f.SHA256
 	current.EvidenceSHA256 = hash
-	current.BindingSHA256, err = bindingHash(codingBinding)
+	current.BindingSHA256, err = bindingHash(codingBinding, r.Workspace.SourceRoot, r.Workspace.BaseCommit)
 	if err != nil {
 		return r, err
 	}
@@ -859,7 +906,7 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	}
 	state, err := r.Readiness.Approve(o.Approve, current, stamp())
 	if err != nil {
-		return r, err
+		return r, staleBindingError(err, r, p.Inputs, current, o.Approve)
 	}
 	if p.Continuation != "" {
 		state, err = state.StartChecks(stamp())
@@ -916,7 +963,14 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	}
 	launcher := harness.ResolveAttempt(codingBinding.Command)
 	forgecell := harness.RecordProvenanceWith(codingBinding.Command, launcher)
-	r.HarnessAttempts = append(r.HarnessAttempts, HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell})
+	codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
+	if len(codingServers) > 0 {
+		codingRequest["mcpServers"] = codingServers
+	}
+	codingRequest = harness.WithModel(codingRequest, codingBinding.Model)
+	attempt := HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell}
+	attempt.RecordInvocation(codingBinding.Command, codingRequest)
+	r.HarnessAttempts = append(r.HarnessAttempts, attempt)
 	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+codingBinding.Binding, "invoke-coding-harness")
 	recordExecutedBinding(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, codingBinding.Binding)
 	timeoutMS, timeoutSource := codingTimeout(codingBinding, p)
@@ -925,10 +979,6 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	}
 	if err = save(r); err != nil {
 		return r, err
-	}
-	codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
-	if len(codingServers) > 0 {
-		codingRequest["mcpServers"] = codingServers
 	}
 	result := invokeHarnessWith(ctx, launcher, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, codingRequest)
 	cleanupExtensions()
@@ -967,6 +1017,27 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	capture, captureErr := verification.Capture(captureCtx, r.Workspace.Path, p.Inputs.BaseCommit, allowed, p.Artifacts)
 	cancelCapture()
+	// Claude Code hot-reloads project settings, so a run that created, edited or
+	// removed anything under .claude (for example through repository code that an
+	// allowed Bash entry ran, which the Edit deny does not cover) changed what its
+	// own next tool call is allowed to do. The comparison is against the base commit
+	// itself, so it holds even for a path the approved scope would otherwise allow.
+	if harness.ClaudeBinding(codingBinding.Command) {
+		changed, e := harness.ClaudeTreeChanges(r.Workspace.Path, p.Inputs.BaseCommit)
+		switch {
+		case e != nil:
+			if captureErr == nil {
+				captureErr = fmt.Errorf("cannot verify that .claude is unchanged: %w", e)
+			}
+		case len(changed) > 0:
+			for _, name := range changed {
+				if !slices.Contains(capture.Violations, name) {
+					capture.Violations = append(capture.Violations, name)
+				}
+			}
+			r.Notes = append(r.Notes, fmt.Sprintf("The coding harness changed Claude project configuration under .claude (%s); .claude must stay byte-identical to the base commit, so the attempt is a scope violation.", listPaths(changed)))
+		}
+	}
 	if captureErr != nil {
 		a.CaptureError = captureErr.Error()
 	}

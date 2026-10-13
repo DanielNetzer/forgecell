@@ -101,7 +101,23 @@ type HarnessAttempt struct {
 	Capture         *verification.CaptureResult `json:"capture,omitempty"`
 	CaptureError    string                      `json:"captureError,omitempty"`
 	Recovered       bool                        `json:"recovered,omitempty"`
+	// Model is the pinned model, or "model unpinned"; Isolation is the isolation mode
+	// of the invocation built for the attempt. Both are absent in earlier ledgers,
+	// which read as unknown rather than as unpinned or isolated.
+	Model     string `json:"model,omitempty"`
+	Isolation string `json:"isolation,omitempty"`
 }
+
+// RecordInvocation records the model and isolation mode that the invocation for
+// request will carry, derived from the same builder the adapter runs. An
+// invocation that cannot be built leaves both fields empty; the run then fails the
+// same way when it starts.
+func (a *HarnessAttempt) RecordInvocation(command []string, request map[string]any) {
+	if model, isolation, err := harness.InvocationProvenance(command, request); err == nil {
+		a.Model, a.Isolation = model, isolation
+	}
+}
+
 type AnalysisAttempt struct {
 	Ordinal        int                 `json:"ordinal"`
 	SnapshotSHA256 string              `json:"snapshotSha256"`
@@ -142,6 +158,10 @@ type Record struct {
 	AnalysisAttempts              []AnalysisAttempt `json:"analysisAttempts,omitempty"`
 	HarnessAttempts               []HarnessAttempt  `json:"harnessAttempts,omitempty"`
 	Extensions                    []ExtensionRecord `json:"extensions,omitempty"`
+	// AdapterProtocol is the adapter protocol the intake fingerprinted the coding
+	// binding under. A ledger written before it was recorded has none, which means an
+	// earlier protocol than the one that introduced the field.
+	AdapterProtocol string `json:"adapterProtocol,omitempty"`
 	// ReviewAttempts is additive: a Lab older than the review Atom decodes it but drops
 	// it on the next save. See ReviewAttempt.
 	ReviewAttempts []ReviewAttempt `json:"reviewAttempts,omitempty"`

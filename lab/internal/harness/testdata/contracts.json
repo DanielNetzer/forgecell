@@ -50,7 +50,7 @@
       "--permission-mode",
       "dontAsk",
       "--setting-sources",
-      "user",
+      "project",
       "--strict-mcp-config",
       "--mcp-config",
       "{\"mcpServers\":{}}",
@@ -78,6 +78,8 @@
       "--strict-mcp-config",
       "--mcp-config",
       "{\"mcpServers\":{}}",
+      "--setting-sources",
+      "project",
       "--json-schema",
       "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"rationale\":{\"type\":\"string\"},\"expectedImpact\":{\"type\":\"string\"},\"evaluation\":{\"type\":\"string\"},\"yaml\":{\"type\":\"string\"}},\"required\":[\"summary\",\"rationale\",\"expectedImpact\",\"evaluation\",\"yaml\"],\"additionalProperties\":false}"
     ],

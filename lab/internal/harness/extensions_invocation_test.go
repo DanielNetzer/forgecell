@@ -35,7 +35,7 @@ func build(t *testing.T, id string, request map[string]any) Invocation {
 
 func TestCodingInvocationAddsPinnedMCPServers(t *testing.T) {
 	want := []string{"--print", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk",
-		"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", goldenGraphifyConfig,
+		"--setting-sources", "project", "--strict-mcp-config", "--mcp-config", goldenGraphifyConfig,
 		"--disallowedTools", "Edit(/.claude/**)", "--json-schema", CodingOutcomeSchema(),
 		"--allowedTools", goldenCodingAllowlist + ",mcp__graphify__query_graph"}
 	got := build(t, "claude-code", codingRequest(map[string]any{"mcpServers": []MCPServer{goldenServer()}}))
@@ -59,7 +59,7 @@ func TestAnalysisInvocationKeepsToolsDisabled(t *testing.T) {
 	head := []string{"--print", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk"}
 
 	withoutSafeMode := append(append([]string{}, head...), "--tools", "", "--strict-mcp-config", "--mcp-config", goldenGraphifyConfig,
-		"--setting-sources", "user", "--allowedTools", "mcp__graphify__query_graph", "--json-schema", schema,
+		"--setting-sources", "project", "--allowedTools", "mcp__graphify__query_graph", "--json-schema", schema,
 		"--no-chrome", "--disable-slash-commands")
 	got := build(t, "claude-code", map[string]any{"kind": "ticket-analysis", "mcpServers": []MCPServer{goldenServer()}})
 	if !reflect.DeepEqual(got.Args, withoutSafeMode) {
