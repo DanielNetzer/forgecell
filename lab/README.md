@@ -61,6 +61,14 @@ and the provider exists, doctor still probes the provider at its own absolute pa
 with the same fixed read-only calls, so a harness installed outside `PATH` is
 checked where it is bound. The binding stays `blocked` until the launcher matches.
 
+Doctor probes the saved binding, the meta binding and each role's provider only when
+the active Formula has a current exact-byte approval. For an unapproved Formula it
+executes none of them: the saved binding and the meta binding report
+`not probed (unapproved)`, no role is probed, doctor is not ready (exit 2) and the
+`nextCommand` is `forgecell init --lab DIR` to review and approve the Formula. Every
+printed command quotes paths for a POSIX shell, so a Lab path containing `$(...)`,
+quotes or spaces pastes as one literal word.
+
 Every result that is not ready carries one `nextCommand`: the provider's login
 command (`codex login`, `claude auth login` or `agent login`) when authentication
 failed; `forgecell init --lab DIR --harness ID` when a ready provider is available

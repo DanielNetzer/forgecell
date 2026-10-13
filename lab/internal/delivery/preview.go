@@ -215,7 +215,7 @@ func Preview(ctx context.Context, o Options) (PreviewResult, error) {
 		return p, err
 	}
 	if len(captured.Violations) > 0 || len(captured.Changes) == 0 {
-		return p, fmt.Errorf("delivery has no changes or exceeds explicitly reviewed scope: %v", captured.Violations)
+		return p, fmt.Errorf("delivery has no changes or exceeds explicitly reviewed scope: [%s]", molecule.BoundedViolations(captured.Violations))
 	}
 	p.Tree = captured.Tree
 	if p.Tree != r.Verification.SourceTree {

@@ -147,7 +147,7 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 			r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = outcome.ElapsedMS
 		}
 	}
-	state, err := r.Readiness.Interrupt(digest, "Human confirmed all processes stopped. Retained observed tree: "+capture.Tree+"; violations: "+strings.Join(capture.Violations, ", ")+". Original known harness outcome retained; no automatic retry or publication.", stamp())
+	state, err := r.Readiness.Interrupt(digest, "Human confirmed all processes stopped. Retained observed tree: "+capture.Tree+"; violations: "+boundedPaths(capture.Violations, maxListedViolations)+". Original known harness outcome retained; no automatic retry or publication.", stamp())
 	if err != nil {
 		return r, err
 	}

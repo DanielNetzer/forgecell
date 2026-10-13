@@ -26,8 +26,16 @@ func argv(t *testing.T, items ...string) string {
 }
 
 // saveRoleFormula writes an active Formula whose default harness is codex and
-// whose optional per-role bindings come from the caller. Doctor never needs approval.
+// whose optional per-role bindings come from the caller, then approves it so
+// doctor probes its providers.
 func saveRoleFormula(t *testing.T, lab, defaultCommand, harnesses string) {
+	t.Helper()
+	writeRoleFormula(t, lab, defaultCommand, harnesses)
+	approveSavedFormula(t, lab)
+}
+
+// writeRoleFormula writes the same Formula without approving it.
+func writeRoleFormula(t *testing.T, lab, defaultCommand, harnesses string) {
 	t.Helper()
 	os.MkdirAll(filepath.Join(lab, "formulas"), 0700)
 	os.WriteFile(filepath.Join(lab, "lab.json"), []byte(`{"schemaVersion":"v0","activeFormulaId":"f"}`), 0600)
@@ -179,7 +187,8 @@ func TestDoctorStaleMetaLauncherPointsAtRebindOfTheCodingBinding(t *testing.T) {
 			if err = os.WriteFile(filepath.Join(lab, "formulas", "f.yaml"), []byte(recipe), 0600); err != nil {
 				t.Fatal(err)
 			}
-			want := fmt.Sprintf("forgecell init --lab %q --rebind codex", lab)
+			approveSavedFormula(t, lab)
+			want := fmt.Sprintf("forgecell init --lab %s --rebind codex", shellWord(lab))
 			_, out := runDoctor(t, lab)
 			meta := rolesByName(t, decodeDoctor(t, out))["meta"]
 			if meta["source"] != c.source || meta["binding"] != "claude-code" || meta["ready"] != c.ready {

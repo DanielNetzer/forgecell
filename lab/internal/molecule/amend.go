@@ -74,7 +74,8 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	next.ParentDigest = parent
 	// The coding allowlist is runtime-owned like the lifecycle fields: derive it
 	// from the amended checks and scope so a submitted payload can neither smuggle nor drop it.
-	if next.CodingAllowlist, err = harness.DeriveCodingAllowlist(r.FormulaSnapshot.YAML, next.Analysis.Checks, next.Analysis.Scope...); err != nil {
+	var allowlistNote string
+	if next.CodingAllowlist, allowlistNote, err = harness.DeriveCodingAllowlistNoted(r.FormulaSnapshot.YAML, next.Analysis.Checks, next.Analysis.Scope...); err != nil {
 		return r, err
 	}
 	approvedFormula, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))
@@ -200,6 +201,9 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	r.Notes = append(r.Notes, fmt.Sprintf("Amendment r%d retains tree %s. Compare immutable plans in the ledger before approval.", next.Revision, capture.Tree))
 	if note, ok := newFilesNote(next); ok {
 		r.Notes = append(r.Notes, note)
+	}
+	if allowlistNote != "" {
+		r.Notes = append(r.Notes, allowlistNote)
 	}
 	return r, save(r)
 }

@@ -79,13 +79,26 @@ func formulaComponents(text string) ([]formulaComponent, error) {
 // formatter entries for its .go files; without such a check the result is
 // independent of scope.
 func DeriveCodingAllowlist(formulaYAML string, checks []readiness.Check, scope ...readiness.ScopedPath) ([]string, error) {
-	return deriveAllowlist(formulaYAML, checks, scope, true)
+	entries, _, err := deriveAllowlist(formulaYAML, checks, scope, true)
+	return entries, err
+}
+
+// DeriveCodingAllowlistNoted is DeriveCodingAllowlist that also reports, for the
+// scope gate, when per-file formatter entries were dropped because they would push
+// the list past its bound. The note is empty otherwise.
+func DeriveCodingAllowlistNoted(formulaYAML string, checks []readiness.Check, scope ...readiness.ScopedPath) ([]string, string, error) {
+	entries, dropped, err := deriveAllowlist(formulaYAML, checks, scope, true)
+	if err != nil || dropped == 0 {
+		return entries, "", err
+	}
+	return entries, fmt.Sprintf("Coding allowlist: %d per-file formatter entries (gofmt -w or go fmt on each in-scope file) were dropped because the allowlist is bounded to %d entries. The coding harness can list unformatted files but cannot run the formatter on them; format them before delivery.", dropped, maxAllowlistEntries), nil
 }
 
 // DerivePreFormatterAllowlist is the derivation that ran before formatter
 // entries existed. It exists only so plans approved earlier keep verifying.
 func DerivePreFormatterAllowlist(formulaYAML string, checks []readiness.Check) ([]string, error) {
-	return deriveAllowlist(formulaYAML, checks, nil, false)
+	entries, _, err := deriveAllowlist(formulaYAML, checks, nil, false)
+	return entries, err
 }
 
 // MatchCodingAllowlist reports whether stored is an allowance the plan may run
@@ -106,10 +119,13 @@ func MatchCodingAllowlist(formulaYAML string, checks []readiness.Check, scope []
 	return nil, false, derr
 }
 
-func deriveAllowlist(formulaYAML string, checks []readiness.Check, scope []readiness.ScopedPath, formatters bool) ([]string, error) {
+// deriveAllowlist also returns how many per-file formatter entries it dropped to
+// stay within the list bound. Only those entries are dropped; every other
+// entry still has to fit or the derivation fails.
+func deriveAllowlist(formulaYAML string, checks []readiness.Check, scope []readiness.ScopedPath, formatters bool) ([]string, int, error) {
 	components, err := formulaComponents(formulaYAML)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	entries := append([]string{}, baseAllowlist...)
 	node := false
@@ -131,10 +147,21 @@ func deriveAllowlist(formulaYAML string, checks []readiness.Check, scope []readi
 			entries = append(entries, entry)
 		}
 	}
+	var writes []string
 	if formatters {
-		entries = append(entries, formatterEntries(checks, scope)...)
+		var lists []string
+		lists, writes = formatterEntries(checks, scope)
+		entries = append(entries, lists...)
 	}
-	return EffectiveCodingAllowlist(entries)
+	out, err := EffectiveCodingAllowlist(append(slices.Clone(entries), writes...))
+	if err == nil || len(writes) == 0 {
+		return out, 0, err
+	}
+	out, retryErr := EffectiveCodingAllowlist(entries)
+	if retryErr != nil {
+		return nil, 0, err
+	}
+	return out, len(writes), nil
 }
 
 var gofmtPathToken = regexp.MustCompile(`^(?:\.|(?:\./)?[A-Za-z0-9_][A-Za-z0-9_./-]*)$`)
@@ -180,7 +207,8 @@ func gofmtListEntry(dir string, args []string) (string, bool) {
 	argv := []string{"gofmt", "-l"}
 	for _, arg := range args {
 		joined := path.Join(dir, arg)
-		if readiness.ValidatePath(joined) != nil {
+		// The checkout root itself is a valid gofmt argument but not a file path.
+		if joined != "." && readiness.ValidatePath(joined) != nil {
 			return "", false
 		}
 		argv = append(argv, joined)
@@ -190,7 +218,10 @@ func gofmtListEntry(dir string, args []string) (string, bool) {
 
 // formatterEntries returns exact formatter entries for required gofmt or go fmt
 // checks: one per approved scope path that ends in .go. No pattern is granted.
-func formatterEntries(checks []readiness.Check, scope []readiness.ScopedPath) []string {
+//
+// Check listing entries (gofmt -l) come back separately from the per-file entries
+// that run the formatter, because only the latter grow with the scope.
+func formatterEntries(checks []readiness.Check, scope []readiness.ScopedPath) (lists, entries []string) {
 	var files []string
 	for _, s := range scope {
 		if strings.HasSuffix(s.Path, ".go") && readiness.ValidatePath(s.Path) == nil {
@@ -198,7 +229,6 @@ func formatterEntries(checks []readiness.Check, scope []readiness.ScopedPath) []
 		}
 	}
 	sort.Strings(files)
-	var entries []string
 	for _, c := range checks {
 		if !c.Required {
 			continue
@@ -208,7 +238,7 @@ func formatterEntries(checks []readiness.Check, scope []readiness.ScopedPath) []
 			if !ok {
 				continue
 			}
-			entries = append(entries, list)
+			lists = append(lists, list)
 			for _, file := range files {
 				if entry, ok := renderEntry("", []string{"gofmt", "-w", file}); ok {
 					entries = append(entries, entry)
@@ -232,7 +262,7 @@ func formatterEntries(checks []readiness.Check, scope []readiness.ScopedPath) []
 			}
 		}
 	}
-	return entries
+	return lists, entries
 }
 
 // EffectiveCodingAllowlist validates entries and returns the canonical list the

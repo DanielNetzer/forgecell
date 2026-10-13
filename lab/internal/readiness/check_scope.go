@@ -10,9 +10,63 @@ import (
 // file the same plan proposes to edit. The corrective retry receives it verbatim.
 const InScopeDefinitionMessage = "drop or replace checks defined by in-scope files"
 
+// IsDocumentationPath reports whether file is prose documentation by extension.
+// A check that cites such a file in its definitions treats it as information, not
+// as something it executes or reads, so the citation never counts as a definition.
+// A documentation path named in the command's argv is still a path the check reads.
+func IsDocumentationPath(file string) bool {
+	switch strings.ToLower(path.Ext(file)) {
+	case ".md", ".markdown", ".mdx", ".rst", ".adoc":
+		return true
+	}
+	return false
+}
+
+// BaselineIDMessage prefixes the intake rejection of a proposed check whose id is
+// already taken by a Formula baseline check. The corrective retry receives it verbatim.
+const BaselineIDMessage = "check ids reserved by the Formula baseline cannot be proposed"
+
+// ValidateBaselineIDs rejects, as a retryable policy violation, a proposed check
+// whose id equals a Formula baseline check id. The Lab adds every baseline check
+// itself, so the duplicate can simply be dropped.
+func ValidateBaselineIDs(a Analysis, baselineIDs []string) error {
+	var found []string
+	for _, c := range a.Checks {
+		if containsID(baselineIDs, c.ID) && !containsID(found, c.ID) {
+			found = append(found, c.ID)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return &PolicyViolation{Reason: BaselineIDMessage + ": " + strings.Join(found, ", ") + "; drop the duplicate (the Lab already includes it) or give the new check a different id"}
+}
+
+// definitionAnchored reports whether a check has a definition that keeps it
+// verifiable when a documentation file it cites is edited: a frozen file that is
+// neither in scope nor documentation, or a new file this plan adds (a definition
+// that is not frozen evidence).
+func definitionAnchored(c Check, refs map[string]string, scope map[string]bool) bool {
+	for _, id := range c.Definitions {
+		file, frozen := refs[id]
+		if !frozen {
+			if id != "" && id != "issue" {
+				return true
+			}
+			continue
+		}
+		if !scope[file] && !IsDocumentationPath(file) {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateInScopeDefinitions rejects a check whose definition evidence or exact argv path is in scope; test paths named in argv are exempt, as in the run-time guard.
+// Documentation files get no exemption here: the auto-approval policy declines any
+// plan whose check cites an in-scope file.
 func ValidateInScopeDefinitions(a Analysis, evidence []Evidence) error {
-	return ValidateInScopeDefinitionsForNewFiles(a, evidence, nil)
+	return validateInScopeDefinitions(a, evidence, nil, false)
 }
 
 // ValidateInScopeDefinitionsForNewFiles is ValidateInScopeDefinitions except that
@@ -20,7 +74,15 @@ func ValidateInScopeDefinitions(a Analysis, evidence []Evidence) error {
 // the frozen tree, so nothing frozen is edited and the check stays candidate
 // evidence; every existing in-scope file still rejects. The caller derives
 // newFiles from the frozen tree (see NewScopeFiles), never from model output.
+//
+// A documentation file cited as a definition is informational and does not reject
+// by itself, but a check that cites an in-scope documentation file and has no
+// other anchor (see definitionAnchored) is rejected.
 func ValidateInScopeDefinitionsForNewFiles(a Analysis, evidence []Evidence, newFiles []string) error {
+	return validateInScopeDefinitions(a, evidence, newFiles, true)
+}
+
+func validateInScopeDefinitions(a Analysis, evidence []Evidence, newFiles []string, docsInformational bool) error {
 	scope := map[string]bool{}
 	for _, s := range a.Scope {
 		scope[s.Path] = true
@@ -44,8 +106,9 @@ func ValidateInScopeDefinitionsForNewFiles(a Analysis, evidence []Evidence, newF
 		byPath[file] = append(byPath[file], check)
 	}
 	for _, c := range a.Checks {
+		anchored := definitionAnchored(c, refs, scope)
 		for _, id := range c.Definitions {
-			if file, ok := refs[id]; ok {
+			if file, ok := refs[id]; ok && (!docsInformational || !IsDocumentationPath(file) || !anchored) {
 				add(file, c.ID)
 			}
 		}

@@ -19,6 +19,7 @@ func saveMetaFormula(t *testing.T, lab, command, learn string) {
 	if err := os.WriteFile(filepath.Join(lab, "formulas", "f.yaml"), []byte(recipe), 0600); err != nil {
 		t.Fatal(err)
 	}
+	approveSavedFormula(t, lab)
 }
 
 func TestDoctorReportsMetaRoleConflictAsNotReady(t *testing.T) {

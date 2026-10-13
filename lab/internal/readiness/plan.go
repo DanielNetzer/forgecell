@@ -187,6 +187,7 @@ const (
 	PolicyClassInScopeDefinition  = "in-scope-definition"
 	PolicyClassEvidenceRequestCap = "evidence-request-cap"
 	PolicyClassDefinitionRef      = "definition-reference"
+	PolicyClassBaselineID         = "baseline-id"
 	PolicyClassOther              = "other"
 )
 
@@ -203,6 +204,8 @@ func PolicyClass(v *PolicyViolation) string {
 		return PolicyClassEvidenceRequestCap
 	case strings.HasPrefix(v.Reason, DefinitionReferenceMessage):
 		return PolicyClassDefinitionRef
+	case strings.HasPrefix(v.Reason, BaselineIDMessage):
+		return PolicyClassBaselineID
 	}
 	return PolicyClassOther
 }
@@ -639,10 +642,22 @@ func (p Plan) DefinitionOverlaps() []DefinitionOverlap {
 	for _, e := range p.Evidence {
 		refs[e.ID] = e.Path
 	}
+	inScope := map[string]bool{}
+	for _, s := range p.Analysis.Scope {
+		inScope[s.Path] = true
+	}
 	byPath := map[string][]string{}
+	// A documentation citation of an in-scope file is informational when the check
+	// has another anchor; without one the check has no frozen definition left.
+	docNotes := map[string][]string{}
 	tests := []string{}
 	for _, c := range append(append([]Check{}, p.Analysis.Checks...), p.Setup...) {
+		anchored := definitionAnchored(c, refs, inScope)
 		for _, id := range c.Definitions {
+			if IsDocumentationPath(refs[id]) && anchored {
+				docNotes[refs[id]] = append(docNotes[refs[id]], c.ID)
+				continue
+			}
 			byPath[refs[id]] = append(byPath[refs[id]], c.ID)
 		}
 		// Commands can invoke tests indirectly; conservatively report every check.
@@ -655,6 +670,9 @@ func (p Plan) DefinitionOverlaps() []DefinitionOverlap {
 		definitions := byPath[scoped.Path]
 		if len(definitions) > 0 {
 			out = append(out, DefinitionOverlap{scoped.Path, definitions, "definition", "Frozen definition may change: candidate verification requires an explicit reviewedAcceptance repair tied to a required human-supplied frozen acceptance check; retain regression definitions and protected gates."})
+		}
+		if cited := docNotes[scoped.Path]; len(cited) > 0 {
+			out = append(out, DefinitionOverlap{scoped.Path, cited, "documentation", "Documentation cited by a check is in scope. It is informational: the check is also defined by a file this plan does not edit, so the overlap does not block coding."})
 		}
 		if ConventionalTestPath(scoped.Path) && len(tests) > 0 {
 			out = append(out, DefinitionOverlap{scoped.Path, tests, "test-source", "Candidate-authored tests remain candidate evidence; regression checks also run with protected baseline test sources. This assessment does not block ordinary test edits."})

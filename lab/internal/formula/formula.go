@@ -293,6 +293,22 @@ func (f Formula) RoleBinding(role HarnessRole) (Binding, bool) {
 	return b, true
 }
 
+// processDefaultTimeoutMS mirrors the 10-minute timeout the process runner
+// applies when a binding carries none.
+const processDefaultTimeoutMS = 600000
+
+// EffectiveTimeoutMS is the timeout an execution applies: the declared timeoutMs,
+// or, when none is declared and maxTimeoutMs is below the process default, that
+// maximum, so a run cannot outlast it. Zero still lets the process layer apply its
+// default. The binding itself keeps what the Formula declares, so a binding hash
+// computed before this clamp existed is unchanged.
+func (b Binding) EffectiveTimeoutMS() int {
+	if b.TimeoutMS == 0 && b.MaxTimeoutMS > 0 && b.MaxTimeoutMS < processDefaultTimeoutMS {
+		return b.MaxTimeoutMS
+	}
+	return b.TimeoutMS
+}
+
 // ExecutionBinding resolves the binding that runs an execution role: intake
 // analysis, coding or learning (meta). Other execution roles are not harness-bound.
 func (f Formula) ExecutionBinding(role ExecutionRole) (Binding, bool) {
@@ -594,8 +610,11 @@ func FileHash(path string) (string, error) {
 	return digest(b), nil
 }
 func approvalError(dir string, e error) error {
-	return fmt.Errorf("Formula execution approval rejected: %v; review current YAML with forgecell init --lab %q, then init --lab %q --approve PROPOSAL_ID", e, dir, dir)
+	return fmt.Errorf("Formula execution approval rejected: %v; review current YAML with forgecell init --lab %s, then init --lab %s --approve PROPOSAL_ID", e, ShellWord(dir), ShellWord(dir))
 }
+
+// ShellWord quotes s as one literal word for a POSIX shell, for printed commands.
+func ShellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 func decisionFile(dir string, a Approval) (string, error) {
 	if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`).MatchString(a.DecisionID) || a.SourceID == "" || a.SourceKind == "" || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(a.SHA256) {
 		return "", fmt.Errorf("invalid approval identity")
