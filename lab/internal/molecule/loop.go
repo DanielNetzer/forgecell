@@ -41,6 +41,28 @@ type LoopOptions struct {
 	MaxConcurrent int
 	Once          bool
 	ListIssues    func(context.Context, string) (intake.OpenIssues, error)
+	// Drain, once closed, stops the loop dispatching further Issues and ends it
+	// after the pass. Unlike cancelling ctx it never interrupts Molecules already
+	// in flight.
+	Drain <-chan struct{}
+	// Work, when set, is the context Molecule work runs on, so ctx can cancel the
+	// Issue listing without interrupting Molecules already in flight. It defaults
+	// to ctx.
+	Work context.Context
+}
+
+// TransientLoopError marks a pass failure that a later pass may not repeat: the
+// Issue listing or the local ledger inventory. Formula and configuration errors
+// are never transient.
+type TransientLoopError struct{ Err error }
+
+func (e TransientLoopError) Error() string { return e.Err.Error() }
+func (e TransientLoopError) Unwrap() error { return e.Err }
+
+// IsTransientLoopError reports whether err is a TransientLoopError.
+func IsTransientLoopError(err error) bool {
+	var t TransientLoopError
+	return errors.As(err, &t)
 }
 
 // LoopItem reports one eligible Issue. Failed marks a Molecule this pass started
@@ -56,6 +78,8 @@ type LoopItem struct {
 	Phase      string
 	Reason     string
 	Failed     bool
+	// Proposal is the saved recovery proposal of an interrupted Molecule.
+	Proposal *LoopProposal
 }
 
 type LoopPass struct {
@@ -109,6 +133,7 @@ func (p LoopPass) progressed() bool {
 }
 
 type loopRun struct {
+	work   context.Context
 	o      LoopOptions
 	lab    string
 	repo   string
@@ -139,7 +164,10 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 		}
 	}
 	lo.Template.LabDir = lab
-	l := &loopRun{o: lo, lab: lab, repo: loaded.Formula.Intake.Repo, loaded: loaded}
+	l := &loopRun{work: ctx, o: lo, lab: lab, repo: loaded.Formula.Intake.Repo, loaded: loaded}
+	if lo.Work != nil {
+		l.work = lo.Work
+	}
 	report.Repository = l.repo
 	for {
 		pass, err := l.pass(ctx)
@@ -147,7 +175,7 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 			return report, err
 		}
 		report.Passes = append(report.Passes, pass)
-		if lo.Once || ctx.Err() != nil || !pass.progressed() {
+		if lo.Once || l.draining(ctx) || !pass.progressed() {
 			return report, nil
 		}
 	}
@@ -191,7 +219,7 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 	var pass LoopPass
 	listed, err := l.o.ListIssues(ctx, l.repo)
 	if err != nil {
-		return pass, err
+		return pass, TransientLoopError{err}
 	}
 	if err = l.reloadFormula(); err != nil {
 		return pass, err
@@ -205,8 +233,9 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 	eligible := l.o.Select.Apply(listed.Issues)
 	inventory := ReadQueueInventory(l.lab)
 	if !inventory.Complete {
-		return pass, fmt.Errorf("the local ledger inventory is incomplete, so no Molecule was started or advanced: %s", inventoryCause(inventory))
+		return pass, TransientLoopError{fmt.Errorf("the local ledger inventory is incomplete, so no Molecule was started or advanced: %s", inventoryCause(inventory))}
 	}
+	pruneRecoveryProposals(l.lab, l.analysisTimeout())
 	pass.Items = make([]LoopItem, len(eligible))
 	work := make(chan int)
 	var wg sync.WaitGroup
@@ -215,16 +244,17 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 		go func() {
 			defer wg.Done()
 			for i := range work {
-				pass.Items[i] = l.process(ctx, inventory, eligible[i])
+				pass.Items[i] = l.process(l.work, inventory, eligible[i])
 			}
 		}()
 	}
 	for i, issue := range eligible {
-		if ctx.Err() == nil {
+		if !l.draining(ctx) {
 			select {
 			case work <- i:
 				continue
 			case <-ctx.Done():
+			case <-l.o.Drain:
 			}
 		}
 		pass.Items[i] = LoopItem{Repository: issue.Repository, Issue: issue.Number, State: LoopInterrupted, Reason: "the loop was interrupted before this Issue was started"}
@@ -232,6 +262,15 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 	close(work)
 	wg.Wait()
 	return pass, nil
+}
+
+func (l *loopRun) draining(ctx context.Context) bool {
+	select {
+	case <-l.o.Drain:
+		return true
+	default:
+		return ctx.Err() != nil
+	}
 }
 
 func (l *loopRun) process(ctx context.Context, inventory QueueInventory, issue intake.OpenIssue) LoopItem {
@@ -254,6 +293,9 @@ func (l *loopRun) existing(ctx context.Context, item LoopItem, summary QueueSumm
 				item.Reason = activeReason(a.Status, a.ID)
 				if reason, stuck := l.interruptedLedger(a, item); stuck {
 					item.State, item.Reason = LoopStalled, reason
+					if a.Phase != "" {
+						item = l.proposeRecovery(item)
+					}
 					return item
 				}
 				break
@@ -275,8 +317,11 @@ const defaultAnalysisTimeout = 10 * time.Minute
 
 // analysisTimeout is how long a ledger may go unwritten while intake or analysis
 // is still working: the Formula's analysis binding timeout.
-func (l *loopRun) analysisTimeout() time.Duration {
-	if b, _ := l.loaded.Formula.ExecutionBinding(formula.IntakeRole); b.TimeoutMS > 0 {
+func (l *loopRun) analysisTimeout() time.Duration { return AnalysisTimeout(l.loaded.Formula) }
+
+// AnalysisTimeout is the Formula's analysis binding timeout, or the default.
+func AnalysisTimeout(f formula.Formula) time.Duration {
+	if b, _ := f.ExecutionBinding(formula.IntakeRole); b.TimeoutMS > 0 {
 		return time.Duration(b.TimeoutMS) * time.Millisecond
 	}
 	return defaultAnalysisTimeout
@@ -294,11 +339,7 @@ func (l *loopRun) interruptedLedger(a QueueAttempt, item LoopItem) (string, bool
 		return "", false
 	}
 	timeout := l.analysisTimeout()
-	info, err := os.Lstat(filepath.Join(l.lab, "ledgers", a.ID+".json"))
-	if err != nil || !info.Mode().IsRegular() || time.Since(info.ModTime()) <= timeout {
-		return "", false
-	}
-	if approvalOwnerMayBeLive(l.lab, a.ID) {
+	if !ledgerAbandoned(l.lab, a.ID, timeout) {
 		return "", false
 	}
 	if a.Phase != "" {
@@ -310,6 +351,16 @@ func (l *loopRun) interruptedLedger(a QueueAttempt, item LoopItem) (string, bool
 	}
 	unlock()
 	return unfinishedIntakeReason(a, timeout), true
+}
+
+// ledgerAbandoned is true when the ledger has not been written for longer than
+// the analysis timeout and no live process owns its approval lock.
+func ledgerAbandoned(lab, id string, timeout time.Duration) bool {
+	info, err := os.Lstat(filepath.Join(lab, "ledgers", id+".json"))
+	if err != nil || !info.Mode().IsRegular() || time.Since(info.ModTime()) <= timeout {
+		return false
+	}
+	return !approvalOwnerMayBeLive(lab, id)
 }
 
 // approvalOwnerMayBeLive reads the approval lock directory's owner file. Anything

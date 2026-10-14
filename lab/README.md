@@ -217,6 +217,63 @@ It never delivers, merges or approves a human gate.
   Formula's analysis timeout and no live process owns its approval lock (and, before
   a scope plan exists, no loop holds the Issue's start lock). The report then points
   to `forgecell ledger <id>`. Anything uncertain keeps the plain active report.
+- **Watching:** `forgecell loop --watch [--interval DURATION]` repeats single passes
+  (each identical to `--once`, with the same server-side selection) until it receives
+  SIGINT or SIGTERM. The interval defaults to 5 minutes and must be at least 1
+  minute (`1m`, `90s` and `5m` are accepted; `30s` is not). `--watch` cannot be
+  combined with `--once`, and `--interval` needs `--watch`; every invalid
+  combination exits 1 before GitHub is called or a Lab is created. Each pass
+  re-reads the approved Formula and re-lists open Issues, and prints its own report.
+  A stop request ends the watch between passes: it dispatches no further Issue,
+  lets Molecules already in flight finish under their usual harness timeouts and
+  locks, and starts no new pass. The exit code is the one the final pass would give
+  under `--once`. A transient pass error (a failed or hung Issue listing, an
+  incomplete ledger inventory) is reported and retried with exponential backoff,
+  capped at four intervals; a stop during such a state exits 1. A Formula or
+  configuration error (the approved Formula cannot be reloaded, `intake.repo`
+  changed, a truncated listing under `label:` or `milestone:`) ends the watch with
+  exit 1. The first SIGINT or SIGTERM stops the loop as described; a second one
+  terminates the process at once, which is safe because the Molecule and Issue
+  locks are advisory flocks that the operating system drops on exit. A stop
+  request also cancels a running Issue listing. No pass delivers,
+  merges or approves a human gate. Notices about recurrence and pending learning
+  are printed after every pass, so they repeat each interval.
+- **Learning:** `--learn` is off by default and works with or without `--watch`.
+  After each pass (and after that pass's recurrence check) the loop runs the pending
+  learn requests for the current approved Formula through the same path as
+  `forgecell learn --pending` and prints each result the same way. Without
+  `--learn` the loop only reports pending requests. Suggestions stay pending: the
+  output offers `forgecell suggestion ID --lab DIR` and the loop never approves or
+  dismisses one. A request that fails stays pending, is reported and does not
+  change the loop's exit code. To keep a failing request from starting the model
+  every pass, the loop skips a request that has failed 3 times (reported as
+  `waiting for operator: 3 failed attempts`) or whose last failure is newer than
+  three intervals (the default 5 minutes applies without `--watch`). Run
+  `forgecell learn --pending` yourself to retry; it is never throttled. A learn run
+  cancelled by a stop request is not counted as a failed attempt.
+- **Recovery proposals:** when a ledger is reported stalled because it is
+  interrupted and no live process owns its approval lock, the loop saves
+  `recovery-proposals/<molecule-id>.json` in the Lab (private permissions, written
+  atomically, outside `ledgers/`). It holds the Molecule and Issue, the ledger status
+  and phase, the latest plan digest, and the exact
+  `forgecell recover ID --plan DIGEST --confirm-stopped --lab DIR` command. When the
+  latest harness attempt retained a captured tree it also records the ordered
+  follow-up `forgecell amend ID --parent DIGEST --plan FILE --lab DIR`, where `FILE`
+  is `recovery-proposals/adopt-plans/<molecule-id>.json`: the latest plan with
+  `continuation: adopt-failed-tree` and that attempt id. The command is exact and
+  runnable once `recover` has succeeded; review the plan file first. A proposal is written only when the ledger holds a plan and its latest
+  harness attempt has reconciled stopped-process evidence, which `recover` requires;
+  otherwise the report keeps its reason and says why no proposal was made. There is
+  one file per Molecule: a later pass over the same state leaves the bytes unchanged
+  and reports it as already proposed, and a changed plan digest replaces the file.
+  The loop only proposes. It never runs `recover` or `amend`, and you run them only
+  after every Lab process has stopped. The report prints each proposal under its
+  Issue, and `forgecell doctor` adds a read-only `recoveryProposals` array (absent
+  when empty; `schemaVersion` stays `v1`) and a `--verbose` section for proposals
+  whose Molecule is still interrupted by the loop's own criteria (the ledger status,
+  its age against the analysis timeout, and approval-lock ownership) at the recorded
+  plan digest. Doctor writes nothing; each loop pass removes the proposal files that
+  no longer apply. Every printed argument is quoted for a POSIX shell.
 
 `forgecell labs [--json]` lists every directory under `FORGECELL_HOME/labs`, legacy
 path-keyed Labs included, sorted by name. Each entry shows the repository, active
