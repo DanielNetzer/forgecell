@@ -361,9 +361,17 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 
 	renamedOld := sortedKeys(renamedOldTest)
 
+	// Resolve the effective module and build cache once, under the caller's (unscrubbed)
+	// environment, so the scrubbed build environment can point at them even though its private
+	// HOME is empty. A failure here is the existing "go toolchain unavailable" skip.
+	gomodcache, gocache, ok := resolveGoCache(ctx)
+	if !ok {
+		return zero, "go toolchain unavailable"
+	}
+
 	// Verify the initial failure at the base tree: at baseCommit, with the hidden tests
 	// applied, at least one hidden test must fail and the package must build.
-	res, reason := runHiddenTests(ctx, o.Source, baseCommit, testFiles, contents, renamedOld, pkgs)
+	res, reason := runHiddenTests(ctx, o.Source, baseCommit, testFiles, contents, renamedOld, pkgs, gomodcache, gocache)
 	if reason != "" {
 		return zero, reason
 	}
@@ -384,7 +392,7 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 	}
 
 	// Validity: the hidden tests must pass on the merge tree.
-	mres, reason := runHiddenTests(ctx, o.Source, p.MergeCommitSHA, testFiles, contents, renamedOld, pkgs)
+	mres, reason := runHiddenTests(ctx, o.Source, p.MergeCommitSHA, testFiles, contents, renamedOld, pkgs, gomodcache, gocache)
 	if reason != "" {
 		return zero, reason
 	}
@@ -633,7 +641,7 @@ type goTestEvent struct {
 // under a scrubbed environment allowlist. It parses the events to distinguish a genuine test
 // failure from a build or toolchain error. A non-empty reason is a recorded skip for an
 // inability to prepare the worktree.
-func runHiddenTests(ctx context.Context, source, commit string, testFiles []string, contents map[string][]byte, renamedOld []string, pkgs []string) (hiddenRunResult, string) {
+func runHiddenTests(ctx context.Context, source, commit string, testFiles []string, contents map[string][]byte, renamedOld []string, pkgs []string, gomodcache, gocache string) (hiddenRunResult, string) {
 	var res hiddenRunResult
 	parent, err := os.MkdirTemp("", "forgecell-replay-verify-")
 	if err != nil {
@@ -668,7 +676,7 @@ func runHiddenTests(ctx context.Context, source, commit string, testFiles []stri
 	r := process.Run(ctx, process.Options{
 		Argv:           argv,
 		Dir:            filepath.Join(worktree, replayModuleSubdir),
-		Env:            scrubbedGoEnv(home),
+		Env:            scrubbedGoEnv(home, gomodcache, gocache),
 		Stdin:          []byte{},
 		Timeout:        replayVerifyTimeout,
 		MaxOutputBytes: 4_000_000,
@@ -724,16 +732,77 @@ func runHiddenTests(ctx context.Context, source, commit string, testFiles []stri
 	return res, ""
 }
 
+// resolveGoCache resolves the effective GOMODCACHE and GOCACHE by running `go env` under the
+// caller's (unscrubbed) environment, so they are known absolute paths before scrubbing clears
+// HOME. It is a function value so tests can inject a fake instead of shelling out. ok is false
+// when the go toolchain is unavailable or the values cannot be determined, which callers map to
+// the existing "go toolchain unavailable" skip.
+//
+// Resolution must not depend on the process working directory or the caller's toolchain
+// selection: it runs from os.TempDir() with GOTOOLCHAIN forced to "local", so a go.mod
+// `toolchain` line in the current directory can never trigger a toolchain download here.
+var resolveGoCache = func(ctx context.Context) (gomodcache, gocache string, ok bool) {
+	r := process.Run(ctx, process.Options{
+		Argv:           []string{"go", "env", "GOMODCACHE", "GOCACHE"},
+		Dir:            os.TempDir(),
+		Env:            envWithGotoolchainLocal(os.Environ()),
+		Stdin:          []byte{},
+		Timeout:        60 * time.Second,
+		MaxOutputBytes: 1_000_000,
+	})
+	if !r.OK {
+		return "", "", false
+	}
+	return parseGoEnvCache(r.Stdout)
+}
+
+// envWithGotoolchainLocal returns env with GOTOOLCHAIN forced to "local" (replacing any existing
+// entry), so a go.mod `toolchain` line can never trigger a toolchain download.
+func envWithGotoolchainLocal(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, "GOTOOLCHAIN=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, "GOTOOLCHAIN=local")
+}
+
+// parseGoEnvCache parses the stdout of `go env GOMODCACHE GOCACHE` into the two cache paths.
+// ok is false unless the output has at least two lines whose first two values are both non-empty
+// absolute paths; trailing blank lines and CRLF endings are tolerated.
+func parseGoEnvCache(stdout string) (gomodcache, gocache string, ok bool) {
+	lines := strings.Split(stdout, "\n")
+	if len(lines) < 2 {
+		return "", "", false
+	}
+	gomodcache = strings.TrimSpace(lines[0])
+	gocache = strings.TrimSpace(lines[1])
+	if gomodcache == "" || gocache == "" {
+		return "", "", false
+	}
+	if !filepath.IsAbs(gomodcache) || !filepath.IsAbs(gocache) {
+		return "", "", false
+	}
+	return gomodcache, gocache, true
+}
+
 // scrubbedGoEnv is the explicit environment allowlist for build-time execution of repository
-// code. It never inherits os.Environ() wholesale.
-func scrubbedGoEnv(home string) []string {
+// code. It never inherits os.Environ() wholesale. GOMODCACHE and GOCACHE are passed in as the
+// absolute paths resolved by resolveGoCache under the caller's environment, because with an
+// empty private HOME and GOPROXY=off Go could otherwise locate neither the module cache nor the
+// build cache; the module cache is read-only input and nothing downloads under GOPROXY=off.
+func scrubbedGoEnv(home, gomodcache, gocache string) []string {
 	env := []string{
 		"HOME=" + home,
 		"GOFLAGS=-mod=readonly",
 		"GOTOOLCHAIN=local",
 		"GOPROXY=off",
+		"GOMODCACHE=" + gomodcache,
+		"GOCACHE=" + gocache,
 	}
-	for _, k := range []string{"PATH", "GOCACHE", "GOMODCACHE", "TMPDIR", "LANG"} {
+	for _, k := range []string{"PATH", "TMPDIR", "LANG"} {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
