@@ -21,6 +21,7 @@ func runEvaluateCohort(ctx context.Context, args []string, out, stderr io.Writer
 	approve := flags.String("approve", "", "Fresh exact cohort activation digest")
 	output := flags.String("out", "", "Evidence directory; created fresh, or resumed when its activation digest matches")
 	source := flags.String("source", ".", "Repository checkout")
+	keepWorkspaces := flags.Bool("keep-workspaces", false, "Retain each attempt's Lab and workspace trees instead of deleting them after its record, verification and captured diff are saved")
 	recheck := flags.Bool("recheck", false, "Re-grade recorded attempts without rerunning a model")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 1
@@ -36,7 +37,7 @@ func runEvaluateCohort(ctx context.Context, args []string, out, stderr io.Writer
 		// per-attempt evidence is untouched and can be regraded by a follow-up.
 		return fail(fmt.Errorf("cohort --recheck is deferred; recorded attempts are retained under %s/attempts and are not regraded here", *output))
 	}
-	report, err := evaluation.RunCohort(ctx, evaluation.CohortOptions{Cohort: *cohort, SourceRoot: *source, Output: *output, Approve: *approve})
+	report, err := evaluation.RunCohort(ctx, evaluation.CohortOptions{Cohort: *cohort, SourceRoot: *source, Output: *output, Approve: *approve, KeepWorkspaces: *keepWorkspaces})
 	if err != nil {
 		return fail(err)
 	}
