@@ -247,3 +247,53 @@ recipes, source and output destination. The preview performs no setup, checks,
 model calls or output-directory writes. The report retains the new decision's
 provenance. Rechecking retained output does not approve new model execution.
 Formula approval remains separate from ticket scope and publication review.
+
+### Cohort evaluation
+
+The single-task `evaluate` above compares one baseline and one candidate recipe on one
+frozen task. `evaluate --cohort` extends the same discipline to a reviewed **cohort**:
+two Formula variants (for example identical apart from `model`) run over N frozen task
+plans with K repetitions each.
+
+```sh
+forgecell evaluate --cohort COHORT.json --source REPO --out DIR            # prints the digest
+forgecell evaluate --cohort COHORT.json --source REPO --out DIR --approve DIGEST
+```
+
+The cohort file is strict JSON, at most 64 KiB, with unknown fields rejected:
+`schemaVersion: 1`; a `hypothesis` (≤ 2000 characters); a `primaryOutcome` of
+`hiddenAcceptancePassRate`, `requiredChecksPassRate` or `costPerAcceptedOutcome`;
+exactly two `variants` `[{name, formula, formulaSha256}]` whose `name` matches
+`^[a-z][a-z0-9-]{0,31}$` and whose `formula` is a cohort-relative Formula file; 1–50
+`tasks` `[{name, plan, planSha256}]`, each `plan` an existing evaluation `Plan` file;
+`repetitions` 1–10; and an optional `stop` `{maxAttempts?, maxCostUSD?}`. Every
+referenced file is pinned by SHA-256 and re-verified before every attempt.
+
+One activation digest covers the cohort bytes, both Formula files and every plan file,
+plus source and destination, reusing the existing exact-approval semantics. Nothing is
+created or executed before approval; without `--approve` the command prints the digest
+and the exact approve command.
+
+For each task, for each repetition, variant A then variant B run interleaved (A first),
+sequentially, each in its own isolated per-attempt Lab under
+`<out>/attempts/<task>/<variant>/rep-<n>/`. A failed or timed-out attempt is recorded,
+never silently retried, and the run continues. The stop rule is checked after each
+attempt; `maxCostUSD` counts only reported cost (list-price estimates included and
+labelled) and never triggers when no cost is reported.
+
+The side-by-side report is written to `<out>/report.json` and `<out>/report.md`. For
+each variant it reports attempts and completions; hidden-acceptance pass count and rate;
+required-checks pass rate; scope violations, scope-change and amendment counts, and
+timeouts; median and p90 of elapsed and harness time; reported cost total and per
+accepted outcome with its basis and `N of M` coverage; effective models; and review-Atom
+findings by severity when present. A per-task × variant table lists the outcomes.
+**Counts and rates only, with no significance claims**, and every rate states its n
+(tasks and repetitions).
+
+An existing `<out>` whose recorded activation digest matches resumes and skips attempts
+already recorded (a directory with a complete attempt record counts as done); a
+mismatched digest is refused so a different cohort can never overwrite retained
+evidence. Cohort `--recheck` — re-grading retained outputs without rerunning a model — is
+**deferred** in this slice; the retained per-attempt evidence under `<out>/attempts` is
+untouched and can be regraded by a follow-up. The single-task `--inputs`/`--recheck`
+mode is unchanged.
