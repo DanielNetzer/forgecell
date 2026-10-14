@@ -297,3 +297,82 @@ evidence. Cohort `--recheck` — re-grading retained outputs without rerunning a
 **deferred** in this slice; the retained per-attempt evidence under `<out>/attempts` is
 untouched and can be regraded by a follow-up. The single-task `--inputs`/`--recheck`
 mode is unchanged.
+
+### Replay tasks
+
+A cohort is only as useful as its tasks. `evaluate replay` builds frozen evaluation task
+plans from our **own merged PRs**, so a model comparison runs against real history with
+real, hidden acceptance tests:
+
+```sh
+forgecell evaluate replay --repo OWNER/REPO --pr 120 --pr 124 --source CHECKOUT --out NEW_DIR
+```
+
+For each PR it reads, read-only via `gh api` (the same pattern as
+`internal/intake/open_issues.go`), the PR's `merge_commit_sha`, `base.sha`/`base.ref`,
+`body`, changed files (`/pulls/N/files`, one page of at most 100) and the linked issue —
+the first `Closes #N`/`Fixes #N` in the PR body, else the first `#N` in the title. The
+issue body is read from `/issues/N` as the current body (`taskSource: current-issue-body`;
+no body history in v1) and is treated as **untrusted text**.
+
+`baseCommit` is computed from the merge commit's parents with local `git` in `--source`: a
+single-parent (squash/rebase) merge uses `merge^1`; a two-parent merge uses the
+merge-base of its two parents. The rule applied is recorded in `approval.md`.
+
+To keep hidden acceptance material out of anything a reviewer might hand to a harness, each
+eligible PR writes to **two** sibling directories. The human-facing `<out>/tasks/pr-<N>/`
+holds only:
+
+- `task.md`, the issue title and body as untrusted text for human review.
+- `approval.md`, a human-readable summary pinning every hidden artifact by SHA-256 and its
+  `hidden/pr-<N>/…` path.
+
+The machine-consumed inputs, which embed or are the hidden tests, live under
+`<out>/hidden/pr-<N>/` and are never shown to the harness during a run:
+
+- `plan.json`, an evaluation `Plan` with `allowedFiles` the PR's changed files (plus a
+  renamed file's previous path), `originalCheckFiles` the changed `_test.go` files,
+  `requireInitialFailure: true`, and `checks` of `go test ./...`, `go vet ./...` and gofmt
+  from `lab` plus an `acceptance` check.
+- `issue.json`, the linked issue as the plan's task (`Plan.Task`, consumed by the `--cohort`
+  runner).
+- `acceptance.sh` (`Plan.Acceptance`), a self-contained script that copies the workspace to
+  a throwaway tree, writes the changed test files (captured at the merge commit) into it and
+  runs their packages, so grading never rewrites tracked content.
+- `files/<repo-relative>`, the raw hidden test files for review.
+
+> **Assumption (recorded):** the frozen `Plan` schema and the #150 cohort runner require
+> `Plan.Task`/`Plan.Acceptance` to be *clean* plan-relative paths (no `..`) read from the
+> plan's own directory. Keeping hidden content out of `tasks/` while staying directly
+> consumable by the cohort runner therefore means `plan.json`, `issue.json` and
+> `acceptance.sh` are co-located under `hidden/pr-<N>/` (the cohort stub's task `plan` path
+> points there), rather than placing `plan.json` in `tasks/` with a `..`-relative reference.
+
+Replay executes repository test code at build time. It does so only under a scrubbed
+environment allowlist (`PATH`, a private `HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE`,
+`GOFLAGS=-mod=readonly`, `GOTOOLCHAIN=local`, `GOPROXY=off`, `LANG`) — never the inherited
+environment — and in throwaway worktrees created with `core.hooksPath=/dev/null`. In a
+worktree at `baseCommit` the hidden tests are applied (renamed-away old paths removed) and
+run with `go test -json`; the PR is built only if at least one hidden test reports a
+`fail` action **and** the package builds. A compile/build error, a missing toolchain or an
+incomplete run is a distinct recorded skip, never a reproduced failure. For validity, the
+hidden tests are also run in a worktree at the merge commit and **must pass** there.
+
+A PR is skipped, with the reason recorded in `<out>/skipped.json`, when it has no `_test.go`
+changes, no linked issue, more than 25 changed files, more than 2,000 changed lines, only
+non-Go changes, hidden tests outside the `lab` module (v1 assumption), a symlinked test
+file, an initial failure that does not reproduce, a build error at base, hidden tests that do
+not pass at the merge commit, or any per-PR infrastructure failure (`gh`/`git` error, unsafe
+path, linked reference that is a pull request). Per-PR failures never abort the run;
+`skipped.json` and `cohort.stub.json` are always written.
+
+To stop the comparison harness from reading the answer out of git history, the builder also
+writes a **history-free** bare repository `<out>/source.git` containing only the tasks' base
+commits (each fetched shallow under `refs/replay/pr-<N>`), so no merge commit, PR branch or
+later history is present. Cohorts built by replay **must** use it as `--source`.
+`<out>/cohort.stub.json` lists every built task pinned by SHA-256 and records `source` as
+that repository; before `forgecell evaluate --cohort`, add exactly two Formula variants,
+remove the documentary `source` field (the strict cohort decoder rejects unknown fields),
+rename it to `cohort.json` and pass `--source <out>/source.git`. The builder writes nothing
+outside `<out>`, and its tests use recorded `gh` fixtures with a tiny fixture repo — no
+network.
