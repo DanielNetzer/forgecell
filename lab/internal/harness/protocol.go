@@ -10,9 +10,11 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
 	"maps"
+	"math"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -485,6 +487,383 @@ func ReadResult(id, output string, meta bool) (string, error) {
 		return "", fmt.Errorf("%s did not return a final result", id)
 	}
 	return result, nil
+}
+
+// TokenCategories holds the four token categories the issue records (#149), as a
+// per-model breakdown or a total across models. Each category is nullable: a nil
+// pointer means the value was not reported and must render as "unreported", never as
+// zero. A total category is nil when no model reported it or when summing it overflowed
+// int64.
+type TokenCategories struct {
+	Input         *int64 `json:"input,omitempty"`
+	Output        *int64 `json:"output,omitempty"`
+	CacheRead     *int64 `json:"cacheRead,omitempty"`
+	CacheCreation *int64 `json:"cacheCreation,omitempty"`
+}
+
+// ModelUsage is one effective model's observed tokens and cost, derived only from a
+// modelUsage[<model>] entry of the Claude CLI final JSON. Model is its canonicalModel
+// (the raw map key when canonicalModel is absent), sanitized and bounded. CostBasis of
+// "list" is a CLI list-price estimate, never a billed charge. Degraded is true when
+// any present field of the entry was malformed (wrong type, non-integer, negative or
+// out of range); the sound fields are still kept and the bad ones read as unreported.
+type ModelUsage struct {
+	Model     string          `json:"model"`
+	Tokens    TokenCategories `json:"tokens"`
+	Thinking  *int64          `json:"thinking,omitempty"`
+	CostUSD   *float64        `json:"costUsd,omitempty"`
+	CostBasis string          `json:"costBasis,omitempty"`
+	Provider  string          `json:"provider,omitempty"`
+	Degraded  bool            `json:"degraded,omitempty"`
+}
+
+// maxModelEntries bounds how many modelUsage entries are kept from untrusted CLI
+// output; the rest are counted in Usage.TruncatedModels. The kept entries are the ones
+// with the largest output-token counts, so a flood of empty entries cannot evict the
+// real model.
+const maxModelEntries = 16
+
+// modelFieldRunes bounds a provider-supplied string (model id, provider, basis) stored
+// from untrusted CLI output.
+const modelFieldRunes = 128
+
+// Usage is the additive, omitempty record of what a Claude Code harness attempt
+// consumed, derived only from the CLI final JSON (--output-format json, #149). It is
+// nil ("unavailable") for Codex, Cursor, a custom command, or a Claude run that
+// emitted none; a nil Usage is rendered as an explicit "unavailable" line item, never
+// as zero. Only the derived per-model and total categories are kept: the CLI's raw
+// top-level `usage` aggregate is deliberately never embedded, because it double counts
+// the same tokens that modelUsage already breaks down.
+type Usage struct {
+	Models          []ModelUsage    `json:"models,omitempty"`
+	Total           TokenCategories `json:"total"`
+	EffectiveModels []string        `json:"effectiveModels,omitempty"`
+	// TruncatedModels counts modelUsage entries dropped beyond maxModelEntries. It is
+	// zero in every ordinary run and non-zero only for adversarial output.
+	TruncatedModels int `json:"truncatedModels,omitempty"`
+	// TotalCostUSD is the CLI's total_cost_usd for the attempt, when it reported one.
+	// It is never estimated or invented.
+	TotalCostUSD *float64 `json:"totalCostUsd,omitempty"`
+	// CostBasis labels the reported cost: "list" (a CLI list-price estimate, never a
+	// billed charge), "mixed" when the per-model bases disagree or only some models
+	// carry one, or whatever the CLI reported. Empty when no model carried a basis.
+	CostBasis     string `json:"costBasis,omitempty"`
+	DurationMS    *int64 `json:"durationMs,omitempty"`
+	DurationAPIMS *int64 `json:"durationApiMs,omitempty"`
+	NumTurns      *int64 `json:"numTurns,omitempty"`
+	TTFTMS        *int64 `json:"ttftMs,omitempty"`
+	// ModelMismatch is true when the set of effective models is not exactly the pinned
+	// model. It is non-blocking everywhere: it never fails readiness or a gate.
+	ModelMismatch bool `json:"modelMismatch,omitempty"`
+}
+
+// int64Sum accumulates a token category across models with overflow detection, so a
+// total never wraps negative or silently truncates. A category that no model reported,
+// or one whose sum overflowed int64, stays unreported (nil) rather than reading zero.
+type int64Sum struct {
+	sum      int64
+	reported bool
+	overflow bool
+}
+
+func (s *int64Sum) add(v *int64) {
+	if v == nil {
+		return
+	}
+	s.reported = true
+	if s.overflow {
+		return
+	}
+	// Parsed category values are guaranteed non-negative, so a wrap shows as a sum
+	// smaller than an addend.
+	next := s.sum + *v
+	if next < s.sum {
+		s.overflow = true
+		return
+	}
+	s.sum = next
+}
+
+func (s int64Sum) value() *int64 {
+	if !s.reported || s.overflow {
+		return nil
+	}
+	v := s.sum
+	return &v
+}
+
+// rawModelUsage is one modelUsage entry decoded field-by-field (json.RawMessage), so a
+// single malformed optional field never drops the whole entry or fails the whole parse.
+type rawModelUsage struct {
+	InputTokens              json.RawMessage `json:"inputTokens"`
+	OutputTokens             json.RawMessage `json:"outputTokens"`
+	CacheReadInputTokens     json.RawMessage `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens json.RawMessage `json:"cacheCreationInputTokens"`
+	ThinkingTokens           json.RawMessage `json:"thinkingTokens"`
+	CostUSD                  json.RawMessage `json:"costUSD"`
+	CanonicalModel           json.RawMessage `json:"canonicalModel"`
+	Provider                 json.RawMessage `json:"provider"`
+	CostBasis                json.RawMessage `json:"costBasis"`
+}
+
+// ParseUsage reads the Claude CLI final JSON (--output-format json) for the usage
+// evidence #149 records. It returns nil when raw is not that JSON, or carries neither
+// modelUsage nor total_cost_usd, which reads as unavailable. Every field is optional
+// and decoded independently: a missing field is tolerated, a malformed one is dropped
+// to "unreported" (marking its model entry degraded) rather than failing the parse.
+// The raw top-level `usage` aggregate is deliberately ignored to avoid double counting;
+// modelUsage is the per-model source of truth and canonicalModel is the effective model
+// id. Untrusted model/provider/basis strings are sanitized and bounded at parse time,
+// and at most maxModelEntries entries are kept.
+func ParseUsage(raw string) *Usage {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var top struct {
+		TotalCostUSD  json.RawMessage `json:"total_cost_usd"`
+		DurationMS    json.RawMessage `json:"duration_ms"`
+		DurationAPIMS json.RawMessage `json:"duration_api_ms"`
+		NumTurns      json.RawMessage `json:"num_turns"`
+		TTFTMS        json.RawMessage `json:"ttft_ms"`
+		ModelUsage    json.RawMessage `json:"modelUsage"`
+	}
+	if json.Unmarshal([]byte(raw), &top) != nil {
+		return nil
+	}
+	var models map[string]json.RawMessage
+	if len(top.ModelUsage) != 0 {
+		// A modelUsage that is not an object (array, string, …) leaves no entries
+		// rather than failing the parse.
+		_ = json.Unmarshal(top.ModelUsage, &models)
+	}
+	var topDegraded bool
+	totalCost := parseFloatField(top.TotalCostUSD, &topDegraded)
+	if len(models) == 0 && totalCost == nil {
+		return nil
+	}
+	u := &Usage{
+		TotalCostUSD:  totalCost,
+		DurationMS:    parseIntField(top.DurationMS, &topDegraded),
+		DurationAPIMS: parseIntField(top.DurationAPIMS, &topDegraded),
+		NumTurns:      parseIntField(top.NumTurns, &topDegraded),
+		TTFTMS:        parseIntField(top.TTFTMS, &topDegraded),
+	}
+	keys := make([]string, 0, len(models))
+	for k := range models {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	entries := make([]ModelUsage, 0, len(models))
+	for _, key := range keys {
+		var m rawModelUsage
+		degraded := false
+		if json.Unmarshal(models[key], &m) != nil {
+			// The entry is not an object; keep it as a fully-unreported, degraded
+			// entry under its map key rather than dropping it.
+			entries = append(entries, ModelUsage{Model: ReviewDisplayText(key, modelFieldRunes), Degraded: true})
+			continue
+		}
+		model := parseStringField(m.CanonicalModel, &degraded)
+		if model == "" {
+			model = ReviewDisplayText(key, modelFieldRunes)
+		}
+		entries = append(entries, ModelUsage{
+			Model: model,
+			Tokens: TokenCategories{
+				Input:         parseIntField(m.InputTokens, &degraded),
+				Output:        parseIntField(m.OutputTokens, &degraded),
+				CacheRead:     parseIntField(m.CacheReadInputTokens, &degraded),
+				CacheCreation: parseIntField(m.CacheCreationInputTokens, &degraded),
+			},
+			Thinking:  parseIntField(m.ThinkingTokens, &degraded),
+			CostUSD:   parseFloatField(m.CostUSD, &degraded),
+			CostBasis: parseStringField(m.CostBasis, &degraded),
+			Provider:  parseStringField(m.Provider, &degraded),
+			Degraded:  degraded,
+		})
+	}
+	// Bound untrusted output: keep the entries with the largest output-token counts,
+	// then restore a stable model-id order for deterministic storage and rendering.
+	if len(entries) > maxModelEntries {
+		slices.SortStableFunc(entries, func(a, b ModelUsage) int {
+			if c := cmpInt64(int64PtrValue(b.Tokens.Output), int64PtrValue(a.Tokens.Output)); c != 0 {
+				return c
+			}
+			return strings.Compare(a.Model, b.Model)
+		})
+		u.TruncatedModels = len(entries) - maxModelEntries
+		entries = entries[:maxModelEntries]
+	}
+	slices.SortStableFunc(entries, func(a, b ModelUsage) int { return strings.Compare(a.Model, b.Model) })
+	var input, output, cacheRead, cacheCreation int64Sum
+	bases := map[string]bool{}
+	allCarryBasis := len(entries) > 0
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		input.add(entry.Tokens.Input)
+		output.add(entry.Tokens.Output)
+		cacheRead.add(entry.Tokens.CacheRead)
+		cacheCreation.add(entry.Tokens.CacheCreation)
+		if entry.CostBasis != "" {
+			bases[entry.CostBasis] = true
+		} else {
+			allCarryBasis = false
+		}
+		if !seen[entry.Model] {
+			seen[entry.Model] = true
+			u.EffectiveModels = append(u.EffectiveModels, entry.Model)
+		}
+	}
+	u.Models = entries
+	u.Total = TokenCategories{Input: input.value(), Output: output.value(), CacheRead: cacheRead.value(), CacheCreation: cacheCreation.value()}
+	slices.Sort(u.EffectiveModels)
+	switch {
+	case len(bases) == 0:
+		// no model carried a basis
+	case len(bases) == 1 && allCarryBasis:
+		for b := range bases {
+			u.CostBasis = b
+		}
+	default:
+		u.CostBasis = "mixed"
+	}
+	return u
+}
+
+// parseIntField decodes one JSON field as a non-negative int64. An absent or null
+// field is unreported without marking the entry degraded. A present but malformed value
+// — wrong type, a non-integer such as 1.5 or 1e3, a negative count, or out of int64
+// range — is unreported and marks the entry degraded.
+func parseIntField(raw json.RawMessage, degraded *bool) *int64 {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return nil
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || v < 0 {
+		*degraded = true
+		return nil
+	}
+	return &v
+}
+
+// parseFloatField decodes one JSON field as a non-negative, finite float64. An absent
+// or null field is unreported without marking degraded; a malformed, negative or
+// non-finite value is unreported and marks the entry degraded, so a cost is never
+// printed as +Inf or NaN.
+func parseFloatField(raw json.RawMessage, degraded *bool) *float64 {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 || math.IsInf(v, 0) || math.IsNaN(v) {
+		*degraded = true
+		return nil
+	}
+	return &v
+}
+
+// parseStringField decodes one JSON field as a string, sanitizing control, bidi and
+// escape characters and bounding it to modelFieldRunes. A present but non-string value
+// is dropped to "" and marks the entry degraded.
+func parseStringField(raw json.RawMessage, degraded *bool) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return ""
+	}
+	var str string
+	if json.Unmarshal(raw, &str) != nil {
+		*degraded = true
+		return ""
+	}
+	return ReviewDisplayText(str, modelFieldRunes)
+}
+
+func int64PtrValue(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// cmpInt64 orders two int64 values without the overflow risk of subtracting them.
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// AttemptUsage derives the usage record for one harness attempt from the provider's
+// raw final stdout. Only a native Claude Code binding emits the parsed JSON; every
+// other binding (Codex, Cursor or a custom command) records no usage ("unavailable")
+// in v1, as does a Claude run that emitted none. pinnedModel is the attempt's recorded
+// pin (ModelUnpinned, "" or a "(passed to a custom command...)" form all mean no
+// enforceable pin); ModelMismatch is set when the effective models are not exactly the
+// pin. The mismatch is non-blocking.
+func AttemptUsage(command []string, rawStdout, pinnedModel string) *Usage {
+	if !ClaudeBinding(command) {
+		return nil
+	}
+	u := ParseUsage(rawStdout)
+	if u == nil {
+		return nil
+	}
+	u.ModelMismatch = pinMismatch(pinnedModel, u.EffectiveModels)
+	return u
+}
+
+var contextWindowSuffix = regexp.MustCompile(`\s*\[[^\]]*\]\s*$`)
+
+// normalizeModel drops a trailing context-window suffix such as " [1m]" so a pin and
+// an effective id that differ only by that marker compare equal.
+func normalizeModel(s string) string {
+	return strings.TrimSpace(contextWindowSuffix.ReplaceAllString(strings.TrimSpace(s), ""))
+}
+
+// knownModelAlias reports whether s is a CLI model alias that resolves to a canonical
+// id at run time (opus/sonnet/haiku).
+func knownModelAlias(s string) bool {
+	switch strings.ToLower(normalizeModel(s)) {
+	case "opus", "sonnet", "haiku":
+		return true
+	}
+	return false
+}
+
+// pinMismatch reports whether the effective models are anything other than exactly the
+// pinned model. An unpinned attempt, or one whose pin cannot be enforced, has no pin to
+// compare and never mismatches. Comparison ignores a trailing context-window suffix.
+// Extra effective models are always a mismatch. When the pin is a known alias
+// (opus/sonnet/haiku) and exactly one model ran, the single resolved id is treated as
+// the alias resolving — informational, not a mismatch.
+func pinMismatch(pinnedModel string, effective []string) bool {
+	pinRaw := strings.TrimSpace(pinnedModel)
+	if pinRaw == "" || pinRaw == ModelUnpinned || strings.Contains(pinRaw, "(passed to") {
+		return false
+	}
+	if len(effective) == 0 {
+		return false
+	}
+	pin := normalizeModel(pinRaw)
+	norm := make([]string, len(effective))
+	for i, e := range effective {
+		norm[i] = normalizeModel(e)
+	}
+	if len(norm) == 1 {
+		if norm[0] == pin || knownModelAlias(pinRaw) {
+			return false
+		}
+		return true
+	}
+	// More than one effective model is never exactly {pin}.
+	return true
 }
 
 // CodingOutcome is semantic evidence, independent of provider process success.

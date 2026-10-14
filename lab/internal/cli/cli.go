@@ -951,6 +951,12 @@ func presentRun(out io.Writer, r molecule.Record) {
 		}
 	}
 	presentReview(out, r)
+	if lines := molecule.UsageSummaryLines(r); len(lines) > 0 {
+		fmt.Fprintln(out, "Usage and cost (evidence, never an approval):")
+		for _, line := range lines {
+			fmt.Fprintln(out, line)
+		}
+	}
 	fmt.Fprintf(out, "Ledger: %s\n", filepath.Join(r.LabDir, "ledgers", r.ID+".md"))
 }
 
