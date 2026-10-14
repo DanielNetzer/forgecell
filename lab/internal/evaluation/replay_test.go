@@ -481,6 +481,77 @@ func TestReplayRefusesExistingOutput(t *testing.T) {
 	}
 }
 
+// TestScrubbedGoEnvResolvesCache asserts that even when GOMODCACHE and GOCACHE are unset in the
+// process environment (the normal case), the scrubbed build environment still carries both,
+// populated from the values the injected resolver obtained from `go env` under the caller's
+// environment. The resolver is injected as a function value so the test does not shell out.
+func TestScrubbedGoEnvResolvesCache(t *testing.T) {
+	// Empty then unset in the process env, so LookupEnv would not find them.
+	t.Setenv("GOMODCACHE", "")
+	t.Setenv("GOCACHE", "")
+	os.Unsetenv("GOMODCACHE")
+	os.Unsetenv("GOCACHE")
+
+	const wantMod = "/resolved/go/pkg/mod"
+	const wantCache = "/resolved/go-build"
+	orig := resolveGoCache
+	resolveGoCache = func(context.Context) (string, string, bool) { return wantMod, wantCache, true }
+	t.Cleanup(func() { resolveGoCache = orig })
+
+	gomodcache, gocache, ok := resolveGoCache(context.Background())
+	if !ok {
+		t.Fatal("injected resolver returned ok=false")
+	}
+	env := scrubbedGoEnv("/private/home", gomodcache, gocache)
+
+	if !contains(env, "GOMODCACHE="+wantMod) {
+		t.Fatalf("GOMODCACHE missing or wrong in scrubbed env: %v", env)
+	}
+	if !contains(env, "GOCACHE="+wantCache) {
+		t.Fatalf("GOCACHE missing or wrong in scrubbed env: %v", env)
+	}
+	// The rest of the allowlist stays as before.
+	for _, want := range []string{"HOME=/private/home", "GOFLAGS=-mod=readonly", "GOPROXY=off"} {
+		if !contains(env, want) {
+			t.Fatalf("scrubbed env missing %q: %v", want, env)
+		}
+	}
+}
+
+// TestParseGoEnvCache covers the pure parser used by resolveGoCache: two absolute lines parse,
+// CRLF endings and a trailing blank line are tolerated, and anything short of two non-empty
+// absolute paths is rejected.
+func TestParseGoEnvCache(t *testing.T) {
+	cases := []struct {
+		name    string
+		stdout  string
+		wantMod string
+		wantCac string
+		wantOK  bool
+	}{
+		{name: "two absolute lines", stdout: "/go/pkg/mod\n/go-build\n", wantMod: "/go/pkg/mod", wantCac: "/go-build", wantOK: true},
+		{name: "crlf endings", stdout: "/go/pkg/mod\r\n/go-build\r\n", wantMod: "/go/pkg/mod", wantCac: "/go-build", wantOK: true},
+		{name: "trailing blank line", stdout: "/go/pkg/mod\n/go-build\n\n", wantMod: "/go/pkg/mod", wantCac: "/go-build", wantOK: true},
+		{name: "one line only", stdout: "/go/pkg/mod\n", wantOK: false},
+		{name: "empty value", stdout: "/go/pkg/mod\n\n", wantOK: false},
+		{name: "relative path", stdout: "go/pkg/mod\n/go-build\n", wantOK: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mod, cac, ok := parseGoEnvCache(c.stdout)
+			if ok != c.wantOK {
+				t.Fatalf("ok = %v, want %v (mod=%q cache=%q)", ok, c.wantOK, mod, cac)
+			}
+			if !c.wantOK {
+				return
+			}
+			if mod != c.wantMod || cac != c.wantCac {
+				t.Fatalf("got mod=%q cache=%q, want mod=%q cache=%q", mod, cac, c.wantMod, c.wantCac)
+			}
+		})
+	}
+}
+
 // --- helpers ---
 
 func assertSkip(t *testing.T, report ReplayReport, pr int, reason string) {
