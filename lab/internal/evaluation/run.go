@@ -60,10 +60,27 @@ type Attempt struct {
 	ScopeOK       bool            `json:"scopeOK"`
 	Tree          string          `json:"tree,omitempty"`
 	Correct       bool            `json:"correct"`
-	Error         string          `json:"error,omitempty"`
-	CostUSD       *float64        `json:"costUsd"`
-	Retries       *int            `json:"observedHarnessRetries"`
-	Interventions int             `json:"humanInterventions"`
+	// RequiredChecks is the tri-state required-checks result: nil when the plan has no
+	// non-acceptance check (n/a), otherwise true only when verification ran and every
+	// non-acceptance plan check was observed passing. Computed once at attempt time from
+	// the plan and persisted, so a resumed report never needs the plan to aggregate it.
+	RequiredChecks *bool `json:"requiredChecks,omitempty"`
+	// ChangesDiffSHA256 is the sha256 of the retained <attempt>/changes.diff captured
+	// before the workspace tree is deleted; ChangesTruncated marks a diff cut at the
+	// 5 MiB cap. Both are empty/false for single-task runs, which retain their trees.
+	ChangesDiffSHA256 string `json:"changesDiffSha256,omitempty"`
+	ChangesTruncated  bool   `json:"changesDiffTruncated,omitempty"`
+	// ChangesError records why the captured diff could not be produced (a git failure or a
+	// write failure). It never aborts the cohort: the attempt record and verification are
+	// still saved, with an empty or partial changes.diff. CleanupError records a failure
+	// to reclaim the attempt's Lab or workspace trees after its evidence was saved. Both
+	// are empty for single-task runs, which neither capture a diff nor delete trees.
+	ChangesError  string   `json:"changesError,omitempty"`
+	CleanupError  string   `json:"cleanupError,omitempty"`
+	Error         string   `json:"error,omitempty"`
+	CostUSD       *float64 `json:"costUsd"`
+	Retries       *int     `json:"observedHarnessRetries"`
+	Interventions int      `json:"humanInterventions"`
 }
 type Report struct {
 	ActivationDigest     string    `json:"activationDigest,omitempty"`

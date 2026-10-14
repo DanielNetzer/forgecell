@@ -258,16 +258,21 @@ plans with K repetitions each.
 ```sh
 forgecell evaluate --cohort COHORT.json --source REPO --out DIR            # prints the digest
 forgecell evaluate --cohort COHORT.json --source REPO --out DIR --approve DIGEST
+forgecell evaluate --cohort COHORT.json --source REPO --out DIR --approve DIGEST --keep-workspaces
 ```
 
 The cohort file is strict JSON, at most 64 KiB, with unknown fields rejected:
 `schemaVersion: 1`; a `hypothesis` (≤ 2000 characters); a `primaryOutcome` of
 `hiddenAcceptancePassRate`, `requiredChecksPassRate` or `costPerAcceptedOutcome`;
 exactly two `variants` `[{name, formula, formulaSha256}]` whose `name` matches
-`^[a-z][a-z0-9-]{0,31}$` and whose `formula` is a cohort-relative Formula file; 1–50
-`tasks` `[{name, plan, planSha256}]`, each `plan` an existing evaluation `Plan` file;
+`^[a-z][a-z0-9-]{0,31}$`, whose `formula` is a cohort-relative Formula file, and whose
+pinned bytes differ (a cohort that pins the same Formula for both variants is refused);
+1–50 `tasks` `[{name, plan, planSha256}]`, each `plan` an existing evaluation `Plan` file;
 `repetitions` 1–10; and an optional `stop` `{maxAttempts?, maxCostUSD?}`. Every
-referenced file is pinned by SHA-256 and re-verified before every attempt.
+referenced file is pinned by SHA-256. On both fresh and resumed runs every input copied
+under `<out>/inputs/` is re-hashed against its pinned hash immediately before each
+attempt and the attempt executes from those verified bytes; a mismatch refuses the run
+and writes `status: aborted` rather than running a mutated copy.
 
 One activation digest covers the cohort bytes, both Formula files and every plan file,
 plus source and destination, reusing the existing exact-approval semantics. Nothing is
@@ -277,26 +282,50 @@ and the exact approve command.
 For each task, for each repetition, variant A then variant B run interleaved (A first),
 sequentially, each in its own isolated per-attempt Lab under
 `<out>/attempts/<task>/<variant>/rep-<n>/`. A failed or timed-out attempt is recorded,
-never silently retried, and the run continues. The stop rule is checked after each
+never silently retried, and the run continues. An attempt cancelled by SIGINT or SIGTERM
+is discarded rather than saved, so resume re-runs that coordinate instead of skipping it,
+and the run is recorded as `status: aborted`. The stop rule is checked after each
 attempt; `maxCostUSD` counts only reported cost (list-price estimates included and
-labelled) and never triggers when no cost is reported.
+labelled), never triggers when no cost is reported, and its stop reason names the cost
+basis. A stop that leaves the two variants with unequal attempt counts records an
+imbalance note, because rates over different n are not directly comparable.
+
+By default each attempt's Lab, workspace and verification trees are deleted once its
+record and verification observations are saved, to bound disk growth. Before deletion the
+run writes `<attempt>/changes.diff` (the unified diff from the base commit to the captured
+tree, capped at 5 MiB with truncation marked, its sha256 recorded in the attempt record)
+and `<attempt>/changes.json` (the changed paths). The diff is captured with a fixed,
+configuration-independent git invocation so it depends only on the pinned bytes; a capture
+that fails is recorded as the attempt's `changesError` and never aborts the run. Deletion
+deregisters the attempt's own worktrees from the shared source object store with targeted
+removal (never a repo-wide prune) and deletes the attempt's branch refs; a cleanup failure
+is recorded as the attempt's `cleanupError`. Both error kinds are summarized in the report
+rather than swallowed. Report and any later recheck read the retained files, never the
+deleted tree. `--keep-workspaces` retains the trees.
 
 The side-by-side report is written to `<out>/report.json` and `<out>/report.md`. For
 each variant it reports attempts and completions; hidden-acceptance pass count and rate;
-required-checks pass rate; scope violations, scope-change and amendment counts, and
+the required-checks pass rate; scope violations, scope-change and amendment counts, and
 timeouts; median and p90 of elapsed and harness time; reported cost total and per
 accepted outcome with its basis and `N of M` coverage; effective models; and review-Atom
-findings by severity when present. A per-task × variant table lists the outcomes.
-**Counts and rates only, with no significance claims**, and every rate states its n
-(tasks and repetitions).
+findings by severity when present. The required-checks pass is tri-state: it is reported
+only when the plan actually ran a non-acceptance check, and is `null` ("n/a") when the
+plan has none. `RequiredChecksPass` and its rate are nullable in `report.json`; aggregates
+and per-task cells exclude n/a attempts and state their own measurable n. When the
+primary outcome is `requiredChecksPassRate` and every attempt is n/a, the report states
+the primary outcome is not measurable. Cost per accepted outcome divides the reported-cost
+total only by the accepted attempts among the cost-reporting ones, and always prints its
+`N of M` coverage. A per-task × variant table lists the outcomes. **Counts and rates only,
+with no significance claims**, and every rate states its n (tasks and repetitions).
 
 An existing `<out>` whose recorded activation digest matches resumes and skips attempts
 already recorded (a directory with a complete attempt record counts as done); a
 mismatched digest is refused so a different cohort can never overwrite retained
 evidence. Cohort `--recheck` — re-grading retained outputs without rerunning a model — is
-**deferred** in this slice; the retained per-attempt evidence under `<out>/attempts` is
-untouched and can be regraded by a follow-up. The single-task `--inputs`/`--recheck`
-mode is unchanged.
+**deferred** in this slice; the retained per-attempt evidence under `<out>/attempts` (the
+record, verification observations and the captured `changes.diff`/`changes.json`) is
+untouched and can be regraded by a follow-up, which reads the captured diff rather than
+the deleted workspace tree. The single-task `--inputs`/`--recheck` mode is unchanged.
 
 ### Replay tasks
 

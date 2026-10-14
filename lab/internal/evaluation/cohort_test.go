@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 )
 
 // completedHarness writes the in-scope change and returns a completed coding outcome.
@@ -164,8 +166,12 @@ func TestCohortTwoByTwoByTwoReportShape(t *testing.T) {
 		t.Fatalf("variants=%d", len(r.Variants))
 	}
 	for _, v := range r.Variants {
-		if v.Attempts != 4 || v.HiddenAcceptancePass != 4 || v.Completions != 4 || v.RequiredChecksPass != 4 {
+		// The fixture plan has only the acceptance check, so required checks are n/a.
+		if v.Attempts != 4 || v.HiddenAcceptancePass != 4 || v.Completions != 4 {
 			t.Fatalf("variant %s: %+v", v.Name, v)
+		}
+		if v.RequiredChecksPass != nil || v.RequiredChecksN != 0 {
+			t.Fatalf("variant %s required checks should be n/a: %+v", v.Name, v)
 		}
 		if v.N.Tasks != 2 || v.N.Repetitions != 2 || v.N.Attempts != 4 {
 			t.Fatalf("variant %s missing n: %+v", v.Name, v.N)
@@ -403,5 +409,462 @@ func TestCohortRejectsUnknownFields(t *testing.T) {
 	os.WriteFile(path, []byte(`{"schemaVersion":1,"surprise":true}`), 0600)
 	if _, _, err := readCohort(path); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+}
+
+// TestCohortRejectsIdenticalFormula rejects a cohort that pins the same Formula bytes for
+// both variants before anything is frozen or executed (item 6).
+func TestCohortRejectsIdenticalFormula(t *testing.T) {
+	c := CohortFile{SchemaVersion: 1, PrimaryOutcome: "hiddenAcceptancePassRate", Repetitions: 1,
+		Variants: []CohortVariant{{Name: "base", Formula: "a.yaml", FormulaSHA256: strings.Repeat("a", 64)}, {Name: "cand", Formula: "b.yaml", FormulaSHA256: strings.Repeat("a", 64)}},
+		Tasks:    []CohortTask{{Name: "task-a", Plan: "p.json", PlanSHA256: strings.Repeat("c", 64)}}}
+	if err := validateCohort(c); err == nil || !strings.Contains(err.Error(), "distinct") {
+		t.Fatalf("identical-Formula cohort accepted: %v", err)
+	}
+}
+
+// TestCohortDigestSensitivity proves the activation digest changes when the cohort bytes,
+// either Formula, any plan hash, the source or the output change (item 6).
+func TestCohortDigestSensitivity(t *testing.T) {
+	cohort := []byte(`{"schemaVersion":1}`)
+	var v [2]formula.Formula
+	v[0] = formula.Formula{SHA256: strings.Repeat("a", 64)}
+	v[1] = formula.Formula{SHA256: strings.Repeat("b", 64)}
+	planHashes := []string{strings.Repeat("c", 64)}
+	base := CohortDigest(cohort, v, planHashes, "/src", "/out")
+	cases := map[string]string{
+		"cohort":  CohortDigest([]byte(`{"schemaVersion":2}`), v, planHashes, "/src", "/out"),
+		"formula": CohortDigest(cohort, [2]formula.Formula{{SHA256: strings.Repeat("d", 64)}, v[1]}, planHashes, "/src", "/out"),
+		"plan":    CohortDigest(cohort, v, []string{strings.Repeat("e", 64)}, "/src", "/out"),
+		"source":  CohortDigest(cohort, v, planHashes, "/other", "/out"),
+		"out":     CohortDigest(cohort, v, planHashes, "/src", "/other"),
+	}
+	for name, got := range cases {
+		if got == base {
+			t.Fatalf("changing %s did not change the digest", name)
+		}
+	}
+}
+
+// TestCohortMedianAndP90 covers the median (even/odd) and nearest-rank p90 helpers that
+// feed the latency summaries (item 6).
+func TestCohortMedianAndP90(t *testing.T) {
+	if median(nil) != 0 || p90(nil) != 0 {
+		t.Fatal("empty samples should be zero")
+	}
+	even := []int64{40, 10, 30, 20}
+	if got := median(even); got != 25 {
+		t.Fatalf("even median = %d, want 25", got)
+	}
+	if got := p90(even); got != 40 { // ceil(0.9*4)=4 -> rank index 3
+		t.Fatalf("p90 = %d, want 40", got)
+	}
+	odd := []int64{30, 10, 20}
+	if got := median(odd); got != 20 {
+		t.Fatalf("odd median = %d, want 20", got)
+	}
+	if got := p90([]int64{5}); got != 5 {
+		t.Fatalf("single p90 = %d, want 5", got)
+	}
+}
+
+// completedAttempt is a minimal Attempt whose harness Atom finished, for grading helpers.
+func completedAttempt(checks []Observation) Attempt {
+	return Attempt{Molecule: molecule.Record{Atoms: []molecule.Atom{{Type: "harness", Status: "done"}}}, Checks: checks}
+}
+
+// TestRequiredChecksTriState covers the three required-checks states: n/a when the plan
+// has no non-acceptance check, a failure when a required check was not observed passing,
+// and a pass when every required check was observed passing (item 2).
+func TestRequiredChecksTriState(t *testing.T) {
+	acceptanceOnly := Plan{Checks: []Command{{Name: "acceptance"}}}
+	if requiredChecksTriState(acceptanceOnly, completedAttempt(nil)) != nil {
+		t.Fatal("acceptance-only plan must grade required checks as n/a")
+	}
+	withBuild := Plan{Checks: []Command{{Name: "acceptance"}, {Name: "build"}}}
+	// Verification never ran: no observation for build, so it is a failure, not n/a.
+	if rc := requiredChecksTriState(withBuild, Attempt{}); rc == nil || *rc {
+		t.Fatalf("unobserved required check should be a failure: %v", rc)
+	}
+	// Harness done but build observed failing.
+	failing := completedAttempt([]Observation{{Command: Command{Name: "build"}, Result: process.Result{OK: false}}})
+	if rc := requiredChecksTriState(withBuild, failing); rc == nil || *rc {
+		t.Fatalf("failing required check should be a failure: %v", rc)
+	}
+	// Harness done and build observed passing.
+	passing := completedAttempt([]Observation{{Command: Command{Name: "build"}, Result: process.Result{OK: true}}})
+	if rc := requiredChecksTriState(withBuild, passing); rc == nil || !*rc {
+		t.Fatalf("observed passing required check should pass: %v", rc)
+	}
+}
+
+// TestCohortRequiredChecksAggregation checks that n/a attempts are excluded from the
+// required-checks n and the pass count aggregates only measurable attempts (item 2).
+func TestCohortRequiredChecksAggregation(t *testing.T) {
+	tr, fa := true, false
+	mk := func(rc *bool) CohortAttempt {
+		return CohortAttempt{Task: "task-a", Variant: "base", Attempt: Attempt{RequiredChecks: rc}}
+	}
+	attempts := []CohortAttempt{mk(&tr), mk(&fa), mk(nil)}
+	base := CohortReport{SchemaVersion: 1, Tasks: 1, Repetitions: 3, PrimaryOutcome: "requiredChecksPassRate"}
+	r := buildCohortReport(base, []string{"base", "cand"}, map[string]string{"base": "x", "cand": "y"}, []string{"task-a"}, attempts)
+	var v VariantSummary
+	for _, s := range r.Variants {
+		if s.Name == "base" {
+			v = s
+		}
+	}
+	if v.RequiredChecksN != 2 || v.RequiredChecksPass == nil || *v.RequiredChecksPass != 1 {
+		t.Fatalf("aggregate excluded n/a wrongly: n=%d pass=%v", v.RequiredChecksN, v.RequiredChecksPass)
+	}
+	// The per-task cell carries the same measurable n.
+	cell := r.PerTask[0].Variants[0]
+	if cell.RequiredChecksN != 2 || cell.RequiredChecksPass == nil || *cell.RequiredChecksPass != 1 {
+		t.Fatalf("cell aggregate wrong: n=%d pass=%v", cell.RequiredChecksN, cell.RequiredChecksPass)
+	}
+}
+
+// TestCohortRequiredChecksNA runs a real cohort whose plan has only the acceptance check,
+// so required checks are n/a everywhere, the primary outcome reads as not measurable, and
+// the markdown renders n/a (item 2).
+func TestCohortRequiredChecksNA(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "requiredChecksPassRate", nil)
+	approveCohort(t, &o)
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range r.Variants {
+		if v.RequiredChecksPass != nil || v.RequiredChecksN != 0 {
+			t.Fatalf("variant %s not n/a: %+v", v.Name, v)
+		}
+	}
+	for _, to := range r.PerTask {
+		for _, cell := range to.Variants {
+			if cell.RequiredChecksPass != nil || cell.RequiredChecksN != 0 {
+				t.Fatalf("cell %s/%s not n/a: %+v", to.Task, cell.Variant, cell)
+			}
+		}
+	}
+	note := false
+	for _, n := range r.Notes {
+		if strings.Contains(n, "not measurable") {
+			note = true
+		}
+	}
+	if !note {
+		t.Fatalf("missing not-measurable note: %v", r.Notes)
+	}
+	md, _ := os.ReadFile(filepath.Join(o.Output, "report.md"))
+	if !strings.Contains(string(md), "Required-checks pass: n/a") {
+		t.Fatalf("report.md did not render n/a required checks:\n%s", md)
+	}
+}
+
+// TestCohortCostPerAcceptedPartialCoverage proves cost per accepted outcome divides only
+// by accepted attempts among the cost-reporting ones and prints both coverages (item 3).
+func TestCohortCostPerAcceptedPartialCoverage(t *testing.T) {
+	mk := func(cost *float64, correct bool) CohortAttempt {
+		var ha []molecule.HarnessAttempt
+		if cost != nil {
+			ha = []molecule.HarnessAttempt{{Usage: &harness.Usage{TotalCostUSD: cost, CostBasis: "list"}}}
+		}
+		return CohortAttempt{Task: "task-a", Variant: "base", Attempt: Attempt{Correct: correct, Molecule: molecule.Record{HarnessAttempts: ha}}}
+	}
+	attempts := []CohortAttempt{mk(fp(0.02), true), mk(fp(0.04), false), mk(nil, true)}
+	base := CohortReport{SchemaVersion: 1, Tasks: 1, Repetitions: 3, PrimaryOutcome: "costPerAcceptedOutcome"}
+	r := buildCohortReport(base, []string{"base", "cand"}, map[string]string{"base": "x", "cand": "y"}, []string{"task-a"}, attempts)
+	var v VariantSummary
+	for _, s := range r.Variants {
+		if s.Name == "base" {
+			v = s
+		}
+	}
+	if v.ReportedCostUSD == nil || *v.ReportedCostUSD != 0.06 {
+		t.Fatalf("reported cost total = %v, want 0.06", v.ReportedCostUSD)
+	}
+	if v.CostCoverage != "2 of 3" {
+		t.Fatalf("cost coverage = %q, want 2 of 3", v.CostCoverage)
+	}
+	// Two attempts reported cost; one of them was accepted, so divide 0.06 by 1.
+	if v.CostPerAcceptedUSD == nil || *v.CostPerAcceptedUSD != 0.06 {
+		t.Fatalf("cost per accepted = %v, want 0.06", v.CostPerAcceptedUSD)
+	}
+	if v.AcceptedCostCoverage != "1 of 2" {
+		t.Fatalf("accepted-among-reporting coverage = %q, want 1 of 2", v.AcceptedCostCoverage)
+	}
+}
+
+// TestCohortDiscardsCancelledAttempt proves a cancelled attempt is not persisted, so
+// resume re-runs that coordinate, and the run is recorded as aborted (items 1 and 6).
+func TestCohortDiscardsCancelledAttempt(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: stuckHarness, timeoutMS: 30000}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	r, err := RunCohort(ctx, o)
+	if err == nil {
+		t.Fatal("expected a cancellation error")
+	}
+	if r.Status != "aborted" {
+		t.Fatalf("status = %q, want aborted", r.Status)
+	}
+	rec := filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1", "attempt.json")
+	if _, e := os.Stat(rec); !os.IsNotExist(e) {
+		t.Fatalf("cancelled attempt was persisted: %v", e)
+	}
+	if _, done := loadAttemptRecord(rec, "task-a", "base", 1); done {
+		t.Fatal("cancelled coordinate counts as done; resume would skip it")
+	}
+}
+
+// TestCohortResumeRefusesTamperedInputs proves resume re-hashes <out>/inputs before each
+// executed attempt and refuses a mutated copy, writing status: aborted (item 4).
+func TestCohortResumeRefusesTamperedInputs(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	if _, err := RunCohort(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	// Discard the base attempt so resume must re-run it, then tamper its copied input.
+	if err := os.RemoveAll(filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1")); err != nil {
+		t.Fatal(err)
+	}
+	acc := filepath.Join(o.Output, "inputs", "tasks", "task-a", "acceptance.sh")
+	if err := os.Chmod(acc, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(acc, []byte("#!/bin/sh\nexit 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := RunCohort(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("tampered input accepted: %v", err)
+	}
+	if r.Status != "aborted" {
+		t.Fatalf("status = %q, want aborted", r.Status)
+	}
+}
+
+// TestCohortDeletesWorkspacesByDefault proves each attempt's Lab and verification trees
+// are deleted after evidence is saved, while the record, changes.diff and changes.json
+// are retained and the diff's sha256 is recorded (item 5).
+func TestCohortDeletesWorkspacesByDefault(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	if _, err := RunCohort(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	attemptDir := filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1")
+	for _, gone := range []string{"lab", "verification"} {
+		if _, e := os.Stat(filepath.Join(attemptDir, gone)); !os.IsNotExist(e) {
+			t.Fatalf("%s tree not deleted: %v", gone, e)
+		}
+	}
+	for _, kept := range []string{"attempt.json", "changes.diff", "changes.json"} {
+		if _, e := os.Stat(filepath.Join(attemptDir, kept)); e != nil {
+			t.Fatalf("retained %s missing: %v", kept, e)
+		}
+	}
+	diff, err := os.ReadFile(filepath.Join(attemptDir, "changes.diff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diff), "value.txt") {
+		t.Fatalf("changes.diff missing the changed path:\n%s", diff)
+	}
+	var ca CohortAttempt
+	recRaw, err := os.ReadFile(filepath.Join(attemptDir, "attempt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(recRaw, &ca); err != nil {
+		t.Fatal(err)
+	}
+	if ca.ChangesDiffSHA256 != Hash(diff) {
+		t.Fatalf("recorded diff sha256 %q != file hash %q", ca.ChangesDiffSHA256, Hash(diff))
+	}
+	var man changesManifest
+	manRaw, err := os.ReadFile(filepath.Join(attemptDir, "changes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(manRaw, &man); err != nil {
+		t.Fatal(err)
+	}
+	if len(man.ChangedFiles) != 1 || man.ChangedFiles[0] != "value.txt" || man.DiffTruncated {
+		t.Fatalf("changes.json = %+v", man)
+	}
+	// Targeted cleanup deregisters the attempt's worktrees from the shared source object
+	// store; no registration may remain pointing under the output directory.
+	wl := exec.Command("git", "worktree", "list", "--porcelain")
+	wl.Dir = o.SourceRoot
+	listed, _ := wl.CombinedOutput()
+	out, _ := filepath.Abs(o.Output)
+	resolved, err := filepath.EvalSymlinks(out)
+	if err != nil {
+		resolved = out
+	}
+	if strings.Contains(string(listed), out) || strings.Contains(string(listed), resolved) {
+		t.Fatalf("stale worktree registration under output after cleanup:\n%s", listed)
+	}
+}
+
+// TestCohortKeepWorkspacesRetainsTrees proves --keep-workspaces retains the attempt trees
+// (item 5).
+func TestCohortKeepWorkspacesRetainsTrees(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	o.KeepWorkspaces = true
+	if _, err := RunCohort(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	attemptDir := filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1")
+	if _, e := os.Stat(filepath.Join(attemptDir, "lab")); e != nil {
+		t.Fatalf("lab tree deleted despite --keep-workspaces: %v", e)
+	}
+	// Even when retained, the captured diff is still written beside the trees.
+	if _, e := os.Stat(filepath.Join(attemptDir, "changes.diff")); e != nil {
+		t.Fatalf("changes.diff missing with --keep-workspaces: %v", e)
+	}
+}
+
+// stickyHarness sleeps (so a parent deadline cancels it) until a marker file exists, then
+// completes. It drives a cancel on the first run and a clean completion on resume.
+const stickyHarness = "#!/bin/sh\ncat >/dev/null\nif [ -f \"$FORGECELL_TEST_MARKER\" ]; then printf changed > value.txt; printf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'; else : > \"$FORGECELL_TEST_MARKER\"; sleep 60; fi\n"
+
+// tamperHarness completes the task and then mutates the frozen input named by
+// $FORGECELL_TEST_TAMPER, so the next attempt's re-hash catches the mutation.
+const tamperHarness = "#!/bin/sh\ncat >/dev/null\nprintf changed > value.txt\nif [ -n \"$FORGECELL_TEST_TAMPER\" ]; then chmod u+w \"$FORGECELL_TEST_TAMPER\" 2>/dev/null; printf x >> \"$FORGECELL_TEST_TAMPER\"; fi\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+
+// TestCohortChangesDiffTruncatesAndRecordsError proves changes.diff capture truncates an
+// oversize diff (marking it and hashing what was written) instead of aborting, and that a
+// git failure is recorded as a changes error rather than aborting the cohort (item 5 HIGH).
+func TestCohortChangesDiffTruncatesAndRecordsError(t *testing.T) {
+	repo := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		b, e := c.CombinedOutput()
+		if e != nil {
+			t.Fatalf("git %v: %s %v", args, b, e)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	git("init", "-q")
+	git("config", "user.email", "test@example.test")
+	git("config", "user.name", "Test")
+	os.WriteFile(filepath.Join(repo, "value.txt"), []byte("before\n"), 0600)
+	git("add", ".")
+	git("commit", "-qm", "base")
+	base := git("rev-parse", "HEAD")
+	os.WriteFile(filepath.Join(repo, "big.txt"), []byte(strings.Repeat("abcdefgh\n", 4000)), 0600)
+	git("add", ".")
+	git("commit", "-qm", "big")
+	tree := git("rev-parse", "HEAD")
+
+	attemptDir := t.TempDir()
+	sha, truncated, cerr := writeAttemptChangesCapped(context.Background(), attemptDir, repo, base, tree, []string{"big.txt"}, 256)
+	if cerr != "" {
+		t.Fatalf("unexpected changes error: %s", cerr)
+	}
+	if !truncated {
+		t.Fatal("oversize diff was not marked truncated")
+	}
+	diff, err := os.ReadFile(filepath.Join(attemptDir, "changes.diff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diff), "truncated") {
+		t.Fatalf("truncation marker missing:\n%s", diff)
+	}
+	if Hash(diff) != sha {
+		t.Fatalf("recorded diff sha %q != written file hash %q", sha, Hash(diff))
+	}
+	var man changesManifest
+	manRaw, _ := os.ReadFile(filepath.Join(attemptDir, "changes.json"))
+	if err := json.Unmarshal(manRaw, &man); err != nil {
+		t.Fatal(err)
+	}
+	if !man.DiffTruncated || len(man.ChangedFiles) != 1 || man.ChangedFiles[0] != "big.txt" {
+		t.Fatalf("changes.json = %+v", man)
+	}
+	// A git failure (an unknown tree object) records a changes error and does not abort.
+	_, _, cerr2 := writeAttemptChangesCapped(context.Background(), attemptDir, repo, base, strings.Repeat("f", 40), nil, maxChangesDiffBytes)
+	if cerr2 == "" || !strings.Contains(cerr2, "cannot capture") {
+		t.Fatalf("git failure not recorded as a changes error: %q", cerr2)
+	}
+}
+
+// TestCohortResumeAfterCancelReruns proves that a coordinate left behind by a cancelled
+// attempt is re-run cleanly on resume (its stale worktree is deregistered by targeted
+// removal) and that verification then succeeds (item 5 MEDIUM).
+func TestCohortResumeAfterCancelReruns(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	t.Setenv("FORGECELL_TEST_MARKER", marker)
+	o := cohortFixture(t, []variantSpec{{name: "base", body: stickyHarness, timeoutMS: 30000}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r1, err := RunCohort(ctx, o)
+	if err == nil {
+		t.Fatal("expected a cancellation error on the first run")
+	}
+	if r1.Status != "aborted" {
+		t.Fatalf("first run status = %q, want aborted", r1.Status)
+	}
+	// Resume with a fresh context; the base coordinate must re-run and verify correctly.
+	r2, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if r2.Status != "complete" || len(r2.Attempts) != 2 {
+		t.Fatalf("resume did not complete: status=%s attempts=%d", r2.Status, len(r2.Attempts))
+	}
+	for _, a := range r2.Attempts {
+		if a.Variant == "base" && !a.Correct {
+			t.Fatalf("resumed base attempt did not verify correctly: %+v", a)
+		}
+	}
+}
+
+// TestCohortFreshRunTamperAborts proves that a fresh run re-hashes <out>/inputs before
+// each attempt: when the first attempt mutates the frozen cohort file, the second
+// attempt's re-hash refuses and the run is recorded as aborted (item 4 MEDIUM).
+func TestCohortFreshRunTamperAborts(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: tamperHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	t.Setenv("FORGECELL_TEST_TAMPER", filepath.Join(o.Output, "inputs", "cohort.json"))
+	approveCohort(t, &o)
+	r, err := RunCohort(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("mutated input accepted: %v", err)
+	}
+	if r.Status != "aborted" {
+		t.Fatalf("status = %q, want aborted", r.Status)
+	}
+}
+
+// TestCohortImbalanceNote records an imbalance note when a stop leaves the variants with
+// unequal attempt counts (item 6).
+func TestCohortImbalanceNote(t *testing.T) {
+	// maxAttempts=3 over 2 reps: base runs twice, cand once, before the stop.
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 2, "hiddenAcceptancePassRate", &CohortStop{MaxAttempts: ip(3)})
+	approveCohort(t, &o)
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "stopped" || len(r.Attempts) != 3 {
+		t.Fatalf("status=%s attempts=%d", r.Status, len(r.Attempts))
+	}
+	found := false
+	for _, n := range r.Notes {
+		if strings.Contains(n, "Imbalance") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing imbalance note: %v", r.Notes)
 	}
 }
