@@ -73,6 +73,11 @@ type ReviewAttempt struct {
 	FollowUps []harness.ReviewFollowUp `json:"followUps,omitempty"`
 	// Diagnostics is absent when no review process ran.
 	Diagnostics *process.Diagnostics `json:"diagnostics,omitempty"`
+	// Usage records the effective model, tokens and reported cost parsed from the
+	// Claude CLI final JSON (#149); additive and omitempty. It is absent for a
+	// non-Claude binding, a Claude run that emitted none, and every earlier ledger,
+	// all of which read as "unavailable" rather than as zero.
+	Usage *harness.Usage `json:"usage,omitempty"`
 }
 
 // ReviewDecision tells the caller whether delivery is blocked. A review that found
@@ -439,6 +444,9 @@ func runReviewAtom(ctx context.Context, o Options, r Record, f formula.Formula, 
 	}
 	result := invoke(ctx, resolution.Binding, r.Workspace.SourceRoot, time.Duration(resolution.Binding.TimeoutMS)*time.Millisecond, request, in.Plan.Policy.CredentialNames)
 	attempt.Diagnostics = resultDiagnostics(result)
+	// Effective model, tokens and reported cost for the review attempt (#149). A
+	// non-Claude binding or a run that emitted none records no usage (unavailable).
+	attempt.Usage = harness.AttemptUsage(resolution.Binding.Command, result.RawStdout, resolution.Binding.Model)
 	if !result.OK {
 		reason := "Review process failed: " + result.Error
 		if result.TimedOut || result.ParentDeadline {

@@ -511,6 +511,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	analysis := o.Analyze
 	var wrapperEvidence []ProvenanceEvidence
 	var analysisDiagnostics *process.Diagnostics
+	var analysisUsage *harness.Usage
 	if analysis == nil {
 		analysis = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 			inputs := readiness.VerificationInputs{CheckInputs: o.CheckInputs, Checks: o.Checks, Setup: o.Setup, Artifacts: o.Artifacts, Policy: o.Policy}
@@ -528,6 +529,10 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			request = harness.WithModel(request, b.Model)
 			result := invokeHarness(ctx, b.Command, w.SourceRoot, time.Duration(b.EffectiveTimeoutMS())*time.Millisecond, request)
 			analysisDiagnostics = resultDiagnostics(result)
+			// Effective model, tokens and reported cost for the analysis attempt (#149).
+			// A wrapper or supplied analysis function never reaches here, so it records no
+			// usage (unavailable), as does a non-Claude binding.
+			analysisUsage = harness.AttemptUsage(b.Command, result.RawStdout, b.Model)
 			return decodeAnalysisResult(result)
 		}
 	}
@@ -567,7 +572,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if correction != nil {
 			callCtx = withAnalysisCorrection(ctx, *correction)
 		}
-		wrapperEvidence, analysisDiagnostics = nil, nil
+		wrapperEvidence, analysisDiagnostics, analysisUsage = nil, nil, nil
 		a, err = analysis(callCtx, analysisBinding, issue, snapshot)
 		if err == nil {
 			// A supplied Analyze can return an over-cap response without an error; the
@@ -592,6 +597,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
 		attempt.FinishedAt = stamp()
 		attempt.Diagnostics = analysisDiagnostics
+		attempt.Usage = analysisUsage
 		if err != nil {
 			attempt.Status = "failed"
 			attempt.Error = err.Error()
@@ -1056,6 +1062,10 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	a := &r.HarnessAttempts[len(r.HarnessAttempts)-1]
 	coding := harness.CodingOutcomeFromProcess(result)
 	a.Coding = &coding
+	// Parse the Claude CLI final JSON for the attempt's effective model, tokens and
+	// reported cost (#149) from the raw provider stdout before it is dropped below. A
+	// non-Claude binding or a run that emitted none records no usage (unavailable).
+	a.Usage = harness.AttemptUsage(codingBinding.Command, result.RawStdout, a.Model)
 	ref, err := historyFile(r, "harness-"+attemptID+"-result.json", struct {
 		process.Result
 		AttemptID  string `json:"attemptId"`

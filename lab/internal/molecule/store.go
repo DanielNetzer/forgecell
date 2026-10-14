@@ -3,12 +3,15 @@ package molecule
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -194,11 +197,243 @@ func save(r Record) error {
 		b.WriteString(reviewVerdictLine(r))
 		fmt.Fprintf(&b, "\n%s\n", r.Verification.Error)
 	}
+	if lines := UsageSummaryLines(r); len(lines) > 0 {
+		fmt.Fprintln(&b, "\n## Usage and cost (#149; evidence, never an approval)")
+		for _, line := range lines {
+			fmt.Fprintln(&b, line)
+		}
+	}
 	fmt.Fprintln(&b, "\n## Notes")
 	for _, note := range r.Notes {
 		fmt.Fprintf(&b, "\n- %s\n", note)
 	}
 	return atomicWrite(base+".md", []byte(b.String()))
+}
+
+// usageAttempt pairs a harness attempt's label with its parsed usage (#149); a nil
+// usage reads as "unavailable", never as zero.
+type usageAttempt struct {
+	label string
+	usage *harness.Usage
+}
+
+// moleculeUsageAttempts lists every harness attempt of the Molecule (analysis, coding
+// and review) in a stable order, each with its usage or nil when unavailable.
+func moleculeUsageAttempts(r Record) []usageAttempt {
+	var attempts []usageAttempt
+	for _, a := range r.AnalysisAttempts {
+		attempts = append(attempts, usageAttempt{fmt.Sprintf("analysis attempt %d", a.Ordinal), a.Usage})
+	}
+	for _, a := range r.HarnessAttempts {
+		attempts = append(attempts, usageAttempt{"coding attempt " + usageText(a.ID), a.Usage})
+	}
+	for _, a := range r.ReviewAttempts {
+		attempts = append(attempts, usageAttempt{fmt.Sprintf("review attempt review-%d", a.Ordinal), a.Usage})
+	}
+	return attempts
+}
+
+// usageText renders a provider-supplied usage string (a model id or basis) as one
+// bounded, control-free token, since it is data from the CLI's final JSON.
+func usageText(s string) string { return harness.ReviewDisplayText(s, 120) }
+
+// formatUSD renders a cost deterministically. Cost is reported only; it is never
+// estimated or invented.
+func formatUSD(v float64) string { return fmt.Sprintf("$%.6f", v) }
+
+// tokenText renders a nullable token category: an unreported value is shown as
+// "unreported", never as zero (#149).
+func tokenText(v *int64) string {
+	if v == nil {
+		return "unreported"
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// costBasisLabel renders a cost basis for display; it never returns empty, so a dollar
+// figure always carries a basis label (#149). "" means no basis was reported. A "list"
+// basis is always a CLI list-price estimate and never an actual charge.
+func costBasisLabel(basis string) string {
+	switch basis {
+	case "":
+		return "basis unavailable"
+	case "list":
+		return "CLI list-price estimate"
+	case "mixed":
+		return "mixed cost basis; see per-attempt line items"
+	case "unavailable":
+		return "unavailable"
+	default:
+		return "cost basis " + usageText(basis)
+	}
+}
+
+// aggregateBasis is the single non-empty basis every cost-reporting attempt shares. It
+// is "mixed" when the reported bases differ or some carry one and some do not, and ""
+// (rendered "basis unavailable") when none carried a basis.
+func aggregateBasis(reported []string) string {
+	distinct := map[string]bool{}
+	anyEmpty := false
+	for _, b := range reported {
+		if b == "" {
+			anyEmpty = true
+			continue
+		}
+		distinct[b] = true
+	}
+	switch {
+	case len(distinct) == 0:
+		return ""
+	case len(distinct) == 1 && !anyEmpty:
+		for b := range distinct {
+			return b
+		}
+	}
+	return "mixed"
+}
+
+// usageModelList renders effective model ids, optionally with a "+N more" suffix for
+// entries dropped by the parser's bound on untrusted output.
+func usageModelList(models []string, truncated int) string {
+	var base string
+	if len(models) == 0 {
+		base = "none reported"
+	} else {
+		items := make([]string, len(models))
+		for i, m := range models {
+			items[i] = usageText(m)
+		}
+		base = strings.Join(items, ", ")
+	}
+	if truncated > 0 {
+		base += fmt.Sprintf(" (+%d more)", truncated)
+	}
+	return base
+}
+
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// tokenTotal accumulates one token category across attempts with overflow detection,
+// so a total never wraps. A category no attempt reported, or one whose sum overflowed,
+// renders "unreported" rather than zero (#149).
+type tokenTotal struct {
+	sum      int64
+	reported bool
+	overflow bool
+}
+
+func (t *tokenTotal) add(v *int64) {
+	if v == nil {
+		return
+	}
+	t.reported = true
+	if t.overflow {
+		return
+	}
+	next := t.sum + *v
+	if next < t.sum {
+		t.overflow = true
+		return
+	}
+	t.sum = next
+}
+
+func (t tokenTotal) text() string {
+	if !t.reported || t.overflow {
+		return "unreported"
+	}
+	return strconv.FormatInt(t.sum, 10)
+}
+
+// UsageSummaryLines renders the per-Molecule usage and cost summary (#149) shared by
+// the ledger Markdown and presentRun: one line per harness attempt (its effective
+// models, token categories and reported cost, or an explicit "unavailable"), the token
+// totals by category, the union of effective models, a coverage line "cost reported
+// for N of M harness attempts", the reported cost total, and a prominent non-blocking
+// mismatch notice when any attempt's effective models differ from its pin. It returns
+// nil when no attempt has reported usage yet, so nothing is shown then. The notice is
+// evidence only: it never fails readiness or a gate. Meta/formula-improvement harness
+// usage is not captured in v1 (deferred to slice B) and so is never part of these
+// totals.
+func UsageSummaryLines(r Record) []string {
+	attempts := moleculeUsageAttempts(r)
+	reported := false
+	for _, a := range attempts {
+		if a.usage != nil {
+			reported = true
+			break
+		}
+	}
+	if !reported {
+		return nil
+	}
+	var lines []string
+	var inputT, outputT, cacheReadT, cacheCreationT tokenTotal
+	costSum := 0.0
+	costOverflow := false
+	costCount, mismatchCount := 0, 0
+	models := map[string]bool{}
+	var reportedBases []string
+	for _, a := range attempts {
+		if a.usage == nil {
+			lines = append(lines, "- "+a.label+": unavailable")
+			continue
+		}
+		u := a.usage
+		inputT.add(u.Total.Input)
+		outputT.add(u.Total.Output)
+		cacheReadT.add(u.Total.CacheRead)
+		cacheCreationT.add(u.Total.CacheCreation)
+		for _, m := range u.EffectiveModels {
+			models[m] = true
+		}
+		detail := fmt.Sprintf("effective models %s · tokens input %s, output %s, cache-read %s, cache-creation %s",
+			usageModelList(u.EffectiveModels, u.TruncatedModels),
+			tokenText(u.Total.Input), tokenText(u.Total.Output), tokenText(u.Total.CacheRead), tokenText(u.Total.CacheCreation))
+		if u.TotalCostUSD != nil {
+			costCount++
+			reportedBases = append(reportedBases, u.CostBasis)
+			next := costSum + *u.TotalCostUSD
+			if math.IsInf(next, 0) || math.IsNaN(next) {
+				costOverflow = true
+			} else {
+				costSum = next
+			}
+			detail += " · cost " + formatUSD(*u.TotalCostUSD) + " (" + costBasisLabel(u.CostBasis) + ")"
+		} else {
+			detail += " · cost unavailable"
+		}
+		if u.ModelMismatch {
+			mismatchCount++
+			detail += " · MODEL MISMATCH vs pin (non-blocking)"
+		}
+		lines = append(lines, "- "+a.label+": "+detail)
+	}
+	lines = append(lines, fmt.Sprintf("Totals: input %s, output %s, cache-read %s, cache-creation %s tokens across effective models %s",
+		inputT.text(), outputT.text(), cacheReadT.text(), cacheCreationT.text(), usageModelList(sortedKeys(models), 0)))
+	coverage := fmt.Sprintf("cost reported for %d of %d harness attempts", costCount, len(attempts))
+	switch {
+	case costCount == 0:
+		lines = append(lines, "Reported cost: unavailable — "+coverage)
+	case costOverflow:
+		lines = append(lines, fmt.Sprintf("Reported cost: unavailable (sum not finite) — %s (%s)", coverage, costBasisLabel(aggregateBasis(reportedBases))))
+	default:
+		// The basis label sits on the coverage phrase (#149 item 7) and so also labels
+		// the dollar figure on this line (#149 review fix 4: never a bare dollar figure).
+		lines = append(lines, fmt.Sprintf("Reported cost: %s total — %s (%s)", formatUSD(costSum), coverage, costBasisLabel(aggregateBasis(reportedBases))))
+	}
+	if mismatchCount > 0 {
+		lines = append(lines, fmt.Sprintf("NOTICE: effective models differ from the pinned model for %d of %d harness attempt(s); this is non-blocking and never fails readiness or a gate.", mismatchCount, len(attempts)))
+	}
+	lines = append(lines, "Note: usage capture covers analysis, coding and review harness attempts; meta/formula-improvement harness usage is deferred to slice B (#149).")
+	return lines
 }
 
 // History is advisory only. Bounds never broaden approval lookup or mutate predecessors.

@@ -106,6 +106,11 @@ type HarnessAttempt struct {
 	// which read as unknown rather than as unpinned or isolated.
 	Model     string `json:"model,omitempty"`
 	Isolation string `json:"isolation,omitempty"`
+	// Usage records the effective model, tokens and reported cost parsed from the
+	// Claude CLI final JSON (#149). It is additive and omitempty: a Codex, Cursor or
+	// custom-command attempt, a Claude run that emitted none, and every earlier ledger
+	// carry no Usage, which reads as "unavailable" rather than as zero.
+	Usage *harness.Usage `json:"usage,omitempty"`
 }
 
 // RecordInvocation records the model and isolation mode that the invocation for
@@ -130,6 +135,12 @@ type AnalysisAttempt struct {
 	// no process result was observed (supplied analysis function, or an earlier
 	// ledger), which reads as unknown rather than as a clean run.
 	Diagnostics *process.Diagnostics `json:"diagnostics,omitempty"`
+	// Usage records the effective model, tokens and reported cost parsed from the
+	// Claude CLI final JSON (#149); additive and omitempty. It is absent for an
+	// analysis wrapper, a supplied analysis function, a non-Claude binding, a Claude
+	// run that emitted none, and every earlier ledger, all of which read as
+	// "unavailable" rather than as zero.
+	Usage *harness.Usage `json:"usage,omitempty"`
 }
 
 // PolicyEvidence points at the ledger value a policy decision relied on.
