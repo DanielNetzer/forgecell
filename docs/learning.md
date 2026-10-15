@@ -382,17 +382,60 @@ environment allowlist (`PATH`, a private `HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACH
 `GOFLAGS=-mod=readonly`, `GOTOOLCHAIN=local`, `GOPROXY=off`, `LANG`) — never the inherited
 environment — and in throwaway worktrees created with `core.hooksPath=/dev/null`. In a
 worktree at `baseCommit` the hidden tests are applied (renamed-away old paths removed) and
-run with `go test -json`; the PR is built only if at least one hidden test reports a
-`fail` action **and** the package builds. A compile/build error, a missing toolchain or an
-incomplete run is a distinct recorded skip, never a reproduced failure. For validity, the
-hidden tests are also run in a worktree at the merge commit and **must pass** there.
+run with `go test -json`; the PR counts as reproducing the initial failure when at least one
+hidden test reports a `fail` action (a **test-failure**) **or** when the failure is a
+**test-compile**: the test package does not compile at base because the hidden tests call
+identifiers the PR adds. To distinguish a test-compile from a real build error, when the base
+run reports a build failure the builder runs `go build -buildvcs=false <pkgs>` in the same
+worktree (before it is removed) under the same scrubbed env — `go build` ignores `_test.go`,
+so a success, or a package with `no non-test Go files` at base (one the PR creates), means the
+non-test code builds and only the tests fail to compile. Any other non-test build failure
+remains the `build failed at base: …` skip. A missing toolchain or an incomplete run is a
+distinct recorded skip, never a reproduced failure. For validity, the hidden tests are also
+run in a worktree at the merge commit and **must pass** there.
+
+The non-test build is run once per hidden-test package: the failure is only a test-compile when
+every package either builds or reports `no non-test Go files`; any other per-package failure is a
+real build error. A base build failure counts as test-compile only when the collected compiler
+output actually contains compile-error lines from which at least one identifier is extracted — a
+`TestMain`/`init` panic or `os.Exit` before any test runs stays a `build failed at base` skip.
+
+A test-compile task gains an **interface contract**. The builder collects every compile error
+(re-running `go test -json -buildvcs=false -gcflags=-e <pkgs>` — `-e` on the named packages only,
+so the compiler does not stop at ten), parses `path:line:col: message` lines, and extracts the
+identifiers the hidden tests need (`undefined: Name`, `undefined: pkg.Name`, `x.Name undefined
+(type T …)` → `T.Name`, too-many/not-enough-arguments and cannot-use → the call target with any
+instantiation suffix stripped, and `unknown field Name … type T` → `T.Name`). If that collection
+run does not complete (timeout, interruption or output overflow) the PR is skipped with `setup
+error: compile-error collection did not complete`. It then resolves those declarations at the
+merge commit with `go/parser`+`go/ast`+`go/printer` over the merge tree's **non-test** `.go`
+files — funcs and methods with the body dropped, the full type spec (including type parameters)
+for a struct or interface, the field line for `T.Name` (promoted embedded fields included), every
+method of that name for a `v.M` call on a local variable, and const/var specs (the value dropped
+whenever it contains a function literal or is not a plain literal/identifier/selector/composite
+expression). Package qualifiers resolve through the test files' imports by the imported package's
+declared name (and dot imports), so a compiler-printed `pkg.T` resolves even when the test aliased
+that import. Predeclared names (`string`, `int`, `error`, the builtins, …) and identifiers
+qualified by an import **outside** the lab module (e.g. `io.Reader`) are excluded — they name
+existing declarations, not identifiers the PR adds — so they never enter the contract nor the
+cross-package method fallback. Unresolved names render as `Name // declaration not found`. If,
+after rendering, no extracted identifier resolves to a declaration, the PR is skipped with `build
+failed at base: no interface identifiers recognized: <build detail>`. The result, sorted by
+package path then name and capped at 400 lines (a larger contract skips the PR with `interface
+contract too large`), is appended to both `issue.json` (`Body`) and `task.md` under the heading
+`## Interface contract (from the merged change)`, one fenced go block per package (each fenced
+with a backtick run longer than any inside the block). `taskSource` then becomes
+`current-issue-body+interface-contract`. `approval.md` records the initial-failure kind, the
+extracted identifiers and any unrecognized "Other compile errors at base" (the latter never
+leak into the task).
 
 A PR is skipped, with the reason recorded in `<out>/skipped.json`, when it has no `_test.go`
 changes, no linked issue, more than 25 changed files, more than 2,000 changed lines, only
 non-Go changes, hidden tests outside the `lab` module (v1 assumption), a symlinked test
-file, an initial failure that does not reproduce, a build error at base, hidden tests that do
-not pass at the merge commit, or any per-PR infrastructure failure (`gh`/`git` error, unsafe
-path, linked reference that is a pull request). Per-PR failures never abort the run;
+file, an initial failure that does not reproduce, a non-test build error at base, an interface
+contract larger than 400 lines, hidden tests that do not pass at the merge commit, or any
+per-PR infrastructure failure (`gh`/`git` error, unsafe path, linked reference that is a pull
+request). Per-PR failures never abort the run;
 `skipped.json` and `cohort.stub.json` are always written.
 
 To stop the comparison harness from reading the answer out of git history, the builder also
