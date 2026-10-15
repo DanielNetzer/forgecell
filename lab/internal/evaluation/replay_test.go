@@ -291,11 +291,13 @@ func TestReplayHandlesRenamedTestFile(t *testing.T) {
 	}
 }
 
-func TestReplaySkipsBuildErrorAtBase(t *testing.T) {
+// TestReplayBuildsTestCompileTask: the hidden test calls a function the PR adds, so the test
+// package fails to compile at base while the non-test package still builds. That is a
+// test-compile initial failure: the PR is built, not skipped, and the task gains an interface
+// contract listing the new function's signature.
+func TestReplayBuildsTestCompileTask(t *testing.T) {
 	f, base, def := newFixture(t)
 	f.git("checkout", "-q", "-b", "feature")
-	// Feature adds a new symbol and a test for it; at base the symbol does not exist, so the
-	// hidden test fails to COMPILE rather than fail — this must be a build-error skip.
 	f.write("lab/calc/calc.go", valueGo(1)+"\nfunc Value2() int { return 2 }\n")
 	f.write("lab/calc/calc_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestValue2(t *testing.T) {\n\tif Value2() != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
 	f.git("add", ".")
@@ -314,11 +316,310 @@ func TestReplaySkipsBuildErrorAtBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(report.Built) != 1 || len(report.Skipped) != 0 {
+		t.Fatalf("built=%+v skipped=%+v", report.Built, report.Skipped)
+	}
+	if report.Built[0].TaskSource != "current-issue-body+interface-contract" {
+		t.Fatalf("taskSource = %q", report.Built[0].TaskSource)
+	}
+
+	// issue.json's body carries the exact contract heading and the resolved signature.
+	issueRaw := mustRead(t, filepath.Join(out, "hidden", "pr-12", "issue.json"))
+	var issue molecule.Issue
+	if err := json.Unmarshal(issueRaw, &issue); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(issue.Body, "## Interface contract (from the merged change)") {
+		t.Fatalf("issue body missing contract heading:\n%s", issue.Body)
+	}
+	if !strings.Contains(issue.Body, "// package forgecellreplayfixture/calc") {
+		t.Fatalf("issue body missing package header:\n%s", issue.Body)
+	}
+	if !strings.Contains(issue.Body, "func Value2() int") {
+		t.Fatalf("issue body missing signature:\n%s", issue.Body)
+	}
+
+	// task.md matches the issue body.
+	taskMD := string(mustRead(t, filepath.Join(out, "tasks", "pr-12", "task.md")))
+	if !strings.Contains(taskMD, "func Value2() int") || !strings.Contains(taskMD, "## Interface contract (from the merged change)") {
+		t.Fatalf("task.md missing contract:\n%s", taskMD)
+	}
+
+	// approval.md records the test-compile kind and the extracted identifier.
+	approvalMD := string(mustRead(t, filepath.Join(out, "tasks", "pr-12", "approval.md")))
+	if !strings.Contains(approvalMD, "Initial failure: test-compile") {
+		t.Fatalf("approval.md missing test-compile kind:\n%s", approvalMD)
+	}
+	if !strings.Contains(approvalMD, "`Value2`") {
+		t.Fatalf("approval.md missing identifier:\n%s", approvalMD)
+	}
+
+	// The contract must never leak into the human task directory as runnable test content,
+	// and the hidden test content stays under hidden/.
+	assertNoHiddenLeak(t, filepath.Join(out, "tasks"))
+}
+
+// TestReplaySkipsBuildErrorAtBase: the non-test package itself fails to build at base (not the
+// test), so the failure is a genuine build error and the PR is skipped.
+func TestReplaySkipsBuildErrorAtBase(t *testing.T) {
+	f, _, def := newFixture(t)
+	// Make a base whose non-test calc.go does not compile.
+	f.write("lab/calc/calc.go", "package calc\n\nfunc Value() int { return missingSymbol }\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "broken base")
+	base := f.head()
+
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", valueGo(2))
+	f.write("lab/calc/calc_test.go", valueTest(2))
+	f.git("add", ".")
+	f.git("commit", "-qm", "fix and test")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/12/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":5,"deletions":0}]`,
+		"repos/owner/repo/pulls/12":       prJSON(merge, base, def, "Closes #4", "fix Value"),
+		"repos/owner/repo/issues/4":       `{"number":4,"title":"fix Value","body":"Fix Value."}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{12}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(report.Built) != 0 || len(report.Skipped) != 1 || report.Skipped[0].PR != 12 {
 		t.Fatalf("report = %+v", report)
 	}
 	if !strings.HasPrefix(report.Skipped[0].Reason, "build failed at base") {
 		t.Fatalf("skip reason = %q", report.Skipped[0].Reason)
+	}
+}
+
+// TestReplayBuildsBrandNewPackage: the PR creates a brand-new package with its test. At base
+// the package directory has no non-test Go files, which is a test-compile initial failure, so
+// the PR is built.
+func TestReplayBuildsBrandNewPackage(t *testing.T) {
+	f, base, def := newFixture(t)
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/widget/widget.go", "package widget\n\nfunc New() int { return 7 }\n")
+	f.write("lab/widget/widget_test.go", "package widget\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {\n\tif New() != 7 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "add widget")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/15/files": `[{"filename":"lab/widget/widget.go","status":"added","additions":3,"deletions":0},{"filename":"lab/widget/widget_test.go","status":"added","additions":7,"deletions":0}]`,
+		"repos/owner/repo/pulls/15":       prJSON(merge, base, def, "Closes #5", "add widget"),
+		"repos/owner/repo/issues/5":       `{"number":5,"title":"add widget","body":"Add a widget."}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{15}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 1 || len(report.Skipped) != 0 {
+		t.Fatalf("built=%+v skipped=%+v", report.Built, report.Skipped)
+	}
+	issue := molecule.Issue{}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(out, "hidden", "pr-15", "issue.json")), &issue); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(issue.Body, "// package forgecellreplayfixture/widget") || !strings.Contains(issue.Body, "func New() int") {
+		t.Fatalf("issue body missing widget contract:\n%s", issue.Body)
+	}
+}
+
+// TestReplaySkipsTestMainPanicAtBase: the non-test package builds and the hidden test compiles,
+// but its TestMain panics before any test runs. That is a runtime build-failure with no compile
+// errors, so it is not reclassified as test-compile and stays the "build failed at base" skip.
+func TestReplaySkipsTestMainPanicAtBase(t *testing.T) {
+	f, base, def := newFixture(t)
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", valueGo(2))
+	f.write("lab/calc/calc_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) { panic(\"boom\") }\n\nfunc TestValue(t *testing.T) {\n\tif Value() != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "feature")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/16/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":9,"deletions":0}]`,
+		"repos/owner/repo/pulls/16":       prJSON(merge, base, def, "Closes #6", "panic test"),
+		"repos/owner/repo/issues/6":       `{"number":6,"title":"panic test","body":"x"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{16}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 0 || len(report.Skipped) != 1 || report.Skipped[0].PR != 16 {
+		t.Fatalf("report = %+v", report)
+	}
+	// The non-test package builds and the test compiles, so the build failure yields no compile
+	// errors and no interface identifiers: the distinct skip reason is used (prefix preserved; the
+	// original build detail is appended after the phrase).
+	if !strings.HasPrefix(report.Skipped[0].Reason, "build failed at base: no interface identifiers recognized") {
+		t.Fatalf("skip reason = %q", report.Skipped[0].Reason)
+	}
+}
+
+// TestReplaySkipsWhenOnlyPredeclaredIdents: at base the hidden test fails to compile only because
+// of a type mismatch against a predeclared type (it assigns an int-returning F to a string). The
+// non-test package builds, so the run is classified test-compile, but the single compile error
+// names only the predeclared `string`, which is dropped: no interface identifier is recognized and
+// the PR is skipped (prefix preserved, build detail appended).
+func TestReplaySkipsWhenOnlyPredeclaredIdents(t *testing.T) {
+	f, _, def := newFixture(t)
+	f.write("lab/calc/calc.go", "package calc\n\nfunc F() int { return 0 }\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "base with F returning int")
+	base := f.head()
+
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", "package calc\n\nfunc F() string { return \"x\" }\n")
+	f.write("lab/calc/calc_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) {\n\tvar s string\n\ts = F()\n\t_ = s\n}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "F returns string")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/20/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":7,"deletions":0}]`,
+		"repos/owner/repo/pulls/20":       prJSON(merge, base, def, "Closes #10", "F returns string"),
+		"repos/owner/repo/issues/10":      `{"number":10,"title":"F returns string","body":"x"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{20}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 0 || len(report.Skipped) != 1 || report.Skipped[0].PR != 20 {
+		t.Fatalf("report = %+v", report)
+	}
+	if !strings.HasPrefix(report.Skipped[0].Reason, "build failed at base: no interface identifiers recognized") {
+		t.Fatalf("skip reason = %q", report.Skipped[0].Reason)
+	}
+}
+
+// TestReplayBuildsMainPackageTestCompile exercises the per-package non-test build's use of
+// os.DevNull for its output. The hidden test is in a `package main` directory whose base source
+// compiles but lacks a function the test calls (a test-compile initial failure). A plain
+// `go build ./tool` would write an executable named after the package directory into the module
+// root — colliding with the package directory itself and failing spuriously; `go build -o
+// os.DevNull` discards the artifact, so the PR is correctly built rather than skipped.
+func TestReplayBuildsMainPackageTestCompile(t *testing.T) {
+	f, _, def := newFixture(t)
+	f.write("lab/tool/main.go", "package main\n\nfunc main() {}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "add tool base")
+	base := f.head()
+
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/tool/main.go", "package main\n\nfunc main() {}\n\nfunc Thing() int { return 2 }\n")
+	f.write("lab/tool/main_test.go", "package main\n\nimport \"testing\"\n\nfunc TestThing(t *testing.T) {\n\tif Thing() != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "add Thing")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/19/files": `[{"filename":"lab/tool/main.go","status":"modified","additions":2,"deletions":0},{"filename":"lab/tool/main_test.go","status":"added","additions":7,"deletions":0}]`,
+		"repos/owner/repo/pulls/19":       prJSON(merge, base, def, "Closes #9", "add Thing"),
+		"repos/owner/repo/issues/9":       `{"number":9,"title":"add Thing","body":"Add Thing."}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{19}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 1 || len(report.Skipped) != 0 {
+		t.Fatalf("built=%+v skipped=%+v", report.Built, report.Skipped)
+	}
+	issue := molecule.Issue{}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(out, "hidden", "pr-19", "issue.json")), &issue); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(issue.Body, "// package forgecellreplayfixture/tool") || !strings.Contains(issue.Body, "func Thing() int") {
+		t.Fatalf("issue body missing tool contract:\n%s", issue.Body)
+	}
+}
+
+// TestReplaySkipsBrokenNonTestWithNewPackage: the PR fixes a broken existing package and adds a
+// brand-new package. At base the existing package's non-test code does not build (a real build
+// error) while the new package has no non-test files. The per-package build classification must
+// treat the existing package's failure as a genuine build error and skip the PR.
+func TestReplaySkipsBrokenNonTestWithNewPackage(t *testing.T) {
+	f, _, def := newFixture(t)
+	f.write("lab/calc/calc.go", "package calc\n\nfunc Value() int { return missingSymbol }\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "broken base")
+	base := f.head()
+
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", valueGo(2))
+	f.write("lab/calc/calc_test.go", valueTest(2))
+	f.write("lab/widget/widget.go", "package widget\n\nfunc New() int { return 7 }\n")
+	f.write("lab/widget/widget_test.go", "package widget\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {\n\tif New() != 7 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "fix and add widget")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/17/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":5,"deletions":0},{"filename":"lab/widget/widget.go","status":"added","additions":3,"deletions":0},{"filename":"lab/widget/widget_test.go","status":"added","additions":7,"deletions":0}]`,
+		"repos/owner/repo/pulls/17":       prJSON(merge, base, def, "Closes #7", "fix and widget"),
+		"repos/owner/repo/issues/7":       `{"number":7,"title":"fix and widget","body":"x"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{17}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 0 || len(report.Skipped) != 1 || report.Skipped[0].PR != 17 {
+		t.Fatalf("report = %+v", report)
+	}
+	if !strings.HasPrefix(report.Skipped[0].Reason, "build failed at base") {
+		t.Fatalf("skip reason = %q", report.Skipped[0].Reason)
+	}
+}
+
+// TestReplaySkipsWhenCompileCollectionIncomplete: when the compile-error collection run does not
+// complete, the test-compile classification cannot be trusted, so the PR is skipped with a setup
+// error rather than built from an unreliable contract. The collector is injected to simulate it.
+func TestReplaySkipsWhenCompileCollectionIncomplete(t *testing.T) {
+	orig := collectCompileErrors
+	collectCompileErrors = func(context.Context, string, []string, []string) (string, bool) { return "", true }
+	t.Cleanup(func() { collectCompileErrors = orig })
+
+	f, base, def := newFixture(t)
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", valueGo(1)+"\nfunc Value2() int { return 2 }\n")
+	f.write("lab/calc/calc_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestValue2(t *testing.T) {\n\tif Value2() != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "feature")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/18/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":5,"deletions":0}]`,
+		"repos/owner/repo/pulls/18":       prJSON(merge, base, def, "Closes #8", "value2"),
+		"repos/owner/repo/issues/8":       `{"number":8,"title":"value2","body":"x"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{18}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 0 || len(report.Skipped) != 1 || report.Skipped[0].Reason != "setup error: compile-error collection did not complete" {
+		t.Fatalf("report = %+v", report)
 	}
 }
 

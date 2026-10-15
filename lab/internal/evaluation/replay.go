@@ -381,14 +381,32 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 	if res.incomplete {
 		return zero, "setup error: acceptance run at base did not complete"
 	}
+	// A test-only compile failure at base counts as a reproduced initial failure; any other
+	// non-test build failure keeps the existing skip. The classification is test-compile only
+	// when the non-test code builds AND the compiler reported at least one compile-error line
+	// from which at least one identifier was extracted: a TestMain/init panic or os.Exit before
+	// any test (a build failure with no compile errors) stays the "build failed at base" skip.
+	initialFailureKind := "test-failure"
+	var contractIdents, otherErrors []string
 	if res.buildFailed {
-		return zero, "build failed at base: " + res.buildDetail
-	}
-	if !res.parsed {
-		return zero, "setup error: acceptance run at base produced no test events"
-	}
-	if !anyIn(hiddenNames, res.failed) {
-		return zero, "initial failure not reproduced"
+		if !res.nonTestBuilds {
+			return zero, "build failed at base: " + res.buildDetail
+		}
+		if res.collectionFailed {
+			return zero, "setup error: compile-error collection did not complete"
+		}
+		contractIdents, otherErrors = parseCompileErrors(res.compileOutput)
+		if len(contractIdents) == 0 {
+			return zero, "build failed at base: no interface identifiers recognized: " + res.buildDetail
+		}
+		initialFailureKind = "test-compile"
+	} else {
+		if !res.parsed {
+			return zero, "setup error: acceptance run at base produced no test events"
+		}
+		if !anyIn(hiddenNames, res.failed) {
+			return zero, "initial failure not reproduced"
+		}
 	}
 
 	// Validity: the hidden tests must pass on the merge tree.
@@ -415,7 +433,27 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 		return zero, fmt.Sprintf("linked reference #%d is a pull request, not an issue", issueNum)
 	}
 
-	issue := molecule.Issue{Number: issueNum, Repo: o.Repo, Title: ri.Title, Body: ri.Body, URL: fmt.Sprintf("https://github.com/%s/issues/%d", o.Repo, issueNum), State: strings.ToUpper(ri.State)}
+	// For a test-compile failure, resolve the identifiers extracted above at the merge commit
+	// into a signature-only interface contract appended to the task. The "other" (unrecognized)
+	// errors go to approval.md only, never the task.
+	taskSource := "current-issue-body"
+	body := ri.Body
+	if initialFailureKind == "test-compile" {
+		blocks, lineCount, resolved := renderInterfaceContract(gitMergeTree{ctx: ctx, source: o.Source, commit: p.MergeCommitSHA}, testFiles, contractIdents)
+		if lineCount > replayContractMaxLines {
+			return zero, "interface contract too large"
+		}
+		// After rendering, if no extracted token resolved to a real declaration (all dropped as
+		// out-of-module, or all "declaration not found"), the contract is useless: skip, keeping the
+		// original build detail in the reason.
+		if resolved == 0 {
+			return zero, "build failed at base: no interface identifiers recognized: " + res.buildDetail
+		}
+		body = appendInterfaceContract(ri.Body, blocks)
+		taskSource = "current-issue-body+interface-contract"
+	}
+
+	issue := molecule.Issue{Number: issueNum, Repo: o.Repo, Title: ri.Title, Body: body, URL: fmt.Sprintf("https://github.com/%s/issues/%d", o.Repo, issueNum), State: strings.ToUpper(ri.State)}
 	issueJSON, err := json.MarshalIndent(issue, "", "  ")
 	if err != nil {
 		return zero, "setup error: " + err.Error()
@@ -448,9 +486,8 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 		return zero, "setup error: " + err.Error()
 	}
 
-	taskSource := "current-issue-body"
-	taskMD := replayTaskMarkdown(issueNum, taskSource, ri.Title, ri.Body)
-	approvalMD := replayApprovalMarkdown(pr, issueNum, taskSource, baseRule, plan, planJSON, issueJSON, acceptanceScript, testFiles, contents)
+	taskMD := replayTaskMarkdown(issueNum, taskSource, ri.Title, body)
+	approvalMD := replayApprovalMarkdown(pr, issueNum, taskSource, baseRule, plan, planJSON, issueJSON, acceptanceScript, testFiles, contents, initialFailureKind, contractIdents, otherErrors)
 
 	taskDir := filepath.Join(o.Out, "tasks", fmt.Sprintf("pr-%d", pr))
 	hiddenDir := filepath.Join(o.Out, "hidden", fmt.Sprintf("pr-%d", pr))
@@ -623,6 +660,17 @@ type hiddenRunResult struct {
 	toolchainMissing bool
 	buildFailed      bool
 	buildDetail      string
+	// nonTestBuilds is set when a build failure is test-only: the non-test `go build` of the
+	// packages succeeds, or a package has no non-test Go files at base (one the PR creates).
+	// Such a failure is treated as a reproduced initial failure (`test-compile`).
+	nonTestBuilds bool
+	// compileOutput is the decoded compiler output collected (with -gcflags=-e, so the compiler
+	// does not stop at ten errors) when the build failed, for interface-contract extraction and
+	// the approval record.
+	compileOutput string
+	// collectionFailed is set when the compile-error collection run did not complete (timed out,
+	// was interrupted or overflowed its output bound), so the collected errors are unreliable.
+	collectionFailed bool
 	incomplete       bool
 	parsed           bool
 	failed           map[string]bool
@@ -727,9 +775,76 @@ func runHiddenTests(ctx context.Context, source, commit string, testFiles []stri
 	if buildFailed {
 		res.buildFailed = true
 		res.buildDetail = firstLine(raw)
+		// Classify the build failure before the worktree is removed: `go build` ignores
+		// _test.go files, so the non-test package either builds (the failure is test-only) or
+		// fails for a real reason. The error-collection run surfaces every compile error.
+		res.nonTestBuilds, res.compileOutput, res.collectionFailed = classifyBaseBuild(ctx, filepath.Join(worktree, replayModuleSubdir), scrubbedGoEnv(home, gomodcache, gocache), pkgs)
 		return res, ""
 	}
 	return res, ""
+}
+
+// classifyBaseBuild decides whether a base build failure is test-only. It runs
+// `go build -buildvcs=false <pkg>` (which ignores _test.go) with the scrubbed env once per
+// hidden-test package: the non-test code builds when every package either builds or reports
+// "no non-test Go files" (a package the PR creates); a per-package failure for any other reason
+// means a real non-test build error. It also collects every compile error with the compiler's
+// -e flag so it does not stop at ten; collectionFailed reports that the collection run did not
+// complete.
+func classifyBaseBuild(ctx context.Context, dir string, env, pkgs []string) (nonTestBuilds bool, compileOutput string, collectionFailed bool) {
+	nonTestBuilds = true
+	for _, pkg := range pkgs {
+		// Discard the build artifact to os.DevNull: `go build` without -o writes an executable
+		// named after the package into the worktree, so a directory that happens to share that
+		// name would make the build fail spuriously.
+		br := process.Run(ctx, process.Options{Argv: []string{"go", "build", "-buildvcs=false", "-o", os.DevNull, pkg}, Dir: dir, Env: env, Stdin: []byte{}, Timeout: replayVerifyTimeout, MaxOutputBytes: 4_000_000})
+		if br.OK {
+			continue
+		}
+		if strings.Contains(br.Stdout+"\n"+br.Stderr, "no non-test Go files") {
+			continue
+		}
+		nonTestBuilds = false
+	}
+	compileOutput, collectionFailed = collectCompileErrors(ctx, dir, env, pkgs)
+	return nonTestBuilds, compileOutput, collectionFailed
+}
+
+// collectCompileErrors re-runs the hidden-test packages under `go test -json -gcflags=-e` so the
+// compiler reports every error (not just the first ten) and returns the decoded compiler output.
+// `-gcflags=-e` applies only to the named packages (not `all=`), so dependencies are untouched.
+// failed is true when the run did not complete (timed out, was interrupted or overflowed), in
+// which case the output is unreliable. It is a var so tests can simulate an incomplete run.
+var collectCompileErrors = func(ctx context.Context, dir string, env, pkgs []string) (compileOutput string, failed bool) {
+	errArgv := append([]string{"go", "test", "-json", "-buildvcs=false", "-gcflags=-e"}, pkgs...)
+	er := process.Run(ctx, process.Options{Argv: errArgv, Dir: dir, Env: env, Stdin: []byte{}, Timeout: replayVerifyTimeout, MaxOutputBytes: 4_000_000})
+	if er.Incomplete() {
+		return "", true
+	}
+	return decodeGoTestOutput(er.Stdout, er.Stderr), false
+}
+
+// decodeGoTestOutput flattens `go test -json` output into plain text: the text of every event
+// that carries output (`output` for test runs and `build-output` for build failures), plus any
+// non-JSON stdout lines and stderr. This yields clean "path:line:col: message" lines for
+// parseCompileErrors.
+func decodeGoTestOutput(stdout, stderr string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(stdout, "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "{") {
+			var ev goTestEvent
+			if json.Unmarshal([]byte(t), &ev) == nil {
+				if ev.Output != "" {
+					b.WriteString(ev.Output)
+				}
+				continue
+			}
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	b.WriteString(stderr)
+	return b.String()
 }
 
 // resolveGoCache resolves the effective GOMODCACHE and GOCACHE by running `go env` under the
@@ -821,11 +936,12 @@ func replayTaskMarkdown(issue int64, taskSource, title, body string) []byte {
 	return []byte(b.String())
 }
 
-func replayApprovalMarkdown(pr int, issue int64, taskSource, baseRule string, plan Plan, planJSON, issueJSON, acceptanceScript []byte, testFiles []string, contents map[string][]byte) []byte {
+func replayApprovalMarkdown(pr int, issue int64, taskSource, baseRule string, plan Plan, planJSON, issueJSON, acceptanceScript []byte, testFiles []string, contents map[string][]byte, initialFailureKind string, contractIdents, otherErrors []string) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Replay task: PR #%d\n\n", pr)
 	b.WriteString("Review this summary before running the task. The hidden acceptance tests are stored under the sibling `hidden/pr-" + strconv.Itoa(pr) + "/` directory, never under this task directory, and are applied only at grading.\n\n")
 	fmt.Fprintf(&b, "- Linked issue: #%d (taskSource: %s)\n", issue, taskSource)
+	fmt.Fprintf(&b, "- Initial failure: %s\n", initialFailureKind)
 	fmt.Fprintf(&b, "- Base commit: `%s` (%s)\n", plan.BaseCommit, baseRule)
 	fmt.Fprintf(&b, "- Target branch: `%s`\n", plan.TargetBranch)
 	fmt.Fprintf(&b, "- Hidden plan.json: `hidden/pr-%d/plan.json` SHA-256 `%s`\n", pr, Hash(planJSON))
@@ -838,6 +954,23 @@ func replayApprovalMarkdown(pr int, issue int64, taskSource, baseRule string, pl
 	b.WriteString("\n## Hidden acceptance test files (captured at the merge commit)\n\n")
 	for _, f := range testFiles {
 		fmt.Fprintf(&b, "- `hidden/pr-%d/files/%s` SHA-256 `%s`\n", pr, f, Hash(contents[f]))
+	}
+	if initialFailureKind == "test-compile" {
+		b.WriteString("\n## Interface contract (test-compile initial failure)\n\n")
+		b.WriteString("Identifiers the hidden tests require at base:\n\n")
+		if len(contractIdents) == 0 {
+			b.WriteString("- (none extracted)\n")
+		}
+		for _, id := range contractIdents {
+			fmt.Fprintf(&b, "- `%s`\n", id)
+		}
+		b.WriteString("\nOther compile errors at base:\n\n")
+		if len(otherErrors) == 0 {
+			b.WriteString("- (none)\n")
+		}
+		for _, e := range otherErrors {
+			fmt.Fprintf(&b, "- `%s`\n", e)
+		}
 	}
 	b.WriteString("\n## Checks\n\n")
 	for _, c := range plan.Checks {
