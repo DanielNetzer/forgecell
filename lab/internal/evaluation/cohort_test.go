@@ -356,6 +356,34 @@ func TestCohortResumesAndSkipsRecordedAttempts(t *testing.T) {
 	}
 }
 
+// TestCohortRefusesBareSource proves a bare --source (what replay previously wrote as
+// source.git) is refused before any output is created or any attempt is recorded, with the
+// exact message, rather than failing per-attempt in the molecule.
+func TestCohortRefusesBareSource(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	bare := filepath.Join(t.TempDir(), "source.git")
+	c := exec.Command("git", "init", "--bare", "-q", bare)
+	if b, e := c.CombinedOutput(); e != nil {
+		t.Fatalf("git init --bare: %s %v", b, e)
+	}
+	// A directory where `git rev-parse --show-toplevel` fails is refused the same way.
+	for _, source := range []string{bare, t.TempDir()} {
+		o.SourceRoot = source
+		r, err := RunCohort(context.Background(), o)
+		if err == nil || err.Error() != "--source must be a non-bare git checkout (replay writes <out>/source)" {
+			t.Fatalf("source %s not refused with the exact message: %v", source, err)
+		}
+		if len(r.Attempts) != 0 {
+			t.Fatalf("attempts recorded for source %s: %+v", source, r.Attempts)
+		}
+		// Fails before any attempt: no output directory is created.
+		if _, e := os.Stat(o.Output); !os.IsNotExist(e) {
+			t.Fatalf("output created for source %s: %v", source, e)
+		}
+	}
+}
+
 func TestCohortRefusesMismatchedDigest(t *testing.T) {
 	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
 	approveCohort(t, &o)
@@ -652,11 +680,14 @@ func TestCohortResumeRefusesTamperedInputs(t *testing.T) {
 func TestCohortDeletesWorkspacesByDefault(t *testing.T) {
 	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
 	approveCohort(t, &o)
-	if _, err := RunCohort(context.Background(), o); err != nil {
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// Deleting the per-attempt source must not record a spurious cleanup error.
+	assertCleanCleanup(t, r)
 	attemptDir := filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1")
-	for _, gone := range []string{"lab", "verification"} {
+	for _, gone := range []string{"lab", "verification", "source"} {
 		if _, e := os.Stat(filepath.Join(attemptDir, gone)); !os.IsNotExist(e) {
 			t.Fatalf("%s tree not deleted: %v", gone, e)
 		}
@@ -695,8 +726,8 @@ func TestCohortDeletesWorkspacesByDefault(t *testing.T) {
 	if len(man.ChangedFiles) != 1 || man.ChangedFiles[0] != "value.txt" || man.DiffTruncated {
 		t.Fatalf("changes.json = %+v", man)
 	}
-	// Targeted cleanup deregisters the attempt's worktrees from the shared source object
-	// store; no registration may remain pointing under the output directory.
+	// Attempts allocate worktrees only in their own per-attempt source, which cleanup
+	// deletes; --source never holds a registration pointing under the output directory.
 	wl := exec.Command("git", "worktree", "list", "--porcelain")
 	wl.Dir = o.SourceRoot
 	listed, _ := wl.CombinedOutput()
@@ -707,6 +738,25 @@ func TestCohortDeletesWorkspacesByDefault(t *testing.T) {
 	}
 	if strings.Contains(string(listed), out) || strings.Contains(string(listed), resolved) {
 		t.Fatalf("stale worktree registration under output after cleanup:\n%s", listed)
+	}
+}
+
+// assertCleanCleanup fails when any attempt recorded a cleanupError or the report carries
+// the manual-removal note.
+func assertCleanCleanup(t *testing.T, r CohortReport) {
+	t.Helper()
+	if len(r.Attempts) == 0 {
+		t.Fatal("no attempts recorded")
+	}
+	for _, ca := range r.Attempts {
+		if ca.CleanupError != "" {
+			t.Fatalf("attempt %s/%s recorded cleanupError %q", ca.Task, ca.Variant, ca.CleanupError)
+		}
+	}
+	for _, n := range r.Notes {
+		if strings.Contains(n, "may need manual removal") {
+			t.Fatalf("report has a cleanup note: %q", n)
+		}
 	}
 }
 

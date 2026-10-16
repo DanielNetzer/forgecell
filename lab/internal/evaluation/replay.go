@@ -88,15 +88,16 @@ type ReplayReport struct {
 }
 
 // replayCohortStub is the cohort-file stub written for the #150 runner. It is a CohortFile
-// with an extra documentary `source` field pointing at the history-free source repository.
+// with an extra documentary `source` field pointing at the history-free source checkout.
 // The stub is deliberately not yet runnable: before `forgecell evaluate --cohort` the
-// operator adds exactly two Formula variants, passes --source <out>/source.git and removes
-// the documentary `source` field (the strict cohort decoder rejects unknown fields).
+// operator adds exactly two Formula variants, passes --source <out>/source and removes the
+// documentary `source` field (the strict cohort decoder rejects unknown fields). When no
+// task is built the `source` field is omitted and `tasks` is empty.
 type replayCohortStub struct {
 	SchemaVersion  int             `json:"schemaVersion"`
 	Hypothesis     string          `json:"hypothesis"`
 	PrimaryOutcome string          `json:"primaryOutcome"`
-	Source         string          `json:"source"`
+	Source         string          `json:"source,omitempty"`
 	Variants       []CohortVariant `json:"variants"`
 	Tasks          []CohortTask    `json:"tasks"`
 	Repetitions    int             `json:"repetitions"`
@@ -152,10 +153,12 @@ func ghGET(ctx context.Context, endpoint string) ([]byte, error) {
 // BuildReplay builds one frozen evaluation task per eligible PR under <out>/hidden/pr-<N>/
 // (machine-consumed inputs) and <out>/tasks/pr-<N>/ (human-facing task.md and approval.md),
 // records every skip in <out>/skipped.json, writes a cohort stub in <out>/cohort.stub.json
-// and a history-free <out>/source.git holding only the tasks' base commits. It writes
-// nothing outside <out>. A PR that fails any gate — including a per-PR infrastructure or
-// GitHub access failure — is recorded as a skip and never aborts the run; skipped.json and
-// cohort.stub.json are always written.
+// and a non-bare, history-free <out>/source checkout holding only the tasks' base commits
+// (usable directly as the cohort --source). It writes nothing outside <out>. A PR that fails
+// any gate — including a per-PR infrastructure or GitHub access failure — is recorded as a
+// skip and never aborts the run; skipped.json and cohort.stub.json are always written. When
+// no task is built, <out>/source is not created and the stub carries no source hint and an
+// empty task list.
 func BuildReplay(ctx context.Context, o ReplayOptions) (report ReplayReport, err error) {
 	report = ReplayReport{SchemaVersion: 1, Repo: o.Repo, Built: []ReplayBuilt{}, Skipped: []ReplaySkip{}}
 	m := replayRepoPattern.FindStringSubmatch(o.Repo)
@@ -173,7 +176,7 @@ func BuildReplay(ctx context.Context, o ReplayOptions) (report ReplayReport, err
 		return report, err
 	}
 	report.Out = o.Out
-	report.Source = filepath.Join(o.Out, "source.git")
+	sourceOut := filepath.Join(o.Out, "source")
 	if o.GH == nil {
 		o.GH = ghGET
 	}
@@ -201,9 +204,9 @@ func BuildReplay(ctx context.Context, o ReplayOptions) (report ReplayReport, err
 
 	stub := replayCohortStub{
 		SchemaVersion:  1,
-		Hypothesis:     "Replace this hypothesis, add exactly two Formula variants and remove the documentary \"source\" field before running `forgecell evaluate --cohort`; pass --source " + filepath.Join(o.Out, "source.git") + ".",
+		Hypothesis:     "Replace this hypothesis, add exactly two Formula variants and remove the documentary \"source\" field before running `forgecell evaluate --cohort`; pass --source " + sourceOut + ".",
 		PrimaryOutcome: "hiddenAcceptancePassRate",
-		Source:         filepath.Join(o.Out, "source.git"),
+		Source:         sourceOut,
 		Variants:       []CohortVariant{},
 		Tasks:          []CohortTask{},
 		Repetitions:    1,
@@ -229,9 +232,27 @@ func BuildReplay(ctx context.Context, o ReplayOptions) (report ReplayReport, err
 		stub.Tasks = append(stub.Tasks, CohortTask{Name: fmt.Sprintf("pr-%d", pr), Plan: filepath.Join("hidden", fmt.Sprintf("pr-%d", pr), "plan.json"), PlanSHA256: built.PlanSHA256})
 	}
 
-	if err = writeSourceGit(ctx, o.Out, o.Source, report.Built); err != nil {
+	// noSource leaves the stub with no source hint and an empty task list (the documentary
+	// source field is omitted), so it can never point a cohort at a missing source.
+	noSource := func() {
+		stub.Source = ""
+		stub.Tasks = []CohortTask{}
+		stub.Hypothesis = "Replace this hypothesis and add exactly two Formula variants and tasks before running `forgecell evaluate --cohort`."
+	}
+	if len(report.Built) == 0 {
+		// Empty build: create no <out>/source.
+		noSource()
+		return report, nil
+	}
+	if err = writeSourceCheckout(ctx, sourceOut, o.Source, o.Repo, report.Built); err != nil {
+		// Remove the partial checkout so a failed build never leaves a half-populated source.
+		if rmErr := os.RemoveAll(sourceOut); rmErr != nil {
+			err = fmt.Errorf("%w; cannot remove partial source checkout: %v", err, rmErr)
+		}
+		noSource()
 		return report, err
 	}
+	report.Source = sourceOut
 	return report, nil
 }
 
@@ -453,7 +474,11 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 		taskSource = "current-issue-body+interface-contract"
 	}
 
-	issue := molecule.Issue{Number: issueNum, Repo: o.Repo, Title: ri.Title, Body: body, URL: fmt.Sprintf("https://github.com/%s/issues/%d", o.Repo, issueNum), State: strings.ToUpper(ri.State)}
+	// The task models the issue as it was when work began, so issue.json freezes State as
+	// OPEN even for a now-closed source issue; intake's State == "OPEN" gate would otherwise
+	// reject every replayed (closed) issue. The live state is recorded in approval.md only.
+	liveState := strings.ToUpper(ri.State)
+	issue := molecule.Issue{Number: issueNum, Repo: o.Repo, Title: ri.Title, Body: body, URL: fmt.Sprintf("https://github.com/%s/issues/%d", o.Repo, issueNum), State: "OPEN"}
 	issueJSON, err := json.MarshalIndent(issue, "", "  ")
 	if err != nil {
 		return zero, "setup error: " + err.Error()
@@ -487,7 +512,7 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 	}
 
 	taskMD := replayTaskMarkdown(issueNum, taskSource, ri.Title, body)
-	approvalMD := replayApprovalMarkdown(pr, issueNum, taskSource, baseRule, plan, planJSON, issueJSON, acceptanceScript, testFiles, contents, initialFailureKind, contractIdents, otherErrors)
+	approvalMD := replayApprovalMarkdown(pr, issueNum, taskSource, baseRule, liveState, plan, planJSON, issueJSON, acceptanceScript, testFiles, contents, initialFailureKind, contractIdents, otherErrors)
 
 	taskDir := filepath.Join(o.Out, "tasks", fmt.Sprintf("pr-%d", pr))
 	hiddenDir := filepath.Join(o.Out, "hidden", fmt.Sprintf("pr-%d", pr))
@@ -936,11 +961,15 @@ func replayTaskMarkdown(issue int64, taskSource, title, body string) []byte {
 	return []byte(b.String())
 }
 
-func replayApprovalMarkdown(pr int, issue int64, taskSource, baseRule string, plan Plan, planJSON, issueJSON, acceptanceScript []byte, testFiles []string, contents map[string][]byte, initialFailureKind string, contractIdents, otherErrors []string) []byte {
+func replayApprovalMarkdown(pr int, issue int64, taskSource, baseRule, liveState string, plan Plan, planJSON, issueJSON, acceptanceScript []byte, testFiles []string, contents map[string][]byte, initialFailureKind string, contractIdents, otherErrors []string) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Replay task: PR #%d\n\n", pr)
 	b.WriteString("Review this summary before running the task. The hidden acceptance tests are stored under the sibling `hidden/pr-" + strconv.Itoa(pr) + "/` directory, never under this task directory, and are applied only at grading.\n\n")
 	fmt.Fprintf(&b, "- Linked issue: #%d (taskSource: %s)\n", issue, taskSource)
+	if liveState == "" {
+		liveState = "unknown"
+	}
+	fmt.Fprintf(&b, "- Live issue state: %s (issue.json freezes State as OPEN so intake accepts the replayed task)\n", liveState)
 	fmt.Fprintf(&b, "- Initial failure: %s\n", initialFailureKind)
 	fmt.Fprintf(&b, "- Base commit: `%s` (%s)\n", plan.BaseCommit, baseRule)
 	fmt.Fprintf(&b, "- Target branch: `%s`\n", plan.TargetBranch)
@@ -976,28 +1005,48 @@ func replayApprovalMarkdown(pr int, issue int64, taskSource, baseRule string, pl
 	for _, c := range plan.Checks {
 		fmt.Fprintf(&b, "- `%s`: `%s` (dir `%s`)\n", c.Name, strings.Join(c.Argv, " "), c.Dir)
 	}
-	b.WriteString("\nAdd exactly two Formula variants to `cohort.stub.json`, remove its documentary `source` field, rename it to `cohort.json` and pass `--source <out>/source.git` before running `forgecell evaluate --cohort`.\n")
+	b.WriteString("\nAdd exactly two Formula variants to `cohort.stub.json`, remove its documentary `source` field, rename it to `cohort.json` and pass `--source <out>/source` before running `forgecell evaluate --cohort`.\n")
 	return []byte(b.String())
 }
 
-// writeSourceGit creates a history-free bare repository holding only the tasks' base
-// commits, so a cohort run started from it exposes no merge commit, PR branch or later
-// history to the harness. Each base is fetched shallow (depth 1) under refs/replay/pr-<N>.
-func writeSourceGit(ctx context.Context, out, source string, built []ReplayBuilt) error {
-	gitDir := filepath.Join(out, "source.git")
-	if err := os.Mkdir(gitDir, 0o755); err != nil {
+// writeSourceCheckout creates a non-bare, history-free checkout at dir holding only the
+// tasks' base commits, so a cohort run started from it exposes no merge commit, PR branch or
+// later history to the harness while remaining directly usable as the cohort --source (a
+// bare repository is not: the molecule runs `git rev-parse --show-toplevel` and
+// `git remote get-url origin` on it). Each base is fetched shallow (depth 1, with
+// --update-shallow because those fetches are shallow) under refs/replay/pr-<N>, HEAD is left
+// detached at the first built task's base commit with a clean work tree, and origin is set
+// to https://github.com/<repo>.git with remote.origin.fetch set to a refspec matching
+// nothing on GitHub, so a stray `git fetch origin` fetches nothing (an unset refspec would
+// still fetch the remote HEAD). No FETCH_HEAD is written, so the .git never records the
+// path of the full-history source.
+func writeSourceCheckout(ctx context.Context, dir, source, repo string, built []ReplayBuilt) error {
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		return err
 	}
-	if r := gitHookless(ctx, gitDir, "init", "--bare", "-q"); !r.OK {
-		return fmt.Errorf("cannot create source.git: %s", strings.TrimSpace(r.Stderr))
+	if r := gitHookless(ctx, dir, "init", "-q"); !r.OK {
+		return fmt.Errorf("cannot create source checkout: %s", strings.TrimSpace(r.Stderr))
 	}
 	for _, b := range built {
 		ref := fmt.Sprintf("refs/replay/pr-%d", b.PR)
-		r := gitHookless(ctx, gitDir, "fetch", "--depth=1", "--no-tags",
+		r := gitHookless(ctx, dir, "fetch", "--update-shallow", "--depth=1", "--no-tags", "--no-write-fetch-head",
 			"--upload-pack", "git -c uploadpack.allowAnySHA1InWant=true upload-pack",
 			source, b.BaseCommit+":"+ref)
 		if !r.OK {
-			return fmt.Errorf("cannot populate source.git for pr %d: %s", b.PR, strings.TrimSpace(r.Stderr))
+			return fmt.Errorf("cannot populate source checkout for pr %d: %s", b.PR, strings.TrimSpace(r.Stderr))
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, ".git", "FETCH_HEAD")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Detached HEAD at the first built task's base commit, leaving a clean work tree and no
+	// branch refs (only refs/replay/pr-<N> remain).
+	if r := gitHookless(ctx, dir, "checkout", "-q", "--detach", built[0].BaseCommit); !r.OK {
+		return fmt.Errorf("cannot check out the base commit: %s", strings.TrimSpace(r.Stderr))
+	}
+	for _, kv := range [][2]string{{"remote.origin.url", "https://github.com/" + repo + ".git"}, {"remote.origin.fetch", noFetchRefspec}} {
+		if r := gitHookless(ctx, dir, "config", kv[0], kv[1]); !r.OK {
+			return fmt.Errorf("cannot set %s: %s", kv[0], strings.TrimSpace(r.Stderr))
 		}
 	}
 	return nil
