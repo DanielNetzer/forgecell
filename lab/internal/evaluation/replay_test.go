@@ -114,7 +114,7 @@ func TestReplayBuildsTaskFromMergedPR(t *testing.T) {
 	gh := ghFixture(map[string]string{
 		"repos/owner/repo/pulls/7/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":5,"deletions":0}]`,
 		"repos/owner/repo/pulls/7":       prJSON(merge, base, def, "Closes #42", "Make Value return 2"),
-		"repos/owner/repo/issues/42":     `{"number":42,"title":"Make Value return 2","body":"Value should return 2."}`,
+		"repos/owner/repo/issues/42":     `{"number":42,"title":"Make Value return 2","body":"Value should return 2.","state":"closed"}`,
 	})
 	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{7}, GH: gh})
 	if err != nil {
@@ -175,6 +175,14 @@ func TestReplayBuildsTaskFromMergedPR(t *testing.T) {
 	if issue.Number != 42 || issue.Repo != "owner/repo" || issue.URL != "https://github.com/owner/repo/issues/42" {
 		t.Fatalf("issue identity: %+v", issue)
 	}
+	// The source issue is closed, but issue.json freezes State as OPEN so intake accepts it.
+	if issue.State != "OPEN" {
+		t.Fatalf("issue.json State = %q, want OPEN", issue.State)
+	}
+	// approval.md records the live (closed) state separately.
+	if ap := string(mustRead(t, filepath.Join(out, "tasks", "pr-7", "approval.md"))); !strings.Contains(ap, "Live issue state: CLOSED") {
+		t.Fatalf("approval.md missing live state:\n%s", ap)
+	}
 	if Hash(mustRead(t, filepath.Join(hiddenDir, "acceptance.sh"))) != plan.AcceptanceSHA256 {
 		t.Fatal("acceptance sha mismatch")
 	}
@@ -204,13 +212,48 @@ func TestReplayBuildsTaskFromMergedPR(t *testing.T) {
 		t.Fatalf("cohort stub plan path = %q", stub.Tasks[0].Plan)
 	}
 
-	// source.git is history-free: it has the base commit but not the merge commit.
-	sg := filepath.Join(out, "source.git")
-	if !gitHas(sg, base) {
-		t.Fatal("source.git is missing the base commit")
+	// <out>/source is a non-bare, history-free checkout usable directly as the cohort
+	// --source: it has the base commit but not the merge commit.
+	src := filepath.Join(out, "source")
+	if report.Source != src {
+		t.Fatalf("report.Source = %q, want %q", report.Source, src)
 	}
-	if gitHas(sg, merge) {
-		t.Fatal("source.git leaked the merge commit")
+	if !gitHas(src, base) {
+		t.Fatal("source is missing the base commit")
+	}
+	if gitHas(src, merge) {
+		t.Fatal("source leaked the merge commit")
+	}
+	// Non-bare: a work tree with a clean status.
+	if out := gitOut(t, src, "rev-parse", "--is-bare-repository"); out != "false" {
+		t.Fatalf("source is bare: %q", out)
+	}
+	if out := gitOut(t, src, "status", "--porcelain"); out != "" {
+		t.Fatalf("source work tree is dirty:\n%s", out)
+	}
+	// Exactly the distinct built base commits (one here), and a detached HEAD at that base.
+	if out := gitOut(t, src, "rev-list", "--all", "--count"); out != "1" {
+		t.Fatalf("source rev-list --all --count = %q, want 1", out)
+	}
+	if out := gitOut(t, src, "rev-parse", "HEAD"); out != base {
+		t.Fatalf("source HEAD = %q, want base %q", out, base)
+	}
+	// symbolic-ref -q HEAD exits non-zero (empty output) when HEAD is detached.
+	if out := gitTry(src, "symbolic-ref", "-q", "HEAD"); out != "" {
+		t.Fatalf("source HEAD is not detached: %q", out)
+	}
+	// origin is set to the repo URL whose only fetch refspec matches nothing on GitHub.
+	if out := gitOut(t, src, "remote", "get-url", "origin"); out != "https://github.com/owner/repo.git" {
+		t.Fatalf("source origin = %q", out)
+	}
+	if out := gitTry(src, "config", "--get-all", "remote.origin.fetch"); out != noFetchRefspec {
+		t.Fatalf("source fetch refspec = %q, want only %q", out, noFetchRefspec)
+	}
+	// No FETCH_HEAD (or anything else under .git) records the full-history source's path.
+	assertNoPathLeak(t, filepath.Join(src, ".git"), f.dir)
+	// Only the replay ref remains besides a detached HEAD.
+	if out := gitOut(t, src, "for-each-ref", "--format=%(refname)"); out != "refs/replay/pr-7" {
+		t.Fatalf("source refs = %q, want only refs/replay/pr-7", out)
 	}
 
 	// The source checkout is untouched (still at the merge tree with Value()==2).
@@ -673,6 +716,42 @@ func TestReplaySkipsWithoutTestChanges(t *testing.T) {
 	assertSkip(t, report, 8, "no test-file changes")
 }
 
+// TestReplayEmptyBuildCreatesNoSource: when nothing is built (here the only PR has no test
+// changes), <out>/source is not created and cohort.stub.json carries no source hint and an
+// empty tasks list.
+func TestReplayEmptyBuildCreatesNoSource(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/8/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1}]`,
+		"repos/owner/repo/pulls/8":       prJSON(strings.Repeat("a", 40), strings.Repeat("b", 40), "main", "Closes #1", "No tests"),
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: t.TempDir(), Out: out, PRs: []int{8}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 0 {
+		t.Fatalf("expected no built tasks: %+v", report.Built)
+	}
+	if report.Source != "" {
+		t.Fatalf("report.Source = %q, want empty on an empty build", report.Source)
+	}
+	if _, err := os.Stat(filepath.Join(out, "source")); !os.IsNotExist(err) {
+		t.Fatalf("<out>/source created on an empty build: %v", err)
+	}
+	// The stub has no source hint (the field is omitted) and an empty tasks list.
+	stubRaw := mustRead(t, filepath.Join(out, "cohort.stub.json"))
+	if strings.Contains(string(stubRaw), "\"source\"") {
+		t.Fatalf("cohort.stub.json kept a source hint on an empty build:\n%s", stubRaw)
+	}
+	var stub CohortFile
+	if err := json.Unmarshal(stubRaw, &stub); err != nil {
+		t.Fatal(err)
+	}
+	if len(stub.Tasks) != 0 {
+		t.Fatalf("cohort stub tasks = %+v, want empty", stub.Tasks)
+	}
+}
+
 func TestReplaySkipsWithoutLinkedIssue(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "cohort")
 	gh := ghFixture(map[string]string{
@@ -891,6 +970,59 @@ func gitHas(gitDir, sha string) bool {
 	c := exec.Command("git", "cat-file", "-e", sha)
 	c.Dir = gitDir
 	return c.Run() == nil
+}
+
+// gitOut runs git in dir and fails the test on a non-zero exit, returning trimmed stdout.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	c := exec.Command("git", args...)
+	c.Dir = dir
+	b, e := c.Output()
+	if e != nil {
+		t.Fatalf("git %v: %v", args, e)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// assertNoPathLeak fails when any file under gitDir contains source's absolute path (plain
+// or symlink-resolved), which a FETCH_HEAD from a local fetch would record.
+func assertNoPathLeak(t *testing.T, gitDir, source string) {
+	t.Helper()
+	needles := []string{source}
+	if r, err := filepath.EvalSymlinks(source); err == nil && r != source {
+		needles = append(needles, r)
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "FETCH_HEAD")); !os.IsNotExist(err) {
+		t.Fatalf("FETCH_HEAD left in %s: %v", gitDir, err)
+	}
+	err := filepath.WalkDir(gitDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, n := range needles {
+			if strings.Contains(string(b), n) {
+				t.Errorf("%s contains the source path %s", p, n)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gitTry runs git in dir and returns trimmed stdout, tolerating a non-zero exit (used for
+// commands like `symbolic-ref -q HEAD` and `config --get-all` that signal "no value" with a
+// non-zero status and empty output).
+func gitTry(dir string, args ...string) string {
+	c := exec.Command("git", args...)
+	c.Dir = dir
+	b, _ := c.Output()
+	return strings.TrimSpace(string(b))
 }
 
 func readPlan(t *testing.T, path string) Plan {

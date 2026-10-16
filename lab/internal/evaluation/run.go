@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -496,10 +497,27 @@ func configureReadiness(o *molecule.Options, p Plan, planBytes, acceptance []byt
 	for _, c := range p.Setup {
 		o.Setup = append(o.Setup, command(c, "setup"))
 	}
-	o.Analyze = func(context.Context, formula.Binding, molecule.Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
+	o.Analyze = func(_ context.Context, _ formula.Binding, _ molecule.Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		a := readiness.Analysis{Summary: "Execute the reviewed frozen evaluation task", Acceptance: []readiness.Criterion{{Description: "Pass the frozen independently reviewed acceptance check", Evidence: []string{"issue", "evaluation-plan"}}}}
+		// A scope item whose path does not exist at base needs a scope evidence ID citing a
+		// manifest (go.mod/package.json/pyproject.toml) whose directory is an ancestor
+		// (readiness.ValidateScope). Cite the nearest-ancestor manifest already in the
+		// collected repository snapshot (the lab/go.mod that CollectForTicket collects and
+		// ValidateScope reads) in addition to issue and evaluation-plan. If no ancestor
+		// manifest is in the snapshot the scope item keeps only issue/evaluation-plan and the
+		// attempt fails at ValidateScope as it does today.
+		existing := map[string]bool{}
+		for _, f := range s.Files {
+			existing[f.Path] = true
+		}
 		for _, file := range p.AllowedFiles {
-			a.Scope = append(a.Scope, readiness.ScopedPath{Path: file, Reason: "Explicit frozen evaluation scope", Evidence: []string{"issue", "evaluation-plan"}})
+			evidence := []string{"issue", "evaluation-plan"}
+			if !existing[file] {
+				if id, ok := nearestManifestEvidence(file, s.Evidence); ok {
+					evidence = append(evidence, id)
+				}
+			}
+			a.Scope = append(a.Scope, readiness.ScopedPath{Path: file, Reason: "Explicit frozen evaluation scope", Evidence: evidence})
 		}
 		for _, c := range p.Checks {
 			category := "regression"
@@ -510,4 +528,36 @@ func configureReadiness(o *molecule.Options, p Plan, planBytes, acceptance []byt
 		}
 		return a, nil
 	}
+}
+
+// nearestManifestEvidence returns the evidence ID of the nearest-ancestor manifest
+// (go.mod/package.json/pyproject.toml) of file among the snapshot evidence, matching the
+// ancestry rule readiness.ValidateScope applies: a manifest at repository root (directory
+// ".") is an ancestor of every path, otherwise its directory must be a strict ancestor.
+// When several manifests qualify the deepest (longest directory) wins. ok is false when no
+// manifest in the snapshot is an ancestor.
+func nearestManifestEvidence(file string, evidence []readiness.FileEvidence) (string, bool) {
+	bestID := ""
+	bestLen := -1
+	for _, e := range evidence {
+		switch path.Base(e.Path) {
+		case "go.mod", "package.json", "pyproject.toml":
+		default:
+			continue
+		}
+		root := path.Dir(e.Path)
+		var l int
+		switch {
+		case root == ".":
+			l = 0
+		case strings.HasPrefix(file, root+"/"):
+			l = len(root)
+		default:
+			continue
+		}
+		if l > bestLen {
+			bestLen, bestID = l, e.ID
+		}
+	}
+	return bestID, bestLen >= 0
 }

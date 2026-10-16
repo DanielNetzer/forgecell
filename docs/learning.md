@@ -296,9 +296,10 @@ run writes `<attempt>/changes.diff` (the unified diff from the base commit to th
 tree, capped at 5 MiB with truncation marked, its sha256 recorded in the attempt record)
 and `<attempt>/changes.json` (the changed paths). The diff is captured with a fixed,
 configuration-independent git invocation so it depends only on the pinned bytes; a capture
-that fails is recorded as the attempt's `changesError` and never aborts the run. Deletion
-deregisters the attempt's own worktrees from the shared source object store with targeted
-removal (never a repo-wide prune) and deletes the attempt's branch refs; a cleanup failure
+that fails is recorded as the attempt's `changesError` and never aborts the run. Every
+worktree an attempt allocates is registered only in the attempt's own throwaway source (see
+Replay tasks below; `--source` is only read and never gains a worktree), so deletion simply
+removes the attempt's Lab, verification and source trees together; a cleanup failure
 is recorded as the attempt's `cleanupError`. Both error kinds are summarized in the report
 rather than swallowed. Report and any later recheck read the retained files, never the
 deleted tree. `--keep-workspaces` retains the trees.
@@ -439,12 +440,44 @@ request). Per-PR failures never abort the run;
 `skipped.json` and `cohort.stub.json` are always written.
 
 To stop the comparison harness from reading the answer out of git history, the builder also
-writes a **history-free** bare repository `<out>/source.git` containing only the tasks' base
-commits (each fetched shallow under `refs/replay/pr-<N>`), so no merge commit, PR branch or
-later history is present. Cohorts built by replay **must** use it as `--source`.
-`<out>/cohort.stub.json` lists every built task pinned by SHA-256 and records `source` as
-that repository; before `forgecell evaluate --cohort`, add exactly two Formula variants,
-remove the documentary `source` field (the strict cohort decoder rejects unknown fields),
-rename it to `cohort.json` and pass `--source <out>/source.git`. The builder writes nothing
-outside `<out>`, and its tests use recorded `gh` fixtures with a tiny fixture repo — no
-network.
+writes a **non-bare, history-free** checkout at `<out>/source` containing only the tasks'
+base commits (each fetched shallow, with `--update-shallow`, under `refs/replay/pr-<N>`), so
+no merge commit, PR branch or later history is present. It has a detached `HEAD` at the first
+built task's base commit and a clean work tree, and `origin` set to
+`https://github.com/<repo>.git` with `remote.origin.fetch` set to
+`+refs/forgecell-none/*:refs/forgecell-none/*`, a refspec that matches nothing on GitHub (an
+unset refspec would still fetch the remote `HEAD`). That refspec only prevents an accidental
+bare `git fetch origin`; network isolation of the coding harness is the real control. Every
+fetch uses `--no-write-fetch-head`, so no `FETCH_HEAD` records the full-history checkout's
+path. A **non-bare** checkout is required because the molecule
+runs `git rev-parse --show-toplevel` and `git remote get-url origin` on `--source`, which a
+bare repository fails; `evaluate --cohort` refuses a bare `--source` before any attempt with
+`--source must be a non-bare git checkout (replay writes <out>/source)`. Cohorts built by
+replay **must** use `<out>/source` as `--source`. `<out>/cohort.stub.json` lists every built
+task pinned by SHA-256 and records `source` as that checkout; before `forgecell evaluate
+--cohort`, add exactly two Formula variants, remove the documentary `source` field (the
+strict cohort decoder rejects unknown fields), rename it to `cohort.json` and pass `--source
+<out>/source`. When **no** task is built (or the checkout cannot be written, in which case the
+partial checkout is removed), `<out>/source` is not created and the stub carries no `source`
+hint and an empty `tasks` list.
+
+A multi-task `<out>/source` holds every task's base commit, and a later PR's base contains an
+earlier PR's solution. `evaluate --cohort` therefore never runs an attempt from `--source`
+itself, which it only reads: for **every** attempt it creates a fresh throwaway source under
+that attempt's directory holding **only** the plan's base commit (shallow, no replay refs,
+detached `HEAD`, `origin` copied from `--source`, the same no-op fetch refspec, no
+`FETCH_HEAD`), runs the molecule, diff capture and verification from it, and removes it after
+the attempt. With `--keep-workspaces` the attempt's trees and its source are kept, but they
+live in that attempt's own source, never shared, so a later attempt cannot see an earlier
+attempt's solution.
+
+Because the task models the issue as it was when work began, `issue.json` freezes
+`State: "OPEN"` even when the source issue is now closed — intake's `State == "OPEN"` gate
+would otherwise reject every replayed (closed) issue. The live issue state is recorded in
+`approval.md` only. The frozen plan stores no manifest evidence: at run time `evaluate`'s
+`configureReadiness` cites, for each scope path that does not exist at base, the evidence ID
+of the nearest-ancestor manifest (`go.mod`, `package.json` or `pyproject.toml`) in the
+repository snapshot `CollectForTicket` collects from the source at the base commit, so
+readiness accepts an added file (with no ancestor manifest the attempt fails readiness as
+before). The builder writes nothing outside
+`<out>`, and its tests use recorded `gh` fixtures with a tiny fixture repo — no network.

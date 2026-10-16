@@ -235,6 +235,14 @@ func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err e
 	if o.SourceRoot, err = filepath.Abs(o.SourceRoot); err != nil {
 		return report, err
 	}
+	// A bare --source (replay previously wrote a bare <out>/source.git) makes every attempt
+	// fail in the molecule before any harness starts, because resolveSource runs
+	// `git rev-parse --show-toplevel` and `git remote get-url origin` on it. Refuse it here,
+	// before any output is created or any attempt is recorded, so the refusal is never
+	// surfaced as a per-attempt harness failure.
+	if bare := gitResult(ctx, o.SourceRoot, "rev-parse", "--is-bare-repository"); (bare.OK && strings.TrimSpace(bare.Stdout) == "true") || !gitResult(ctx, o.SourceRoot, "rev-parse", "--show-toplevel").OK {
+		return report, fmt.Errorf("--source must be a non-bare git checkout (replay writes <out>/source)")
+	}
 	raw, c, err := readCohort(o.Cohort)
 	if err != nil {
 		return report, err
@@ -372,10 +380,10 @@ loop:
 					if e != nil {
 						return abort(e)
 					}
-					// Deregister any worktrees a prior crashed or cancelled attempt left at
-					// this coordinate before reclaiming the directory, so a re-run allocates
-					// cleanly. Targeted removal only; never a repo-wide prune.
-					_ = removeAttemptWorktrees(ctx, o.SourceRoot, attemptDir)
+					// Every worktree an attempt allocates is registered in its own
+					// per-attempt source under attemptDir (never in --source), so reclaiming
+					// the directory left by a prior crashed or cancelled attempt is enough
+					// for a re-run to allocate cleanly.
 					if e := os.RemoveAll(attemptDir); e != nil {
 						return abort(e)
 					}
@@ -397,7 +405,12 @@ loop:
 						return abort(e)
 					}
 					lt.acceptancePath = acceptancePath
-					a, e := runCohortAttempt(ctx, vf, vname, lt, planBytes, acceptBytes, o.SourceRoot, filepath.Join(attemptDir, "lab"), filepath.Join(attemptDir, "verification"), digest, decisionAt)
+					// A replayed --source holds every task's base commit, and a later PR's
+					// base contains an earlier PR's solution. Each attempt therefore runs
+					// from its own throwaway source holding only this plan's base commit;
+					// --source itself is only read.
+					attemptSource := filepath.Join(attemptDir, "source")
+					a, e := runCohortAttempt(ctx, vf, vname, lt, planBytes, acceptBytes, o.SourceRoot, attemptSource, filepath.Join(attemptDir, "lab"), filepath.Join(attemptDir, "verification"), digest, decisionAt)
 					if e != nil {
 						return abort(e)
 					}
@@ -408,16 +421,18 @@ loop:
 					}
 					// Capture the retained diff before the trees are reclaimed. A diff
 					// failure is recorded as a changes error, never an abort.
-					sha, truncated, changesErr := writeAttemptChanges(ctx, attemptDir, o.SourceRoot, lt.plan.BaseCommit, a.Tree, a.ChangedFiles)
+					sha, truncated, changesErr := writeAttemptChanges(ctx, attemptDir, attemptSource, lt.plan.BaseCommit, a.Tree, a.ChangedFiles)
 					a.ChangesDiffSHA256 = sha
 					a.ChangesTruncated = truncated
 					a.ChangesError = changesErr
 					ca := CohortAttempt{Task: lt.task.Name, Variant: vname, Repetition: rep, Attempt: a}
 					// The record, verification observations and captured diff are saved; by
-					// default reclaim the attempt's Lab and workspace trees. A cleanup error
-					// is recorded on the attempt (and summarized in the report), not swallowed.
+					// default reclaim the attempt's Lab, workspace and per-attempt source
+					// trees. A cleanup error is recorded on the attempt (and summarized in the
+					// report), not swallowed. Kept trees stay in this attempt's own source,
+					// so a later attempt never sees them.
 					if !o.KeepWorkspaces {
-						if e := cleanupAttemptTrees(ctx, attemptDir, o.SourceRoot); e != nil {
+						if e := cleanupAttemptTrees(attemptDir, attemptSource); e != nil {
 							ca.CleanupError = e.Error()
 						}
 					}
@@ -578,92 +593,60 @@ func writeAttemptChangesCapped(ctx context.Context, attemptDir, source, base, tr
 	return Hash(diff), truncated, changesErr
 }
 
-// resolvePath returns the symlink-resolved absolute path, falling back to the plain
-// absolute path when the target cannot be resolved (for example it no longer exists).
-func resolvePath(p string) string {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
-	}
-	if a, err := filepath.Abs(p); err == nil {
-		return a
-	}
-	return p
-}
-
-// removeAttemptWorktrees deregisters every git worktree the shared source object store has
-// registered under attemptDir and deletes each one's branch ref. It is targeted to this
-// attempt's own paths and never runs a repo-wide prune, so a concurrent session's
-// worktrees are never touched. A missing worktree ("not a working tree") is ignored.
-func removeAttemptWorktrees(ctx context.Context, source, attemptDir string) error {
-	abs := resolvePath(attemptDir)
-	list := gitResult(ctx, source, "worktree", "list", "--porcelain")
-	if !list.OK {
-		return fmt.Errorf("cannot list worktrees: %s", strings.TrimSpace(list.Stderr))
-	}
-	var problems []string
-	var path, branch string
-	flush := func() {
-		p, br := path, branch
-		path, branch = "", ""
-		if p == "" {
-			return
-		}
-		// Resolve symlinks on both sides (git may store a realpath, e.g. /private/var vs
-		// /var on macOS) so the attempt's own worktrees are matched, and only those.
-		ap := resolvePath(p)
-		if ap != abs && !strings.HasPrefix(ap, abs+string(os.PathSeparator)) {
-			return
-		}
-		if r := gitResult(ctx, source, "worktree", "remove", "--force", p); !r.OK {
-			s := strings.TrimSpace(r.Stderr)
-			if !strings.Contains(s, "not a working tree") && !strings.Contains(s, "not a worktree") {
-				problems = append(problems, "worktree remove "+p+": "+s)
-			}
-		}
-		if br != "" {
-			if r := gitResult(ctx, source, "branch", "-D", br); !r.OK {
-				s := strings.TrimSpace(r.Stderr)
-				if !strings.Contains(s, "not found") {
-					problems = append(problems, "branch -D "+br+": "+s)
-				}
-			}
+// cleanupAttemptTrees deletes the attempt's Lab, verification and per-attempt source trees.
+// Every worktree the attempt allocated is registered only in that per-attempt source, which
+// is deleted with them, so no worktree is deregistered first (`git worktree remove` would
+// also refuse the source's own main worktree under attemptDir and record a spurious error);
+// --source is never touched. The retained record, changes.diff and changes.json are left in
+// place. A failure is returned so the caller can record it.
+func cleanupAttemptTrees(attemptDir, source string) error {
+	problems := []string{}
+	for _, tree := range []string{filepath.Join(attemptDir, "lab"), filepath.Join(attemptDir, "verification"), source} {
+		if e := os.RemoveAll(tree); e != nil {
+			problems = append(problems, e.Error())
 		}
 	}
-	for _, line := range strings.Split(list.Stdout, "\n") {
-		switch {
-		case strings.HasPrefix(line, "worktree "):
-			flush()
-			path = strings.TrimPrefix(line, "worktree ")
-		case strings.HasPrefix(line, "branch "):
-			branch = strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
-		case line == "":
-			flush()
-		}
-	}
-	flush()
 	if len(problems) > 0 {
 		return fmt.Errorf("%s", strings.Join(problems, "; "))
 	}
 	return nil
 }
 
-// cleanupAttemptTrees deletes the attempt's Lab and verification worktrees, deregistering
-// them from the shared source object store with targeted removal (never a repo-wide
-// prune), and deletes the attempt's own branch refs. The retained record, changes.diff
-// and changes.json are left in place. A failure is returned so the caller can record it.
-func cleanupAttemptTrees(ctx context.Context, attemptDir, source string) error {
-	problems := []string{}
-	if e := removeAttemptWorktrees(ctx, source, attemptDir); e != nil {
-		problems = append(problems, e.Error())
+// noFetchRefspec is set as remote.origin.fetch on every history-free source so a stray
+// `git fetch origin` matches nothing on GitHub (an unset refspec would still fetch the
+// remote HEAD). Network isolation of the coding harness is the real control; this only
+// prevents an accidental bare fetch.
+const noFetchRefspec = "+refs/forgecell-none/*:refs/forgecell-none/*"
+
+// prepareAttemptSource creates a fresh non-bare source at dir holding only base, fetched
+// shallow from source (only read), with a detached HEAD at base, origin copied from source
+// and the no-op fetch refspec. No FETCH_HEAD is written, so the .git never records the
+// path of source.
+func prepareAttemptSource(ctx context.Context, source, dir, base string) error {
+	origin := gitResult(ctx, source, "remote", "get-url", "origin")
+	if !origin.OK {
+		return fmt.Errorf("cannot read the --source origin: %s", strings.TrimSpace(origin.Stderr))
 	}
-	if e := os.RemoveAll(filepath.Join(attemptDir, "lab")); e != nil {
-		problems = append(problems, e.Error())
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return err
 	}
-	if e := os.RemoveAll(filepath.Join(attemptDir, "verification")); e != nil {
-		problems = append(problems, e.Error())
+	if r := gitHookless(ctx, dir, "init", "-q"); !r.OK {
+		return fmt.Errorf("cannot create attempt source: %s", strings.TrimSpace(r.Stderr))
 	}
-	if len(problems) > 0 {
-		return fmt.Errorf("%s", strings.Join(problems, "; "))
+	if r := gitHookless(ctx, dir, "fetch", "--depth=1", "--no-tags", "--no-write-fetch-head", "--update-shallow",
+		"--upload-pack", "git -c uploadpack.allowAnySHA1InWant=true upload-pack", source, base); !r.OK {
+		return fmt.Errorf("cannot fetch base commit %s into attempt source: %s", base, strings.TrimSpace(r.Stderr))
+	}
+	if err := os.Remove(filepath.Join(dir, ".git", "FETCH_HEAD")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if r := gitHookless(ctx, dir, "checkout", "-q", "--detach", base); !r.OK {
+		return fmt.Errorf("cannot check out base commit %s in attempt source: %s", base, strings.TrimSpace(r.Stderr))
+	}
+	for _, kv := range [][2]string{{"remote.origin.url", strings.TrimSpace(origin.Stdout)}, {"remote.origin.fetch", noFetchRefspec}} {
+		if r := gitHookless(ctx, dir, "config", kv[0], kv[1]); !r.OK {
+			return fmt.Errorf("cannot set %s in attempt source: %s", kv[0], strings.TrimSpace(r.Stderr))
+		}
 	}
 	return nil
 }
@@ -811,11 +794,19 @@ func costBasisLabel(attempts []CohortAttempt) string {
 // frozen task through the existing Molecule engine, captures the output tree and grades
 // it with the existing independent verifier. A failed or timed-out run is recorded in
 // the returned Attempt (never retried); only an unrecoverable infrastructure error is
-// returned as a Go error.
-func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string, lt loadedTask, planBytes, acceptBytes []byte, source, labDir, verifyDir, digest, decisionAt string) (Attempt, error) {
+// returned as a Go error. The molecule, diff and verification run from attemptSource, a
+// fresh source holding only the plan's base commit; source (--source) is only read.
+func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string, lt loadedTask, planBytes, acceptBytes []byte, source, attemptSource, labDir, verifyDir, digest, decisionAt string) (Attempt, error) {
 	started := time.Now()
 	p := lt.plan
 	a := Attempt{Variant: variantName, FormulaSHA256: f.SHA256, StartedAt: started.UTC().Format(time.RFC3339Nano), Checks: []Observation{}, Setup: []Observation{}}
+	if err := prepareAttemptSource(ctx, source, attemptSource, p.BaseCommit); err != nil {
+		// A base the source cannot supply is a recorded attempt failure, as a missing base
+		// was before per-attempt sources; the run continues with the next attempt.
+		a.Error = err.Error()
+		a.ElapsedMS = time.Since(started).Milliseconds()
+		return a, nil
+	}
 	if err := os.MkdirAll(filepath.Join(labDir, "formulas"), 0700); err != nil {
 		return a, err
 	}
@@ -872,7 +863,7 @@ func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string
 
 	runOptions := molecule.Options{
 		LabDir:     labDir,
-		SourceRoot: source,
+		SourceRoot: attemptSource,
 		Issue:      fmt.Sprint(lt.issue.Number),
 		Base:       p.BaseCommit,
 		ReadIssue:  func(context.Context, string, int64, string) (molecule.Issue, error) { return lt.issue, nil },
@@ -930,7 +921,7 @@ func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string
 		}
 	}
 	if a.Error == "" {
-		a.Verification = verify(ctx, source, verifyDir, lt.acceptancePath, p, a)
+		a.Verification = verify(ctx, attemptSource, verifyDir, lt.acceptancePath, p, a)
 		a.Checks = a.Verification.Checks
 		a.Correct = done && a.Verification.Correct
 		if a.Verification.Error != "" {
