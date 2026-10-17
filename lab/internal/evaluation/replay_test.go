@@ -703,6 +703,53 @@ func TestReplaySkipsWhenGoMissing(t *testing.T) {
 	}
 }
 
+// TestReplaySkipsOversizedAcceptanceScript: a hidden test file of about 70 KB makes the
+// acceptance script exceed readiness.MaxCheckInputBytes, so intake would reject it. The PR is
+// skipped with the script's length before any go toolchain run, and nothing is written for it.
+func TestReplaySkipsOversizedAcceptanceScript(t *testing.T) {
+	f, base, def := newFixture(t)
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", valueGo(2))
+	padding := strings.Repeat("// padding to grow the hidden test file past the check-input bound.\n", 1020)
+	testBody := valueTest(2) + padding
+	if len(testBody) < 69000 || len(testBody) > 71000 {
+		t.Fatalf("fixture test file is %d bytes, want about 70 KB", len(testBody))
+	}
+	f.write("lab/calc/calc_test.go", testBody)
+	f.git("add", ".")
+	f.git("commit", "-qm", "feature")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+	merge := f.head()
+
+	testFiles := []string{"lab/calc/calc_test.go"}
+	pkgs, err := acceptancePackages(testFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := buildAcceptanceScript(testFiles, map[string][]byte{testFiles[0]: []byte(testBody)}, pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/21/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":1025,"deletions":0}]`,
+		"repos/owner/repo/pulls/21":       prJSON(merge, base, def, "Closes #42", "Make Value return 2"),
+		"repos/owner/repo/issues/42":      `{"number":42,"title":"Make Value return 2","body":"Value should return 2.","state":"closed"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{21}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSkip(t, report, 21, fmt.Sprintf("acceptance script exceeds the 64000-byte check-input bound (%d bytes)", len(script)))
+	for _, dir := range []string{filepath.Join(out, "tasks", "pr-21"), filepath.Join(out, "hidden", "pr-21")} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("%s written for a skipped PR: %v", dir, err)
+		}
+	}
+}
+
 func TestReplaySkipsWithoutTestChanges(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "cohort")
 	gh := ghFixture(map[string]string{

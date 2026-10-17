@@ -16,6 +16,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
 // Replay builds frozen evaluation task plans from merged pull requests. The task text is
@@ -378,6 +379,11 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 	acceptanceScript, err := buildAcceptanceScript(testFiles, contents, pkgs)
 	if err != nil {
 		return zero, err.Error()
+	}
+	// Intake rejects any check input over the readiness bound, so an oversized script would
+	// produce a task that can never be accepted.
+	if len(acceptanceScript) > readiness.MaxCheckInputBytes {
+		return zero, fmt.Sprintf("acceptance script exceeds the %d-byte check-input bound (%d bytes)", readiness.MaxCheckInputBytes, len(acceptanceScript))
 	}
 
 	renamedOld := sortedKeys(renamedOldTest)
