@@ -855,9 +855,30 @@ func TestCohortResumeAfterCancelReruns(t *testing.T) {
 	t.Setenv("FORGECELL_TEST_MARKER", marker)
 	o := cohortFixture(t, []variantSpec{{name: "base", body: stickyHarness, timeoutMS: 30000}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
 	approveCohort(t, &o)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Cancel once the base harness has started (it writes the marker before it
+	// sleeps), not on a fixed deadline that setup under load can use up. The
+	// fallback deadline is reached only on failure.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	started := make(chan struct{})
+	go func() {
+		defer cancel()
+		for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := os.Stat(marker); err == nil {
+				close(started)
+				return
+			}
+		}
+	}()
 	r1, err := RunCohort(ctx, o)
+	select {
+	case <-started:
+	default:
+		t.Fatalf("base harness never started before the first run ended: %v", err)
+	}
 	if err == nil {
 		t.Fatal("expected a cancellation error on the first run")
 	}

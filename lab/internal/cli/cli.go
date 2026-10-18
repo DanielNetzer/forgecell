@@ -544,7 +544,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if err != nil {
 			return fail(describeFormulaLoadFailure(*lab, err))
 		}
-		candidates := onboarding.Discover(ctx, cwd, nil)
+		candidates := onboarding.Discover(ctx, cwd, doctorRun)
 		pathReady := map[string]bool{}
 		for _, c := range candidates {
 			pathReady[c.ID] = c.Readiness == "ready"
@@ -570,7 +570,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				checked = onboarding.Candidate{ID: existing, Readiness: "blocked", Detail: notProbedUnapproved}
 				checked = checked.CompleteUnknowns()
 			} else {
-				checked = onboarding.ProbeBinding(ctx, probed.Harness, cwd, nil)
+				checked = onboarding.ProbeBinding(ctx, probed.Harness, cwd, doctorRun)
 			}
 			if checked.Binding != nil {
 				checked.Binding.WithRunningVersion(version)
@@ -592,8 +592,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			env[key] = os.Getenv(key)
 		}
 		selection := onboarding.Select(candidates, *preferred, existing, env)
-		git := process.Run(ctx, process.Options{Argv: []string{"git", "--version"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
-		gh := process.Run(ctx, process.Options{Argv: []string{"gh", "auth", "status"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
+		git := doctorRun(ctx, process.Options{Argv: []string{"git", "--version"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
+		gh := doctorRun(ctx, process.Options{Argv: []string{"gh", "auth", "status"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
 		var meta onboarding.MetaReport
 		if unapproved {
 			meta = onboarding.DescribeFormulaMeta(active.Formula)
@@ -601,7 +601,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				meta.NextAction = notProbedUnapproved
 			}
 		} else {
-			meta = onboarding.InspectMeta(ctx, probed, cwd, nil)
+			meta = onboarding.InspectMeta(ctx, probed, cwd, doctorRun)
 		}
 		workflow := selectedWorkflow(candidates, selection.ID)
 		ready := !unapproved && workflow.State == "conditional" && git.OK && gh.OK && selection.Status == "ready" && (saved == nil || saved.Readiness == "ready")
@@ -612,7 +612,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		commands := doctorCommands{lab: labDir, pathReady: pathReady}
 		roles := []onboarding.RoleReadiness{}
 		if active.Formula.ID != "" && !unapproved {
-			roles = onboarding.InspectRoles(ctx, probed, cwd, nil)
+			roles = onboarding.InspectRoles(ctx, probed, cwd, doctorRun)
 		}
 		firstRoleCommand := ""
 		rolesReady := true
@@ -1302,6 +1302,11 @@ func selectedWorkflow(candidates []onboarding.Candidate, id string) harness.Capa
 const doctorSchemaVersion = "v1"
 
 const notProbedUnapproved = "not probed (unapproved)"
+
+// doctorRun executes every doctor probe: harness discovery, the saved, meta and
+// role bindings, git and gh. Tests replace it so probe results do not depend on
+// host load.
+var doctorRun onboarding.Runner = process.Run
 
 // doctorCandidate adds guidance to a probed candidate. Steps appear only when the
 // caller asks for them with --verbose --json.
