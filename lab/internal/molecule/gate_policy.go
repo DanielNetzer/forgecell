@@ -122,6 +122,10 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 		// Excusing protected-regression failures always needs a human decision.
 		return decline("plan-has-protected-deltas", "the plan declares %d expected protected-regression delta(s), which require human review", len(plan.ExpectedProtectedDeltas))
 	}
+	if len(plan.ProtectedExemptPaths) > 0 {
+		// Keeping a test at its candidate version in the protected view always needs a human decision.
+		return decline("plan-has-protected-exemptions", "the plan exempts %d test source(s) from protected-regression restore, which require human review", len(plan.ProtectedExemptPaths))
+	}
 	base := fmt.Sprintf("/readiness/plans/%d", n)
 	if plan.Continuation != "" {
 		return decline("plan-continuation", "plan continuation %q is not a first scope approval", plan.Continuation)
@@ -242,7 +246,7 @@ func evaluateAutoWhenReady(r Record, f formula.Formula, coding formula.Binding, 
 		{Pointer: base + "/plan/setup", Observed: fmt.Sprintf("%d setup commands", len(plan.Setup))},
 		{Pointer: base + "/plan/inputs/mandatoryConstraints", Observed: fmt.Sprintf("%d mandatory constraints", len(plan.Inputs.MandatoryConstraints))},
 		{Pointer: base + "/plan/policy", Observed: fmt.Sprintf("environment=[%s] credentialNames=%d setupNetwork=%s checkNetwork=%s containment=%s", strings.Join(pol.Environment, ","), len(pol.CredentialNames), pol.SetupNetwork, pol.CheckNetwork, pol.Containment)},
-		{Pointer: base + "/plan", Observed: fmt.Sprintf("allowNoChange=%t harnessTimeoutMs=%d ceilingMs=%d expectedProtectedDeltas=%d", plan.AllowNoChange, plan.HarnessTimeoutMS, coding.TimeoutCeilingMS(), len(plan.ExpectedProtectedDeltas))},
+		{Pointer: base + "/plan", Observed: fmt.Sprintf("allowNoChange=%t harnessTimeoutMs=%d ceilingMs=%d expectedProtectedDeltas=%d protectedExemptPaths=%d", plan.AllowNoChange, plan.HarnessTimeoutMS, coding.TimeoutCeilingMS(), len(plan.ExpectedProtectedDeltas), len(plan.ProtectedExemptPaths))},
 		{Pointer: base + "/plan/codingAllowlist", Observed: fmt.Sprintf("%d entries, sha256 %x", len(derived), listed)},
 		{Pointer: base + "/plan/artifacts", Observed: fmt.Sprintf("%d artifact roots", len(plan.Artifacts))},
 		{Pointer: base + "/plan/checkInputs", Observed: fmt.Sprintf("%d check inputs", len(plan.CheckInputs))},

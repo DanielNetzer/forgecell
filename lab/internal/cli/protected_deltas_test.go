@@ -64,6 +64,22 @@ func TestProtectedDeltaReviewListsAcceptedDeltasAndWarnings(t *testing.T) {
 	}
 }
 
+func TestProtectedExemptionsScopeGateListsExemptPaths(t *testing.T) {
+	const header = "PROTECTED-TEST EXEMPTIONS (these files keep the candidate version in the protected regression run):"
+	p := gatePlan()
+	p.ProtectedExemptPaths = []string{"lab/x_test.go"}
+	var out bytes.Buffer
+	presentRun(&out, gateRecord(p, "scope-waiting"))
+	if !strings.Contains(out.String(), header+"\n  lab/x_test.go\n") {
+		t.Fatalf("scope gate missing exemptions block in:\n%s", out.String())
+	}
+	out.Reset()
+	presentRun(&out, gateRecord(gatePlan(), "scope-waiting"))
+	if strings.Contains(out.String(), "PROTECTED-TEST EXEMPTIONS") {
+		t.Fatalf("exemptions block shown without exemptions:\n%s", out.String())
+	}
+}
+
 func TestProtectedDeltaReviewWithoutDeltasIsUnchanged(t *testing.T) {
 	r := gateRecord(readiness.Plan{}, "review-waiting")
 	r.Verification = &verification.Result{RequiredChecksPassed: true}

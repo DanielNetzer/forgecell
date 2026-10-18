@@ -153,6 +153,16 @@ func TestReplayBuildsTaskFromMergedPR(t *testing.T) {
 	if strings.Join(plan.OriginalCheckFiles, ",") != "lab/calc/calc_test.go" {
 		t.Fatalf("originalCheckFiles = %v", plan.OriginalCheckFiles)
 	}
+	// The replay plan exempts exactly the PR's changed test files.
+	if strings.Join(plan.CandidateTestFiles, ",") != "lab/calc/calc_test.go" {
+		t.Fatalf("candidateTestFiles = %v", plan.CandidateTestFiles)
+	}
+	if err := validateCandidateTestFiles(plan); err != nil {
+		t.Fatalf("generated candidate test files invalid: %v", err)
+	}
+	if got := protectedExemptPaths(plan); strings.Join(got, ",") != strings.Join(plan.CandidateTestFiles, ",") {
+		t.Fatalf("replay plan exempts %v, want candidateTestFiles %v", got, plan.CandidateTestFiles)
+	}
 	acc := 0
 	for _, c := range plan.Checks {
 		if c.Name == "acceptance" {

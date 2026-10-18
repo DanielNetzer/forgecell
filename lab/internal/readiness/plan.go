@@ -138,6 +138,12 @@ type Plan struct {
 	// pin. It joins the plan digest, so only the exact human approval accepts it.
 	// Empty keeps the digest of every earlier plan unchanged.
 	ExpectedProtectedDeltas []ProtectedDelta `json:"expectedProtectedDeltas,omitempty"`
+	// ProtectedExemptPaths lists approved protected test sources that the protected
+	// regression view keeps at their candidate version instead of restoring them to
+	// base. Only an evaluation sets it, for the replayed PR's own test files, which
+	// hidden acceptance grades. It joins the plan digest; empty keeps the digest of
+	// every earlier plan unchanged.
+	ProtectedExemptPaths []string `json:"protectedExemptPaths,omitempty"`
 	// FormulaBaseline lists the ids of the checks the approved Formula requires in
 	// every plan. Each must match a required regression check below, so a baseline
 	// check can be told apart from a candidate. It joins the plan digest; empty
@@ -166,6 +172,9 @@ type ProtectedDelta struct {
 
 // MaxProtectedDeltas bounds a declaration so it stays reviewable.
 const MaxProtectedDeltas = 64
+
+// MaxProtectedExemptPaths bounds the protected-regression exemptions of a plan.
+const MaxProtectedExemptPaths = 64
 
 // MaxHarnessTimeoutMS is the same hard cap the Formula and checks use.
 const MaxHarnessTimeoutMS = 3600000
@@ -455,6 +464,9 @@ func (p Plan) Validate() error {
 		return err
 	}
 	if err := p.validateProtectedDeltas(paths, cited); err != nil {
+		return err
+	}
+	if err := p.validateProtectedExemptPaths(paths); err != nil {
 		return err
 	}
 	if err := p.validateFormulaBaseline(); err != nil {
@@ -934,9 +946,12 @@ func RequestsGoTestJSON(argv []string) bool { return requestsGoTestJSON(argv) }
 // protectedTestSource mirrors what the protected view restores from the base
 // commit: conventional test paths and every regression check definition.
 func (p Plan) protectedTestSource(file string) bool {
-	if ConventionalTestPath(file) {
-		return true
-	}
+	return ConventionalTestPath(file) || p.regressionDefinition(file)
+}
+
+// regressionDefinition reports whether file is cited as the definition of a
+// regression check.
+func (p Plan) regressionDefinition(file string) bool {
 	ids := map[string]bool{}
 	for _, e := range p.Evidence {
 		if e.Path == file {
@@ -1001,6 +1016,35 @@ func (p Plan) validateProtectedDeltas(scope map[string]bool, cited func([]string
 		}
 		if err := cited(d.Evidence); err != nil {
 			return fmt.Errorf("expected protected delta %s %s: %w", d.Package, d.Test, err)
+		}
+	}
+	return nil
+}
+
+// validateProtectedExemptPaths requires each exemption to be an exact, distinct,
+// in-scope conventional test path that defines no regression check, so an exemption
+// never reaches an unreviewed file or a protected gate's own definition.
+func (p Plan) validateProtectedExemptPaths(scope map[string]bool) error {
+	if len(p.ProtectedExemptPaths) > MaxProtectedExemptPaths {
+		return fmt.Errorf("at most %d protected exempt paths permitted", MaxProtectedExemptPaths)
+	}
+	seen := map[string]bool{}
+	for _, file := range p.ProtectedExemptPaths {
+		if err := ValidatePath(file); err != nil {
+			return fmt.Errorf("protected exempt path: %w", err)
+		}
+		if seen[file] {
+			return fmt.Errorf("duplicate protected exempt path: %q", file)
+		}
+		seen[file] = true
+		if !scope[file] {
+			return fmt.Errorf("protected exempt path is outside the approved scope: %q", file)
+		}
+		if !ConventionalTestPath(file) {
+			return fmt.Errorf("protected exempt path is not a conventional test path: %q", file)
+		}
+		if p.regressionDefinition(file) {
+			return fmt.Errorf("protected exempt path defines a regression check: %q", file)
 		}
 	}
 	return nil

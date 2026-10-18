@@ -78,6 +78,18 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if next.CodingAllowlist, allowlistNote, err = harness.DeriveCodingAllowlistNoted(r.FormulaSnapshot.YAML, next.Analysis.Checks, next.Analysis.Scope...); err != nil {
 		return r, err
 	}
+	// Protected exemptions are runtime-owned too: only the evaluation runner sets them,
+	// so an amendment keeps the previous ones that remain in the amended scope.
+	next.ProtectedExemptPaths = nil
+	amendedScope := map[string]bool{}
+	for _, s := range next.Analysis.Scope {
+		amendedScope[s.Path] = true
+	}
+	for _, file := range previous.ProtectedExemptPaths {
+		if amendedScope[file] {
+			next.ProtectedExemptPaths = append(next.ProtectedExemptPaths, file)
+		}
+	}
 	approvedFormula, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))
 	if err != nil {
 		return r, err

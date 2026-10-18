@@ -25,22 +25,27 @@ type Command struct {
 	TimeoutMS int      `json:"timeoutMs"`
 }
 type Plan struct {
-	ReadinessVersion      int                      `json:"readinessVersion"`
-	TargetBranch          string                   `json:"targetBranch"`
-	Artifacts             []readiness.ArtifactRoot `json:"artifacts"`
-	SchemaVersion         int                      `json:"schemaVersion"`
-	Approval              string                   `json:"approval"`
-	ApprovalSHA256        string                   `json:"approvalSha256"`
-	Task                  string                   `json:"task"`
-	TaskSHA256            string                   `json:"taskSha256"`
-	Acceptance            string                   `json:"acceptance"`
-	AcceptanceSHA256      string                   `json:"acceptanceSha256"`
-	BaseCommit            string                   `json:"baseCommit"`
-	AllowedFiles          []string                 `json:"allowedFiles"`
-	OriginalCheckFiles    []string                 `json:"originalCheckFiles"`
-	RequireInitialFailure bool                     `json:"requireInitialFailure"`
-	Setup                 []Command                `json:"setup"`
-	Checks                []Command                `json:"checks"`
+	ReadinessVersion   int                      `json:"readinessVersion"`
+	TargetBranch       string                   `json:"targetBranch"`
+	Artifacts          []readiness.ArtifactRoot `json:"artifacts"`
+	SchemaVersion      int                      `json:"schemaVersion"`
+	Approval           string                   `json:"approval"`
+	ApprovalSHA256     string                   `json:"approvalSha256"`
+	Task               string                   `json:"task"`
+	TaskSHA256         string                   `json:"taskSha256"`
+	Acceptance         string                   `json:"acceptance"`
+	AcceptanceSHA256   string                   `json:"acceptanceSha256"`
+	BaseCommit         string                   `json:"baseCommit"`
+	AllowedFiles       []string                 `json:"allowedFiles"`
+	OriginalCheckFiles []string                 `json:"originalCheckFiles"`
+	// CandidateTestFiles lists the replayed PR's own test files, a subset of
+	// AllowedFiles and OriginalCheckFiles, that hidden acceptance grades. They run in
+	// their candidate version in the protected regression and independent
+	// verification. Only replay sets it; a recheck never adds to it.
+	CandidateTestFiles    []string  `json:"candidateTestFiles,omitempty"`
+	RequireInitialFailure bool      `json:"requireInitialFailure"`
+	Setup                 []Command `json:"setup"`
+	Checks                []Command `json:"checks"`
 }
 type Observation struct {
 	Command Command        `json:"command"`
@@ -279,6 +284,9 @@ func Run(ctx context.Context, o RunOptions) (report Report, err error) {
 			return report, fmt.Errorf("invalid original check file")
 		}
 	}
+	if err = validateCandidateTestFiles(p); err != nil {
+		return report, err
+	}
 	acceptanceCount := 0
 	names := map[string]bool{}
 	for _, c := range append(append([]Command{}, p.Setup...), p.Checks...) {
@@ -494,6 +502,7 @@ func configureReadiness(o *molecule.Options, p Plan, planBytes, acceptance []byt
 		{Evidence: readiness.Evidence{ID: "acceptance-input", Path: "acceptance.sh", SHA256: Hash(acceptance)}, Content: string(acceptance)},
 	}
 	o.Artifacts = p.Artifacts
+	o.ProtectedExemptPaths = protectedExemptPaths(p)
 	command := func(c Command, category string) readiness.Check {
 		argv := append([]string{}, c.Argv...)
 		for i, arg := range argv {
@@ -541,6 +550,57 @@ func configureReadiness(o *molecule.Options, p Plan, planBytes, acceptance []byt
 		}
 		return a, nil
 	}
+}
+
+// validateCandidateTestFiles requires each candidate test file to be a clean, distinct,
+// in-scope original check file at a conventional test path.
+func validateCandidateTestFiles(p Plan) error {
+	allowed := map[string]bool{}
+	for _, file := range p.AllowedFiles {
+		allowed[file] = true
+	}
+	original := map[string]bool{}
+	for _, file := range p.OriginalCheckFiles {
+		original[file] = true
+	}
+	seen := map[string]bool{}
+	for _, file := range p.CandidateTestFiles {
+		if !relative(file, false) || seen[file] {
+			return fmt.Errorf("invalid or duplicate candidate test file")
+		}
+		seen[file] = true
+		if !allowed[file] || !original[file] || !readiness.ConventionalTestPath(file) {
+			return fmt.Errorf("candidate test file must be an in-scope original check file at a conventional test path: %q", file)
+		}
+	}
+	return nil
+}
+
+// protectedExemptPaths returns the replayed PR's own test files, the plan's
+// CandidateTestFiles. Hidden acceptance grades them with their real versions, so the
+// protected view keeps the candidate's copies instead of restoring base. Every other
+// original check file, including any a recheck adds, keeps its base version. Entries
+// that are not in-scope conventional test original check files are never exempt.
+// It is a variable only so tests can strip the exemption.
+var protectedExemptPaths = func(p Plan) []string {
+	allowed := map[string]bool{}
+	for _, file := range p.AllowedFiles {
+		allowed[file] = true
+	}
+	original := map[string]bool{}
+	for _, file := range p.OriginalCheckFiles {
+		original[file] = true
+	}
+	var out []string
+	for _, file := range p.CandidateTestFiles {
+		if allowed[file] && original[file] && readiness.ConventionalTestPath(file) {
+			out = append(out, file)
+			allowed[file] = false
+		}
+	}
+	// A canonical order keeps the plan digest independent of the task's file order.
+	sort.Strings(out)
+	return out
 }
 
 // nearestManifestEvidence returns the evidence ID of the nearest-ancestor manifest

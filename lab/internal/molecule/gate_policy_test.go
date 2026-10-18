@@ -127,6 +127,9 @@ func TestGatePolicyScopeDeclinesEachUnreadyCondition(t *testing.T) {
 		{"protected deltas", func(r *Record) {
 			r.Readiness.Plans[0].Plan.ExpectedProtectedDeltas = []readiness.ProtectedDelta{{CheckID: "regression", Package: "example.test/pkg", Test: "TestX"}}
 		}, "plan-has-protected-deltas"},
+		{"protected exemptions", func(r *Record) {
+			r.Readiness.Plans[0].Plan.ProtectedExemptPaths = []string{"pkg/a_test.go"}
+		}, "plan-has-protected-exemptions"},
 		{"ledger unknowns", func(r *Record) { r.Analysis.Unknowns = []string{"Is the base branch stable?"} }, "analysis-has-unknowns"},
 		{"plan unknowns", func(r *Record) {
 			r.Readiness.Plans[0].Plan.Analysis.Unknowns = []string{"Is the base branch stable?"}
@@ -559,7 +562,7 @@ func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
 		{plan + "/setup", "0 setup commands"},
 		{plan + "/inputs/mandatoryConstraints", "0 mandatory constraints"},
 		{plan + "/policy", "environment=[PATH] credentialNames=0 setupNetwork=unrestricted checkNetwork=unrestricted containment=filtered-environment"},
-		{plan, "allowNoChange=false harnessTimeoutMs=0 ceilingMs=0 expectedProtectedDeltas=0"},
+		{plan, "allowNoChange=false harnessTimeoutMs=0 ceilingMs=0 expectedProtectedDeltas=0 protectedExemptPaths=0"},
 		{plan + "/codingAllowlist", fmt.Sprintf("%d entries, sha256 %x", len(list), sum)},
 		{plan + "/artifacts", "0 artifact roots"},
 		{plan + "/checkInputs", "0 check inputs"},
@@ -963,6 +966,7 @@ func TestGatePolicyRecordedPointersResolveInPersistedLedger(t *testing.T) {
 	}{
 		{"codingAllowlist", len(p.CodingAllowlist)},
 		{"expectedProtectedDeltas", len(p.ExpectedProtectedDeltas)},
+		{"protectedExemptPaths", len(p.ProtectedExemptPaths)},
 		{"formulaBaseline", len(p.FormulaBaseline)},
 	} {
 		pointer := plan + "/" + tc.name
@@ -1078,5 +1082,24 @@ func TestGatePolicyDecisionIsStampedByItsRecorder(t *testing.T) {
 	}
 	if _, err = time.Parse(time.RFC3339Nano, loadRecord(t, r.LabDir, r.ID).PolicyDecisions[0].At); err != nil {
 		t.Fatalf("the persisted decision has no valid time: %v", err)
+	}
+}
+
+// Protected exemptions are runtime-owned: only the evaluation runner sets them, so an
+// amendment payload cannot add one and slip past the plan-has-protected-exemptions rule.
+func TestGatePolicyAmendIgnoresSubmittedProtectedExemptions(t *testing.T) {
+	o, _ := fixture(t)
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := copyPlan(t, r.Readiness.Plans[0].Plan)
+	next.ProtectedExemptPaths = []string{"code.txt"}
+	r, err = Amend(context.Background(), o.LabDir, r.ID, r.Readiness.Plans[0].Digest, next, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan.ProtectedExemptPaths; len(got) != 0 {
+		t.Fatalf("amendment payload added protected exemptions %q", got)
 	}
 }

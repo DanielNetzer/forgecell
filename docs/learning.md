@@ -366,6 +366,21 @@ repetition giving the outcome (`accepted`, `failed`, `incomplete` or `invalid:<r
 the served models, the cost and the elapsed time, followed by the last 20 stdout lines of
 each failed command (a leading `…` marks a first line cut from a longer stream).
 
+The protected regression of an evaluation attempt exempts the task's own test files
+(the plan's `candidateTestFiles`, which replay sets to the replayed PR's changed test files
+and which hidden acceptance grades with their real versions): the evaluation sets them,
+sorted, as the readiness plan's `protectedExemptPaths`, so
+the protected view keeps the candidate's copies instead of restoring the base versions, and
+a correct solution to a PR that changed an existing test is not failed by that old test.
+Independent verification likewise applies the candidate's versions of those files, so its
+regression checks see the same test sources as the protected run: the PR's own test files
+are graded by hidden acceptance and run in their candidate versions everywhere else.
+Every other existing test, and every other original check file, is still restored to base;
+`originalCheckFiles` alone only means "keep the base version", so a hand-authored plan
+without `candidateTestFiles` exempts nothing and files a recheck adds always keep base.
+A plan with exemptions is never approved automatically (`plan-has-protected-exemptions`),
+an amendment cannot add or change them, and normal ticket runs never set them.
+
 An existing `<out>` whose recorded activation digest matches resumes and skips attempts
 already recorded (a directory with a complete attempt record counts as done); a
 mismatched digest is refused so a different cohort can never overwrite retained

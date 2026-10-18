@@ -80,6 +80,8 @@ func Recheck(ctx context.Context, source, evidence, output string, originalCheck
 			return report, fmt.Errorf("original check file must be in the recorded scope")
 		}
 	}
+	// Supplied files only extend OriginalCheckFiles, never CandidateTestFiles, so they
+	// keep their base version in verification.
 	p.OriginalCheckFiles = append(p.OriginalCheckFiles, originalChecks...)
 	if err = os.Mkdir(output, 0700); err != nil {
 		return report, fmt.Errorf("recheck needs a new evidence directory: %w", err)
@@ -92,7 +94,18 @@ func Recheck(ctx context.Context, source, evidence, output string, originalCheck
 	if err = os.WriteFile(filepath.Join(output, "verification-plan.json"), revisedPlan, 0400); err != nil {
 		return report, err
 	}
-	report.Notes = append(report.Notes, "Reverified captured output trees in new checkouts with fresh dependencies. No model was rerun.", "Original report SHA-256: "+originalReportHash, "Verification plan SHA-256: "+Hash(revisedPlan), "Original check files retained from baseline: "+fmt.Sprint(p.OriginalCheckFiles))
+	exempt := protectedExemptPaths(p)
+	isExempt := map[string]bool{}
+	for _, f := range exempt {
+		isExempt[f] = true
+	}
+	retained := []string{}
+	for _, f := range p.OriginalCheckFiles {
+		if !isExempt[f] {
+			retained = append(retained, f)
+		}
+	}
+	report.Notes = append(report.Notes, "Reverified captured output trees in new checkouts with fresh dependencies. No model was rerun.", "Original report SHA-256: "+originalReportHash, "Verification plan SHA-256: "+Hash(revisedPlan), "Original check files retained from baseline: "+fmt.Sprint(retained), "Candidate test files applied in their candidate version: "+fmt.Sprint(exempt))
 	report.Status = "verifying"
 	if err = saveReport(output, report); err != nil {
 		return report, err

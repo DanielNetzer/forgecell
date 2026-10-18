@@ -915,6 +915,12 @@ func presentRun(out io.Writer, r molecule.Record) {
 		} else if advisory := p.ProtectedDeltaAdvisory(protectedFailures(r)...); advisory != "" {
 			fmt.Fprintln(out, advisory)
 		}
+		if len(p.ProtectedExemptPaths) > 0 {
+			fmt.Fprintln(out, "PROTECTED-TEST EXEMPTIONS (these files keep the candidate version in the protected regression run):")
+			for _, file := range p.ProtectedExemptPaths {
+				fmt.Fprintf(out, "  %s\n", file)
+			}
+		}
 		if p.Continuation == "" {
 			fmt.Fprintln(out, codingTimeoutLine(r.FormulaSnapshot.YAML, p.HarnessTimeoutMS))
 			if len(p.CodingAllowlist) == 0 {
