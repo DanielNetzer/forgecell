@@ -402,3 +402,67 @@ func TestValidateConfigurationAppliesValidateRulesToSuppliedInputs(t *testing.T)
 		}
 	}
 }
+
+func exemptFixture() Plan {
+	p := fixture()
+	p.Analysis.Scope = append(p.Analysis.Scope, ScopedPath{Path: "lab/parser_test.go", Reason: "Parser tests", Evidence: []string{"manifest"}})
+	return p
+}
+
+func TestProtectedExemptPathsJoinDigest(t *testing.T) {
+	p := exemptFixture()
+	absent, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(p)
+	if strings.Contains(string(raw), "protectedExemptPaths") {
+		t.Fatal("absent exemptions changed historical serialization")
+	}
+	p.ProtectedExemptPaths = []string{"lab/parser_test.go"}
+	exempt, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exempt == absent {
+		t.Fatal("protected exemptions not bound to exact approval")
+	}
+}
+
+func TestProtectedExemptPathsValidation(t *testing.T) {
+	tooMany := make([]string, MaxProtectedExemptPaths+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("lab/p%d_test.go", i)
+	}
+	for name, tt := range map[string]struct {
+		paths []string
+		want  string
+	}{
+		"parent":       {[]string{"../lab/parser_test.go"}, `protected exempt path: unsafe repository path: "../lab/parser_test.go"`},
+		"unclean":      {[]string{"lab/./parser_test.go"}, `protected exempt path: expected an exact normalized repository path: "lab/./parser_test.go"`},
+		"absolute":     {[]string{"/lab/parser_test.go"}, `protected exempt path: expected an exact normalized repository path: "/lab/parser_test.go"`},
+		"duplicate":    {[]string{"lab/parser_test.go", "lab/parser_test.go"}, `duplicate protected exempt path: "lab/parser_test.go"`},
+		"out of scope": {[]string{"lab/other_test.go"}, `protected exempt path is outside the approved scope: "lab/other_test.go"`},
+		"not a test":   {[]string{"lab/parser.go"}, `protected exempt path is not a conventional test path: "lab/parser.go"`},
+		"too many":     {tooMany, fmt.Sprintf("at most %d protected exempt paths permitted", MaxProtectedExemptPaths)},
+	} {
+		p := exemptFixture()
+		p.ProtectedExemptPaths = tt.paths
+		if err := p.Validate(); err == nil || err.Error() != tt.want {
+			t.Errorf("%s: got %v, want %q", name, err, tt.want)
+		}
+	}
+	// A regression-check definition stays restored even when it is a conventional test path.
+	defined := exemptFixture()
+	defined.Evidence = append(defined.Evidence, Evidence{ID: "parser-test", Path: "lab/parser_test.go", SHA256: strings.Repeat("f", 64)})
+	defined.Analysis.Checks[0].Definitions = append(defined.Analysis.Checks[0].Definitions, "parser-test")
+	defined.ProtectedExemptPaths = []string{"lab/parser_test.go"}
+	if err := defined.Validate(); err == nil || err.Error() != `protected exempt path defines a regression check: "lab/parser_test.go"` {
+		t.Errorf("regression definition: got %v", err)
+	}
+	p := exemptFixture()
+	p.ProtectedExemptPaths = []string{"lab/parser_test.go"}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("in-scope test exemption refused: %v", err)
+	}
+}

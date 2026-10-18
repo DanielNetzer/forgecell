@@ -35,8 +35,16 @@ func ProtectedTree(ctx context.Context, source string, p readiness.Plan, candida
 	if err != nil {
 		return "", err
 	}
+	// An exempt file keeps its candidate version: it is neither restored nor removed.
+	exempt := map[string]bool{}
+	for _, file := range p.ProtectedExemptPaths {
+		exempt[file] = true
+	}
 	files := []string{}
 	for _, file := range paths(changed) {
+		if exempt[file] {
+			continue
+		}
 		if protected[file] || readiness.ConventionalTestPath(file) {
 			files = append(files, file)
 		}

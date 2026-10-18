@@ -212,6 +212,8 @@ type Options struct {
 	Policy      *readiness.ExecutionPolicy
 	Setup       []readiness.Check
 	Artifacts   []readiness.ArtifactRoot
+	// ProtectedExemptPaths is copied into the plan; only an evaluation sets it.
+	ProtectedExemptPaths []string
 
 	LabDir, SourceRoot, Issue, FormulaID, Base string
 	Approve, TargetBranch                      string

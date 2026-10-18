@@ -501,6 +501,7 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 		BaseCommit:            baseCommit,
 		AllowedFiles:          allowedFiles,
 		OriginalCheckFiles:    testFiles,
+		CandidateTestFiles:    candidateTestFiles(testFiles),
 		RequireInitialFailure: true,
 		Checks: []Command{
 			{Name: "go-test", Dir: replayModuleSubdir, Argv: []string{"go", "test", "./..."}, TimeoutMS: replayGoTestTimeoutMS},
@@ -510,6 +511,9 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 		},
 	}
 	if err = validatePlan(plan); err != nil {
+		return zero, "generated plan invalid: " + err.Error()
+	}
+	if err = validateCandidateTestFiles(plan); err != nil {
 		return zero, "generated plan invalid: " + err.Error()
 	}
 	planJSON, err := json.MarshalIndent(plan, "", "  ")
@@ -1092,6 +1096,19 @@ func writeReplayJSON(path string, value any) error {
 		return err
 	}
 	return os.WriteFile(path, append(raw, '\n'), 0o644)
+}
+
+// candidateTestFiles returns the PR's changed test files at conventional test paths,
+// sorted: the files hidden acceptance grades, which the protected regression exempts.
+func candidateTestFiles(testFiles []string) []string {
+	out := []string{}
+	for _, f := range testFiles {
+		if readiness.ConventionalTestPath(f) {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sortedKeys(set map[string]bool) []string {

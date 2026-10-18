@@ -19,6 +19,10 @@ const mergedChangeHarness = "#!/bin/sh\ncat >/dev/null\nif [ -f lab/widget/widge
 // noopHarness reports completion without changing anything: the negative control.
 const noopHarness = "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
 
+// modifiedTestHarness writes the merged change of a replayed PR that changes both the
+// implementation and its existing test.
+var modifiedTestHarness = "#!/bin/sh\ncat >/dev/null\ncat > lab/calc/calc.go <<'FORGECELL_EOF'\n" + valueGo(2) + "FORGECELL_EOF\ncat > lab/calc/calc_test.go <<'FORGECELL_EOF'\n" + valueTest(2) + "FORGECELL_EOF\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+
 // e2eFormulaYAML mirrors the custom-binding Formula shape used by the cohort tests, pinned to
 // the given coding-harness script. Two variants with different script paths differ in bytes,
 // satisfying the distinct-variants rule while behaving identically.
@@ -228,6 +232,101 @@ func TestReplayCohortEndToEnd(t *testing.T) {
 	for _, variant := range []string{"base", "cand"} {
 		if _, e := os.Stat(filepath.Join(neg.Output, "attempts", "pr-15", variant, "rep-1", "source")); !os.IsNotExist(e) {
 			t.Fatalf("per-attempt source kept without --keep-workspaces: %v", e)
+		}
+	}
+}
+
+// TestReplayCohortExemptsModifiedExistingTest replays a PR that modifies an existing test
+// (issue #176). The protected regression keeps the candidate's version of the PR's own test
+// file, which hidden acceptance grades, so the merged solution is graded correct with the
+// protected run passing. With the exemption stripped the protected run restores the old test
+// and fails, so no attempt is graded correct.
+func TestReplayCohortExemptsModifiedExistingTest(t *testing.T) {
+	f, _, def := newFixture(t)
+	f.write("lab/calc/calc_test.go", valueTest(1))
+	f.git("add", ".")
+	f.git("commit", "-qm", "existing test")
+	base := f.head()
+	f.git("checkout", "-q", "-b", "two")
+	f.write("lab/calc/calc.go", valueGo(2))
+	f.write("lab/calc/calc_test.go", valueTest(2))
+	f.git("add", ".")
+	f.git("commit", "-qm", "value two")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge two", "two")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/20/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"modified","additions":1,"deletions":1}]`,
+		"repos/owner/repo/pulls/20":       prJSON(merge, base, def, "Closes #8", "Make Value return 2"),
+		"repos/owner/repo/issues/8":       `{"number":8,"title":"Make Value return 2","body":"Value should return 2.","state":"closed"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{20}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 1 {
+		t.Fatalf("replay did not build the PR: built=%+v skipped=%+v", report.Built, report.Skipped)
+	}
+
+	run := func(name string) CohortReport {
+		t.Helper()
+		o := e2eCohort(t, out, name, []string{"pr-20"}, [2]string{modifiedTestHarness, modifiedTestHarness})
+		r, err := RunCohort(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Status != "complete" || len(r.Attempts) != 2 {
+			t.Fatalf("%s: status=%s attempts=%d", name, r.Status, len(r.Attempts))
+		}
+		return r
+	}
+	// When every changed test is exempt the protected tree is the candidate tree, so the
+	// candidate run is the protected run and no separate one is recorded.
+	protectedPassed := func(ca CohortAttempt) bool {
+		v := ca.Attempt.Molecule.Verification
+		return v != nil && v.RequiredChecksPassed && (v.Protected == nil || (v.Protected.RequiredChecksPassed && v.Protected.Error == ""))
+	}
+
+	r := run("exempt")
+	for _, ca := range r.Attempts {
+		a := ca.Attempt
+		if a.Molecule.Readiness == nil || len(a.Molecule.Readiness.Plans) == 0 {
+			t.Fatalf("attempt %s stopped before readiness: error=%q", ca.Variant, a.Error)
+		}
+		if got := a.Molecule.Readiness.Plans[0].Plan.ProtectedExemptPaths; strings.Join(got, ",") != "lab/calc/calc_test.go" {
+			t.Fatalf("attempt %s plan exempts %v", ca.Variant, got)
+		}
+		if !protectedPassed(ca) {
+			t.Fatalf("attempt %s protected run did not pass: error=%q verification=%+v", ca.Variant, a.Error, a.Molecule.Verification)
+		}
+		if !a.Correct {
+			t.Fatalf("attempt %s not graded correct: error=%q verification=%+v", ca.Variant, a.Error, a.Verification)
+		}
+	}
+	for _, v := range r.Variants {
+		if v.HiddenAcceptancePass != 1 {
+			t.Fatalf("variant %s hiddenAcceptancePass = %d, want 1", v.Name, v.HiddenAcceptancePass)
+		}
+	}
+
+	original := protectedExemptPaths
+	protectedExemptPaths = func(Plan) []string { return nil }
+	t.Cleanup(func() { protectedExemptPaths = original })
+	stripped := run("stripped")
+	for _, ca := range stripped.Attempts {
+		a := ca.Attempt
+		if a.Molecule.Readiness == nil || len(a.Molecule.Readiness.Plans) == 0 || len(a.Molecule.Readiness.Plans[0].Plan.ProtectedExemptPaths) != 0 {
+			t.Fatalf("stripped attempt %s still has an exemption or no plan: error=%q", ca.Variant, a.Error)
+		}
+		// The restored old test must fail in the protected run itself, not merely leave
+		// the attempt ungraded.
+		if v := a.Molecule.Verification; v == nil || v.Protected == nil || v.Protected.RequiredChecksPassed {
+			t.Fatalf("stripped attempt %s protected run did not fail: error=%q verification=%+v", ca.Variant, a.Error, a.Molecule.Verification)
+		}
+		if a.Correct {
+			t.Fatalf("stripped attempt %s graded correct", ca.Variant)
 		}
 	}
 }

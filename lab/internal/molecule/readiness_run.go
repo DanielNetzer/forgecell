@@ -566,6 +566,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		p.CheckInputs = o.CheckInputs
 		p.Setup = o.Setup
 		p.Artifacts = o.Artifacts
+		p.ProtectedExemptPaths = o.ProtectedExemptPaths
 		for _, input := range o.CheckInputs {
 			p.Evidence = append(p.Evidence, input.Evidence)
 		}

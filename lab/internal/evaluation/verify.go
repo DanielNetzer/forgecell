@@ -59,9 +59,16 @@ func verify(ctx context.Context, source, destination, acceptance string, p Plan,
 	if r := gitResult(ctx, source, "worktree", "add", "--detach", destination, p.BaseCommit); !r.OK {
 		return fail(fmt.Errorf("cannot create independent verification checkout: %s", r.Stderr))
 	}
+	// Original check files keep their base version, except the plan's candidate test
+	// files, whose candidate versions are applied to match the exempted protected run;
+	// the acceptance check still grades them with the PR's real versions in its
+	// throwaway copy.
 	protected := map[string]bool{}
 	for _, f := range p.OriginalCheckFiles {
 		protected[f] = true
+	}
+	for _, f := range protectedExemptPaths(p) {
+		protected[f] = false
 	}
 	paths := []string{}
 	for _, f := range p.AllowedFiles {
