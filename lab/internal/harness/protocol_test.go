@@ -72,6 +72,28 @@ func TestAnalysisEvidenceRequestContract(t *testing.T) {
 	}
 }
 
+func TestAnalysisAsksEveryBlockingQuestionAtOnce(t *testing.T) {
+	const asked = "If information is insufficient, return every blocking clarification question at once, each with its reason; do not hold questions back for a later run, and never invent missing evidence."
+	const old = "If information is insufficient, return precise clarification questions with reasons; never invent missing evidence."
+	if !strings.Contains(analysisInstruction, asked) || strings.Contains(analysisInstruction, old) || strings.Contains(analysisInstruction, "return precise clarification questions with reasons") {
+		t.Fatalf("analysis instruction must ask every blocking question at once: %s", analysisInstruction)
+	}
+	// Cursor does not run ticket analysis.
+	for _, id := range []string{"codex", "claude-code"} {
+		invocation, err := BuildInvocation(id, map[string]any{"kind": "ticket-analysis"}, "output")
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(invocation)
+		if !strings.Contains(invocation.Input, asked) && !strings.Contains(string(raw), asked) {
+			t.Fatalf("%s: the analysis invocation lacks the clarification sentence", id)
+		}
+		if strings.Contains(string(raw), "return precise clarification questions with reasons") {
+			t.Fatalf("%s: the analysis invocation keeps the old clarification sentence", id)
+		}
+	}
+}
+
 func TestCapabilitiesMatchInvocationSupport(t *testing.T) {
 	for _, id := range []string{"codex", "claude-code", "cursor"} {
 		c := AdapterCapabilities(id)

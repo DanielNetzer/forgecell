@@ -375,7 +375,7 @@ func TestFingerprintTracksProjectClaudeSettingsAndModel(t *testing.T) {
 	}
 
 	inputs := FingerprintInputs{ProjectRoot: root, BaseCommit: settled, Model: pinnedModel}
-	bumped, err := fingerprintWith(command, "4", inputs)
+	bumped, err := fingerprintWith(command, "not-"+AdapterProtocolVersion, inputs)
 	if err != nil || bumped == pinned {
 		t.Fatal("protocol change invisible")
 	}

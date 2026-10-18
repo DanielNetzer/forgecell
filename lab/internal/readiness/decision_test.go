@@ -3,6 +3,7 @@ package readiness
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -209,5 +210,113 @@ func TestNonCompletionConsumesApprovalAndCannotVerify(t *testing.T) {
 		if _, err = s.ValidateForDelivery(); err == nil {
 			t.Fatal("non-completion delivered")
 		}
+	}
+}
+
+// amendedCoding returns a state whose revision-two plan, paused on tree, is coding.
+func amendedCoding(t *testing.T, tree string) (State, Plan) {
+	t.Helper()
+	p := fixture()
+	s, _ := NewState(p, "proposed")
+	d, _ := p.Digest()
+	s, _ = s.Approve(d, p.Inputs, "approved")
+	s, _ = s.StartAttempt("start")
+	s, _ = s.FinishAttempt("check-pending", "captured", "captured")
+	s, err := s.RecordVerification(true, "passed", "verified")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := fixture()
+	next.Revision, next.ParentDigest, next.PausedTree = 2, d, tree
+	next.Analysis.Acceptance = append(next.Analysis.Acceptance, Criterion{Description: "Leading tokens return an error", Evidence: []string{"issue"}})
+	if s, err = s.Amend(next, "amended"); err != nil {
+		t.Fatal(err)
+	}
+	nd, _ := next.Digest()
+	if s, err = s.Approve(nd, next.Inputs, "approved again"); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = s.StartAttempt("start again"); err != nil {
+		t.Fatal(err)
+	}
+	return s, next
+}
+
+func TestRecordNoChangeWaitsForReviewAndRefusesDelivery(t *testing.T) {
+	tree := strings.Repeat("f", 40)
+	s, next := amendedCoding(t, tree)
+	for name, other := range map[string]string{"another tree": strings.Repeat("e", 40), "no tree": ""} {
+		if _, err := s.RecordNoChange(other, "nochange"); err == nil {
+			t.Fatalf("%s: a tree other than the paused tree recorded no change", name)
+		}
+	}
+	stopped, err := s.RecordNoChange(tree, "nochange")
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := stopped.Events[len(stopped.Events)-1]
+	if stopped.Phase != "review-waiting" || NoChangeAfterAmendment != "no-change-after-amendment" || last.Kind != NoChangeAfterAmendment || last.Tree != tree || !strings.Contains(last.Detail, tree) {
+		t.Fatalf("no-change state %+v", stopped)
+	}
+	if s.Phase != "coding" {
+		t.Fatal("original state mutated")
+	}
+	if _, err = stopped.ValidateForDelivery(); err == nil || err.Error() != "amendment produced no change; nothing was verified" {
+		t.Fatalf("delivery of an unverified no-change amendment: %v", err)
+	}
+	if _, err = stopped.RecordVerification(true, "passed", "check"); err == nil {
+		t.Fatal("a no-change state accepted verification")
+	}
+	if _, err = stopped.RecordNoChange(tree, "again"); err == nil {
+		t.Fatal("no change recorded twice")
+	}
+
+	// A later amendment proceeds normally from review-waiting.
+	nd, _ := next.Digest()
+	third := fixture()
+	third.Revision, third.ParentDigest, third.PausedTree = 3, nd, tree
+	third.Analysis.Acceptance = append(append([]Criterion{}, next.Analysis.Acceptance...), Criterion{Description: "Empty input returns an error", Evidence: []string{"issue"}})
+	amended, err := stopped.Amend(third, "amended again")
+	if err != nil {
+		t.Fatalf("an amendment after no change: %v", err)
+	}
+	td, _ := third.Digest()
+	if amended, err = amended.Approve(td, third.Inputs, "approved"); err == nil {
+		amended, err = amended.StartAttempt("start")
+	}
+	if err == nil {
+		amended, err = amended.FinishAttempt("check-pending", "captured", "captured")
+	}
+	if err == nil {
+		amended, err = amended.RecordVerification(true, "passed", "verified")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delivered, err := amended.ValidateForDelivery(); err != nil || delivered.Revision != 3 {
+		t.Fatalf("the later amendment must deliver normally: %v", err)
+	}
+}
+
+func TestRecordNoChangeRequiresAnAmendedCodingAttempt(t *testing.T) {
+	p := fixture()
+	s, _ := NewState(p, "proposed")
+	d, _ := p.Digest()
+	s, _ = s.Approve(d, p.Inputs, "approved")
+	if _, err := s.RecordNoChange(p.Inputs.BaseCommit, "nochange"); err == nil {
+		t.Fatal("no change recorded outside the coding phase")
+	}
+	s, _ = s.StartAttempt("start")
+	if _, err := s.RecordNoChange(p.Inputs.BaseCommit, "nochange"); err == nil {
+		t.Fatal("no change recorded for revision one")
+	}
+	tree := strings.Repeat("f", 40)
+	amended, _ := amendedCoding(t, tree)
+	pending, err := amended.FinishAttempt("check-pending", "captured", "captured")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pending.RecordNoChange(tree, "nochange"); err == nil {
+		t.Fatal("no change recorded after coding finished")
 	}
 }

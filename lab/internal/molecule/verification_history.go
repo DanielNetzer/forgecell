@@ -106,7 +106,9 @@ func completedCoding(r Record) bool {
 			} else {
 				stages[e.Digest] = 0
 			}
-		case "attempt-check-pending":
+		// An amended attempt that kept the parent revision's tree completed its
+		// coding; only verification was skipped, so checks-only may verify it.
+		case "attempt-check-pending", readiness.NoChangeAfterAmendment:
 			if stages[e.Digest] == 2 {
 				stages[e.Digest] = 3
 			} else {
@@ -120,7 +122,7 @@ func completedCoding(r Record) bool {
 	for i := len(r.Readiness.Events) - 1; i >= 0; i-- {
 		e := r.Readiness.Events[i]
 		switch e.Kind {
-		case "attempt-check-pending":
+		case "attempt-check-pending", readiness.NoChangeAfterAmendment:
 			return e.Digest == a.PlanDigest && stages[e.Digest] == 3
 		case "attempt-started", "attempt-failed", "attempt-blocked", "attempt-unknown", "attempt-scope-change", "attempt-scope-violation":
 			return false

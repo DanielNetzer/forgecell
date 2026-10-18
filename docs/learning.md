@@ -157,6 +157,18 @@ is stored:
 - `protected-regression-failed`: verification ran the protected view and its required
   checks did not pass.
 
+Intake and recovery also guard against two wasted runs; neither is a failure class
+above. An analysis whose candidate plan fails `Plan.Validate` (for example a check with
+category `vet`) is rejected inside the analysis loop with the policy-violation class
+`plan-validation` and gets one corrective retry within the same three-retry budget; a
+second invalid plan stops intake. Supplied check inputs, checks, setup and the Formula
+baseline are validated before any analysis, so their errors stop intake without a
+retry. An amended coding attempt that completes with the tree and artifacts of the
+parent revision's paused state stops at the review gate with outcome reason
+`noChangeAfterAmendment`: verification is not run, delivery and learning refuse it, and
+the next step is a further amendment with new work or a checks-only amendment that
+verifies the retained tree.
+
 The streak is the newest run of finished Molecules of the current Formula snapshot,
 ordered by finish time and then Molecule id, among the 128 most recently modified
 ledgers. Every Molecule in it exhibits the class and is one that `learn` itself would

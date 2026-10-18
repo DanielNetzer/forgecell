@@ -214,8 +214,10 @@ func TestHardening129AmendDerivesNewFilesFromTheFrozenTree(t *testing.T) {
 }
 
 func TestHardening129ExistingFileCannotPoseAsANewFile(t *testing.T) {
-	r, calls, _ := runClasses(t, "existing-file")
-	if *calls != 1 || r.Status != "blocked" || r.Readiness != nil {
+	// Citing an existing scope path as a new file fails plan validation, which gets
+	// one plan-validation retry; repeating it stops intake.
+	r, calls, _ := runClasses(t, "existing-file", "existing-file")
+	if *calls != 2 || r.Status != "blocked" || r.Readiness != nil || !strings.Contains(strings.Join(r.Notes, "\n"), "the corrective analysis retry was also rejected") {
 		t.Fatalf("a scope path that exists in the frozen tree is not new, so citing it must stop: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
 	}
 }

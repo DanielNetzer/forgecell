@@ -181,6 +181,10 @@ func (e *PolicyViolation) Error() string { return e.Reason }
 // own checks as independent acceptance.
 const LabellingViolationMessage = "analysis cannot assert independent acceptance review; retain as a candidate check for separate human review"
 
+// PlanValidationMessage prefixes the rejection of an analysis whose candidate plan
+// fails Plan.Validate; the validator error follows after ": ".
+const PlanValidationMessage = "the analysis produced a plan that fails validation"
+
 // Policy violation classes. Each class gets its own corrective analysis retry.
 const (
 	PolicyClassLabelling          = "labelling"
@@ -188,6 +192,7 @@ const (
 	PolicyClassEvidenceRequestCap = "evidence-request-cap"
 	PolicyClassDefinitionRef      = "definition-reference"
 	PolicyClassBaselineID         = "baseline-id"
+	PolicyClassPlanValidation     = "plan-validation"
 	PolicyClassOther              = "other"
 )
 
@@ -206,6 +211,8 @@ func PolicyClass(v *PolicyViolation) string {
 		return PolicyClassDefinitionRef
 	case strings.HasPrefix(v.Reason, BaselineIDMessage):
 		return PolicyClassBaselineID
+	case strings.HasPrefix(v.Reason, PlanValidationMessage):
+		return PolicyClassPlanValidation
 	}
 	return PolicyClassOther
 }
@@ -348,11 +355,8 @@ func (p Plan) Validate() error {
 	if (p.Continuation == "adopt-failed-tree" && (!identifier.MatchString(p.AdoptAttempt) || !hex256.MatchString(p.PausedArtifactsSHA256))) || (p.Continuation != "adopt-failed-tree" && p.AdoptAttempt != "") {
 		return fmt.Errorf("failed-tree adoption requires an exact attempt and artifact identity")
 	}
-	for _, constraint := range p.Inputs.MandatoryConstraints {
-		kind, digest, ok := strings.Cut(constraint, ":")
-		if !ok || (kind != "github-ruleset-sha256" && kind != "github-protection-sha256") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(digest) {
-			return fmt.Errorf("unsupported mandatory policy constraint")
-		}
+	if err := validateMandatoryConstraints(p.Inputs.MandatoryConstraints); err != nil {
+		return err
 	}
 	if p.SchemaVersion != "v1" || !identifier.MatchString(p.MoleculeID) || p.Revision < 1 {
 		return fmt.Errorf("invalid readiness identity")
@@ -372,57 +376,14 @@ func (p Plan) Validate() error {
 	if issue.Repository != in.Repository || issue.Number < 1 || issue.State != "OPEN" || !textOK(issue.Title) || issue.URL != fmt.Sprintf("https://github.com/%s/issues/%d", in.Repository, issue.Number) {
 		return fmt.Errorf("issue must be open and match the selected repository and identity")
 	}
-	refs := map[string]bool{"issue": true}
-	if len(p.Evidence) > 256 {
-		return fmt.Errorf("too many evidence references")
-	}
-	evidencePaths := map[string]bool{}
-	for _, e := range p.Evidence {
-		if evidencePaths[e.Path] {
-			return fmt.Errorf("ambiguous evidence path: %s", e.Path)
-		}
-		evidencePaths[e.Path] = true
-		if !identifier.MatchString(e.ID) || refs[e.ID] || !hex256.MatchString(e.SHA256) {
-			return fmt.Errorf("invalid or duplicate evidence identity: %s", e.ID)
-		}
-		if err := ValidatePath(e.Path); err != nil {
-			return err
-		}
-		refs[e.ID] = true
-	}
-	if err := validateCheckInputs(p.CheckInputs); err != nil {
+	refs, evidencePaths, err := p.evidenceRefs()
+	if err != nil {
 		return err
 	}
-	if len(p.CheckInputs) > 32 {
-		return fmt.Errorf("too many reviewed check inputs")
+	if err := p.validateReviewedInputs(); err != nil {
+		return err
 	}
-	for _, input := range p.CheckInputs {
-		if len(input.Content) > 64000 || fmt.Sprintf("%x", sha256.Sum256([]byte(input.Content))) != input.SHA256 {
-			return fmt.Errorf("reviewed check input bytes do not match hash")
-		}
-		found := false
-		for _, ref := range p.Evidence {
-			if ref == input.Evidence {
-				found = true
-			}
-		}
-		if !found {
-			return fmt.Errorf("reviewed check input lacks exact evidence reference")
-		}
-	}
-	cited := func(ids []string) error {
-		if len(ids) == 0 || len(ids) > 256 {
-			return fmt.Errorf("evidence citation required")
-		}
-		seen := map[string]bool{}
-		for _, id := range ids {
-			if !refs[id] || seen[id] {
-				return fmt.Errorf("unknown or duplicate evidence citation: %s", id)
-			}
-			seen[id] = true
-		}
-		return nil
-	}
+	cited := citations(refs)
 	a := p.Analysis
 	if !textOK(a.Summary) || len(a.Scope) == 0 || len(a.Scope) > 256 || len(a.Acceptance) == 0 || len(a.Acceptance) > 100 || len(a.Checks) == 0 || len(a.Checks) > 64 {
 		return fmt.Errorf("plan requires bounded summary, scope, acceptance and checks")
@@ -483,58 +444,11 @@ func (p Plan) Validate() error {
 			return fmt.Errorf("invalid or duplicate command identity: %s", c.ID)
 		}
 		ids[c.ID] = true
-		switch c.Category {
-		case "regression", "candidate", "setup":
-		case "independent-acceptance":
-			if !textOK(c.IndependentProvenance) {
-				return fmt.Errorf("independent acceptance requires separate review provenance")
-			}
-		default:
-			return fmt.Errorf("unknown check category: %s", c.Category)
-		}
 		if c.Category != "setup" && c.Required {
 			required = true
 		}
-		if c.Dir != "." {
-			if err := ValidatePath(c.Dir); err != nil {
-				return err
-			}
-		}
-		if len(c.Argv) == 0 || len(c.Argv) > 128 || c.TimeoutMS < 1 || c.TimeoutMS > 3600000 {
-			return fmt.Errorf("invalid command argv or timeout")
-		}
-		for _, s := range c.Argv {
-			if !textOK(s) {
-				return fmt.Errorf("invalid command argument")
-			}
-		}
-		if strings.ContainsAny(c.Argv[0], "\r\n\t") || (!path.IsAbs(c.Argv[0]) && strings.Contains(c.Argv[0], " ")) {
-			return fmt.Errorf("command must be argv, not a shell string")
-		}
-		if err := cited(c.Evidence); err != nil {
+		if err := validateCommand(c, cited, newFiles); err != nil {
 			return err
-		}
-		definitions := []string{}
-		citedNew := map[string]bool{}
-		for _, id := range c.Definitions {
-			if !newFiles[id] {
-				definitions = append(definitions, id)
-				continue
-			}
-			if c.Category != "candidate" || citedNew[id] {
-				return fmt.Errorf("command definitions: new file %s may define only a candidate check, once", id)
-			}
-			citedNew[id] = true
-		}
-		if len(definitions) > 0 || len(citedNew) == 0 {
-			if err := cited(definitions); err != nil {
-				return fmt.Errorf("command definitions: %w", err)
-			}
-		}
-		for _, id := range definitions {
-			if id == "issue" {
-				return fmt.Errorf("command definitions must reference frozen files")
-			}
 		}
 	}
 	if err := p.validateDefinitionRepairs(); err != nil {
@@ -559,10 +473,7 @@ func (p Plan) Validate() error {
 		return fmt.Errorf("amended artifact inventory must be bound to approval")
 	}
 	for _, r := range p.Artifacts {
-		if _, _, _, err := r.Limits(); err != nil {
-			return err
-		}
-		if err := ValidatePath(r.Path); err != nil {
+		if err := validateArtifactRoot(r); err != nil {
 			return err
 		}
 		if !ids[r.CommandID] {
@@ -580,6 +491,199 @@ func (p Plan) Validate() error {
 		}
 	}
 	return nil
+}
+
+// ValidateConfiguration applies Validate's rules to the parts of a plan that a
+// human or the Formula supplies rather than the analysis: mandatory constraints,
+// evidence references, reviewed check inputs, supplied and baseline checks in
+// Analysis.Checks, setup, artifact roots and the Formula baseline. Intake runs it
+// before any analysis, so a configuration error stops intake instead of costing a
+// corrective analysis retry the model cannot use.
+func (p Plan) ValidateConfiguration() error {
+	if err := validateMandatoryConstraints(p.Inputs.MandatoryConstraints); err != nil {
+		return err
+	}
+	refs, _, err := p.evidenceRefs()
+	if err != nil {
+		return err
+	}
+	if err := p.validateReviewedInputs(); err != nil {
+		return err
+	}
+	cited := citations(refs)
+	for _, c := range p.Analysis.Checks {
+		if c.Category == "setup" {
+			return fmt.Errorf("setup is not a verification check")
+		}
+	}
+	for _, c := range p.Setup {
+		if c.Category != "setup" {
+			return fmt.Errorf("setup commands must be labelled setup")
+		}
+	}
+	inputs := map[string]bool{}
+	for _, input := range p.CheckInputs {
+		inputs[input.ID] = true
+	}
+	ids := map[string]bool{}
+	for _, c := range append(append([]Check{}, p.Analysis.Checks...), p.Setup...) {
+		if !identifier.MatchString(c.ID) || ids[c.ID] || !textOK(c.Reason) {
+			return fmt.Errorf("invalid or duplicate command identity: %s", c.ID)
+		}
+		ids[c.ID] = true
+		if err := validateCommand(c, cited, nil); err != nil {
+			return err
+		}
+		if err := validateInputArguments(c, inputs); err != nil {
+			return err
+		}
+	}
+	if err := p.validateFormulaBaseline(); err != nil {
+		return err
+	}
+	for _, r := range p.Artifacts {
+		if err := validateArtifactRoot(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateMandatoryConstraints(constraints []string) error {
+	for _, constraint := range constraints {
+		kind, digest, ok := strings.Cut(constraint, ":")
+		if !ok || (kind != "github-ruleset-sha256" && kind != "github-protection-sha256") || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(digest) {
+			return fmt.Errorf("unsupported mandatory policy constraint")
+		}
+	}
+	return nil
+}
+
+// evidenceRefs returns the citable evidence ids (with issue) and evidence paths.
+func (p Plan) evidenceRefs() (map[string]bool, map[string]bool, error) {
+	refs := map[string]bool{"issue": true}
+	if len(p.Evidence) > 256 {
+		return nil, nil, fmt.Errorf("too many evidence references")
+	}
+	evidencePaths := map[string]bool{}
+	for _, e := range p.Evidence {
+		if evidencePaths[e.Path] {
+			return nil, nil, fmt.Errorf("ambiguous evidence path: %s", e.Path)
+		}
+		evidencePaths[e.Path] = true
+		if !identifier.MatchString(e.ID) || refs[e.ID] || !hex256.MatchString(e.SHA256) {
+			return nil, nil, fmt.Errorf("invalid or duplicate evidence identity: %s", e.ID)
+		}
+		if err := ValidatePath(e.Path); err != nil {
+			return nil, nil, err
+		}
+		refs[e.ID] = true
+	}
+	return refs, evidencePaths, nil
+}
+
+func (p Plan) validateReviewedInputs() error {
+	if err := validateCheckInputs(p.CheckInputs); err != nil {
+		return err
+	}
+	if len(p.CheckInputs) > 32 {
+		return fmt.Errorf("too many reviewed check inputs")
+	}
+	for _, input := range p.CheckInputs {
+		if len(input.Content) > 64000 || fmt.Sprintf("%x", sha256.Sum256([]byte(input.Content))) != input.SHA256 {
+			return fmt.Errorf("reviewed check input bytes do not match hash")
+		}
+		found := false
+		for _, ref := range p.Evidence {
+			if ref == input.Evidence {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("reviewed check input lacks exact evidence reference")
+		}
+	}
+	return nil
+}
+
+// citations returns a validator of one bounded, duplicate-free citation list.
+func citations(refs map[string]bool) func([]string) error {
+	return func(ids []string) error {
+		if len(ids) == 0 || len(ids) > 256 {
+			return fmt.Errorf("evidence citation required")
+		}
+		seen := map[string]bool{}
+		for _, id := range ids {
+			if !refs[id] || seen[id] {
+				return fmt.Errorf("unknown or duplicate evidence citation: %s", id)
+			}
+			seen[id] = true
+		}
+		return nil
+	}
+}
+
+// validateCommand checks one command's category, directory, argv, timeout,
+// evidence and definitions. newFiles are the plan's new scope files.
+func validateCommand(c Check, cited func([]string) error, newFiles map[string]bool) error {
+	switch c.Category {
+	case "regression", "candidate", "setup":
+	case "independent-acceptance":
+		if !textOK(c.IndependentProvenance) {
+			return fmt.Errorf("independent acceptance requires separate review provenance")
+		}
+	default:
+		return fmt.Errorf("unknown check category: %s", c.Category)
+	}
+	if c.Dir != "." {
+		if err := ValidatePath(c.Dir); err != nil {
+			return err
+		}
+	}
+	if len(c.Argv) == 0 || len(c.Argv) > 128 || c.TimeoutMS < 1 || c.TimeoutMS > 3600000 {
+		return fmt.Errorf("invalid command argv or timeout")
+	}
+	for _, s := range c.Argv {
+		if !textOK(s) {
+			return fmt.Errorf("invalid command argument")
+		}
+	}
+	if strings.ContainsAny(c.Argv[0], "\r\n\t") || (!path.IsAbs(c.Argv[0]) && strings.Contains(c.Argv[0], " ")) {
+		return fmt.Errorf("command must be argv, not a shell string")
+	}
+	if err := cited(c.Evidence); err != nil {
+		return err
+	}
+	definitions := []string{}
+	citedNew := map[string]bool{}
+	for _, id := range c.Definitions {
+		if !newFiles[id] {
+			definitions = append(definitions, id)
+			continue
+		}
+		if c.Category != "candidate" || citedNew[id] {
+			return fmt.Errorf("command definitions: new file %s may define only a candidate check, once", id)
+		}
+		citedNew[id] = true
+	}
+	if len(definitions) > 0 || len(citedNew) == 0 {
+		if err := cited(definitions); err != nil {
+			return fmt.Errorf("command definitions: %w", err)
+		}
+	}
+	for _, id := range definitions {
+		if id == "issue" {
+			return fmt.Errorf("command definitions must reference frozen files")
+		}
+	}
+	return nil
+}
+
+func validateArtifactRoot(r ArtifactRoot) error {
+	if _, _, _, err := r.Limits(); err != nil {
+		return err
+	}
+	return ValidatePath(r.Path)
 }
 
 // Digest intentionally excludes the issue's update timestamp: identity/content
@@ -689,15 +793,8 @@ func (p Plan) validateDefinitionRepairs() error {
 	commands := append(append([]Check{}, p.Analysis.Checks...), p.Setup...)
 	overlaps := p.DefinitionOverlaps()
 	for _, c := range commands {
-		// Every input argument must cite the exact frozen evidence identity, via
-		// definitions or evidence. Supplying bytes establishes no review provenance.
-		for _, arg := range c.Argv {
-			if strings.HasPrefix(arg, "{input:") {
-				id := strings.TrimSuffix(strings.TrimPrefix(arg, "{input:"), "}")
-				if arg != "{input:"+id+"}" || !inputs[id] || (!containsID(c.Definitions, id) && !containsID(c.Evidence, id)) {
-					return fmt.Errorf("command %s has unbound reviewed input %s", c.ID, arg)
-				}
-			}
+		if err := validateInputArguments(c, inputs); err != nil {
+			return err
 		}
 		if c.ReviewedAcceptance == "" {
 			continue
@@ -740,6 +837,21 @@ func (p Plan) validateDefinitionRepairs() error {
 		}
 		if !found {
 			return fmt.Errorf("definition repair %s names missing acceptance check %s", c.ID, c.ReviewedAcceptance)
+		}
+	}
+	return nil
+}
+
+// validateInputArguments requires every input argument to cite the exact frozen
+// evidence identity, via definitions or evidence. Supplying bytes establishes no
+// review provenance.
+func validateInputArguments(c Check, inputs map[string]bool) error {
+	for _, arg := range c.Argv {
+		if strings.HasPrefix(arg, "{input:") {
+			id := strings.TrimSuffix(strings.TrimPrefix(arg, "{input:"), "}")
+			if arg != "{input:"+id+"}" || !inputs[id] || (!containsID(c.Definitions, id) && !containsID(c.Evidence, id)) {
+				return fmt.Errorf("command %s has unbound reviewed input %s", c.ID, arg)
+			}
 		}
 	}
 	return nil

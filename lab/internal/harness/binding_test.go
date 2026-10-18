@@ -60,13 +60,13 @@ func TestUpgradeWithinTheSameProtocolKeepsTheBindingRunnable(t *testing.T) {
 
 func TestAdapterProtocolBumpBlocksWithAnActionableMessage(t *testing.T) {
 	provider := fake(t, completedProvider)
-	launcher, sentinel := fakeBuild(t, "1.0.0", "4")
+	launcher, sentinel := fakeBuild(t, "1.0.0", "not-"+AdapterProtocolVersion)
 	r, started := invoke(t, launcher, provider)
 	running, _ := os.Executable()
 	if r.OK || r.Code != -1 || started {
 		t.Fatalf("incompatible protocol ran: %+v started=%t", r, started)
 	}
-	for _, want := range []string{launcher, running, "version 1.0.0", "adapter protocol 4", "adapter protocol " + AdapterProtocolVersion, "forgecell init --lab DIR --harness claude-code"} {
+	for _, want := range []string{launcher, running, "version 1.0.0", "adapter protocol not-" + AdapterProtocolVersion, "adapter protocol " + AdapterProtocolVersion, "forgecell init --lab DIR --harness claude-code"} {
 		if !strings.Contains(r.Error, want) {
 			t.Fatalf("message omits %q: %s", want, r.Error)
 		}
@@ -192,8 +192,8 @@ func TestManagedLauncherResolvesToTheActiveReleaseAcrossUpgrades(t *testing.T) {
 			t.Fatal("active release was executed")
 		}
 	}
-	activate(t, home, "2.0.0", "4")
-	if r, started := invoke(t, exposed, provider); r.OK || started || !strings.Contains(r.Error, "adapter protocol 4") {
+	activate(t, home, "2.0.0", "not-"+AdapterProtocolVersion)
+	if r, started := invoke(t, exposed, provider); r.OK || started || !strings.Contains(r.Error, "adapter protocol not-"+AdapterProtocolVersion) {
 		t.Fatalf("a protocol bump in the active release must block: %+v", r)
 	}
 	os.Remove(filepath.Join(home, "current"))

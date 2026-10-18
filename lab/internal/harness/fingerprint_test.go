@@ -25,7 +25,7 @@ func TestFingerprintIgnoresForgecellBuildButNotProtocolArgvOrProvider(t *testing
 	if missing, err := Fingerprint([]string{"/missing/forgecell", "__adapter", "codex", provider}); err != nil || missing != a {
 		t.Fatalf("launcher availability must not gate the fingerprint: %v", err)
 	}
-	bumped, err := fingerprint([]string{buildA, "__adapter", "codex", provider}, "4")
+	bumped, err := fingerprint([]string{buildA, "__adapter", "codex", provider}, "not-"+AdapterProtocolVersion)
 	if err != nil || bumped == a {
 		t.Fatal("protocol bump invisible")
 	}
