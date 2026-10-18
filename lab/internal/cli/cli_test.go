@@ -13,12 +13,14 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/learning"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCLIHelpAndVersion(t *testing.T) {
@@ -62,6 +64,7 @@ func TestDoctorPreservesSavedBinding(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", bin)
+	loadTolerantDoctorProbes(t)
 	t.Setenv("CLAUDECODE", "1")
 	t.Setenv("CODEX_THREAD_ID", "")
 	t.Setenv("CURSOR_AGENT", "")
@@ -131,10 +134,36 @@ func writeTool(t *testing.T, dir, name, body string) string {
 	return path
 }
 
+// loadTolerantDoctorProbes replaces doctor's probe runner for one test. The
+// stubs answer at once, so the production 5 s per-call bound is raised to a
+// limit only a hung stub reaches, and a just-written stub that is briefly
+// "text file busy" under a concurrent fork is retried, so full-suite load
+// cannot turn a passing probe step into a failed one.
+func loadTolerantDoctorProbes(t *testing.T) {
+	t.Helper()
+	previous := doctorRun
+	t.Cleanup(func() { doctorRun = previous })
+	doctorRun = func(ctx context.Context, o process.Options) process.Result {
+		if o.Timeout > 0 && o.Timeout < time.Minute {
+			o.Timeout = time.Minute
+		}
+		var result process.Result
+		for attempt := 0; attempt < 50; attempt++ {
+			if result = process.Run(ctx, o); result.Code != -1 || !strings.Contains(result.Error, "text file busy") || ctx.Err() != nil {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return result
+	}
+}
+
 // doctorFixture isolates the process: an empty working directory, git and gh
-// fakes on PATH, no harness environment signals, and a fresh Lab directory.
+// fakes on PATH, no harness environment signals, load-tolerant probes, and a
+// fresh Lab directory.
 func doctorFixture(t *testing.T) (bin, lab string) {
 	t.Helper()
+	loadTolerantDoctorProbes(t)
 	t.Chdir(t.TempDir())
 	bin = t.TempDir()
 	writeTool(t, bin, "git", "#!/bin/sh\nexit 0\n")

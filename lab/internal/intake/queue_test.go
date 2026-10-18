@@ -81,24 +81,32 @@ func TestIssueQueueCancellationStopsPipeHoldingDescendant(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv("QUEUE_CHILD_PID", pidFile)
-	queueGH(t, "sleep 4 &\necho $! > \"$QUEUE_CHILD_PID\"\nwait\n")
+	// The descendant outlives every failure deadline below, so it can only stop
+	// because cancellation killed it. The pid is renamed into place so a reader
+	// never sees a partly written file.
+	queueGH(t, "sleep 120 &\necho $! > \"$QUEUE_CHILD_PID.tmp\"\nmv \"$QUEUE_CHILD_PID.tmp\" \"$QUEUE_CHILD_PID\"\nwait\n")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { _, err := ReadIssueQueue(ctx, "o/r", 1, 30, ""); done <- err }()
+	// Readiness is the pid-file marker; the deadline is reached only on failure.
 	var pid int
-	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		raw, err := os.ReadFile(pidFile)
-		if err == nil {
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		if raw, err := os.ReadFile(pidFile); err == nil {
 			pid, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
-			if pid > 0 {
-				break
-			}
+		}
+		if pid > 0 {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatal("fake gh returned before starting its descendant", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake gh did not start descendant")
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if pid == 0 {
-		t.Fatal("fake gh did not start descendant")
 	}
 	child, err := os.FindProcess(pid)
 	if err != nil {
@@ -111,10 +119,10 @@ func TestIssueQueueCancellationStopsPipeHoldingDescendant(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "GitHub data unavailable") {
 			t.Fatal(err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("cancellation did not return")
 	}
-	for deadline := time.Now().Add(time.Second); ; {
+	for deadline := time.Now().Add(30 * time.Second); ; {
 		raw, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
 		state := strings.TrimSpace(string(raw))
 		var exitErr *exec.ExitError
