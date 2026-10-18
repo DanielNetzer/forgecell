@@ -112,6 +112,56 @@ func writeHistory(t *testing.T, result verification.Result) molecule.Record {
 	return molecule.Record{ID: "mol-1", LabDir: lab, VerificationAttempts: []molecule.VerificationAttempt{{Status: "failed", Result: &ref}}}
 }
 
+// TestFailedCheckOutputExtractsFailedTestsFromFullStream: failing Go test names are read
+// from the whole stored stream before it is tailed. A go test -json stream whose only
+// failure comes before more than 8 KiB of pass events still yields it, a JSON-escaped
+// subtest name is decoded, and a "--- FAIL:" line printed inside an event's Output is not
+// counted. A check whose stored stream was itself cut is flagged, and the flag reaches
+// the attempt and report.md.
+func TestFailedCheckOutputExtractsFailedTestsFromFullStream(t *testing.T) {
+	var stream strings.Builder
+	stream.WriteString(`{"Action":"run","Package":"x","Test":"TestEarly"}` + "\n")
+	stream.WriteString(`{"Action":"output","Package":"x","Test":"TestEarly","Output":"--- FAIL: TestPrinted (0.00s)\n"}` + "\n")
+	stream.WriteString(`{"Action":"fail","Package":"x","Test":"TestEarly","Elapsed":0.01}` + "\n")
+	stream.WriteString(`{"Action":"fail","Package":"x","Test":"TestEsc/a\u0026b\"q\"","Elapsed":0}` + "\n")
+	for i := 0; stream.Len() < 12*1024; i++ {
+		fmt.Fprintf(&stream, `{"Action":"pass","Package":"x","Test":"TestPass%03d","Elapsed":0}`+"\n", i)
+	}
+	stream.WriteString(`{"Action":"fail","Package":"x","Elapsed":1}` + "\n")
+	full := process.Result{OK: false, Code: 1, Stdout: stream.String()}
+	cut := process.Result{OK: false, Code: 1, Stdout: "--- FAIL: TestCut (0.00s)\n", Truncated: true}
+	record := writeHistory(t, verification.Result{
+		SchemaVersion: "v1",
+		Checks:        []verification.Observation{{ID: "acceptance", Result: process.Result{OK: true}}, {ID: "go-test", Result: full}, {ID: "go-vet", Result: cut}},
+	})
+	got := failedCheckOutput(record)
+	if len(got) != 2 {
+		t.Fatalf("failed outputs = %d, want 2: %+v", len(got), got)
+	}
+	test := got[0]
+	if strings.Contains(test.StdoutTail, "TestEarly") || !test.StdoutTruncated {
+		t.Fatalf("the early failure should be cut from the 8 KiB tail; truncated=%v", test.StdoutTruncated)
+	}
+	if names := strings.Join(test.FailedTests, ","); names != `TestEarly,TestEsc/a&b"q"` || test.FailedTestsTruncated {
+		t.Fatalf("go-test failed tests = %q truncated=%v", names, test.FailedTestsTruncated)
+	}
+	if vet := got[1]; strings.Join(vet.FailedTests, ",") != "TestCut" || !vet.FailedTestsTruncated {
+		t.Fatalf("cut stream = %+v", vet)
+	}
+
+	a := completedAttempt(nil)
+	a.FailedCheckOutput = got
+	a.Molecule.Verification = &verification.Result{Checks: []verification.Observation{{ID: "acceptance", Result: process.Result{OK: true}}}}
+	setHiddenAcceptance(&a)
+	if names := strings.Join(a.RegressionFailedTests, ","); names != `TestCut,TestEarly,TestEsc/a&b"q"` || !a.RegressionFailedTestsTruncated {
+		t.Fatalf("regression failed tests = %q truncated=%v", names, a.RegressionFailedTestsTruncated)
+	}
+	md := renderCohortMarkdown(buildCohortReport(CohortReport{SchemaVersion: 1, Tasks: 1, Repetitions: 1}, []string{"base"}, map[string]string{}, []string{"task-a"}, []CohortAttempt{{Task: "task-a", Variant: "base", Repetition: 1, Attempt: a}}))
+	if want := "  - regression failed tests: TestCut, TestEarly, TestEsc/a&b\"q\" (output truncated)\n"; !strings.Contains(md, want) {
+		t.Fatalf("report.md missing %q:\n%s", want, md)
+	}
+}
+
 // TestFailedSetupOutputRecordedAndRedacted: a failing setup command's tail is recorded with
 // Phase setup (in the protected view too), and a credential-shaped string that was never an
 // environment value is redacted in attempt.json and report.md.

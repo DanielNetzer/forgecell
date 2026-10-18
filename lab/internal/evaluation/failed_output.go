@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 )
 
@@ -33,15 +36,20 @@ const (
 // captured; each tail is additionally passed through harness.RedactSecrets, so
 // credential-shaped text that was not an environment value is redacted too. Truncated
 // reports that the stream was longer than its tail, so the tail's first line may be cut.
+// FailedTests names the Go tests the check's full streams report failing, extracted before
+// tailing so an early failure is never cut away; FailedTestsTruncated reports that the
+// stored stream itself was cut at capture, so the names may be incomplete.
 type FailedCheckOutput struct {
-	ID              string `json:"id"`
-	Phase           string `json:"phase"`
-	Protected       bool   `json:"protected,omitempty"`
-	Code            int    `json:"code"`
-	StdoutTail      string `json:"stdoutTail"`
-	StdoutTruncated bool   `json:"stdoutTruncated,omitempty"`
-	StderrTail      string `json:"stderrTail"`
-	StderrTruncated bool   `json:"stderrTruncated,omitempty"`
+	ID                   string   `json:"id"`
+	Phase                string   `json:"phase"`
+	Protected            bool     `json:"protected,omitempty"`
+	Code                 int      `json:"code"`
+	StdoutTail           string   `json:"stdoutTail"`
+	StdoutTruncated      bool     `json:"stdoutTruncated,omitempty"`
+	StderrTail           string   `json:"stderrTail"`
+	StderrTruncated      bool     `json:"stderrTruncated,omitempty"`
+	FailedTests          []string `json:"failedTests,omitempty"`
+	FailedTestsTruncated bool     `json:"failedTestsTruncated,omitempty"`
 }
 
 // failedCheckOutput reads the Molecule's latest verification history result and returns
@@ -84,8 +92,13 @@ func failedCheckOutput(r molecule.Record) []FailedCheckOutput {
 				continue
 			}
 			f := FailedCheckOutput{ID: obs.ID, Phase: phase, Protected: protected, Code: obs.Result.Code}
-			f.StdoutTail, f.StdoutTruncated = redactedTail(obs.Result.Stdout, failedOutputTailBytes)
-			f.StderrTail, f.StderrTruncated = redactedTail(obs.Result.Stderr, failedOutputTailBytes)
+			stdout, stderr := harness.RedactSecrets(obs.Result.Stdout), harness.RedactSecrets(obs.Result.Stderr)
+			if phase == failedPhaseCheck {
+				f.FailedTests = failedGoTests(stdout, stderr)
+				f.FailedTestsTruncated = streamCut(obs.Result)
+			}
+			f.StdoutTail, f.StdoutTruncated = tail(stdout, failedOutputTailBytes), len(stdout) > failedOutputTailBytes
+			f.StderrTail, f.StderrTruncated = tail(stderr, failedOutputTailBytes), len(stderr) > failedOutputTailBytes
 			out = append(out, f)
 		}
 	}
@@ -103,11 +116,63 @@ func failedCheckOutput(r molecule.Record) []FailedCheckOutput {
 	return out
 }
 
-// redactedTail redacts credential-shaped text in the whole stream, so a secret straddling
-// the cut is never half-kept, then returns its last n bytes and whether it was cut.
-func redactedTail(s string, n int) (string, bool) {
-	s = harness.RedactSecrets(s)
-	return tail(s, n), len(s) > n
+// streamCut reports that a check's stored streams are not its whole output: the capture
+// kept only a prefix (Truncated) or stopped at the output cap (Overflow).
+func streamCut(r process.Result) bool {
+	return r.Truncated || r.Overflow
+}
+
+// goTestFailLine matches a plain go test "--- FAIL: TestName (…)" line, including an
+// indented subtest line, whose name is kept whole (TestX/sub).
+var goTestFailLine = regexp.MustCompile(`^[ \t]*--- FAIL: (\S+)`)
+
+// failedGoTests returns the sorted, unique Go test names the given full check streams
+// report failing. A stream carrying go test -json events is read from its structured
+// events only (Action "fail" with a Test, subtests kept as Parent/Sub), so a "--- FAIL:"
+// line printed inside an event's Output is never counted twice or invented; a plain
+// stream is read from its "--- FAIL:" lines.
+func failedGoTests(streams ...string) []string {
+	var names []string
+	for _, s := range streams {
+		var events, plain []string
+		structured := false
+		for _, line := range strings.Split(s, "\n") {
+			line = strings.TrimSuffix(line, "\r")
+			if strings.HasPrefix(line, "{") {
+				var e goTestEvent
+				if json.Unmarshal([]byte(line), &e) == nil && e.Action != "" {
+					structured = true
+					if e.Action == "fail" && e.Test != "" {
+						events = append(events, e.Test)
+					}
+					continue
+				}
+			}
+			if m := goTestFailLine.FindStringSubmatch(line); m != nil {
+				plain = append(plain, m[1])
+			}
+		}
+		if structured {
+			names = append(names, events...)
+		} else {
+			names = append(names, plain...)
+		}
+	}
+	return uniqueSorted(names)
+}
+
+// uniqueSorted returns the sorted distinct values of names, nil when there are none.
+func uniqueSorted(names []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // tail returns at most the last n bytes of s, starting on a rune boundary.
