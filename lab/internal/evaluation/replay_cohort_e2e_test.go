@@ -236,6 +236,116 @@ func TestReplayCohortEndToEnd(t *testing.T) {
 	}
 }
 
+// flakyRegressionHarness writes task A's merged widget change plus a candidate version of
+// the PR's own test file holding an extra failing test, standing in for a flake in the
+// replayed code: hidden acceptance (graded with the PR's real test file) passes while the
+// go-test regression check fails.
+const flakyRegressionHarness = "#!/bin/sh\ncat >/dev/null\nmkdir -p lab/widget\nprintf 'package widget\\n\\nfunc New() int { return 7 }\\n' > lab/widget/widget.go\nprintf 'package widget\\n\\nimport \"testing\"\\n\\nfunc TestNew(t *testing.T) {\\n\\tif New() != 7 {\\n\\t\\tt.Fatal(\"no\")\\n\\t}\\n}\\n\\nfunc TestFlakyHistorical(t *testing.T) { t.Fatal(\"flake\") }\\n' > lab/widget/widget_test.go\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+
+// wrongWidgetHarness writes a widget that hidden acceptance rejects.
+const wrongWidgetHarness = "#!/bin/sh\ncat >/dev/null\nmkdir -p lab/widget\nprintf 'package widget\\n\\nfunc New() int { return 8 }\\n' > lab/widget/widget.go\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+
+// TestReplayCohortHiddenAcceptanceIndependentOfRegressionFailure (issue #178): hidden
+// acceptance runs first, so a failing regression check cannot hide it. An attempt whose
+// acceptance passes while go-test fails records HiddenAcceptance true, Correct false and
+// the failing test names, and the report counts it as a hidden-acceptance pass. A rejected
+// change records false; a harness that never completes records nil and is excluded from
+// HiddenAcceptanceN.
+func TestReplayCohortHiddenAcceptanceIndependentOfRegressionFailure(t *testing.T) {
+	f, base, def := newFixture(t)
+	f.git("checkout", "-q", "-b", "widget")
+	f.write("lab/widget/widget.go", "package widget\n\nfunc New() int { return 7 }\n")
+	f.write("lab/widget/widget_test.go", "package widget\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {\n\tif New() != 7 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "add widget")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge widget", "widget")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/15/files": `[{"filename":"lab/widget/widget.go","status":"added","additions":3,"deletions":0},{"filename":"lab/widget/widget_test.go","status":"added","additions":7,"deletions":0}]`,
+		"repos/owner/repo/pulls/15":       prJSON(merge, base, def, "Closes #5", "add widget"),
+		"repos/owner/repo/issues/5":       `{"number":5,"title":"add widget","body":"Add a widget.","state":"closed"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{15}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 1 {
+		t.Fatalf("replay did not build the PR: built=%+v skipped=%+v", report.Built, report.Skipped)
+	}
+	run := func(name string, bodies [2]string) (CohortReport, CohortOptions) {
+		t.Helper()
+		o := e2eCohort(t, out, name, []string{"pr-15"}, bodies)
+		r, err := RunCohort(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Status != "complete" || len(r.Attempts) != 2 {
+			t.Fatalf("%s: status=%s attempts=%d", name, r.Status, len(r.Attempts))
+		}
+		// Hidden acceptance and Correct come from consistent runs.
+		for _, ca := range r.Attempts {
+			if ca.Correct && (ca.HiddenAcceptance == nil || !*ca.HiddenAcceptance) {
+				t.Fatalf("%s: %s correct without a passing hidden acceptance", name, ca.Variant)
+			}
+		}
+		return r, o
+	}
+	byVariant := func(r CohortReport) (map[string]Attempt, map[string]VariantSummary) {
+		attempts, variants := map[string]Attempt{}, map[string]VariantSummary{}
+		for _, ca := range r.Attempts {
+			attempts[ca.Variant] = ca.Attempt
+		}
+		for _, v := range r.Variants {
+			variants[v.Name] = v
+		}
+		return attempts, variants
+	}
+
+	r, o := run("flaky", [2]string{flakyRegressionHarness, wrongWidgetHarness})
+	attempts, variants := byVariant(r)
+	flaky := attempts["base"]
+	if flaky.HiddenAcceptance == nil || !*flaky.HiddenAcceptance || flaky.Correct {
+		t.Fatalf("flaky attempt hiddenAcceptance=%v correct=%v error=%q verification=%+v", flaky.HiddenAcceptance, flaky.Correct, flaky.Error, flaky.Molecule.Verification)
+	}
+	if v := flaky.Molecule.Verification; v == nil || len(v.Checks) < 2 || v.Checks[0].ID != "acceptance" || v.Checks[1].ID != "go-test" || v.Checks[1].Result.OK {
+		t.Fatalf("candidate verification did not run acceptance first then fail go-test: %+v", flaky.Molecule.Verification)
+	}
+	if got := strings.Join(flaky.RegressionFailedTests, ","); got != "TestFlakyHistorical" {
+		t.Fatalf("regression failed tests = %q", got)
+	}
+	if v := variants["base"]; v.HiddenAcceptancePass != 1 || v.HiddenAcceptanceN != 1 || v.Correct != 0 {
+		t.Fatalf("flaky variant counts: %+v", v)
+	}
+	wrong := attempts["cand"]
+	if wrong.HiddenAcceptance == nil || *wrong.HiddenAcceptance || wrong.Correct || wrong.RegressionFailedTests != nil {
+		t.Fatalf("rejected attempt hiddenAcceptance=%v correct=%v regression=%v error=%q", wrong.HiddenAcceptance, wrong.Correct, wrong.RegressionFailedTests, wrong.Error)
+	}
+	if v := variants["cand"]; v.HiddenAcceptancePass != 0 || v.HiddenAcceptanceN != 1 {
+		t.Fatalf("rejected variant counts: %+v", v)
+	}
+	md := string(mustRead(t, filepath.Join(o.Output, "report.md")))
+	for _, want := range []string{"Hidden-acceptance pass 1 of 1-ran (100%); correct (acceptance and every required check): 0", "  - regression failed tests: TestFlakyHistorical\n"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("report.md missing %q:\n%s", want, md)
+		}
+	}
+
+	r, _ = run("incomplete", [2]string{flakyRegressionHarness, failingHarness})
+	attempts, variants = byVariant(r)
+	if a := attempts["cand"]; completed(a) || a.HiddenAcceptance != nil {
+		t.Fatalf("incomplete attempt completed=%v hiddenAcceptance=%v", completed(a), a.HiddenAcceptance)
+	}
+	if v := variants["cand"]; v.HiddenAcceptanceN != 0 || v.HiddenAcceptancePass != 0 || v.N.Attempts != 1 {
+		t.Fatalf("incomplete variant counts: %+v", v)
+	}
+	if v := variants["base"]; v.HiddenAcceptancePass != 1 || v.HiddenAcceptanceN != 1 {
+		t.Fatalf("flaky variant counts in second cohort: %+v", v)
+	}
+}
+
 // TestReplayCohortExemptsModifiedExistingTest replays a PR that modifies an existing test
 // (issue #176). The protected regression keeps the candidate's version of the PR's own test
 // file, which hidden acceptance grades, so the merged solution is graded correct with the

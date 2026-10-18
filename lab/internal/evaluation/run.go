@@ -71,6 +71,19 @@ type Attempt struct {
 	// non-acceptance plan check was observed passing. Computed once at attempt time from
 	// the plan and persisted, so a resumed report never needs the plan to aggregate it.
 	RequiredChecks *bool `json:"requiredChecks,omitempty"`
+	// HiddenAcceptance is the hidden acceptance check's own result, independent of every
+	// other check, from the independent verification that sets Correct (or the Molecule's
+	// candidate verification when that never ran): nil when it never ran or did not
+	// complete (coding incomplete, setup failed, verification errored first, or the check
+	// timed out), and for an invalid attempt. It is always written, null included, so a
+	// record lacking the key is known to predate it.
+	HiddenAcceptance *bool `json:"hiddenAcceptance"`
+	// RegressionFailedTests lists, sorted and unique, the Go tests the full streams of the
+	// failed regression checks report failing, for an attempt whose hidden acceptance
+	// passed but whose regression checks did not. RegressionFailedTestsTruncated marks a
+	// failed check whose stored stream was itself cut, so the list may be incomplete.
+	RegressionFailedTests          []string `json:"regressionFailedTests,omitempty"`
+	RegressionFailedTestsTruncated bool     `json:"regressionFailedTestsTruncated,omitempty"`
 	// ChangesDiffSHA256 is the sha256 of the retained <attempt>/changes.diff captured
 	// before the workspace tree is deleted; ChangesTruncated marks a diff cut at the
 	// 5 MiB cap. Both are empty/false for single-task runs, which retain their trees.
@@ -541,12 +554,18 @@ func configureReadiness(o *molecule.Options, p Plan, planBytes, acceptance []byt
 			}
 			a.Scope = append(a.Scope, readiness.ScopedPath{Path: file, Reason: "Explicit frozen evaluation scope", Evidence: evidence})
 		}
+		// Hidden acceptance runs first: verification is fail-fast, so a failing
+		// regression check (for example a flake in the replayed historical code) must
+		// not hide the acceptance result. The other checks follow in plan order.
 		for _, c := range p.Checks {
-			category := "regression"
 			if c.Name == "acceptance" {
-				category = "independent-acceptance"
+				a.Checks = append(a.Checks, command(c, "independent-acceptance"))
 			}
-			a.Checks = append(a.Checks, command(c, category))
+		}
+		for _, c := range p.Checks {
+			if c.Name != "acceptance" {
+				a.Checks = append(a.Checks, command(c, "regression"))
+			}
 		}
 		return a, nil
 	}

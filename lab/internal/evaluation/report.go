@@ -20,6 +20,9 @@ type CohortAttempt struct {
 	Variant    string `json:"variant"`
 	Repetition int    `json:"repetition"`
 	Attempt
+	// hiddenAcceptanceUnrecorded marks a resumed record saved before hiddenAcceptance
+	// existed; it is known only when the record is loaded and is never saved.
+	hiddenAcceptanceUnrecorded bool
 }
 
 // RateDenominators states the n behind every rate: the cohort shape and the number of
@@ -40,11 +43,17 @@ type VariantSummary struct {
 	// Attempts counts every recorded attempt, invalid ones included. Invalid counts the
 	// attempts excluded from every rate, median and per-accepted cost, by reason; they
 	// stay in Attempts, ReportedCostUSD and CostCoverage because their cost was spent.
-	Attempts             int            `json:"attempts"`
-	Invalid              int            `json:"invalid"`
-	InvalidReasons       map[string]int `json:"invalidReasons,omitempty"`
-	Completions          int            `json:"completions"`
-	HiddenAcceptancePass int            `json:"hiddenAcceptancePass"`
+	Attempts       int            `json:"attempts"`
+	Invalid        int            `json:"invalid"`
+	InvalidReasons map[string]int `json:"invalidReasons,omitempty"`
+	Completions    int            `json:"completions"`
+	// Correct counts attempts whose hidden acceptance and every required check passed.
+	// HiddenAcceptancePass counts, independently, attempts whose hidden acceptance check
+	// passed whatever the other checks did; HiddenAcceptanceN is the number of attempts
+	// where acceptance ran at all.
+	Correct              int `json:"correct"`
+	HiddenAcceptancePass int `json:"hiddenAcceptancePass"`
+	HiddenAcceptanceN    int `json:"hiddenAcceptanceN"`
 	// RequiredChecksPass is nullable: null (n/a) when no attempt had a non-acceptance
 	// plan check to measure. RequiredChecksN is the number of measurable (non-n/a)
 	// attempts the pass count and rate are computed over.
@@ -378,7 +387,13 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 				s.Completions++
 			}
 			if a.Correct {
-				s.HiddenAcceptancePass++
+				s.Correct++
+			}
+			if a.HiddenAcceptance != nil {
+				s.HiddenAcceptanceN++
+				if *a.HiddenAcceptance {
+					s.HiddenAcceptancePass++
+				}
 			}
 			// Required checks are tri-state: n/a attempts are excluded from the rate's n.
 			if a.RequiredChecks != nil {
@@ -459,7 +474,7 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 				if completed(a) {
 					cell.Completions++
 				}
-				if a.Correct {
+				if a.HiddenAcceptance != nil && *a.HiddenAcceptance {
 					cell.HiddenAcceptancePass++
 				}
 				if a.RequiredChecks != nil {
@@ -487,9 +502,13 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 	}
 	// Surface, rather than swallow, per-attempt change-capture and cleanup failures.
 	changeErrs, cleanupErrs, invalid := 0, 0, 0
+	unrecorded := false
 	for _, ca := range attempts {
 		if ca.Invalid != "" {
 			invalid++
+		}
+		if ca.hiddenAcceptanceUnrecorded {
+			unrecorded = true
 		}
 		if ca.ChangesError != "" {
 			changeErrs++
@@ -506,6 +525,9 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 	}
 	if invalid > 0 {
 		r.Notes = append(r.Notes, fmt.Sprintf("%d attempt(s) excluded as invalid; see each attempt's invalid field.", invalid))
+	}
+	if unrecorded {
+		r.Notes = append(r.Notes, "Some attempts were recorded before hiddenAcceptance existed; they are excluded from the hidden-acceptance rate.")
 	}
 	return r
 }
@@ -585,7 +607,9 @@ func renderCohortMarkdown(r CohortReport) string {
 			sort.Strings(reasons)
 			fmt.Fprintf(&b, "- Invalid (excluded from rates and medians): %d (%s)\n", v.Invalid, strings.Join(reasons, ", "))
 		}
-		fmt.Fprintf(&b, "- Hidden-acceptance pass: %d (%s; %s)\n", v.HiddenAcceptancePass, rate(v.HiddenAcceptancePass, valid), n)
+		// Hidden acceptance runs first, so its pass rate is measured over the attempts where
+		// it ran, independently of any regression failure; correct requires every check.
+		fmt.Fprintf(&b, "- Hidden-acceptance pass %d of %d-ran (%s); correct (acceptance and every required check): %d (%s; %s)\n", v.HiddenAcceptancePass, v.HiddenAcceptanceN, rate(v.HiddenAcceptancePass, v.HiddenAcceptanceN), v.Correct, rate(v.Correct, valid), n)
 		fmt.Fprintf(&b, "- Required-checks pass: %s\n", requiredChecksLine(v.RequiredChecksPass, v.RequiredChecksN))
 		fmt.Fprintf(&b, "- Scope violations: %d; scope-change: %d; amendments: %d; timeouts: %d; failures: %d (%s)\n", v.ScopeViolations, v.ScopeChanges, v.Amendments, v.Timeouts, v.Failures, n)
 		fmt.Fprintf(&b, "- Elapsed: median %s, p90 %s; harness: median %s, p90 %s (%s)\n", msOrNA(v.ElapsedMedianMS, valid), msOrNA(v.ElapsedP90MS, valid), msOrNA(v.HarnessMedianMS, valid), msOrNA(v.HarnessP90MS, valid), n)
@@ -638,7 +662,28 @@ func renderCohortMarkdown(r CohortReport) string {
 			if models := attemptModels(ca.Attempt); len(models) > 0 {
 				served = strings.Join(models, ", ")
 			}
-			fmt.Fprintf(&b, "- %s / %s / rep-%d: %s; served: %s; cost %s; elapsed %d ms\n", ca.Task, ca.Variant, ca.Repetition, attemptOutcome(ca.Attempt), served, costOrUnreported(reportedCost(ca.Attempt)), ca.ElapsedMS)
+			hidden := "not run"
+			switch {
+			case ca.Invalid != "":
+				hidden = "invalid:" + ca.Invalid
+			case ca.hiddenAcceptanceUnrecorded:
+				hidden = "not recorded"
+			case ca.HiddenAcceptance != nil && *ca.HiddenAcceptance:
+				hidden = "passed"
+			case ca.HiddenAcceptance != nil:
+				hidden = "failed"
+			}
+			fmt.Fprintf(&b, "- %s / %s / rep-%d: %s; served: %s; cost %s; elapsed %d ms; hidden acceptance %s\n", ca.Task, ca.Variant, ca.Repetition, attemptOutcome(ca.Attempt), served, costOrUnreported(reportedCost(ca.Attempt)), ca.ElapsedMS, hidden)
+			if len(ca.RegressionFailedTests) > 0 || ca.RegressionFailedTestsTruncated {
+				failed := strings.Join(ca.RegressionFailedTests, ", ")
+				if failed == "" {
+					failed = "none found"
+				}
+				if ca.RegressionFailedTestsTruncated {
+					failed += " (output truncated)"
+				}
+				fmt.Fprintf(&b, "  - regression failed tests: %s\n", failed)
+			}
 			for _, f := range ca.FailedCheckOutput {
 				view := ""
 				if f.Protected {

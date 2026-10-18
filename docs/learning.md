@@ -366,6 +366,30 @@ repetition giving the outcome (`accepted`, `failed`, `incomplete` or `invalid:<r
 the served models, the cost and the elapsed time, followed by the last 20 stdout lines of
 each failed command (a leading `…` marks a first line cut from a longer stream).
 
+Hidden acceptance runs first. The evaluation lists the plan's `acceptance` check before
+every other plan check in the readiness analysis (setup still runs before all checks, and
+Formula baseline checks follow), so Molecule verification, which is unchanged — still
+fail-fast and still all-required — always observes the hidden test before a regression
+check can stop it, for example on a timing-sensitive test in the replayed historical
+code. Each attempt records `hiddenAcceptance`: `true` or `false` from the evaluation's
+independent verification, the same run that sets `correct` and runs every check (so
+`correct` always implies `hiddenAcceptance: true`), or from the Molecule's candidate
+verification when independent verification never ran; `null` when acceptance never ran
+or did not complete (coding incomplete, setup failed, verification errored first, or the
+check timed out, was interrupted or hit the output cap), and for an invalid attempt.
+`hiddenAcceptancePass` counts attempts with `hiddenAcceptance: true`, independently of
+every other check, and `hiddenAcceptanceN` counts the attempts where it ran; `report.md`
+shows `hidden-acceptance pass X of N-ran` beside `correct`, which still requires
+acceptance and every required check to pass. A resumed record written before the field
+existed lacks the key; it is excluded from the hidden-acceptance rate and the report
+notes it. When acceptance passed but a regression check failed, the attempt records
+`regressionFailedTests`, the sorted, unique Go test names the failed checks' full
+streams report (read before tailing: `go test -json` `fail` events with a test when the
+stream carries them, otherwise `--- FAIL:` lines), and the `## Attempts` section lists
+them, so flakes in historical code are visible rather than read as the model's failure.
+When a failed check's stored stream was itself cut, `regressionFailedTestsTruncated` is
+set and the list is marked `(output truncated)`.
+
 The protected regression of an evaluation attempt exempts the task's own test files
 (the plan's `candidateTestFiles`, which replay sets to the replayed PR's changed test files
 and which hidden acceptance grades with their real versions): the evaluation sets them,

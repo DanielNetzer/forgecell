@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 )
@@ -577,6 +578,7 @@ func runCohortCoordinate(ctx context.Context, o CohortOptions, raw []byte, c Coh
 	a.ChangesError = changesErr
 	// Keep failed-check stream tails before cleanup deletes the history files.
 	a.FailedCheckOutput = failedCheckOutput(a.Molecule)
+	setHiddenAcceptance(&a)
 	ca := CohortAttempt{Task: lt.task.Name, Variant: vname, Repetition: rep, Attempt: a}
 	// The record, verification observations and captured diff are saved; by default
 	// reclaim the attempt's Lab, workspace and per-attempt source trees. A cleanup error is
@@ -596,6 +598,64 @@ func runCohortCoordinate(ctx context.Context, o CohortOptions, raw []byte, c Coh
 		return CohortAttempt{}, e
 	}
 	return ca, nil
+}
+
+// setHiddenAcceptance records the hidden acceptance check's own result, independent of
+// every other check, and, when it passed but a regression check failed, the Go tests that
+// failure names. The result comes from the evaluation's independent verification, the run
+// that sets Correct and runs every check, so Correct always implies a passing hidden
+// acceptance; only when that verification observed no acceptance (it never ran) does the
+// Molecule's candidate verification supply it (its protected view never runs acceptance).
+// Acceptance counts as not run (nil) when coding did not complete, no acceptance was
+// observed (for example setup failed or verification errored first), or the acceptance
+// run was cut short (timeout, deadline, interruption or output cap). An invalid attempt
+// records nil: it counts toward no rate.
+func setHiddenAcceptance(a *Attempt) {
+	a.HiddenAcceptance, a.RegressionFailedTests, a.RegressionFailedTestsTruncated = nil, nil, false
+	if a.Invalid != "" || !completed(*a) {
+		return
+	}
+	var result process.Result
+	found := false
+	for _, obs := range a.Verification.Checks {
+		if obs.Command.Name == "acceptance" {
+			result, found = obs.Result, true
+			break
+		}
+	}
+	if !found && a.Molecule.Verification != nil {
+		for _, obs := range a.Molecule.Verification.Checks {
+			if obs.ID == "acceptance" {
+				result, found = obs.Result, true
+				break
+			}
+		}
+	}
+	if !found || result.Incomplete() {
+		return
+	}
+	ok := result.OK
+	a.HiddenAcceptance = &ok
+	if !ok {
+		return
+	}
+	// Failing test names come from the full streams of both runs' failed regression
+	// checks: the Molecule's, extracted from its history before tailing, and the
+	// independent verification's.
+	var names []string
+	for _, f := range a.FailedCheckOutput {
+		if f.Phase == failedPhaseCheck && f.ID != "acceptance" {
+			names = append(names, f.FailedTests...)
+			a.RegressionFailedTestsTruncated = a.RegressionFailedTestsTruncated || f.FailedTestsTruncated
+		}
+	}
+	for _, obs := range a.Verification.Checks {
+		if obs.Command.Name != "acceptance" && !obs.Result.OK {
+			names = append(names, failedGoTests(harness.RedactSecrets(obs.Result.Stdout), harness.RedactSecrets(obs.Result.Stderr))...)
+			a.RegressionFailedTestsTruncated = a.RegressionFailedTestsTruncated || streamCut(obs.Result)
+		}
+	}
+	a.RegressionFailedTests = uniqueSorted(names)
 }
 
 // writeCohortReport and writeCohortAttemptChanges are variables only so tests can inject a
@@ -862,6 +922,13 @@ func loadAttemptRecordAt(path, task, variant string, rep int) (CohortAttempt, in
 	ca := r.CohortAttempt
 	if ca.Task != task || ca.Variant != variant || ca.Repetition != rep || ca.StartedAt == "" || ca.ElapsedMS == 0 {
 		return CohortAttempt{}, 0, false
+	}
+	// A record saved before hiddenAcceptance existed lacks the key (a current one always
+	// writes it, null when acceptance never ran); the report excludes and notes it.
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(raw, &keys) == nil {
+		_, recorded := keys["hiddenAcceptance"]
+		ca.hiddenAcceptanceUnrecorded = !recorded
 	}
 	return ca, r.Parallel, true
 }

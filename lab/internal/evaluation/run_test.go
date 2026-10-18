@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"os"
 	"os/exec"
@@ -396,5 +397,39 @@ func TestEvidenceStandardSystemAliases(t *testing.T) {
 				t.Fatal("descendant symlink accepted")
 			}
 		})
+	}
+}
+
+// TestConfigureReadinessRunsAcceptanceFirst: the readiness analysis lists the hidden
+// acceptance check first, so fail-fast verification always observes it, then the other
+// plan checks in plan order; setup stays separate.
+func TestConfigureReadinessRunsAcceptanceFirst(t *testing.T) {
+	p := Plan{
+		Setup: []Command{{Name: "deps", Dir: ".", Argv: []string{"true"}}},
+		Checks: []Command{
+			{Name: "go-test", Dir: ".", Argv: []string{"go", "test", "./..."}},
+			{Name: "go-vet", Dir: ".", Argv: []string{"go", "vet", "./..."}},
+			{Name: "acceptance", Dir: ".", Argv: []string{"sh", "{acceptance}"}},
+			{Name: "gofmt", Dir: ".", Argv: []string{"gofmt", "-l", "."}},
+		},
+	}
+	var o molecule.Options
+	configureReadiness(&o, p, []byte("{}"), []byte("exit 0\n"))
+	a, err := o.Analyze(context.Background(), formula.Binding{}, molecule.Issue{}, readiness.RepositorySnapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, c := range a.Checks {
+		ids = append(ids, c.ID+":"+c.Category)
+	}
+	if got := strings.Join(ids, ","); got != "acceptance:independent-acceptance,go-test:regression,go-vet:regression,gofmt:regression" {
+		t.Fatalf("analysis checks = %s", got)
+	}
+	if a.Checks[0].Argv[1] != "{input:acceptance-input}" {
+		t.Fatalf("acceptance argv = %v", a.Checks[0].Argv)
+	}
+	if len(o.Setup) != 1 || o.Setup[0].ID != "deps" || o.Setup[0].Category != "setup" {
+		t.Fatalf("setup = %+v", o.Setup)
 	}
 }
