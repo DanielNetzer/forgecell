@@ -23,8 +23,9 @@ type CohortAttempt struct {
 }
 
 // RateDenominators states the n behind every rate: the cohort shape and the number of
-// attempts the rate is computed over. The report never claims significance; it reports
-// counts and rates with their n so a reviewer reads them as feasibility evidence only.
+// valid attempts the rate is computed over (invalid attempts are excluded). The report
+// never claims significance; it reports counts and rates with their n so a reviewer
+// reads them as feasibility evidence only.
 type RateDenominators struct {
 	Tasks       int `json:"tasks"`
 	Repetitions int `json:"repetitions"`
@@ -36,9 +37,14 @@ type VariantSummary struct {
 	Name          string `json:"name"`
 	FormulaSHA256 string `json:"formulaSha256"`
 
-	Attempts             int `json:"attempts"`
-	Completions          int `json:"completions"`
-	HiddenAcceptancePass int `json:"hiddenAcceptancePass"`
+	// Attempts counts every recorded attempt, invalid ones included. Invalid counts the
+	// attempts excluded from every rate, median and per-accepted cost, by reason; they
+	// stay in Attempts, ReportedCostUSD and CostCoverage because their cost was spent.
+	Attempts             int            `json:"attempts"`
+	Invalid              int            `json:"invalid"`
+	InvalidReasons       map[string]int `json:"invalidReasons,omitempty"`
+	Completions          int            `json:"completions"`
+	HiddenAcceptancePass int            `json:"hiddenAcceptancePass"`
 	// RequiredChecksPass is nullable: null (n/a) when no attempt had a non-acceptance
 	// plan check to measure. RequiredChecksN is the number of measurable (non-n/a)
 	// attempts the pass count and rate are computed over.
@@ -87,6 +93,7 @@ type Severity struct {
 type TaskVariantOutcome struct {
 	Variant              string `json:"variant"`
 	Attempts             int    `json:"attempts"`
+	Invalid              int    `json:"invalid,omitempty"`
 	Completions          int    `json:"completions"`
 	HiddenAcceptancePass int    `json:"hiddenAcceptancePass"`
 	RequiredChecksPass   *int   `json:"requiredChecksPass"`
@@ -312,8 +319,9 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 		group := byVariant[name]
 		s := VariantSummary{Name: name, FormulaSHA256: variantHashes[name], CostCoverage: "0 of 0", AcceptedCostCoverage: "0 of 0", EffectiveModels: []string{}}
 		var elapsed, harness []int64
-		var costTotal float64
+		var costTotal, validCostTotal float64
 		costReported := 0
+		validCostReported := 0
 		costReportedAccepted := 0
 		reqPass := 0
 		bases := map[string]bool{}
@@ -323,40 +331,13 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 		for _, ca := range group {
 			a := ca.Attempt
 			s.Attempts++
-			if completed(a) {
-				s.Completions++
-			}
-			if a.Correct {
-				s.HiddenAcceptancePass++
-			}
-			// Required checks are tri-state: n/a attempts are excluded from the rate's n.
-			if a.RequiredChecks != nil {
-				s.RequiredChecksN++
-				if *a.RequiredChecks {
-					reqPass++
-				}
-			}
-			if scopeViolation(a) {
-				s.ScopeViolations++
-			}
-			if scopeChange(a) {
-				s.ScopeChanges++
-			}
-			s.Amendments += amendments(a)
-			if timedOut(a) {
-				s.Timeouts++
-			}
-			if !a.Correct {
-				s.Failures++
-			}
-			elapsed = append(elapsed, a.ElapsedMS)
-			harness = append(harness, a.HarnessMS)
+			// An invalid attempt's cost was spent, so it stays in the reported cost and
+			// its coverage, and its served models and review findings stay visible; it is
+			// excluded from every count, rate, median and the per-accepted cost below, so
+			// the valid counts add up to the valid n.
 			if c := reportedCost(a); c != nil {
 				costReported++
 				costTotal += *c
-				if a.Correct {
-					costReportedAccepted++
-				}
 			}
 			for _, h := range a.Molecule.HarnessAttempts {
 				if h.Usage != nil && h.Usage.CostBasis != "" {
@@ -372,6 +353,49 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 				sev.Medium += as.Medium
 				sev.Low += as.Low
 			}
+			if a.Invalid != "" {
+				s.Invalid++
+				if s.InvalidReasons == nil {
+					s.InvalidReasons = map[string]int{}
+				}
+				s.InvalidReasons[a.Invalid]++
+				continue
+			}
+			if scopeViolation(a) {
+				s.ScopeViolations++
+			}
+			if scopeChange(a) {
+				s.ScopeChanges++
+			}
+			s.Amendments += amendments(a)
+			if timedOut(a) {
+				s.Timeouts++
+			}
+			if !a.Correct {
+				s.Failures++
+			}
+			if completed(a) {
+				s.Completions++
+			}
+			if a.Correct {
+				s.HiddenAcceptancePass++
+			}
+			// Required checks are tri-state: n/a attempts are excluded from the rate's n.
+			if a.RequiredChecks != nil {
+				s.RequiredChecksN++
+				if *a.RequiredChecks {
+					reqPass++
+				}
+			}
+			elapsed = append(elapsed, a.ElapsedMS)
+			harness = append(harness, a.HarnessMS)
+			if c := reportedCost(a); c != nil {
+				validCostReported++
+				validCostTotal += *c
+				if a.Correct {
+					costReportedAccepted++
+				}
+			}
 		}
 		if s.RequiredChecksN > 0 {
 			rp := reqPass
@@ -381,14 +405,14 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 		s.ElapsedMedianMS, s.ElapsedP90MS = median(elapsed), p90(elapsed)
 		s.HarnessMedianMS, s.HarnessP90MS = median(harness), p90(harness)
 		s.CostCoverage = fmt.Sprintf("%d of %d", costReported, s.Attempts)
-		s.AcceptedCostCoverage = fmt.Sprintf("%d of %d", costReportedAccepted, costReported)
+		s.AcceptedCostCoverage = fmt.Sprintf("%d of %d", costReportedAccepted, validCostReported)
 		if costReported > 0 {
 			total := costTotal
 			s.ReportedCostUSD = &total
-			// Divide only by accepted attempts among the cost-reporting ones, never by
-			// passes counted over attempts that reported no cost.
+			// Divide only by accepted attempts among the valid cost-reporting ones, never
+			// by passes counted over attempts that reported no cost or were invalid.
 			if costReportedAccepted > 0 {
-				per := total / float64(costReportedAccepted)
+				per := validCostTotal / float64(costReportedAccepted)
 				s.CostPerAcceptedUSD = &per
 			}
 			switch {
@@ -408,7 +432,7 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 			sc := sev
 			s.ReviewFindings = &sc
 		}
-		s.N = RateDenominators{Tasks: base.Tasks, Repetitions: base.Repetitions, Attempts: s.Attempts}
+		s.N = RateDenominators{Tasks: base.Tasks, Repetitions: base.Repetitions, Attempts: s.Attempts - s.Invalid}
 		r.Variants = append(r.Variants, s)
 	}
 
@@ -422,6 +446,16 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 			for _, ca := range group {
 				a := ca.Attempt
 				cell.Attempts++
+				if a.Invalid != "" {
+					cell.Invalid++
+					continue
+				}
+				if timedOut(a) {
+					cell.Timeouts++
+				}
+				if !a.Correct {
+					cell.Failures++
+				}
 				if completed(a) {
 					cell.Completions++
 				}
@@ -433,12 +467,6 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 					if *a.RequiredChecks {
 						reqPass++
 					}
-				}
-				if timedOut(a) {
-					cell.Timeouts++
-				}
-				if !a.Correct {
-					cell.Failures++
 				}
 			}
 			if cell.RequiredChecksN > 0 {
@@ -458,8 +486,11 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 		r.Notes = append(r.Notes, "Primary outcome requiredChecksPassRate is not measurable: every attempt is n/a because no task plan has a non-acceptance check.")
 	}
 	// Surface, rather than swallow, per-attempt change-capture and cleanup failures.
-	changeErrs, cleanupErrs := 0, 0
+	changeErrs, cleanupErrs, invalid := 0, 0, 0
 	for _, ca := range attempts {
+		if ca.Invalid != "" {
+			invalid++
+		}
 		if ca.ChangesError != "" {
 			changeErrs++
 		}
@@ -472,6 +503,9 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 	}
 	if cleanupErrs > 0 {
 		r.Notes = append(r.Notes, fmt.Sprintf("Workspace cleanup reported an error on %d attempt(s); see each attempt's cleanupError. Those Lab or workspace trees may need manual removal.", cleanupErrs))
+	}
+	if invalid > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("%d attempt(s) excluded as invalid; see each attempt's invalid field.", invalid))
 	}
 	return r
 }
@@ -506,6 +540,20 @@ func costOrUnreported(c *float64) string {
 	return fmt.Sprintf("$%.6f", *c)
 }
 
+// attemptOutcome names one attempt's outcome for the report: invalid:<reason> first,
+// then accepted, incomplete when no harness Atom finished, otherwise failed.
+func attemptOutcome(a Attempt) string {
+	switch {
+	case a.Invalid != "":
+		return "invalid:" + a.Invalid
+	case a.Correct:
+		return "accepted"
+	case !completed(a):
+		return "incomplete"
+	}
+	return "failed"
+}
+
 // renderCohortMarkdown renders the side-by-side report. Counts and rates only, with no
 // significance claims; every rate states its n next to it.
 func renderCohortMarkdown(r CohortReport) string {
@@ -521,14 +569,26 @@ func renderCohortMarkdown(r CohortReport) string {
 	fmt.Fprintf(&b, "**Counts and rates only. No significance or causal claims. Every rate states its n.**\n\n")
 
 	for _, v := range r.Variants {
-		n := fmt.Sprintf("n=%d attempts over %d task(s) × %d rep(s)", v.N.Attempts, v.N.Tasks, v.N.Repetitions)
+		valid := v.N.Attempts
+		n := fmt.Sprintf("n=%d attempts over %d task(s) × %d rep(s)", valid, v.N.Tasks, v.N.Repetitions)
+		if v.Invalid > 0 {
+			n = fmt.Sprintf("n=%d valid attempts over %d task(s) × %d rep(s); %d invalid excluded", valid, v.N.Tasks, v.N.Repetitions, v.Invalid)
+		}
 		fmt.Fprintf(&b, "## Variant %s\n\n", v.Name)
 		fmt.Fprintf(&b, "- Formula SHA-256: `%s`\n", v.FormulaSHA256)
-		fmt.Fprintf(&b, "- Attempts: %d; completions: %d (%s; %s)\n", v.Attempts, v.Completions, rate(v.Completions, v.Attempts), n)
-		fmt.Fprintf(&b, "- Hidden-acceptance pass: %d (%s; %s)\n", v.HiddenAcceptancePass, rate(v.HiddenAcceptancePass, v.Attempts), n)
+		fmt.Fprintf(&b, "- Attempts: %d; completions: %d (%s; %s)\n", v.Attempts, v.Completions, rate(v.Completions, valid), n)
+		if v.Invalid > 0 {
+			reasons := make([]string, 0, len(v.InvalidReasons))
+			for reason, count := range v.InvalidReasons {
+				reasons = append(reasons, fmt.Sprintf("%s=%d", reason, count))
+			}
+			sort.Strings(reasons)
+			fmt.Fprintf(&b, "- Invalid (excluded from rates and medians): %d (%s)\n", v.Invalid, strings.Join(reasons, ", "))
+		}
+		fmt.Fprintf(&b, "- Hidden-acceptance pass: %d (%s; %s)\n", v.HiddenAcceptancePass, rate(v.HiddenAcceptancePass, valid), n)
 		fmt.Fprintf(&b, "- Required-checks pass: %s\n", requiredChecksLine(v.RequiredChecksPass, v.RequiredChecksN))
 		fmt.Fprintf(&b, "- Scope violations: %d; scope-change: %d; amendments: %d; timeouts: %d; failures: %d (%s)\n", v.ScopeViolations, v.ScopeChanges, v.Amendments, v.Timeouts, v.Failures, n)
-		fmt.Fprintf(&b, "- Elapsed: median %s, p90 %s; harness: median %s, p90 %s (%s)\n", msOrNA(v.ElapsedMedianMS, v.Attempts), msOrNA(v.ElapsedP90MS, v.Attempts), msOrNA(v.HarnessMedianMS, v.Attempts), msOrNA(v.HarnessP90MS, v.Attempts), n)
+		fmt.Fprintf(&b, "- Elapsed: median %s, p90 %s; harness: median %s, p90 %s (%s)\n", msOrNA(v.ElapsedMedianMS, valid), msOrNA(v.ElapsedP90MS, valid), msOrNA(v.HarnessMedianMS, valid), msOrNA(v.HarnessP90MS, valid), n)
 		basis := v.CostBasis
 		if basis == "" {
 			basis = "basis unavailable"
@@ -547,7 +607,7 @@ func renderCohortMarkdown(r CohortReport) string {
 	}
 
 	fmt.Fprintf(&b, "## Per-task outcomes\n\n")
-	fmt.Fprintf(&b, "Each cell shows hidden-acceptance pass / attempts for the task × variant (over %d rep(s)).\n\n", r.Repetitions)
+	fmt.Fprintf(&b, "Each cell shows hidden-acceptance pass / valid attempts for the task × variant (over %d rep(s)).\n\n", r.Repetitions)
 	fmt.Fprintf(&b, "| task |")
 	for _, v := range r.Variants {
 		fmt.Fprintf(&b, " %s |", v.Name)
@@ -560,11 +620,52 @@ func renderCohortMarkdown(r CohortReport) string {
 	for _, to := range r.PerTask {
 		fmt.Fprintf(&b, "| %s |", to.Task)
 		for _, cell := range to.Variants {
-			fmt.Fprintf(&b, " %d/%d (to %d, fail %d) |", cell.HiddenAcceptancePass, cell.Attempts, cell.Timeouts, cell.Failures)
+			invalid := ""
+			if cell.Invalid > 0 {
+				invalid = fmt.Sprintf(", invalid %d", cell.Invalid)
+			}
+			fmt.Fprintf(&b, " %d/%d (to %d, fail %d%s) |", cell.HiddenAcceptancePass, cell.Attempts-cell.Invalid, cell.Timeouts, cell.Failures, invalid)
 		}
 		fmt.Fprintf(&b, "\n")
 	}
 	fmt.Fprintf(&b, "\n")
+	// The attempts carry their failed-check tails only in memory: RunCohort's attempts are
+	// the per-attempt attempt.json records, and report.json omits the tails.
+	if len(r.Attempts) > 0 {
+		fmt.Fprintf(&b, "## Attempts\n\n")
+		for _, ca := range r.Attempts {
+			served := "unavailable"
+			if models := attemptModels(ca.Attempt); len(models) > 0 {
+				served = strings.Join(models, ", ")
+			}
+			fmt.Fprintf(&b, "- %s / %s / rep-%d: %s; served: %s; cost %s; elapsed %d ms\n", ca.Task, ca.Variant, ca.Repetition, attemptOutcome(ca.Attempt), served, costOrUnreported(reportedCost(ca.Attempt)), ca.ElapsedMS)
+			for _, f := range ca.FailedCheckOutput {
+				view := ""
+				if f.Protected {
+					view = " (protected)"
+				}
+				phase := "check"
+				if f.Phase == failedPhaseSetup {
+					phase = "setup"
+				}
+				fmt.Fprintf(&b, "  - failed %s `%s`%s exit %d; last 20 lines of stdout:\n\n", phase, f.ID, view, f.Code)
+				all := tailLines(f.StdoutTail, -1)
+				lines := tailLines(f.StdoutTail, 20)
+				if len(lines) == 0 {
+					fmt.Fprintf(&b, "        (no stdout)\n")
+				}
+				// A tail cut from a longer stream starts mid-line; mark that first line.
+				if f.StdoutTruncated && len(lines) == len(all) && len(lines) > 0 {
+					lines[0] = "…" + lines[0]
+				}
+				for _, line := range lines {
+					fmt.Fprintf(&b, "        %s\n", line)
+				}
+				fmt.Fprintf(&b, "\n")
+			}
+		}
+		fmt.Fprintf(&b, "\n")
+	}
 	for _, note := range r.Notes {
 		fmt.Fprintf(&b, "> %s\n", note)
 	}
@@ -572,6 +673,30 @@ func renderCohortMarkdown(r CohortReport) string {
 }
 
 // saveCohortReport writes report.json atomically and report.md beside it.
+// reportJSONAttempt is a cohort attempt as report.json carries it. Its nil
+// FailedCheckOutput shadows the embedded one, so the stream tails stay only in each
+// attempt's attempt.json and never grow the report a resume must read.
+type reportJSONAttempt struct {
+	CohortAttempt
+	FailedCheckOutput []FailedCheckOutput `json:"failedCheckOutput,omitempty"`
+}
+
+// MarshalJSON writes the report with each attempt's failed-check tails left out.
+func (r CohortReport) MarshalJSON() ([]byte, error) {
+	type plain CohortReport
+	out := struct {
+		plain
+		Attempts []reportJSONAttempt `json:"attempts"`
+	}{plain: plain(r)}
+	if r.Attempts != nil {
+		out.Attempts = make([]reportJSONAttempt, len(r.Attempts))
+		for i, ca := range r.Attempts {
+			out.Attempts[i] = reportJSONAttempt{CohortAttempt: ca}
+		}
+	}
+	return json.Marshal(out)
+}
+
 func saveCohortReport(dir string, r CohortReport) error {
 	raw, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {

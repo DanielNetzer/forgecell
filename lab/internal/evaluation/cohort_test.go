@@ -918,3 +918,258 @@ func TestCohortImbalanceNote(t *testing.T) {
 		t.Fatalf("missing imbalance note: %v", r.Notes)
 	}
 }
+
+// claudeCodeCommand is a claude-code-shaped binding command, the only shape for which
+// harness.AttemptUsage records usage.
+var claudeCodeCommand = []string{"/launcher", "__adapter", "claude-code", "/usr/bin/claude"}
+
+// servedUsage builds harness usage from canned Claude CLI final JSON reporting one served
+// model and an optional total cost, compared against pin.
+func servedUsage(t *testing.T, served, pin string, cost *float64) *harness.Usage {
+	t.Helper()
+	top := map[string]any{"modelUsage": map[string]any{served: map[string]any{"inputTokens": 10, "outputTokens": 5, "canonicalModel": served, "costBasis": "list"}}}
+	if cost != nil {
+		top["total_cost_usd"] = *cost
+	}
+	raw, _ := json.Marshal(top)
+	u := harness.AttemptUsage(claudeCodeCommand, string(raw), pin)
+	if u == nil {
+		t.Fatal("expected usage from the claude-code-shaped command")
+	}
+	return u
+}
+
+// TestModelMismatchMarksAttemptInvalid: a harness attempt served a model other than its
+// pin makes the attempt invalid and never correct; the field is omitted when empty.
+func TestModelMismatchMarksAttemptInvalid(t *testing.T) {
+	a := completedAttempt(nil)
+	a.Correct = true
+	a.Molecule.HarnessAttempts = []molecule.HarnessAttempt{{Model: "claude-opus-4-8", Usage: servedUsage(t, "claude-opus-5-5", "claude-opus-4-8", nil)}}
+	finalizeUsage(&a)
+	if a.Invalid != "model-mismatch" || a.Correct {
+		t.Fatalf("mismatch not invalid: invalid=%q correct=%v", a.Invalid, a.Correct)
+	}
+	if pinned, served, ok := modelMismatch(a); !ok || pinned != "claude-opus-4-8" || served != "claude-opus-5-5" {
+		t.Fatalf("mismatch detail = %q %q %v", pinned, served, ok)
+	}
+	raw, _ := json.Marshal(a)
+	if !strings.Contains(string(raw), `"invalid":"model-mismatch"`) {
+		t.Fatalf("attempt JSON lacks invalid: %s", raw)
+	}
+	valid, _ := json.Marshal(completedAttempt(nil))
+	if strings.Contains(string(valid), `"invalid"`) {
+		t.Fatalf("valid attempt JSON carries invalid: %s", valid)
+	}
+}
+
+// TestAliasPinIsNotMismatch pins the existing pinMismatch behavior: an alias pin that
+// resolves to exactly one model is not a mismatch, so the attempt stays valid.
+func TestAliasPinIsNotMismatch(t *testing.T) {
+	for _, alias := range []string{"opus", "sonnet", "haiku"} {
+		a := completedAttempt(nil)
+		a.Correct = true
+		u := servedUsage(t, "claude-"+alias+"-5-5", alias, nil)
+		if u.ModelMismatch {
+			t.Fatalf("alias %s resolving to one model flagged as a mismatch", alias)
+		}
+		a.Molecule.HarnessAttempts = []molecule.HarnessAttempt{{Model: alias, Usage: u}}
+		finalizeUsage(&a)
+		if a.Invalid != "" || !a.Correct {
+			t.Fatalf("alias %s attempt invalidated: invalid=%q correct=%v", alias, a.Invalid, a.Correct)
+		}
+	}
+}
+
+// TestAttemptCostUSDFromReportedUsage: a harness that reports total_cost_usd yields a
+// matching attempt.json costUsd; with no reported cost it stays null.
+func TestAttemptCostUSDFromReportedUsage(t *testing.T) {
+	dir := t.TempDir()
+	read := func(ca CohortAttempt) map[string]json.RawMessage {
+		t.Helper()
+		path := filepath.Join(dir, "attempt.json")
+		if err := saveAttemptRecord(path, ca); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := os.ReadFile(path)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		return fields
+	}
+	a := completedAttempt(nil)
+	a.Molecule.HarnessAttempts = []molecule.HarnessAttempt{
+		{Model: "claude-opus-5-5", Usage: servedUsage(t, "claude-opus-5-5", "claude-opus-5-5", fp(0.25))},
+		{Model: "claude-opus-5-5", Usage: servedUsage(t, "claude-opus-5-5", "claude-opus-5-5", fp(0.5))},
+	}
+	finalizeUsage(&a)
+	if a.CostUSD == nil || *a.CostUSD != 0.75 || a.Invalid != "" {
+		t.Fatalf("CostUSD = %v invalid=%q, want 0.75", a.CostUSD, a.Invalid)
+	}
+	if got := string(read(CohortAttempt{Attempt: a})["costUsd"]); got != "0.75" {
+		t.Fatalf("attempt.json costUsd = %s, want 0.75", got)
+	}
+	none := completedAttempt(nil)
+	none.Molecule.HarnessAttempts = []molecule.HarnessAttempt{{Model: "claude-opus-5-5", Usage: servedUsage(t, "claude-opus-5-5", "claude-opus-5-5", nil)}, {}}
+	finalizeUsage(&none)
+	if none.CostUSD != nil {
+		t.Fatalf("CostUSD = %v without a reported cost", *none.CostUSD)
+	}
+	if got := string(read(CohortAttempt{Attempt: none})["costUsd"]); got != "null" {
+		t.Fatalf("attempt.json costUsd = %s, want null", got)
+	}
+}
+
+// TestCohortModelMismatchInvalidatesAndStops runs a real cohort whose base variant is
+// served a model other than its pin (injected as Claude CLI usage the custom stub
+// command cannot report). Its first attempt is invalid, excluded from the rates, keeps
+// its cost, and stops the run because the comparison cannot be made.
+func TestCohortModelMismatchInvalidatesAndStops(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 2, 2, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	original := runCohortMolecule
+	t.Cleanup(func() { runCohortMolecule = original })
+	runCohortMolecule = func(ctx context.Context, opts molecule.Options) (molecule.Record, error) {
+		r, err := original(ctx, opts)
+		if strings.Contains(opts.LabDir, string(filepath.Separator)+"base"+string(filepath.Separator)) {
+			for i := range r.HarnessAttempts {
+				r.HarnessAttempts[i].Model = "claude-opus-4-8"
+				r.HarnessAttempts[i].Usage = servedUsage(t, "claude-opus-5-5", "claude-opus-4-8", fp(0.5))
+			}
+		}
+		return r, err
+	}
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "variant base was not served its pinned model (claude-opus-4-8 → claude-opus-5-5)"
+	if r.Status != "stopped" || r.Stopped != want || len(r.Attempts) != 1 {
+		t.Fatalf("status=%s stopped=%q attempts=%d", r.Status, r.Stopped, len(r.Attempts))
+	}
+	a := r.Attempts[0]
+	if a.Variant != "base" || a.Invalid != "model-mismatch" || a.Correct || !completed(a.Attempt) {
+		t.Fatalf("first attempt not invalid: variant=%s invalid=%q correct=%v", a.Variant, a.Invalid, a.Correct)
+	}
+	var base VariantSummary
+	for _, v := range r.Variants {
+		if v.Name == "base" {
+			base = v
+		}
+	}
+	if base.Attempts != 1 || base.Invalid != 1 || base.InvalidReasons["model-mismatch"] != 1 || base.Completions != 0 || base.HiddenAcceptancePass != 0 || base.N.Attempts != 0 || base.CostPerAcceptedUSD != nil {
+		t.Fatalf("invalid attempt not excluded from rates: %+v", base)
+	}
+	if base.ReportedCostUSD == nil || *base.ReportedCostUSD != 0.5 || base.CostCoverage != "1 of 1" {
+		t.Fatalf("invalid attempt's spent cost dropped: %+v", base)
+	}
+	notes := 0
+	for _, n := range r.Notes {
+		if n == "1 attempt(s) excluded as invalid; see each attempt's invalid field." {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("invalid note count = %d: %v", notes, r.Notes)
+	}
+	raw, err := os.ReadFile(filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1", "attempt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	json.Unmarshal(raw, &fields)
+	if string(fields["invalid"]) != `"model-mismatch"` || string(fields["costUsd"]) != "0.5" {
+		t.Fatalf("attempt.json invalid=%s costUsd=%s", fields["invalid"], fields["costUsd"])
+	}
+	md, _ := os.ReadFile(filepath.Join(o.Output, "report.md"))
+	for _, s := range []string{"Stopped early: " + want, "task-a / base / rep-1: invalid:model-mismatch; served: claude-opus-5-5; cost $0.500000"} {
+		if !strings.Contains(string(md), s) {
+			t.Fatalf("report.md missing %q:\n%s", s, md)
+		}
+	}
+}
+
+// TestCohortLaterModelMismatchDoesNotStop: only a variant's first attempt stops the run;
+// a mismatch on a later attempt is recorded as invalid and the cohort completes.
+func TestCohortLaterModelMismatchDoesNotStop(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 2, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	original := runCohortMolecule
+	t.Cleanup(func() { runCohortMolecule = original })
+	later := string(filepath.Separator) + filepath.Join("base", "rep-2") + string(filepath.Separator)
+	runCohortMolecule = func(ctx context.Context, opts molecule.Options) (molecule.Record, error) {
+		r, err := original(ctx, opts)
+		if strings.Contains(opts.LabDir, later) {
+			for i := range r.HarnessAttempts {
+				r.HarnessAttempts[i].Model = "claude-opus-4-8"
+				r.HarnessAttempts[i].Usage = servedUsage(t, "claude-opus-5-5", "claude-opus-4-8", nil)
+			}
+		}
+		return r, err
+	}
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "complete" || r.Stopped != "" || len(r.Attempts) != 4 {
+		t.Fatalf("status=%s stopped=%q attempts=%d", r.Status, r.Stopped, len(r.Attempts))
+	}
+	for _, a := range r.Attempts {
+		if invalid := a.Variant == "base" && a.Repetition == 2; (a.Invalid == "model-mismatch") != invalid {
+			t.Fatalf("%s rep-%d invalid=%q", a.Variant, a.Repetition, a.Invalid)
+		}
+	}
+}
+
+// wrongValueHarness completes with a change the acceptance check rejects.
+const wrongValueHarness = "#!/bin/sh\ncat >/dev/null\nprintf wrong > value.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+
+// TestCohortAttemptRecordKeepsFailedCheckOutputAfterCleanup: the failed check's entry is
+// read from the verification history before cleanup deletes the Lab, survives in
+// attempt.json, and is left out of report.json.
+func TestCohortAttemptRecordKeepsFailedCheckOutputAfterCleanup(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: wrongValueHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptDir := filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1")
+	if _, e := os.Stat(filepath.Join(attemptDir, "lab")); !os.IsNotExist(e) {
+		t.Fatalf("lab tree not deleted: %v", e)
+	}
+	raw, err := os.ReadFile(filepath.Join(attemptDir, "attempt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ca CohortAttempt
+	if err := json.Unmarshal(raw, &ca); err != nil {
+		t.Fatal(err)
+	}
+	if ca.Correct || len(ca.FailedCheckOutput) == 0 {
+		t.Fatalf("attempt.json lost the failed check: correct=%v %+v", ca.Correct, ca.FailedCheckOutput)
+	}
+	found := false
+	for _, f := range ca.FailedCheckOutput {
+		if f.ID == "acceptance" && f.Phase == "check" && !f.Protected && f.Code != 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no failed acceptance entry: %+v", ca.FailedCheckOutput)
+	}
+	if r.Attempts[0].FailedCheckOutput == nil {
+		t.Fatal("in-memory report attempt lost its failed-check output")
+	}
+	report, err := os.ReadFile(filepath.Join(o.Output, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(report), "failedCheckOutput") {
+		t.Fatal("report.json carries failed-check output")
+	}
+	md, _ := os.ReadFile(filepath.Join(o.Output, "report.md"))
+	if !strings.Contains(string(md), "  - failed check `acceptance` exit ") {
+		t.Fatalf("report.md missing the failed check:\n%s", md)
+	}
+}
