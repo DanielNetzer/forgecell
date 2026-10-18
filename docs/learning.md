@@ -319,6 +319,26 @@ total only by the accepted attempts among the cost-reporting ones, and always pr
 `N of M` coverage. A per-task × variant table lists the outcomes. **Counts and rates only,
 with no significance claims**, and every rate states its n (tasks and repetitions).
 
+An attempt whose harness was served a model other than its pin (`usage.modelMismatch`)
+is recorded with `invalid: "model-mismatch"` and is never correct. Invalid attempts stay in
+the variant's attempt count, reported cost and cost coverage, because the money was spent,
+but are excluded from completions, passes, failures, timeouts, scope and amendment counts,
+required checks, every median and p90 and the cost per accepted outcome; each variant
+reports `invalid` and `invalidReasons`, and the report adds one note naming how many were
+excluded. When a variant's first attempt is invalid this way the run stops (`variant
+<name> was not served its pinned model (<pinned> → <served>)`), because the comparison
+cannot be made; a mismatch on a later attempt is recorded and the run continues. Each
+`attempt.json` records `costUsd` from the reported usage (`null` when nothing reported a
+cost), and, before the Lab is deleted, `failedCheckOutput`: for every failed Molecule
+setup command (`phase: setup`) and check (`phase: check`), in the candidate view and its
+protected run, the ID, exit code and the last 8 KiB of stdout and stderr, copied from the
+verification history (already scrubbed of environment secret values) and passed through
+the pattern-based credential redaction. The tails stay out of `report.json`, which a
+resume must read. `report.md` has an `## Attempts` section: one line per task, variant and
+repetition giving the outcome (`accepted`, `failed`, `incomplete` or `invalid:<reason>`),
+the served models, the cost and the elapsed time, followed by the last 20 stdout lines of
+each failed command (a leading `…` marks a first line cut from a longer stream).
+
 An existing `<out>` whose recorded activation digest matches resumes and skips attempts
 already recorded (a directory with a complete attempt record counts as done); a
 mismatched digest is refused so a different cohort can never overwrite retained

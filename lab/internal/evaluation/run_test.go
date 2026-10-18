@@ -75,8 +75,16 @@ func TestPairUsesMatchingBaseAndRetainsIndependentResults(t *testing.T) {
 			t.Fatalf("missing exact activation: %+v %v", active, e)
 		}
 
-		if !a.Correct || a.CostUSD != nil || a.Retries != nil || a.Tree == "" || a.Molecule.Workspace.BaseCommit != report.BaseCommit {
+		if !a.Correct || a.Retries != nil || a.Tree == "" || a.Molecule.Workspace.BaseCommit != report.BaseCommit {
 			t.Fatalf("%+v", a)
+		}
+		// CostUSD is the reported harness cost; a custom command reports none, so it stays
+		// null rather than reading zero.
+		if want := reportedCost(a); (a.CostUSD == nil) != (want == nil) || (want != nil && *a.CostUSD != *want) {
+			t.Fatalf("CostUSD = %v, want %v", a.CostUSD, want)
+		}
+		if a.CostUSD != nil {
+			t.Fatalf("custom command reported a cost: %v", *a.CostUSD)
 		}
 	}
 	if report.Attempts[0].Molecule.Workspace.Path == report.Attempts[1].Molecule.Workspace.Path {

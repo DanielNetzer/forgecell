@@ -76,9 +76,18 @@ type Attempt struct {
 	// still saved, with an empty or partial changes.diff. CleanupError records a failure
 	// to reclaim the attempt's Lab or workspace trees after its evidence was saved. Both
 	// are empty for single-task runs, which neither capture a diff nor delete trees.
-	ChangesError  string   `json:"changesError,omitempty"`
-	CleanupError  string   `json:"cleanupError,omitempty"`
-	Error         string   `json:"error,omitempty"`
+	ChangesError string `json:"changesError,omitempty"`
+	CleanupError string `json:"cleanupError,omitempty"`
+	Error        string `json:"error,omitempty"`
+	// Invalid names why the attempt cannot count toward a comparison (for example
+	// "model-mismatch" when the harness was not served its pinned model). An invalid
+	// attempt is never correct and is excluded from every cohort rate and median.
+	Invalid string `json:"invalid,omitempty"`
+	// FailedCheckOutput keeps the stream tails of failed Molecule checks, read from the
+	// verification history before a cohort deletes the attempt's Lab.
+	FailedCheckOutput []FailedCheckOutput `json:"failedCheckOutput,omitempty"`
+	// CostUSD is the reported harness cost (#149 usage), nil when no harness attempt
+	// reported one.
 	CostUSD       *float64 `json:"costUsd"`
 	Retries       *int     `json:"observedHarnessRetries"`
 	Interventions int      `json:"humanInterventions"`
@@ -105,12 +114,15 @@ var commitPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
 func relative(s string, allowDot bool) bool {
 	return s != "" && !filepath.IsAbs(s) && !strings.ContainsAny(s, "\x00\\") && filepath.Clean(s) == s && (allowDot || s != ".") && s != ".." && !strings.HasPrefix(s, "../")
 }
-func bounded(file string) ([]byte, error) {
+func bounded(file string) ([]byte, error) { return boundedTo(file, 2_000_000) }
+
+// boundedTo reads a regular file of at most limit bytes.
+func boundedTo(file string, limit int64) ([]byte, error) {
 	st, err := os.Lstat(file)
 	if err != nil {
 		return nil, err
 	}
-	if !st.Mode().IsRegular() || st.Size() > 2_000_000 {
+	if !st.Mode().IsRegular() || st.Size() > limit {
 		return nil, fmt.Errorf("input must be a bounded regular file: %s", file)
 	}
 	return os.ReadFile(file)
@@ -456,6 +468,7 @@ func Run(ctx context.Context, o RunOptions) (report Report, err error) {
 			}
 		}
 
+		a.CostUSD = reportedCost(a)
 		a.ElapsedMS = time.Since(started).Milliseconds()
 		report.Attempts = append(report.Attempts, a)
 		if err = saveReport(o.Output, report); err != nil {

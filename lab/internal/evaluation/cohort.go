@@ -425,6 +425,8 @@ loop:
 					a.ChangesDiffSHA256 = sha
 					a.ChangesTruncated = truncated
 					a.ChangesError = changesErr
+					// Keep failed-check stream tails before cleanup deletes the history files.
+					a.FailedCheckOutput = failedCheckOutput(a.Molecule)
 					ca := CohortAttempt{Task: lt.task.Name, Variant: vname, Repetition: rep, Attempt: a}
 					// The record, verification observations and captured diff are saved; by
 					// default reclaim the attempt's Lab, workspace and per-attempt source
@@ -447,6 +449,10 @@ loop:
 				}
 				if ctx.Err() != nil {
 					return abort(ctx.Err())
+				}
+				if s := firstAttemptInvalid(attempts[len(attempts)-1], attempts); s != "" {
+					stopped = s
+					break loop
 				}
 				if s := cohortStop(c.Stop, attempts); s != "" {
 					stopped = s
@@ -700,11 +706,16 @@ func prepareCohortOutput(output, digest string, raw []byte, c CohortFile, varian
 	return false, nil
 }
 
+// maxAttemptRecordBytes bounds attempt.json on resume. It is above the general input
+// bound because the record carries failed-check tails (up to 8 KiB per stream, per
+// command, per view, before JSON escaping), and a record that fails to load is re-run.
+const maxAttemptRecordBytes = 8_000_000
+
 // loadAttemptRecord reads a recorded attempt; the second return is whether it is a
 // complete record for exactly this coordinate. An incomplete, invalid or foreign record
 // is treated as not done, so the attempt is re-run from a clean directory.
 func loadAttemptRecord(path, task, variant string, rep int) (CohortAttempt, bool) {
-	raw, err := bounded(path)
+	raw, err := boundedTo(path, maxAttemptRecordBytes)
 	if err != nil {
 		return CohortAttempt{}, false
 	}
@@ -896,10 +907,10 @@ func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string
 	configureReadiness(&runOptions, p, planBytes, acceptBytes)
 
 	var err error
-	a.Molecule, err = molecule.Run(ctx, runOptions)
+	a.Molecule, err = runCohortMolecule(ctx, runOptions)
 	if err == nil && a.Molecule.Readiness != nil {
 		runOptions.Approve = a.Molecule.Readiness.Plans[0].Digest
-		a.Molecule, err = molecule.Run(ctx, runOptions)
+		a.Molecule, err = runCohortMolecule(ctx, runOptions)
 	}
 	if err != nil {
 		a.Error = err.Error()
@@ -931,6 +942,63 @@ func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string
 	// Grade the required (non-acceptance) plan checks once, with the plan in hand, and
 	// persist the tri-state so a resumed report never needs the plan to aggregate it.
 	a.RequiredChecks = requiredChecksTriState(p, a)
+	finalizeUsage(&a)
 	a.ElapsedMS = time.Since(started).Milliseconds()
 	return a, nil
+}
+
+// finalizeUsage applies the harness usage the Molecule recorded to the attempt: a model
+// mismatch makes it invalid, and the reported cost (nil when none) becomes CostUSD.
+func finalizeUsage(a *Attempt) {
+	markInvalid(a)
+	a.CostUSD = reportedCost(*a)
+}
+
+// runCohortMolecule runs one cohort attempt's Molecule. It is a variable only so tests
+// can inject harness usage a custom stub command can never report.
+var runCohortMolecule = molecule.Run
+
+// invalidModelMismatch marks an attempt whose harness was not served its pinned model.
+const invalidModelMismatch = "model-mismatch"
+
+// markInvalid marks an attempt invalid when any harness attempt was served a model other
+// than its pin. An invalid attempt is never correct, so it cannot be read as a pass.
+func markInvalid(a *Attempt) {
+	if _, _, ok := modelMismatch(*a); ok {
+		a.Invalid = invalidModelMismatch
+		a.Correct = false
+	}
+}
+
+// modelMismatch returns the pin and the served models of the first harness attempt whose
+// usage reports a model mismatch.
+func modelMismatch(a Attempt) (pinned, served string, ok bool) {
+	for _, h := range a.Molecule.HarnessAttempts {
+		if h.Usage != nil && h.Usage.ModelMismatch {
+			served = strings.Join(h.Usage.EffectiveModels, ", ")
+			if served == "" {
+				served = "unavailable"
+			}
+			return h.Model, served, true
+		}
+	}
+	return "", "", false
+}
+
+// firstAttemptInvalid returns the stop reason when ca is its variant's first attempt and
+// was not served its pinned model: the comparison cannot be made.
+func firstAttemptInvalid(ca CohortAttempt, attempts []CohortAttempt) string {
+	if ca.Invalid != invalidModelMismatch {
+		return ""
+	}
+	for _, a := range attempts {
+		if a.Variant == ca.Variant {
+			if a.Task != ca.Task || a.Repetition != ca.Repetition {
+				return ""
+			}
+			break
+		}
+	}
+	pinned, served, _ := modelMismatch(ca.Attempt)
+	return fmt.Sprintf("variant %s was not served its pinned model (%s → %s)", ca.Variant, pinned, served)
 }
