@@ -884,3 +884,22 @@ func TestChecksPersistsNonpassingEvidenceWithoutSideEffects(t *testing.T) {
 		})
 	}
 }
+
+// TestEvaluateCohortParallelRange: --parallel outside 1 to 4 is refused before anything is
+// read, created or executed.
+func TestEvaluateCohortParallelRange(t *testing.T) {
+	for _, n := range []string{"0", "5", "-1"} {
+		output := filepath.Join(t.TempDir(), "results")
+		var out, stderr bytes.Buffer
+		args := []string{"evaluate", "--cohort", filepath.Join(t.TempDir(), "cohort.json"), "--out", output, "--parallel", n}
+		if code := Run(context.Background(), args, strings.NewReader(""), &out, &stderr, "test"); code != 1 || out.Len() != 0 {
+			t.Fatalf("--parallel %s accepted: code=%d output=%s", n, code, &out)
+		}
+		if !strings.Contains(stderr.String(), "--parallel must be 1 to 4, got "+n) {
+			t.Fatalf("--parallel %s refusal unclear: %s", n, &stderr)
+		}
+		if _, err := os.Stat(output); !os.IsNotExist(err) {
+			t.Fatalf("--parallel %s created the output: %v", n, err)
+		}
+	}
+}
