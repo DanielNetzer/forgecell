@@ -3,9 +3,12 @@ package evaluation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1192,5 +1195,584 @@ func TestCohortAttemptRecordKeepsFailedCheckOutputAfterCleanup(t *testing.T) {
 	md, _ := os.ReadFile(filepath.Join(o.Output, "report.md"))
 	if !strings.Contains(string(md), "  - failed check `acceptance` exit ") {
 		t.Fatalf("report.md missing the failed check:\n%s", md)
+	}
+}
+
+// normalizedCohortReport reads report.json and clears what legitimately differs between
+// two runs of the same cohort: timestamps, durations, the output-bound digest, the
+// parallel note and the per-attempt records (reduced to their outcome).
+func normalizedCohortReport(t *testing.T, output string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(output, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r CohortReport
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatal(err)
+	}
+	r.ActivationDigest, r.StartedAt, r.FinishedAt = "", "", ""
+	for i := range r.Variants {
+		v := &r.Variants[i]
+		v.ElapsedMedianMS, v.ElapsedP90MS, v.HarnessMedianMS, v.HarnessP90MS = 0, 0, 0, 0
+	}
+	notes := []string{}
+	for _, n := range r.Notes {
+		if !strings.HasPrefix(n, "Attempts ran up to ") {
+			notes = append(notes, n)
+		}
+	}
+	r.Notes = notes
+	type outcome struct {
+		Task, Variant, Error, Invalid, ChangesDiffSHA256 string
+		Repetition                                       int
+		Correct, ScopeOK                                 bool
+		ChangedFiles                                     []string
+	}
+	var outcomes []outcome
+	for _, a := range r.Attempts {
+		outcomes = append(outcomes, outcome{a.Task, a.Variant, a.Error, a.Invalid, a.ChangesDiffSHA256, a.Repetition, a.Correct, a.ScopeOK, a.ChangedFiles})
+	}
+	r.Attempts = nil
+	out, _ := json.Marshal([]any{r, outcomes})
+	return string(out)
+}
+
+// markerHarness substitutes the marker directory into a stub harness body. The path is
+// written into the script itself, so it does not depend on the harness environment.
+func markerHarness(body, dir string) string {
+	return strings.ReplaceAll(body, "MARKERS", dir)
+}
+
+// lastBaseHarness completes like completedHarness, but the first coordinate's attempt
+// (task-a/base/rep-1) first waits, bounded, until the later task-a/cand/rep-1 attempt's
+// record is saved, so it finishes last; a timeout fails it. MARKERS/sequential skips the
+// wait, and MARKERS/waited records that it happened.
+const lastBaseHarness = `#!/bin/sh
+cat >/dev/null
+here=$(pwd -P)
+case "$here" in
+*/attempts/task-a/base/rep-1/*)
+  if [ ! -f "MARKERS/sequential" ]; then
+    rec="${here%%/attempts/task-a/base/rep-1/*}/attempts/task-a/cand/rep-1/attempt.json"
+    i=0
+    while [ ! -f "$rec" ] && [ $i -lt 900 ]; do sleep 0.1; i=$((i+1)); done
+    [ -f "$rec" ] || exit 9
+    : > "MARKERS/waited"
+  fi;;
+esac
+printf changed > value.txt
+printf '%s' '{"schemaVersion":"v1","outcome":"completed","reason":"done","paths":[]}'
+`
+
+// TestCohortParallelMatchesSequentialReport: with --parallel 2 every attempt is recorded,
+// and even though the first coordinate finishes last, report.json lists the attempts in
+// coordinate order and equals the sequential report apart from timestamps, durations, the
+// output-bound digest and the parallel note.
+func TestCohortParallelMatchesSequentialReport(t *testing.T) {
+	markers := t.TempDir()
+	o := cohortFixture(t, []variantSpec{{name: "base", body: markerHarness(lastBaseHarness, markers), timeoutMS: 120000}, {name: "cand", body: completedHarness}}, 2, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	if err := os.WriteFile(filepath.Join(markers, "sequential"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunCohort(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(markers, "sequential")); err != nil {
+		t.Fatal(err)
+	}
+	p := o
+	p.Output = filepath.Join(filepath.Dir(o.Output), "results-parallel")
+	approveCohort(t, &p)
+	p.Parallel = 2
+	r, err := RunCohort(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "complete" || len(r.Attempts) != 4 {
+		t.Fatalf("status=%s attempts=%d", r.Status, len(r.Attempts))
+	}
+	if _, err := os.Stat(filepath.Join(markers, "waited")); err != nil {
+		t.Fatalf("task-a/base did not wait for task-a/cand to finish first: %v", err)
+	}
+	var onDisk struct {
+		Attempts []struct {
+			Task       string `json:"task"`
+			Variant    string `json:"variant"`
+			Repetition int    `json:"repetition"`
+		} `json:"attempts"`
+	}
+	raw, err := os.ReadFile(filepath.Join(p.Output, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &onDisk); err != nil || len(onDisk.Attempts) != 4 {
+		t.Fatalf("report.json attempts: %v %d", err, len(onDisk.Attempts))
+	}
+	order := [][2]string{{"task-a", "base"}, {"task-a", "cand"}, {"task-b", "base"}, {"task-b", "cand"}}
+	for i, want := range order {
+		if a := r.Attempts[i]; a.Task != want[0] || a.Variant != want[1] || a.Repetition != 1 {
+			t.Fatalf("attempt %d = %s/%s/rep-%d", i, a.Task, a.Variant, a.Repetition)
+		}
+		if a := onDisk.Attempts[i]; a.Task != want[0] || a.Variant != want[1] || a.Repetition != 1 {
+			t.Fatalf("report.json attempt %d = %s/%s/rep-%d", i, a.Task, a.Variant, a.Repetition)
+		}
+	}
+	for _, v := range r.Variants {
+		if v.Attempts != 2 || v.HiddenAcceptancePass != 2 {
+			t.Fatalf("variant %s: %+v", v.Name, v)
+		}
+	}
+	note := "Attempts ran up to 2 at a time; elapsed and harness durations include contention from concurrent attempts."
+	found := 0
+	for _, n := range r.Notes {
+		if n == note {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("parallel note count = %d: %v", found, r.Notes)
+	}
+	seq, par := normalizedCohortReport(t, o.Output), normalizedCohortReport(t, p.Output)
+	if seq != par {
+		t.Fatalf("parallel report differs from sequential:\nsequential %s\nparallel   %s", seq, par)
+	}
+	if strings.Contains(seq, "Attempts ran up to") {
+		t.Fatal("sequential report carries the parallel note")
+	}
+}
+
+// overlapHarness records its start under MARKERS, waits (bounded) until a second attempt
+// has also started, records the starts and ends it saw, then completes.
+const overlapHarness = "#!/bin/sh\ncat >/dev/null\nd=\"MARKERS\"\n: > \"$d/start-$$\"\ni=0\nwhile [ \"$(ls \"$d\" | grep -c '^start-')\" -lt 2 ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done\nseen=$(ls \"$d\")\nprintf '%s\\n' \"$seen\" > \"$d/seen-$$\"\n: > \"$d/end-$$\"\nprintf changed > value.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+
+// TestCohortParallelAttemptsOverlap: with --parallel 2 two attempts' harnesses really run at
+// the same time: one saw both starts and no end before it ended.
+func TestCohortParallelAttemptsOverlap(t *testing.T) {
+	markers := t.TempDir()
+	body := markerHarness(overlapHarness, markers)
+	o := cohortFixture(t, []variantSpec{{name: "base", body: body}, {name: "cand", body: body}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	o.Parallel = 2
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "complete" || len(r.Attempts) != 2 {
+		t.Fatalf("status=%s attempts=%d", r.Status, len(r.Attempts))
+	}
+	seen, _ := filepath.Glob(filepath.Join(markers, "seen-*"))
+	overlap := false
+	for _, s := range seen {
+		raw, err := os.ReadFile(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		starts, ends := strings.Count(string(raw), "start-"), strings.Count(string(raw), "end-")
+		if starts >= 2 && ends == 0 {
+			overlap = true
+		}
+	}
+	if !overlap {
+		t.Fatalf("no two attempts overlapped; %d harness run(s) recorded", len(seen))
+	}
+}
+
+// TestCohortParallelStopsOnMaxAttempts: with maxAttempts 2 and --parallel 2, the two
+// in-flight attempts finish and are recorded, no third coordinate starts, and the report
+// is stopped with the maxAttempts reason.
+func TestCohortParallelStopsOnMaxAttempts(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 2, 1, "hiddenAcceptancePassRate", &CohortStop{MaxAttempts: ip(2)})
+	approveCohort(t, &o)
+	o.Parallel = 2
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "stopped" || len(r.Attempts) != 2 || !strings.Contains(r.Stopped, "maxAttempts") {
+		t.Fatalf("status=%s attempts=%d stopped=%q", r.Status, len(r.Attempts), r.Stopped)
+	}
+	for i, v := range []string{"base", "cand"} {
+		if a := r.Attempts[i]; a.Task != "task-a" || a.Variant != v {
+			t.Fatalf("attempt %d = %s/%s", i, a.Task, a.Variant)
+		}
+	}
+	if _, e := os.Stat(filepath.Join(o.Output, "attempts", "task-b")); !os.IsNotExist(e) {
+		t.Fatalf("a third coordinate started: %v", e)
+	}
+}
+
+// releaseHarness sleeps (so cancellation discards it) until MARKERS/release exists, then
+// completes; it drives a mid-run cancel and a clean resume.
+const releaseHarness = "#!/bin/sh\ncat >/dev/null\nif [ -f \"MARKERS/release\" ]; then printf changed > value.txt; printf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'; else sleep 60; fi\n"
+
+// TestCohortParallelCancelDiscardsInFlight: a cancellation with --parallel 2 discards the
+// in-flight attempts (no attempt.json), keeps the attempt that finished, and resume (with a
+// different Parallel) re-runs only the coordinates without a record.
+func TestCohortParallelCancelDiscardsInFlight(t *testing.T) {
+	markers := t.TempDir()
+	release := filepath.Join(markers, "release")
+	o := cohortFixture(t, []variantSpec{{name: "base", body: markerHarness(releaseHarness, markers), timeoutMS: 120000}, {name: "cand", body: completedHarness}}, 2, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	o.Parallel = 2
+	record := func(task, variant string) string {
+		return filepath.Join(o.Output, "attempts", task, variant, "rep-1", "attempt.json")
+	}
+	// task-a/base sleeps while task-a/cand completes; cancel once that record is saved,
+	// when task-a/base (and task-b/base, started in the freed slot) are in flight.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recorded := make(chan struct{})
+	go func() {
+		defer cancel()
+		for deadline := time.Now().Add(90 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := os.Stat(record("task-a", "cand")); err == nil {
+				close(recorded)
+				return
+			}
+		}
+	}()
+	r1, err := RunCohort(ctx, o)
+	select {
+	case <-recorded:
+	default:
+		t.Fatalf("task-a/cand was never recorded before the first run ended: %v", err)
+	}
+	if err == nil || r1.Status != "aborted" {
+		t.Fatalf("first run err=%v status=%q, want a cancellation and aborted", err, r1.Status)
+	}
+	for _, c := range [][2]string{{"task-a", "base"}, {"task-b", "base"}, {"task-b", "cand"}} {
+		if _, e := os.Stat(record(c[0], c[1])); !os.IsNotExist(e) {
+			t.Fatalf("%s/%s was persisted: %v", c[0], c[1], e)
+		}
+	}
+	kept, done := loadAttemptRecord(record("task-a", "cand"), "task-a", "cand", 1)
+	if !done {
+		t.Fatal("finished task-a/cand attempt was not kept")
+	}
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Parallel is not part of the activation digest, so resuming with another value is
+	// accepted under the same approval.
+	o.Parallel = 1
+	r2, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if r2.Status != "complete" || len(r2.Attempts) != 4 {
+		t.Fatalf("resume status=%s attempts=%d", r2.Status, len(r2.Attempts))
+	}
+	for _, a := range r2.Attempts {
+		if a.Task == "task-a" && a.Variant == "cand" {
+			if a.StartedAt != kept.StartedAt {
+				t.Fatal("resume re-ran the recorded task-a/cand attempt")
+			}
+		} else if a.StartedAt == kept.StartedAt || !a.Correct {
+			t.Fatalf("discarded %s/%s was not re-run cleanly: %+v", a.Task, a.Variant, a.Attempt.Error)
+		}
+	}
+	// The kept attempt ran two at a time; its record says so and the resumed report keeps
+	// the contention note although the resume ran one at a time.
+	raw, err := os.ReadFile(record("task-a", "cand"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || string(fields["parallel"]) != "2" {
+		t.Fatalf("kept attempt.json parallel = %s (%v)", fields["parallel"], err)
+	}
+	raw, err = os.ReadFile(record("task-a", "base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields = nil
+	if err := json.Unmarshal(raw, &fields); err != nil || fields["parallel"] != nil {
+		t.Fatalf("sequential attempt.json parallel = %s (%v)", fields["parallel"], err)
+	}
+	note := "Attempts ran up to 2 at a time; elapsed and harness durations include contention from concurrent attempts."
+	if !slices.Contains(r2.Notes, note) {
+		t.Fatalf("resumed report lost the contention note: %v", r2.Notes)
+	}
+}
+
+// TestCohortParallelResumeWithGapsKeepsMaxAttempts: maxAttempts counts recorded
+// coordinates before any start, so a resume whose earlier run recorded task-a/cand and
+// task-b/base but not task-a/base re-runs task-a/base, loads task-a/cand, and then stops at
+// exactly two attempts instead of loading task-b/base as a third.
+func TestCohortParallelResumeWithGapsKeepsMaxAttempts(t *testing.T) {
+	markers := t.TempDir()
+	runs := filepath.Join(markers, "runs")
+	counting := "#!/bin/sh\ncat >/dev/null\necho run >> \"" + runs + "\"\nprintf changed > value.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+	o := cohortFixture(t, []variantSpec{{name: "base", body: counting}, {name: "cand", body: counting}}, 2, 1, "hiddenAcceptancePassRate", &CohortStop{MaxAttempts: ip(2)})
+	approveCohort(t, &o)
+	o.Parallel = 2
+	record := func(task, variant string) string {
+		return filepath.Join(o.Output, "attempts", task, variant, "rep-1", "attempt.json")
+	}
+	// The first run records task-a/base and task-a/cand. Turn that into the gap: task-b/base
+	// gets a record (task-a/base's, re-addressed) and task-a/base loses its own.
+	if r, err := RunCohort(context.Background(), o); err != nil || r.Status != "stopped" {
+		t.Fatalf("first run: status=%s err=%v", r.Status, err)
+	}
+	ca, done := loadAttemptRecord(record("task-a", "base"), "task-a", "base", 1)
+	if !done {
+		t.Fatal("first run did not record task-a/base")
+	}
+	ca.Task = "task-b"
+	if err := os.MkdirAll(filepath.Dir(record("task-b", "base")), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAttemptRecord(record("task-b", "base"), ca); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(record("task-a", "base")); err != nil {
+		t.Fatal(err)
+	}
+	// The first run's two attempts give the harness runs per attempt.
+	firstRuns, err := os.ReadFile(runs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(runs); err != nil {
+		t.Fatal(err)
+	}
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "stopped" || len(r.Attempts) != 2 || !strings.Contains(r.Stopped, "maxAttempts") {
+		t.Fatalf("status=%s attempts=%d stopped=%q", r.Status, len(r.Attempts), r.Stopped)
+	}
+	for i, v := range []string{"base", "cand"} {
+		if a := r.Attempts[i]; a.Task != "task-a" || a.Variant != v {
+			t.Fatalf("attempt %d = %s/%s", i, a.Task, a.Variant)
+		}
+	}
+	resumeRuns, _ := os.ReadFile(runs)
+	if n := strings.Count(string(firstRuns), "run"); n == 0 || 2*strings.Count(string(resumeRuns), "run") != n {
+		t.Fatalf("resume ran %d harness(es) against %d for two attempts; want only task-a/base", strings.Count(string(resumeRuns), "run"), n)
+	}
+	if _, e := os.Stat(filepath.Join(o.Output, "attempts", "task-b", "cand")); !os.IsNotExist(e) {
+		t.Fatalf("task-b/cand started: %v", e)
+	}
+}
+
+// TestCohortParallelCancelDuringChangesCaptureDiscards: a cancellation that lands while
+// the diff is captured, after the attempt itself returned, still discards the attempt: no
+// attempt.json is saved and the run reports the cancellation.
+func TestCohortParallelCancelDuringChangesCaptureDiscards(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	o.Parallel = 2
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	original := writeCohortAttemptChanges
+	t.Cleanup(func() { writeCohortAttemptChanges = original })
+	writeCohortAttemptChanges = func(c context.Context, attemptDir, source, base, tree string, changed []string) (string, bool, string) {
+		sha, truncated, changesErr := original(c, attemptDir, source, base, tree, changed)
+		cancel()
+		return sha, truncated, changesErr
+	}
+	r, err := RunCohort(ctx, o)
+	if err == nil || r.Status != "aborted" {
+		t.Fatalf("err=%v status=%q, want a cancellation and aborted", err, r.Status)
+	}
+	for _, v := range []string{"base", "cand"} {
+		if _, e := os.Stat(filepath.Join(o.Output, "attempts", "task-a", v, "rep-1", "attempt.json")); !os.IsNotExist(e) {
+			t.Fatalf("task-a/%s was saved after a cancellation during the changes capture: %v", v, e)
+		}
+	}
+	if len(r.Attempts) != 0 {
+		t.Fatalf("report recorded %d cancelled attempt(s)", len(r.Attempts))
+	}
+}
+
+// TestCohortParallelReportSaveFailureCancelsInFlight: when saving the report fails while
+// the start loop completes a recorded coordinate, the in-flight attempt is cancelled at
+// once and discarded, and the run returns the save error promptly.
+func TestCohortParallelReportSaveFailureCancelsInFlight(t *testing.T) {
+	markers := t.TempDir()
+	o := cohortFixture(t, []variantSpec{{name: "base", body: markerHarness(releaseHarness, markers), timeoutMS: 120000}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	o.Parallel = 2
+	// Record both attempts, then drop task-a/base so the resume re-runs it (sleeping) while
+	// the start loop loads task-a/cand.
+	if err := os.WriteFile(filepath.Join(markers, "release"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunCohort(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	baseRecord := filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1", "attempt.json")
+	if err := os.Remove(baseRecord); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(markers, "release")); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected report save failure")
+	original := writeCohortReport
+	t.Cleanup(func() { writeCohortReport = original })
+	writeCohortReport = func(dir string, r CohortReport) error {
+		if len(r.Attempts) > 0 {
+			return injected
+		}
+		return original(dir, r)
+	}
+	started := time.Now()
+	_, err := RunCohort(context.Background(), o)
+	if !errors.Is(err, injected) {
+		t.Fatalf("err=%v, want the injected save failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 30*time.Second {
+		t.Fatalf("the in-flight attempt was not cancelled: the run took %s", elapsed)
+	}
+	if _, e := os.Stat(baseRecord); !os.IsNotExist(e) {
+		t.Fatalf("the in-flight task-a/base attempt was recorded: %v", e)
+	}
+}
+
+// TestCohortParallelFirstAttemptInvalidFollowsCoordinateOrder: the first-attempt model
+// check uses coordinate order, not completion order. A variant's first attempt stops the
+// run even when it finishes before the other variant's first attempt, and a later attempt
+// that finishes before its variant's first one never stops it.
+func TestCohortParallelFirstAttemptInvalidFollowsCoordinateOrder(t *testing.T) {
+	// mismatch makes the attempt whose Lab path contains slow wait, bounded, until the
+	// record wait names exists, so it finishes after that one, and serves the attempt whose
+	// Lab path contains invalid a model other than its pin.
+	mismatch := func(t *testing.T, slow string, wait func(opts molecule.Options) string, invalid string) {
+		original := runCohortMolecule
+		t.Cleanup(func() { runCohortMolecule = original })
+		runCohortMolecule = func(ctx context.Context, opts molecule.Options) (molecule.Record, error) {
+			if rec := wait(opts); rec != "" && strings.Contains(opts.LabDir, slow) {
+				for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+					if _, err := os.Stat(rec); err == nil {
+						break
+					}
+				}
+			}
+			r, err := original(ctx, opts)
+			if strings.Contains(opts.LabDir, invalid) {
+				for i := range r.HarnessAttempts {
+					r.HarnessAttempts[i].Model = "claude-opus-4-8"
+					r.HarnessAttempts[i].Usage = servedUsage(t, "claude-opus-5-5", "claude-opus-4-8", nil)
+				}
+			}
+			return r, err
+		}
+	}
+	sep := string(filepath.Separator)
+	coordinate := func(task, variant string) string {
+		return sep + filepath.Join("attempts", task, variant, "rep-1") + sep
+	}
+	recordFor := func(opts molecule.Options, task, variant string) string {
+		i := strings.Index(opts.LabDir, sep+"attempts"+sep)
+		if i < 0 {
+			return ""
+		}
+		return filepath.Join(opts.LabDir[:i], "attempts", task, variant, "rep-1", "attempt.json")
+	}
+
+	t.Run("second variant's first attempt finishes first", func(t *testing.T) {
+		o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 2, 1, "hiddenAcceptancePassRate", nil)
+		approveCohort(t, &o)
+		o.Parallel = 2
+		mismatch(t, coordinate("task-a", "base"),
+			func(opts molecule.Options) string { return recordFor(opts, "task-a", "cand") },
+			coordinate("task-a", "cand"))
+		r, err := RunCohort(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "variant cand was not served its pinned model (claude-opus-4-8 → claude-opus-5-5)"
+		if r.Status != "stopped" || r.Stopped != want {
+			t.Fatalf("status=%s stopped=%q", r.Status, r.Stopped)
+		}
+		// The in-flight task-a/base attempt finished and was recorded; nothing new started.
+		if len(r.Attempts) != 2 || r.Attempts[0].Variant != "base" || r.Attempts[1].Variant != "cand" || r.Attempts[0].Invalid != "" || r.Attempts[1].Invalid != "model-mismatch" {
+			t.Fatalf("attempts: %+v", r.Attempts)
+		}
+		if _, e := os.Stat(filepath.Join(o.Output, "attempts", "task-b")); !os.IsNotExist(e) {
+			t.Fatalf("a coordinate started after the stop: %v", e)
+		}
+	})
+
+	t.Run("later attempt finishing first does not stop", func(t *testing.T) {
+		o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 2, 1, "hiddenAcceptancePassRate", nil)
+		approveCohort(t, &o)
+		o.Parallel = 3
+		mismatch(t, coordinate("task-a", "base"),
+			func(opts molecule.Options) string { return recordFor(opts, "task-b", "base") },
+			coordinate("task-b", "base"))
+		r, err := RunCohort(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Status != "complete" || r.Stopped != "" || len(r.Attempts) != 4 {
+			t.Fatalf("status=%s stopped=%q attempts=%d", r.Status, r.Stopped, len(r.Attempts))
+		}
+		for _, a := range r.Attempts {
+			if invalid := a.Task == "task-b" && a.Variant == "base"; (a.Invalid == "model-mismatch") != invalid {
+				t.Fatalf("%s/%s invalid=%q", a.Task, a.Variant, a.Invalid)
+			}
+		}
+	})
+}
+
+// concurrencyHarness marks itself running under MARKERS, waits (bounded) until LIMIT
+// attempts run or all TOTAL have started, and logs the running count it saw before and
+// after a short hold.
+const concurrencyHarness = "#!/bin/sh\ncat >/dev/null\nd=\"MARKERS\"\n: > \"$d/running-$$\"\n: > \"$d/started-$$\"\ni=0\nwhile [ \"$(ls \"$d\" | grep -c '^running-')\" -lt LIMIT ] && [ \"$(ls \"$d\" | grep -c '^started-')\" -lt TOTAL ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\nls \"$d\" | grep -c '^running-' >> \"$d/counts\"\nsleep 0.3\nls \"$d\" | grep -c '^running-' >> \"$d/counts\"\nrm -f \"$d/running-$$\"\nprintf changed > value.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+
+// TestCohortParallelNeverExceedsN: with --parallel 2 over four coordinates, the harnesses
+// running at the same moment reach two and never more.
+func TestCohortParallelNeverExceedsN(t *testing.T) {
+	markers := t.TempDir()
+	body := strings.NewReplacer("MARKERS", markers, "LIMIT", "2", "TOTAL", "4").Replace(concurrencyHarness)
+	o := cohortFixture(t, []variantSpec{{name: "base", body: body}, {name: "cand", body: body}}, 2, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	o.Parallel = 2
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "complete" || len(r.Attempts) != 4 {
+		t.Fatalf("status=%s attempts=%d", r.Status, len(r.Attempts))
+	}
+	raw, err := os.ReadFile(filepath.Join(markers, "counts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	most := 0
+	for _, f := range strings.Fields(string(raw)) {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			t.Fatalf("counts: %q", raw)
+		}
+		most = max(most, n)
+	}
+	if most != 2 {
+		t.Fatalf("most attempts running at once = %d, want 2 (counts %q)", most, raw)
+	}
+}
+
+// TestCohortParallelRefusesOutOfRange: Parallel outside 1 to 4 is refused before anything
+// is created; zero is the default of 1.
+func TestCohortParallelRefusesOutOfRange(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	for _, n := range []int{-1, 5} {
+		o.Parallel = n
+		if _, err := RunCohort(context.Background(), o); err == nil || !strings.Contains(err.Error(), "parallel must be 1 to 4") {
+			t.Fatalf("Parallel %d accepted: %v", n, err)
+		}
+		if _, e := os.Stat(o.Output); !os.IsNotExist(e) {
+			t.Fatalf("Parallel %d created the output: %v", n, e)
+		}
 	}
 }

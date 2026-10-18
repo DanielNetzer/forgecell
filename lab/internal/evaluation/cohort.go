@@ -67,7 +67,14 @@ type CohortOptions struct {
 	// KeepWorkspaces retains each attempt's Lab and workspace trees instead of deleting
 	// them once the record, verification observations and captured diff are saved.
 	KeepWorkspaces bool
+	// Parallel is how many attempts may run at a time, 1 to 4; zero means 1. It is not
+	// part of the activation digest, so changing it never invalidates an approval or a
+	// resume, and the report is in coordinate order whatever it is.
+	Parallel int
 }
+
+// maxCohortParallel bounds CohortOptions.Parallel.
+const maxCohortParallel = 4
 
 // readCohort reads and strictly decodes the cohort file.
 func readCohort(path string) ([]byte, CohortFile, error) {
@@ -226,6 +233,13 @@ type loadedTask struct {
 // existing output with a matching digest resumes and skips attempts already recorded,
 // and a mismatched digest is refused.
 func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err error) {
+	parallel := o.Parallel
+	if parallel == 0 {
+		parallel = 1
+	}
+	if parallel < 1 || parallel > maxCohortParallel {
+		return report, fmt.Errorf("parallel must be 1 to %d attempts at a time, got %d", maxCohortParallel, o.Parallel)
+	}
 	if o.Cohort, err = filepath.Abs(o.Cohort); err != nil {
 		return report, err
 	}
@@ -336,7 +350,7 @@ func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err e
 		Notes: []string{
 			"Counts and rates only. This is paired feasibility evidence, never statistical or causal proof of improvement.",
 			"Every rate states its n (tasks, repetitions and the attempts computed over).",
-			"Variants are interleaved per task and repetition (A then B) so time-dependent drift affects both; attempts run sequentially in isolated per-attempt Labs.",
+			"Variants are interleaved per task and repetition (A then B) so time-dependent drift affects both; attempts run in isolated per-attempt Labs.",
 			"Reported cost is the #149 usage figure where available (list-price estimates included and labelled); attempts without reported cost read as unreported, never zero.",
 			"Amendment counts are a proxy from the readiness plan history (proposals beyond the first).",
 			"Independent checks run outside the coding harness sandbox; their results are reported separately.",
@@ -346,120 +360,142 @@ func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err e
 		base.Notes = append(base.Notes, "Resumed an existing output with a matching activation digest; attempts already recorded were skipped.")
 	}
 	report = buildCohortReport(base, variantNames, variantHashes, taskNames, nil)
-	if err = saveCohortReport(o.Output, report); err != nil {
+	if err = writeCohortReport(o.Output, report); err != nil {
 		return report, err
 	}
 
-	var attempts []CohortAttempt
-	// abort records status: aborted and the evidence gathered so far, so an error or a
-	// cancellation leaves a durable report that never claims the run completed.
-	abort := func(e error) (CohortReport, error) {
-		base.Status = "aborted"
-		base.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		report = buildCohortReport(base, variantNames, variantHashes, taskNames, attempts)
-		if saveErr := saveCohortReport(o.Output, report); saveErr != nil && e == nil {
-			e = saveErr
-		}
-		return report, e
+	// The coordinate order: for each task, for each repetition, variant A then variant B.
+	type coordinate struct {
+		task, rep, variant int
 	}
-	stopped := ""
-loop:
-	for _, lt := range tasks {
+	var coords []coordinate
+	for ti := range tasks {
 		for rep := 1; rep <= c.Repetitions; rep++ {
-			for vi, vname := range variantNames {
-				attemptDir := filepath.Join(o.Output, "attempts", lt.task.Name, vname, fmt.Sprintf("rep-%d", rep))
-				recordPath := filepath.Join(attemptDir, "attempt.json")
-				if ca, done := loadAttemptRecord(recordPath, lt.task.Name, vname, rep); done {
-					attempts = append(attempts, ca)
-				} else {
-					// Re-hash every input under <out>/inputs (the cohort file, both variant
-					// Formula copies and this task's plan, issue and acceptance) against its
-					// pinned hash immediately before the attempt; a mismatch refuses the run
-					// rather than executing a mutated copy, on both fresh and resumed runs.
-					vf, planBytes, acceptBytes, e := verifyAttemptInputs(o.Output, Hash(raw), c.Variants, c.Variants[vi], lt)
-					if e != nil {
-						return abort(e)
-					}
-					// Every worktree an attempt allocates is registered in its own
-					// per-attempt source under attemptDir (never in --source), so reclaiming
-					// the directory left by a prior crashed or cancelled attempt is enough
-					// for a re-run to allocate cleanly.
-					if e := os.RemoveAll(attemptDir); e != nil {
-						return abort(e)
-					}
-					if e := os.MkdirAll(attemptDir, 0700); e != nil {
-						return abort(e)
-					}
-					// Materialise the verified acceptance and plan bytes into a fresh
-					// per-attempt read-only path and execute setup, preflight and
-					// verification from it, never from the mutable <out>/inputs copy.
-					verifiedDir := filepath.Join(attemptDir, "verified")
-					if e := os.MkdirAll(verifiedDir, 0700); e != nil {
-						return abort(e)
-					}
-					acceptancePath := filepath.Join(verifiedDir, "acceptance"+filepath.Ext(lt.plan.Acceptance))
-					if e := os.WriteFile(acceptancePath, acceptBytes, 0400); e != nil {
-						return abort(e)
-					}
-					if e := os.WriteFile(filepath.Join(verifiedDir, "plan.json"), planBytes, 0400); e != nil {
-						return abort(e)
-					}
-					lt.acceptancePath = acceptancePath
-					// A replayed --source holds every task's base commit, and a later PR's
-					// base contains an earlier PR's solution. Each attempt therefore runs
-					// from its own throwaway source holding only this plan's base commit;
-					// --source itself is only read.
-					attemptSource := filepath.Join(attemptDir, "source")
-					a, e := runCohortAttempt(ctx, vf, vname, lt, planBytes, acceptBytes, o.SourceRoot, attemptSource, filepath.Join(attemptDir, "lab"), filepath.Join(attemptDir, "verification"), digest, decisionAt)
-					if e != nil {
-						return abort(e)
-					}
-					// A cancelled attempt is discarded before it is saved, so resume
-					// re-runs this coordinate instead of skipping it as done.
-					if ctx.Err() != nil {
-						return abort(ctx.Err())
-					}
-					// Capture the retained diff before the trees are reclaimed. A diff
-					// failure is recorded as a changes error, never an abort.
-					sha, truncated, changesErr := writeAttemptChanges(ctx, attemptDir, attemptSource, lt.plan.BaseCommit, a.Tree, a.ChangedFiles)
-					a.ChangesDiffSHA256 = sha
-					a.ChangesTruncated = truncated
-					a.ChangesError = changesErr
-					// Keep failed-check stream tails before cleanup deletes the history files.
-					a.FailedCheckOutput = failedCheckOutput(a.Molecule)
-					ca := CohortAttempt{Task: lt.task.Name, Variant: vname, Repetition: rep, Attempt: a}
-					// The record, verification observations and captured diff are saved; by
-					// default reclaim the attempt's Lab, workspace and per-attempt source
-					// trees. A cleanup error is recorded on the attempt (and summarized in the
-					// report), not swallowed. Kept trees stay in this attempt's own source,
-					// so a later attempt never sees them.
-					if !o.KeepWorkspaces {
-						if e := cleanupAttemptTrees(attemptDir, attemptSource); e != nil {
-							ca.CleanupError = e.Error()
-						}
-					}
-					if e := saveAttemptRecord(recordPath, ca); e != nil {
-						return abort(e)
-					}
-					attempts = append(attempts, ca)
-				}
-				report = buildCohortReport(base, variantNames, variantHashes, taskNames, attempts)
-				if e := saveCohortReport(o.Output, report); e != nil {
-					return abort(e)
-				}
-				if ctx.Err() != nil {
-					return abort(ctx.Err())
-				}
-				if s := firstAttemptInvalid(attempts[len(attempts)-1], attempts); s != "" {
-					stopped = s
-					break loop
-				}
-				if s := cohortStop(c.Stop, attempts); s != "" {
-					stopped = s
-					break loop
-				}
+			for vi := range variantNames {
+				coords = append(coords, coordinate{ti, rep, vi})
 			}
 		}
+	}
+	taskIndex := map[string]int{}
+	for i, name := range taskNames {
+		taskIndex[name] = i
+	}
+	variantIndex := map[string]int{variantNames[0]: 0, variantNames[1]: 1}
+
+	// attempts, report building and saving are owned by this coordinating goroutine alone;
+	// workers only send their finished attempt back, so the shared state needs no lock.
+	var attempts []CohortAttempt
+	// ranParallel is the highest parallel level any recorded attempt ran under, including
+	// attempts recorded by an earlier run, so a resume keeps the contention note.
+	ranParallel := 0
+	// rebuild keeps attempts in coordinate order before every report, so report.json and
+	// report.md do not depend on the order in which concurrent attempts finish.
+	rebuild := func() CohortReport {
+		sort.SliceStable(attempts, func(i, j int) bool {
+			a, b := attempts[i], attempts[j]
+			if taskIndex[a.Task] != taskIndex[b.Task] {
+				return taskIndex[a.Task] < taskIndex[b.Task]
+			}
+			if a.Repetition != b.Repetition {
+				return a.Repetition < b.Repetition
+			}
+			return variantIndex[a.Variant] < variantIndex[b.Variant]
+		})
+		b := base
+		if ranParallel > 1 {
+			b.Notes = append(append([]string(nil), base.Notes...), fmt.Sprintf("Attempts ran up to %d at a time; elapsed and harness durations include contention from concurrent attempts.", ranParallel))
+		}
+		return buildCohortReport(b, variantNames, variantHashes, taskNames, attempts)
+	}
+
+	// Every worker shares runCtx: an abort error or a cancellation cancels it, so nothing
+	// new starts and in-flight attempts are discarded before they are saved.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	type result struct {
+		ca  CohortAttempt
+		err error
+	}
+	results := make(chan result)
+	inFlight := 0
+	var halt error
+	stopped := ""
+	// complete records one finished attempt, rebuilds and saves the report and, unless the
+	// run already stopped or halted, evaluates the stop rules. A save error or a
+	// cancellation halts the run and cancels the in-flight attempts at once, so they are
+	// discarded rather than recorded.
+	complete := func(ca CohortAttempt, ranAt int) {
+		attempts = append(attempts, ca)
+		ranParallel = max(ranParallel, ranAt)
+		report = rebuild()
+		e := writeCohortReport(o.Output, report)
+		if halt != nil {
+			return
+		}
+		if e == nil {
+			e = ctx.Err()
+		}
+		if e != nil {
+			halt = e
+			cancelRun()
+			return
+		}
+		if stopped != "" {
+			return
+		}
+		if s := firstAttemptInvalid(ca, taskNames[0]); s != "" {
+			stopped = s
+			return
+		}
+		stopped = cohortStop(c.Stop, attempts)
+	}
+	next := 0
+	for {
+		for halt == nil && stopped == "" && next < len(coords) && inFlight < parallel {
+			cd := coords[next]
+			lt, vname := tasks[cd.task], variantNames[cd.variant]
+			attemptDir := filepath.Join(o.Output, "attempts", lt.task.Name, vname, fmt.Sprintf("rep-%d", cd.rep))
+			// Recorded plus in-flight attempts count against maxAttempts before every
+			// coordinate, recorded or not, so neither a freed worker nor a resume with gaps
+			// ever takes the run past the limit.
+			if c.Stop != nil && c.Stop.MaxAttempts != nil && len(attempts)+inFlight >= *c.Stop.MaxAttempts {
+				break
+			}
+			if ca, ranAt, done := loadAttemptRecordAt(filepath.Join(attemptDir, "attempt.json"), lt.task.Name, vname, cd.rep); done {
+				next++
+				complete(ca, ranAt)
+				continue
+			}
+			next++
+			inFlight++
+			go func() {
+				ca, e := runCohortCoordinate(runCtx, o, raw, c, lt, cd.variant, cd.rep, attemptDir, digest, decisionAt, parallel)
+				results <- result{ca, e}
+			}()
+		}
+		if inFlight == 0 {
+			break
+		}
+		r := <-results
+		inFlight--
+		if r.err != nil {
+			if halt == nil {
+				halt = r.err
+			}
+			cancelRun()
+			continue
+		}
+		complete(r.ca, parallel)
+	}
+	if halt != nil {
+		// abort records status: aborted and the evidence gathered so far, so an error or a
+		// cancellation leaves a durable report that never claims the run completed.
+		base.Status = "aborted"
+		base.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		report = rebuild()
+		// The first error is returned; a failure to save the aborted report never hides it.
+		_ = writeCohortReport(o.Output, report)
+		return report, halt
 	}
 
 	base.Status = "complete"
@@ -477,10 +513,97 @@ loop:
 		}
 	}
 	base.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	report = buildCohortReport(base, variantNames, variantHashes, taskNames, attempts)
-	err = saveCohortReport(o.Output, report)
+	report = rebuild()
+	err = writeCohortReport(o.Output, report)
 	return report, err
 }
+
+// runCohortCoordinate prepares and runs the attempt at one coordinate and saves its record.
+// It runs in a worker; a returned error aborts the run, and an attempt cancelled through
+// ctx is returned as an error before it is saved, so resume re-runs that coordinate. The
+// record carries parallel, the level the attempt ran under.
+func runCohortCoordinate(ctx context.Context, o CohortOptions, raw []byte, c CohortFile, lt loadedTask, vi, rep int, attemptDir, digest, decisionAt string, parallel int) (CohortAttempt, error) {
+	vname := c.Variants[vi].Name
+	// Re-hash every input under <out>/inputs (the cohort file, both variant Formula copies
+	// and this task's plan, issue and acceptance) against its pinned hash immediately
+	// before the attempt; a mismatch refuses the run rather than executing a mutated copy,
+	// on both fresh and resumed runs.
+	vf, planBytes, acceptBytes, e := verifyAttemptInputs(o.Output, Hash(raw), c.Variants, c.Variants[vi], lt)
+	if e != nil {
+		return CohortAttempt{}, e
+	}
+	// Every worktree an attempt allocates is registered in its own per-attempt source
+	// under attemptDir (never in --source), so reclaiming the directory left by a prior
+	// crashed or cancelled attempt is enough for a re-run to allocate cleanly.
+	if e := os.RemoveAll(attemptDir); e != nil {
+		return CohortAttempt{}, e
+	}
+	if e := os.MkdirAll(attemptDir, 0700); e != nil {
+		return CohortAttempt{}, e
+	}
+	// Materialise the verified acceptance and plan bytes into a fresh per-attempt
+	// read-only path and execute setup, preflight and verification from it, never from the
+	// mutable <out>/inputs copy.
+	verifiedDir := filepath.Join(attemptDir, "verified")
+	if e := os.MkdirAll(verifiedDir, 0700); e != nil {
+		return CohortAttempt{}, e
+	}
+	acceptancePath := filepath.Join(verifiedDir, "acceptance"+filepath.Ext(lt.plan.Acceptance))
+	if e := os.WriteFile(acceptancePath, acceptBytes, 0400); e != nil {
+		return CohortAttempt{}, e
+	}
+	if e := os.WriteFile(filepath.Join(verifiedDir, "plan.json"), planBytes, 0400); e != nil {
+		return CohortAttempt{}, e
+	}
+	lt.acceptancePath = acceptancePath
+	// A replayed --source holds every task's base commit, and a later PR's base contains
+	// an earlier PR's solution. Each attempt therefore runs from its own throwaway source
+	// holding only this plan's base commit; --source itself is only read.
+	attemptSource := filepath.Join(attemptDir, "source")
+	a, e := runCohortAttempt(ctx, vf, vname, lt, planBytes, acceptBytes, o.SourceRoot, attemptSource, filepath.Join(attemptDir, "lab"), filepath.Join(attemptDir, "verification"), digest, decisionAt)
+	if e != nil {
+		return CohortAttempt{}, e
+	}
+	// A cancelled attempt is discarded before it is saved, so resume re-runs this
+	// coordinate instead of skipping it as done.
+	if ctx.Err() != nil {
+		return CohortAttempt{}, ctx.Err()
+	}
+	// Capture the retained diff before the trees are reclaimed. A diff failure is recorded
+	// as a changes error, never an abort.
+	sha, truncated, changesErr := writeCohortAttemptChanges(ctx, attemptDir, attemptSource, lt.plan.BaseCommit, a.Tree, a.ChangedFiles)
+	a.ChangesDiffSHA256 = sha
+	a.ChangesTruncated = truncated
+	a.ChangesError = changesErr
+	// Keep failed-check stream tails before cleanup deletes the history files.
+	a.FailedCheckOutput = failedCheckOutput(a.Molecule)
+	ca := CohortAttempt{Task: lt.task.Name, Variant: vname, Repetition: rep, Attempt: a}
+	// The record, verification observations and captured diff are saved; by default
+	// reclaim the attempt's Lab, workspace and per-attempt source trees. A cleanup error is
+	// recorded on the attempt (and summarized in the report), not swallowed. Kept trees
+	// stay in this attempt's own source, so a later attempt never sees them.
+	if !o.KeepWorkspaces {
+		if e := cleanupAttemptTrees(attemptDir, attemptSource); e != nil {
+			ca.CleanupError = e.Error()
+		}
+	}
+	// A cancellation during the diff capture or cleanup still discards the attempt: a done
+	// record is never saved for an attempt the run was cancelled under.
+	if ctx.Err() != nil {
+		return CohortAttempt{}, ctx.Err()
+	}
+	if e := saveAttemptRecordAt(filepath.Join(attemptDir, "attempt.json"), ca, parallel); e != nil {
+		return CohortAttempt{}, e
+	}
+	return ca, nil
+}
+
+// writeCohortReport and writeCohortAttemptChanges are variables only so tests can inject a
+// report-save failure or a cancellation during the diff capture.
+var (
+	writeCohortReport         = saveCohortReport
+	writeCohortAttemptChanges = writeAttemptChanges
+)
 
 // verifyAttemptInputs re-hashes every pinned input under <out>/inputs for one attempt and
 // returns the verified variant Formula and the plan and acceptance bytes to execute from.
@@ -715,22 +838,45 @@ const maxAttemptRecordBytes = 8_000_000
 // complete record for exactly this coordinate. An incomplete, invalid or foreign record
 // is treated as not done, so the attempt is re-run from a clean directory.
 func loadAttemptRecord(path, task, variant string, rep int) (CohortAttempt, bool) {
+	ca, _, done := loadAttemptRecordAt(path, task, variant, rep)
+	return ca, done
+}
+
+// attemptRecord is the saved attempt.json: the attempt and, when it ran alongside others,
+// how many attempts could run at a time (omitted when they ran one at a time).
+type attemptRecord struct {
+	CohortAttempt
+	Parallel int `json:"parallel,omitempty"`
+}
+
+// loadAttemptRecordAt is loadAttemptRecord that also returns the recorded parallel level.
+func loadAttemptRecordAt(path, task, variant string, rep int) (CohortAttempt, int, bool) {
 	raw, err := boundedTo(path, maxAttemptRecordBytes)
 	if err != nil {
-		return CohortAttempt{}, false
+		return CohortAttempt{}, 0, false
 	}
-	var ca CohortAttempt
-	if json.Unmarshal(raw, &ca) != nil {
-		return CohortAttempt{}, false
+	var r attemptRecord
+	if json.Unmarshal(raw, &r) != nil {
+		return CohortAttempt{}, 0, false
 	}
+	ca := r.CohortAttempt
 	if ca.Task != task || ca.Variant != variant || ca.Repetition != rep || ca.StartedAt == "" || ca.ElapsedMS == 0 {
-		return CohortAttempt{}, false
+		return CohortAttempt{}, 0, false
 	}
-	return ca, true
+	return ca, r.Parallel, true
 }
 
 func saveAttemptRecord(path string, ca CohortAttempt) error {
-	raw, err := json.MarshalIndent(ca, "", "  ")
+	return saveAttemptRecordAt(path, ca, 1)
+}
+
+// saveAttemptRecordAt saves the record with the parallel level the attempt ran under.
+func saveAttemptRecordAt(path string, ca CohortAttempt, parallel int) error {
+	r := attemptRecord{CohortAttempt: ca}
+	if parallel > 1 {
+		r.Parallel = parallel
+	}
+	raw, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -985,19 +1131,12 @@ func modelMismatch(a Attempt) (pinned, served string, ok bool) {
 	return "", "", false
 }
 
-// firstAttemptInvalid returns the stop reason when ca is its variant's first attempt and
-// was not served its pinned model: the comparison cannot be made.
-func firstAttemptInvalid(ca CohortAttempt, attempts []CohortAttempt) string {
-	if ca.Invalid != invalidModelMismatch {
+// firstAttemptInvalid returns the stop reason when ca is its variant's first attempt in
+// coordinate order (the first task's first repetition, whatever order attempts finish in)
+// and was not served its pinned model: the comparison cannot be made.
+func firstAttemptInvalid(ca CohortAttempt, firstTask string) string {
+	if ca.Invalid != invalidModelMismatch || ca.Task != firstTask || ca.Repetition != 1 {
 		return ""
-	}
-	for _, a := range attempts {
-		if a.Variant == ca.Variant {
-			if a.Task != ca.Task || a.Repetition != ca.Repetition {
-				return ""
-			}
-			break
-		}
 	}
 	pinned, served, _ := modelMismatch(ca.Attempt)
 	return fmt.Sprintf("variant %s was not served its pinned model (%s → %s)", ca.Variant, pinned, served)

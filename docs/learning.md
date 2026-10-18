@@ -302,6 +302,21 @@ labelled), never triggers when no cost is reported, and its stop reason names th
 basis. A stop that leaves the two variants with unequal attempt counts records an
 imbalance note, because rates over different n are not directly comparable.
 
+`--parallel N` (1–4, default 1) runs up to N attempts at a time; the default runs them one
+at a time exactly as above. Coordinates still start in the same order, so A and B of a
+task and repetition tend to run together under the same machine load, and recorded
+coordinates are still skipped on resume. The report keeps attempts in coordinate order,
+so `report.json` and `report.md` do not depend on completion order. `--parallel` is not
+part of the activation digest, so changing it never invalidates an approval or a resume.
+When a stop rule fires, no new attempt starts and the in-flight ones finish and are
+recorded; `maxAttempts` counts recorded and in-flight attempts before every coordinate,
+so it is never exceeded, even on a resume with gaps. An abort error, a report-save error or
+SIGINT/SIGTERM cancels the in-flight attempts, which are discarded unsaved (also when the
+cancellation lands during the diff capture) so resume re-runs them. Each `attempt.json`
+run with N above 1 records `parallel: N`, and whenever any recorded attempt ran that way,
+including after a resume, the report notes that elapsed and harness durations include
+contention from concurrent attempts.
+
 By default each attempt's Lab, workspace and verification trees are deleted once its
 record and verification observations are saved, to bound disk growth. Before deletion the
 run writes `<attempt>/changes.diff` (the unified diff from the base commit to the captured
