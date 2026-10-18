@@ -181,6 +181,28 @@ func (s State) RecordVerification(passed bool, detail, at string) (State, error)
 	return s.transition("verification-"+phase, phase, detail, at)
 }
 
+// NoChangeAfterAmendment is the event kind of an amended coding attempt whose
+// captured tree equals the parent revision's paused tree.
+const NoChangeAfterAmendment = "no-change-after-amendment"
+
+// RecordNoChange ends an amended coding attempt that produced no change. Nothing
+// is verified: the Molecule waits for human review, delivery refuses it, and a
+// further amendment may proceed from that state.
+func (s State) RecordNoChange(tree, at string) (State, error) {
+	p, err := s.current()
+	if err != nil {
+		return s, err
+	}
+	if s.Phase != "coding" || p.Plan.Revision < 2 || p.Plan.Continuation != "" || !gitHash.MatchString(tree) || tree != p.Plan.PausedTree {
+		return s, fmt.Errorf("no-change requires a running amended coding attempt that kept the parent revision's tree")
+	}
+	out, err := s.transition(NoChangeAfterAmendment, "review-waiting", "Amended coding attempt produced no change (tree "+tree+"); verification was not run.", at)
+	if err == nil {
+		out.Events[len(out.Events)-1].Tree = tree
+	}
+	return out, err
+}
+
 // ValidateForDelivery refuses missing, uncertain or unreviewed execution history.
 func (s State) ValidateForDelivery() (Plan, error) {
 	p, err := s.current()
@@ -189,6 +211,17 @@ func (s State) ValidateForDelivery() (Plan, error) {
 	}
 	if s.Phase != "review-waiting" {
 		return Plan{}, fmt.Errorf("readiness has not reached final review")
+	}
+	if last := s.Events[len(s.Events)-1]; last.Kind == NoChangeAfterAmendment {
+		verified := false
+		for _, e := range s.Events {
+			if e.Digest == p.Digest && e.Kind == "verification-review-waiting" {
+				verified = true
+			}
+		}
+		if !verified {
+			return Plan{}, fmt.Errorf("amendment produced no change; nothing was verified")
+		}
 	}
 	approved, started, finished, verified := false, false, false, false
 	adopted := false

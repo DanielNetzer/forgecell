@@ -111,8 +111,8 @@ func displayError(err error) string {
 func shellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // staleBindingError explains a binding fingerprint mismatch that an adapter protocol
-// change caused. Protocol 3 changed every binding fingerprint, so a plan reviewed
-// under an earlier protocol cannot be approved until intake is refreshed.
+// change caused. Every protocol bump since 3 changes every binding fingerprint, so a
+// plan reviewed under an earlier protocol cannot be approved until intake is refreshed.
 func staleBindingError(err error, r Record, planned, current readiness.Inputs, digest string) error {
 	if planned.BindingSHA256 == current.BindingSHA256 || r.AdapterProtocol == harness.AdapterProtocolVersion {
 		return err
@@ -162,6 +162,12 @@ func analysisRequest(ctx context.Context, i Issue, s readiness.RepositorySnapsho
 		}
 		if strings.HasPrefix(c.ValidatorMessage, readiness.BaselineIDMessage) {
 			correction["instruction"] = "Return the complete analysis again. The Lab already includes every Formula baseline check, so drop any proposed check whose id equals a baseline check id, or give that check a different id. Do not rename the baseline checks or relax the rule."
+		}
+		if strings.HasPrefix(c.ValidatorMessage, readiness.PlanValidationMessage) {
+			correction["instruction"] = "Return the complete analysis again so that the plan built from it passes validation. Fix the plan error the validator message reports and only that; do not relax or reword the rule."
+			if strings.Contains(c.ValidatorMessage, "category") {
+				correction["instruction"] = "Return the complete analysis again so that the plan built from it passes validation. A check category must be exactly one of regression, candidate, setup or independent-acceptance; a tool name such as vet, build or lint is never a category. Label existing tests and CI baseline commands regression and model-proposed tests candidate. Fix only the field the validator message names; do not relax or reword the rule."
+			}
 		}
 		request["correction"] = correction
 	}
@@ -537,6 +543,56 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		}
 	}
 
+	// buildPlan builds the revision-one plan from an analysis. The analysis loop
+	// builds and validates the same candidate plan, so a plan that fails validation
+	// gets a corrective retry instead of stopping intake after the loop.
+	codingBinding := roles.bindings[formula.Coding]
+	buildPlan := func(a readiness.Analysis, snapshot readiness.RepositorySnapshot) (readiness.Plan, string, error) {
+		evidenceHash, err := snapshot.Digest()
+		if err != nil {
+			return readiness.Plan{}, "", err
+		}
+		bindingDigest, err := bindingHash(codingBinding, w.SourceRoot, w.BaseCommit)
+		if err != nil {
+			return readiness.Plan{}, "", err
+		}
+		p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: w.Repo, TargetBranch: target, BaseCommit: w.BaseCommit, FormulaSHA256: f.SHA256, EvidenceSHA256: evidenceHash, BindingSHA256: bindingDigest, Issue: issueInput(issue), MandatoryConstraints: o.MandatoryConstraints}, Evidence: snapshot.References(), Analysis: a, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
+		p.Analysis.Checks = append(append([]readiness.Check(nil), p.Analysis.Checks...), o.Checks...)
+		p.NewFiles = readiness.CitedNewFiles(p.Analysis.Checks, readiness.NewScopeFiles(a.Scope, snapshot.Files))
+		p.HarnessTimeoutMS = proposeHarnessTimeoutMS(codingBinding, len(p.Analysis.Scope))
+		if o.Policy != nil {
+			p.Policy = *o.Policy
+		}
+		p.CheckInputs = o.CheckInputs
+		p.Setup = o.Setup
+		p.Artifacts = o.Artifacts
+		for _, input := range o.CheckInputs {
+			p.Evidence = append(p.Evidence, input.Evidence)
+		}
+		if err = applyFormulaBaseline(f, &p); err != nil {
+			return readiness.Plan{}, "", err
+		}
+		var allowlistNote string
+		if p.CodingAllowlist, allowlistNote, err = harness.DeriveCodingAllowlistNoted(f.YAML, p.Analysis.Checks, p.Analysis.Scope...); err != nil {
+			return readiness.Plan{}, "", err
+		}
+		return p, allowlistNote, nil
+	}
+	// Human- and Formula-supplied inputs are validated before any analysis with the
+	// rules Plan.Validate applies to them. The model cannot correct them, so their
+	// failure stops intake here and never spends a plan-validation retry.
+	configuration := readiness.Plan{Inputs: readiness.Inputs{MandatoryConstraints: o.MandatoryConstraints}, Evidence: snapshot.References(), CheckInputs: o.CheckInputs, Setup: o.Setup, Artifacts: o.Artifacts}
+	configuration.Analysis.Checks = append([]readiness.Check(nil), o.Checks...)
+	for _, input := range o.CheckInputs {
+		configuration.Evidence = append(configuration.Evidence, input.Evidence)
+	}
+	if err = applyFormulaBaseline(f, &configuration); err == nil {
+		err = configuration.ValidateConfiguration()
+	}
+	if err != nil {
+		return stopIntake(r, err.Error())
+	}
+
 	// At most one supplemental evidence pass and one corrective retry per policy
 	// class, up to maxCorrectiveAnalyses in all, so maxAnalysisInvocations is the
 	// hard bound. Every invocation has its own ordinal and therefore its own
@@ -592,6 +648,16 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 					baselineIDs[i] = rc.ID
 				}
 				err = readiness.ValidateBaselineIDs(a, baselineIDs)
+			}
+			// A plan that would fail validation after the loop is a correctable
+			// rejection here. A clarification stops intake before any plan is built,
+			// and a build error stops it after the loop exactly as before.
+			if err == nil && len(a.Questions) == 0 {
+				if candidate, _, buildErr := buildPlan(a, snapshot); buildErr == nil {
+					if invalid := candidate.Validate(); invalid != nil {
+						err = &readiness.PolicyViolation{Reason: readiness.PlanValidationMessage + ": " + invalid.Error()}
+					}
+				}
 			}
 		}
 		attempt := &r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
@@ -668,33 +734,8 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if len(a.Questions) > 0 {
 		return stopIntake(r, "Clarification required. No coding harness was invoked.")
 	}
-	evidenceHash, err := snapshot.Digest()
+	p, allowlistNote, err := buildPlan(a, snapshot)
 	if err != nil {
-		return stopIntake(r, err.Error())
-	}
-	codingBinding := roles.bindings[formula.Coding]
-	bindingDigest, err := bindingHash(codingBinding, w.SourceRoot, w.BaseCommit)
-	if err != nil {
-		return stopIntake(r, err.Error())
-	}
-	p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: w.Repo, TargetBranch: target, BaseCommit: w.BaseCommit, FormulaSHA256: f.SHA256, EvidenceSHA256: evidenceHash, BindingSHA256: bindingDigest, Issue: issueInput(issue), MandatoryConstraints: o.MandatoryConstraints}, Evidence: snapshot.References(), Analysis: a, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
-	p.Analysis.Checks = append(p.Analysis.Checks, o.Checks...)
-	p.NewFiles = readiness.CitedNewFiles(p.Analysis.Checks, readiness.NewScopeFiles(a.Scope, snapshot.Files))
-	p.HarnessTimeoutMS = proposeHarnessTimeoutMS(codingBinding, len(p.Analysis.Scope))
-	if o.Policy != nil {
-		p.Policy = *o.Policy
-	}
-	p.CheckInputs = o.CheckInputs
-	p.Setup = o.Setup
-	p.Artifacts = o.Artifacts
-	for _, input := range o.CheckInputs {
-		p.Evidence = append(p.Evidence, input.Evidence)
-	}
-	if err = applyFormulaBaseline(f, &p); err != nil {
-		return stopIntake(r, err.Error())
-	}
-	var allowlistNote string
-	if p.CodingAllowlist, allowlistNote, err = harness.DeriveCodingAllowlistNoted(f.YAML, p.Analysis.Checks, p.Analysis.Scope...); err != nil {
 		return stopIntake(r, err.Error())
 	}
 	if err = snapshot.ValidateScope(a.Scope); err != nil {
@@ -1038,6 +1079,13 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	launcher := harness.ResolveAttempt(codingBinding.Command)
 	forgecell := harness.RecordProvenanceWith(codingBinding.Command, launcher)
 	codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
+	if p.Revision > 1 {
+		added := newAcceptance(r, p)
+		codingRequest["newAcceptance"] = added
+		if len(added) > 0 {
+			codingRequest["instruction"] = codingRequest["instruction"].(string) + amendedPlanInstruction
+		}
+	}
 	if len(codingServers) > 0 {
 		codingRequest["mcpServers"] = codingServers
 	}
@@ -1197,6 +1245,12 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		atom(&r, roles.atoms[formula.Coding], "failed", phase+": "+detail)
 		return finishStopped(r, phase+": "+detail+" Retained tree: "+capture.Tree)
 	}
+	// An amendment exists to change the retained tree; a completed attempt that left
+	// it byte-identical satisfies nothing new, so it is not verified.
+	// Retained artifact bytes count as a change too.
+	if phase == "completed" && p.Revision > 1 && p.Continuation == "" && capture.Tree == p.PausedTree && (p.PausedArtifactsSHA256 == "" || artifactHash(capture) == p.PausedArtifactsSHA256) {
+		return finishNoChange(r, p, capture, coding)
+	}
 	atom(&r, roles.atoms[formula.Coding], "done", coding.Outcome+": "+coding.Reason)
 	state, err = r.Readiness.FinishAttempt("check-pending", "Coding output captured: "+capture.Tree, stamp())
 	if err != nil {
@@ -1204,6 +1258,87 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	}
 	r.Readiness = &state
 	return verifyCaptured(ctx, o, r, p, capture)
+}
+
+// amendedPlanInstruction ends the coding instruction of an amended plan.
+const amendedPlanInstruction = " This is an amended plan: implement every item in newAcceptance; an unchanged tree does not satisfy them."
+
+// noChangeAfterAmendment is the outcome reason of an amended coding attempt whose
+// captured tree equals the parent revision's paused tree.
+const noChangeAfterAmendment = "noChangeAfterAmendment"
+
+// newAcceptance lists, in plan order and once each, the acceptance descriptions of
+// an amended plan that its nearest coded ancestor lacks, matched by exact
+// description. The coded ancestor is the nearest revision in the ledger whose work
+// reached checks; a revision skipped on the way (it produced no change, its coding
+// stopped before checks, or it never ran) satisfied nothing, so the items it added
+// stay new.
+func newAcceptance(r Record, p readiness.Plan) []string {
+	satisfied := map[string]bool{}
+	if r.Readiness != nil {
+		plans := map[string]readiness.Plan{}
+		for _, proposal := range r.Readiness.Plans {
+			plans[proposal.Digest] = proposal.Plan
+		}
+		reachedChecks := func(digest string) bool {
+			for _, e := range r.Readiness.Events {
+				if e.Digest == digest && (e.Kind == "attempt-check-pending" || strings.HasPrefix(e.Kind, "verification-")) {
+					return true
+				}
+			}
+			return false
+		}
+		seen := map[string]bool{}
+		for digest := p.ParentDigest; digest != "" && !seen[digest]; digest = plans[digest].ParentDigest {
+			seen[digest] = true
+			ancestor, ok := plans[digest]
+			if !ok {
+				break
+			}
+			if reachedChecks(digest) {
+				for _, c := range ancestor.Analysis.Acceptance {
+					satisfied[c.Description] = true
+				}
+				break
+			}
+		}
+	}
+	added := []string{}
+	for _, c := range p.Analysis.Acceptance {
+		if !satisfied[c.Description] {
+			satisfied[c.Description] = true
+			added = append(added, c.Description)
+		}
+	}
+	return added
+}
+
+// finishNoChange stops an amended coding attempt that changed nothing at the
+// review gate without verification; delivery refuses it until a later amendment.
+func finishNoChange(r Record, p readiness.Plan, capture verification.CaptureResult, outcome harness.CodingOutcome) (Record, error) {
+	roles, err := resolveExecutionRoles(r)
+	if err != nil {
+		return r, err
+	}
+	note := fmt.Sprintf("Amendment r%d coding attempt produced no change (tree %s equals the parent revision's tree); verification was not run. Amend again with new work, or amend with continuation checks-only to verify the retained tree.", p.Revision, capture.Tree)
+	state, err := r.Readiness.RecordNoChange(capture.Tree, stamp())
+	if err != nil {
+		return r, err
+	}
+	r.Readiness = &state
+	atom(&r, roles.atoms[formula.Coding], "done", outcome.Outcome+": "+outcome.Reason)
+	for _, i := range roles.after(formula.Coding) {
+		if r.Atoms[i].Status == "pending" || r.Atoms[i].Status == "active" {
+			atom(&r, i, "skipped", note)
+		}
+	}
+	// The parent revision's verification result must not read as this revision's.
+	atom(&r, roles.atoms[formula.Verification], "skipped", note)
+	atom(&r, roles.atoms[formula.ReviewApproval], "waiting", noChangeAfterAmendment+": "+note+" Delivery is refused until then.")
+	r.Notes = append(r.Notes, note)
+	r.Status = "waiting"
+	r.FinishedAt = stamp()
+	return r, save(r)
 }
 
 func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, capture verification.CaptureResult) (Record, error) {

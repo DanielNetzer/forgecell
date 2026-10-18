@@ -353,3 +353,52 @@ func TestEvidenceRequestValidation(t *testing.T) {
 		t.Fatal("unresolved request approved")
 	}
 }
+
+func TestPlanValidationFailureIsItsOwnPolicyClass(t *testing.T) {
+	p := fixture()
+	p.Analysis.Checks[0].Category = "vet"
+	err := p.Validate()
+	if err == nil || err.Error() != "unknown check category: vet" {
+		t.Fatalf("validation: %v", err)
+	}
+	v := &PolicyViolation{Reason: PlanValidationMessage + ": " + err.Error()}
+	if PlanValidationMessage != "the analysis produced a plan that fails validation" {
+		t.Fatalf("message %q", PlanValidationMessage)
+	}
+	if got := PolicyClass(v); PolicyClassPlanValidation != "plan-validation" || got != PolicyClassPlanValidation {
+		t.Fatalf("class %q, want plan-validation", got)
+	}
+	if got := PolicyClass(&PolicyViolation{Reason: "unknown check category: vet"}); got != PolicyClassOther {
+		t.Fatalf("an unprefixed validator error is class %q, want other", got)
+	}
+}
+
+func TestValidateConfigurationAppliesValidateRulesToSuppliedInputs(t *testing.T) {
+	p := fixture()
+	if err := p.ValidateConfiguration(); err != nil {
+		t.Fatalf("a valid plan's configuration: %v", err)
+	}
+	// Analysis-owned fields are not configuration.
+	p.Analysis.Summary, p.Analysis.Scope, p.Analysis.Acceptance = "", nil, nil
+	if err := p.ValidateConfiguration(); err != nil {
+		t.Fatalf("configuration must not depend on the analysis: %v", err)
+	}
+	for name, mutate := range map[string]func(*Plan){
+		"category":   func(p *Plan) { p.Analysis.Checks[0].Category = "vet" },
+		"constraint": func(p *Plan) { p.Inputs.MandatoryConstraints = []string{"unknown:x"} },
+		"input": func(p *Plan) {
+			p.CheckInputs = []FileEvidence{{Evidence: Evidence{ID: "input", Path: "input.txt", SHA256: strings.Repeat("0", 64)}, Content: "x"}}
+		},
+		"setup": func(p *Plan) { p.Setup = []Check{p.Analysis.Checks[0]} },
+	} {
+		q := fixture()
+		mutate(&q)
+		want := q.Validate()
+		if want == nil {
+			t.Fatalf("%s: fixture mutation is valid", name)
+		}
+		if got := q.ValidateConfiguration(); got == nil || got.Error() != want.Error() {
+			t.Fatalf("%s: configuration error %v, want Validate's %v", name, got, want)
+		}
+	}
+}

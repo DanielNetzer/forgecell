@@ -8,6 +8,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
 // These are evidence labels, not new primitives or correctness claims.
@@ -32,6 +33,11 @@ func classifyEvidence(lab string, r molecule.Record) (EvidenceOutcome, error) {
 		case "scope-waiting", "approved", "coding", "check-pending":
 			return e, fmt.Errorf("learning requires a stopped or verified attempt; %s is pending", r.ID)
 		case "review-waiting":
+			// Recurrence selection skips such a Molecule as ineligible; only an
+			// explicit selection reports this reason.
+			if events := r.Readiness.Events; len(events) > 0 && events[len(events)-1].Kind == readiness.NoChangeAfterAmendment {
+				return e, fmt.Errorf("learning requires a stopped or verified attempt; %s is waiting after an amendment that produced no change, and nothing was verified", r.ID)
+			}
 			if _, err := r.Readiness.ValidateForDelivery(); err != nil {
 				return e, err
 			}

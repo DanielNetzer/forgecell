@@ -329,6 +329,11 @@ and refresh intake for each pending ticket; approving such a plan stops with "ap
 under adapter protocol N; refresh intake after rebinding" (`2 or earlier` for a ledger
 that did not record its protocol), and nothing is started.
 
+Adapter protocol 4, the current protocol, changes the ticket-analysis instruction so the
+analysis returns every blocking clarification question at once. Like protocol 3 it
+changes every binding fingerprint, so the same rebind and intake refresh apply to a plan
+reviewed under protocol 3.
+
 A Formula may pin the provider model with an optional `harness.model` and per-role
 `harnesses.<role>.model`. A role override never inherits the default's model, because a
 model name only means something to the provider that binding names. A pinned model is
