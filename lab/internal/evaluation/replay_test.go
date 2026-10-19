@@ -3,6 +3,7 @@ package evaluation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -757,6 +758,120 @@ func TestReplaySkipsOversizedAcceptanceScript(t *testing.T) {
 		if _, err := os.Stat(dir); !os.IsNotExist(err) {
 			t.Fatalf("%s written for a skipped PR: %v", dir, err)
 		}
+	}
+}
+
+// TestAcceptanceScriptRunsOnlyHiddenTests: the generated script runs go test with a -run
+// pattern naming exactly the hidden test functions, sorted and regex-quoted.
+func TestAcceptanceScriptRunsOnlyHiddenTests(t *testing.T) {
+	testFiles := []string{"lab/calc/a_test.go", "lab/calc/b_test.go"}
+	contents := map[string][]byte{
+		testFiles[0]: []byte("package calc\n\nimport \"testing\"\n\nfunc TestZeta(t *testing.T) {}\n\nfunc helper() {}\n\nfunc ExampleValue() {}\n"),
+		testFiles[1]: []byte("package calc\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {}\n\nfunc FuzzValue(f *testing.F) {}\n"),
+	}
+	script, err := buildAcceptanceScript(testFiles, contents, []string{"./calc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "'go' 'test' '-buildvcs=false' '-run' '^(ExampleValue|FuzzValue|TestAlpha|TestZeta)$' './calc'\n"; !strings.HasSuffix(string(script), want) {
+		t.Fatalf("acceptance script does not end with %q:\n%s", want, script)
+	}
+	if got, err := hiddenRunPattern([]string{"TestB", "TestA.x"}); err != nil || got != `^(TestA\.x|TestB)$` {
+		t.Fatalf("hiddenRunPattern = %q, %v", got, err)
+	}
+}
+
+// TestReplaySkipsOverlongRunPattern: when the joined -run pattern of the hidden test names
+// exceeds 4,000 bytes the PR is skipped with "hidden test name pattern too long", before any
+// go toolchain run, and nothing is written for it.
+func TestReplaySkipsOverlongRunPattern(t *testing.T) {
+	var names []string
+	for len(strings.Join(names, "|")) <= replayMaxRunPatternBytes {
+		names = append(names, fmt.Sprintf("TestGeneratedCaseWithALongName%04d", len(names)))
+	}
+	if _, err := hiddenRunPattern(names); !errors.Is(err, errHiddenRunPatternTooLong) {
+		t.Fatalf("hiddenRunPattern(%d names) error = %v", len(names), err)
+	}
+	var body strings.Builder
+	body.WriteString("package calc\n\nimport \"testing\"\n")
+	for _, n := range names {
+		fmt.Fprintf(&body, "\nfunc %s(t *testing.T) {}\n", n)
+	}
+	f, base, def := newFixture(t)
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", valueGo(2))
+	f.write("lab/calc/calc_test.go", body.String())
+	f.git("add", ".")
+	f.git("commit", "-qm", "feature")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/22/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":5,"deletions":0}]`,
+		"repos/owner/repo/pulls/22":       prJSON(merge, base, def, "Closes #42", "Many tests"),
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{22}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSkip(t, report, 22, "hidden test name pattern too long")
+	if _, err := os.Stat(filepath.Join(out, "hidden", "pr-22")); !os.IsNotExist(err) {
+		t.Fatalf("hidden directory written for a skipped PR: %v", err)
+	}
+}
+
+// TestReplayAcceptanceIgnoresUnrelatedFailingTest: the base holds an always-failing test in
+// the same package as the hidden test. Because acceptance and both build-time validation
+// runs use the hidden tests' -run filter, the PR still builds (the initial failure is
+// reproduced by its own test and the merge-pass validation is not failed by the unrelated
+// one), and the generated acceptance fails on the base tree and passes on the merge tree.
+func TestReplayAcceptanceIgnoresUnrelatedFailingTest(t *testing.T) {
+	f, _, def := newFixture(t)
+	f.write("lab/calc/unrelated_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestUnrelatedAlwaysFails(t *testing.T) { t.Fatal(\"unrelated\") }\n")
+	f.git("add", ".")
+	f.git("commit", "-qm", "unrelated failing test")
+	base := f.head()
+	f.git("checkout", "-q", "-b", "feature")
+	f.write("lab/calc/calc.go", valueGo(2))
+	f.write("lab/calc/calc_test.go", valueTest(2))
+	f.git("add", ".")
+	f.git("commit", "-qm", "feature")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/23/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":5,"deletions":0}]`,
+		"repos/owner/repo/pulls/23":       prJSON(merge, base, def, "Closes #42", "Make Value return 2"),
+		"repos/owner/repo/issues/42":      `{"number":42,"title":"Make Value return 2","body":"Value should return 2.","state":"closed"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{23}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 1 {
+		t.Fatalf("built=%+v skipped=%+v", report.Built, report.Skipped)
+	}
+	script := filepath.Join(out, "hidden", "pr-23", "acceptance.sh")
+	if !strings.Contains(string(mustRead(t, script)), "'-run' '^(TestValue)$'") {
+		t.Fatalf("acceptance script lacks the hidden -run filter:\n%s", mustRead(t, script))
+	}
+	runAcceptance := func(commit string) (string, error) {
+		dir := filepath.Join(t.TempDir(), "wt")
+		f.git("worktree", "add", "-q", "--detach", dir, commit)
+		c := exec.Command("/bin/sh", script)
+		c.Dir = dir
+		b, err := c.CombinedOutput()
+		return string(b), err
+	}
+	if outText, err := runAcceptance(merge); err != nil {
+		t.Fatalf("acceptance failed on the merge tree despite the unrelated test being filtered out: %v\n%s", err, outText)
+	}
+	if outText, err := runAcceptance(base); err == nil || !strings.Contains(outText, "TestValue") || strings.Contains(outText, "TestUnrelatedAlwaysFails") {
+		t.Fatalf("acceptance on the base tree: err=%v, want a TestValue failure only\n%s", err, outText)
 	}
 }
 

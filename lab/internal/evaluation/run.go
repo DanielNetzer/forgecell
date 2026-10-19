@@ -84,6 +84,22 @@ type Attempt struct {
 	// failed check whose stored stream was itself cut, so the list may be incomplete.
 	RegressionFailedTests          []string `json:"regressionFailedTests,omitempty"`
 	RegressionFailedTestsTruncated bool     `json:"regressionFailedTestsTruncated,omitempty"`
+	// RegressionFailures pairs each of those failed tests with its package and its three
+	// re-runs at the base commit: FlakyAtBase when it both passed and failed there,
+	// BrokenAtBase when it failed every run; a test beyond the re-run cap, or one whose base
+	// re-runs could not decide, is Unclassified. Cohort attempts only.
+	RegressionFailures []RegressionFailure `json:"regressionFailures,omitempty"`
+	// CorrectExcludingBaseFlakes is Correct, or, judged from the independent verification
+	// alone with every plan check observed: acceptance and every non-go-test check passed and
+	// each failed go test check failed solely on tests tagged FlakyAtBase (no unattributed
+	// package failure). Correct keeps its strict meaning.
+	CorrectExcludingBaseFlakes bool `json:"correctExcludingBaseFlakes,omitempty"`
+	// EvaluationVerification is the independent verification of a completed coding attempt
+	// whose captured tree the Molecule's own fail-fast verification stopped on a failed
+	// check; Verification keeps that refusal, so Correct and the required checks keep their
+	// meaning, and only HiddenAcceptance and CorrectExcludingBaseFlakes read this run.
+	// Cohort attempts only.
+	EvaluationVerification *Verification `json:"evaluationVerification,omitempty"`
 	// ChangesDiffSHA256 is the sha256 of the retained <attempt>/changes.diff captured
 	// before the workspace tree is deleted; ChangesTruncated marks a diff cut at the
 	// 5 MiB cap. Both are empty/false for single-task runs, which retain their trees.

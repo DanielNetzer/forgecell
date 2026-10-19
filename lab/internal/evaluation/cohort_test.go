@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1759,6 +1761,213 @@ func TestCohortParallelNeverExceedsN(t *testing.T) {
 	if most != 2 {
 		t.Fatalf("most attempts running at once = %d, want 2 (counts %q)", most, raw)
 	}
+}
+
+// calcHarness writes calc.go with the given source, runs extra shell lines and reports
+// completion.
+func calcHarness(source, extra string) string {
+	return "#!/bin/sh\ncat >/dev/null\ncat > lab/calc/calc.go <<'FORGECELL_EOF'\n" + source + "FORGECELL_EOF\n" + extra + "printf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
+}
+
+// TestCohortClassifiesRegressionFailuresFlakyAtBase (issue #180), through the real RunCohort
+// flow with a stub harness and real verification. The replayed base holds TestMarkerFlaky,
+// which fails while a marker file exists: a stand-in for a test flaky in the historical
+// code. The test toggles the marker so the flake decides nothing but the classification:
+// each Molecule run starts without it, the independent verification runs with it, and the
+// three base re-runs see it present, absent, present (2/3 failed, so flaky at base).
+//
+// The base variant's change is clean: its Molecule verification passes, the independent
+// verification runs every check and fails only go-test on the flaky test, so the attempt is
+// not Correct but is correct excluding base flakes. The cand variant's change passes hidden
+// acceptance but has a go vet violation, and its harness creates the marker, so the
+// Molecule's fail-fast verification stops at go-test on the flaky test (which is still
+// classified flaky at base). The evaluation still verifies that stopped tree independently,
+// every check run, and observes the vet failure there: the flag is false.
+func TestCohortClassifiesRegressionFailuresFlakyAtBase(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "flaky-marker")
+	// A self-assignment compiles and passes go test's own vet subset, but go vet reports it.
+	vetViolation := "package calc\n\n// Value is the implementation under test.\nfunc Value() int {\n\tv := 2\n\tv = v\n\treturn v\n}\n"
+	r, o, attempts, baseRuns := runFlakyCohort(t, marker, [2]string{calcHarness(valueGo(2), ""), calcHarness(vetViolation, fmt.Sprintf(": > %s\n", shQuote(marker)))})
+	flakyAtBase := RegressionFailure{Package: "forgecellreplayfixture/flaky", Test: "TestMarkerFlaky", FlakyAtBase: true, BaseFails: 2, BasePasses: 1}
+
+	clean := attempts["base"]
+	if clean.HiddenAcceptance == nil || !*clean.HiddenAcceptance || clean.Correct || clean.Error != "" || clean.Verification.Error != "" || len(clean.Verification.Checks) != 4 || clean.EvaluationVerification != nil {
+		t.Fatalf("base attempt hiddenAcceptance=%v correct=%v error=%q verification=%+v", clean.HiddenAcceptance, clean.Correct, clean.Error, clean.Verification)
+	}
+	if fmt.Sprint(clean.RegressionFailures) != fmt.Sprint([]RegressionFailure{flakyAtBase}) || !clean.CorrectExcludingBaseFlakes {
+		t.Fatalf("base attempt failures=%+v correctExcludingBaseFlakes=%v error=%q", clean.RegressionFailures, clean.CorrectExcludingBaseFlakes, clean.Error)
+	}
+	if strings.Join(clean.RegressionFailedTests, ",") != "TestMarkerFlaky" {
+		t.Fatalf("base attempt regression failed tests = %v", clean.RegressionFailedTests)
+	}
+
+	vet := attempts["cand"]
+	if vet.HiddenAcceptance == nil || !*vet.HiddenAcceptance || vet.Correct || vet.CorrectExcludingBaseFlakes || len(vet.Verification.Checks) != 0 || vet.Verification.Error == "" {
+		t.Fatalf("cand attempt hiddenAcceptance=%v correct=%v correctExcludingBaseFlakes=%v verification=%+v", vet.HiddenAcceptance, vet.Correct, vet.CorrectExcludingBaseFlakes, vet.Verification)
+	}
+	if ev := vet.EvaluationVerification; ev == nil || ev.Error != "" || !failedChecks(ev.Checks, "go-test", "go-vet") {
+		t.Fatalf("cand evaluation verification = %+v", ev)
+	}
+	if fmt.Sprint(vet.RegressionFailures) != fmt.Sprint([]RegressionFailure{flakyAtBase}) {
+		t.Fatalf("cand attempt failures=%+v, want %+v (failed=%+v)", vet.RegressionFailures, flakyAtBase, vet.FailedCheckOutput)
+	}
+	// Each attempt re-ran the flaky test exactly three times, with no early stop.
+	if baseRuns["TestMarkerFlaky"] != 2*baseFlakeRuns {
+		t.Fatalf("base runs = %v", baseRuns)
+	}
+
+	variants := map[string]VariantSummary{}
+	for _, v := range r.Variants {
+		variants[v.Name] = v
+	}
+	if v := variants["base"]; v.Correct != 0 || v.CorrectExcludingBaseFlakes != 1 {
+		t.Fatalf("base variant counts: %+v", v)
+	}
+	if v := variants["cand"]; v.Correct != 0 || v.CorrectExcludingBaseFlakes != 0 {
+		t.Fatalf("cand variant counts: %+v", v)
+	}
+	md := string(mustRead(t, filepath.Join(o.Output, "report.md")))
+	for _, want := range []string{
+		"  - regression failed tests: TestMarkerFlaky [flaky at base (2/3 failed)]\n",
+		"- Correct excluding base flakes (independent verification: acceptance and every non-test check passed; every failed regression test flaky at base): 1 (100%",
+	} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("report.md missing %q:\n%s", want, md)
+		}
+	}
+	// The base re-runs leave the per-attempt sources to the normal cleanup.
+	assertCleanCleanup(t, r)
+}
+
+// TestCohortVerifiesTreeTheMoleculeStoppedOnABaseFlake (issue #180): both variants' changes
+// are clean, but their harnesses create the marker, so each Molecule's fail-fast verification
+// stops at go-test on the base-flaky test and the attempt is not Correct. The evaluation still
+// verifies the captured tree independently: hidden acceptance passes there, go vet and gofmt
+// pass, and go-test fails only on the flaky test, so the attempt is correct excluding base
+// flakes while Correct and the required checks keep their strict, Molecule-gated meaning.
+func TestCohortVerifiesTreeTheMoleculeStoppedOnABaseFlake(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "flaky-marker")
+	body := calcHarness(valueGo(2), fmt.Sprintf(": > %s\n", shQuote(marker)))
+	r, _, attempts, baseRuns := runFlakyCohort(t, marker, [2]string{body, body})
+	flakyAtBase := RegressionFailure{Package: "forgecellreplayfixture/flaky", Test: "TestMarkerFlaky", FlakyAtBase: true, BaseFails: 2, BasePasses: 1}
+	for name, a := range attempts {
+		if a.Molecule.Status != "blocked" || a.Correct || a.Verification.Error == "" || len(a.Checks) != 0 || a.RequiredChecks == nil || *a.RequiredChecks {
+			t.Fatalf("%s: molecule=%s correct=%v verification=%+v requiredChecks=%v", name, a.Molecule.Status, a.Correct, a.Verification, a.RequiredChecks)
+		}
+		ev := a.EvaluationVerification
+		if ev == nil || ev.Error != "" || len(ev.Checks) != 4 || !failedChecks(ev.Checks, "go-test") {
+			t.Fatalf("%s: evaluation verification = %+v", name, ev)
+		}
+		if a.HiddenAcceptance == nil || !*a.HiddenAcceptance {
+			t.Fatalf("%s: hiddenAcceptance = %v", name, a.HiddenAcceptance)
+		}
+		if fmt.Sprint(a.RegressionFailures) != fmt.Sprint([]RegressionFailure{flakyAtBase}) || !a.CorrectExcludingBaseFlakes {
+			t.Fatalf("%s: failures=%+v correctExcludingBaseFlakes=%v", name, a.RegressionFailures, a.CorrectExcludingBaseFlakes)
+		}
+	}
+	if baseRuns["TestMarkerFlaky"] != 2*baseFlakeRuns {
+		t.Fatalf("base runs = %v", baseRuns)
+	}
+	for _, v := range r.Variants {
+		if v.Correct != 0 || v.CorrectExcludingBaseFlakes != 1 {
+			t.Fatalf("%s variant counts: %+v", v.Name, v)
+		}
+	}
+	assertCleanCleanup(t, r)
+}
+
+// failedChecks reports whether exactly the named checks of observations failed.
+func failedChecks(observations []Observation, names ...string) bool {
+	var failed []string
+	for _, obs := range observations {
+		if !obs.Result.OK {
+			failed = append(failed, obs.Command.Name)
+		}
+	}
+	slices.Sort(failed)
+	slices.Sort(names)
+	return slices.Equal(failed, names)
+}
+
+// runFlakyCohort replays a PR onto a base holding TestMarkerFlaky, which fails while marker
+// exists, and runs a two-variant cohort over it with the given harnesses. Each Molecule run
+// starts without the marker, the independent verification runs with it, and each attempt's
+// three base re-runs see it present, absent, present. It returns the report, the options,
+// the attempts by variant and the base re-run counts by test.
+func runFlakyCohort(t *testing.T, marker string, harnesses [2]string) (CohortReport, CohortOptions, map[string]Attempt, map[string]int) {
+	t.Helper()
+	f, _, def := newFixture(t)
+	f.write("lab/flaky/flaky_test.go", fmt.Sprintf("package flaky\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMarkerFlaky(t *testing.T) {\n\tif _, err := os.Stat(%q); err == nil {\n\t\tt.Fatal(\"flaked\")\n\t}\n}\n", marker))
+	f.git("add", ".")
+	f.git("commit", "-qm", "base with a flaky test")
+	base := f.head()
+	f.git("checkout", "-q", "-b", "two")
+	f.write("lab/calc/calc.go", valueGo(2))
+	f.write("lab/calc/calc_test.go", valueTest(2))
+	f.git("add", ".")
+	f.git("commit", "-qm", "value two")
+	f.git("checkout", "-q", def)
+	f.git("merge", "-q", "--no-ff", "-m", "merge two", "two")
+	merge := f.head()
+
+	out := filepath.Join(t.TempDir(), "cohort")
+	gh := ghFixture(map[string]string{
+		"repos/owner/repo/pulls/30/files": `[{"filename":"lab/calc/calc.go","status":"modified","additions":1,"deletions":1},{"filename":"lab/calc/calc_test.go","status":"added","additions":7,"deletions":0}]`,
+		"repos/owner/repo/pulls/30":       prJSON(merge, base, def, "Closes #9", "Make Value return 2"),
+		"repos/owner/repo/issues/9":       `{"number":9,"title":"Make Value return 2","body":"Value should return 2.","state":"closed"}`,
+	})
+	report, err := BuildReplay(context.Background(), ReplayOptions{Repo: "owner/repo", Source: f.dir, Out: out, PRs: []int{30}, GH: gh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Built) != 1 {
+		t.Fatalf("replay did not build the PR: built=%+v skipped=%+v", report.Built, report.Skipped)
+	}
+
+	setMarker := func(present bool) {
+		if present {
+			if err := os.WriteFile(marker, nil, 0o600); err != nil {
+				t.Error(err)
+			}
+		} else if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			t.Error(err)
+		}
+	}
+	originalMolecule := runCohortMolecule
+	runCohortMolecule = func(ctx context.Context, o molecule.Options) (molecule.Record, error) {
+		setMarker(false)
+		r, err := originalMolecule(ctx, o)
+		// The independent verification runs after the last call, with the marker present.
+		setMarker(true)
+		return r, err
+	}
+	t.Cleanup(func() { runCohortMolecule = originalMolecule })
+	var mu sync.Mutex
+	baseRuns := map[string]int{}
+	originalBase := runBaseTest
+	runBaseTest = func(ctx context.Context, dir string, env []string, pkg, test string) baseRunOutcome {
+		mu.Lock()
+		n := baseRuns[test]
+		baseRuns[test]++
+		mu.Unlock()
+		setMarker(n%baseFlakeRuns != 1)
+		return originalBase(ctx, dir, env, pkg, test)
+	}
+	t.Cleanup(func() { runBaseTest = originalBase })
+
+	o := e2eCohort(t, out, "flakes", []string{"pr-30"}, harnesses)
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "complete" || len(r.Attempts) != 2 {
+		t.Fatalf("status=%s attempts=%d", r.Status, len(r.Attempts))
+	}
+	attempts := map[string]Attempt{}
+	for _, ca := range r.Attempts {
+		attempts[ca.Variant] = ca.Attempt
+	}
+	return r, o, attempts, baseRuns
 }
 
 // TestCohortParallelRefusesOutOfRange: Parallel outside 1 to 4 is refused before anything

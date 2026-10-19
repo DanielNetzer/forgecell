@@ -203,3 +203,81 @@ func TestFailedSetupOutputRecordedAndRedacted(t *testing.T) {
 		t.Fatalf("report.md leaks the token or lacks the setup entry:\n%s", md)
 	}
 }
+
+// TestGoTestFailuresRecordPackages: each failed test is recorded with its package import
+// path, from the Package field of go test -json events and from the "FAIL\t<pkg>" result
+// line that follows a plain stream's "--- FAIL:" lines. A package failure no failed test
+// accounts for (a build failure, a panic outside any test) is reported as unattributed.
+func TestGoTestFailuresRecordPackages(t *testing.T) {
+	plain := "--- FAIL: TestB (0.00s)\n    b_test.go:3: boom\n    --- FAIL: TestB/sub (0.00s)\nFAIL\nFAIL\texample.test/one\t0.01s\nok  \texample.test/two\t0.02s\n--- FAIL: TestA (0.00s)\nFAIL\nFAIL\texample.test/three\t0.01s\nFAIL\n"
+	failures, unattributed := goTestFailures(plain, "")
+	want := []GoTestFailure{{"example.test/one", "TestB"}, {"example.test/one", "TestB/sub"}, {"example.test/three", "TestA"}}
+	if fmt.Sprint(failures) != fmt.Sprint(want) || unattributed {
+		t.Fatalf("plain failures = %v unattributed=%v, want %v", failures, unattributed, want)
+	}
+	if names := strings.Join(failedGoTests(plain), ","); names != "TestA,TestB,TestB/sub" {
+		t.Fatalf("failed test names = %q", names)
+	}
+
+	jsonStream := `{"Action":"run","Package":"example.test/one","Test":"TestX"}
+{"Action":"output","Package":"example.test/one","Test":"TestX","Output":"--- FAIL: TestX (0.00s)\n"}
+{"Action":"fail","Package":"example.test/one","Test":"TestX"}
+{"Action":"fail","Package":"example.test/one"}
+{"Action":"pass","Package":"example.test/two","Test":"TestY"}
+`
+	failures, unattributed = goTestFailures(jsonStream)
+	if fmt.Sprint(failures) != fmt.Sprint([]GoTestFailure{{"example.test/one", "TestX"}}) || unattributed {
+		t.Fatalf("json failures = %v unattributed=%v", failures, unattributed)
+	}
+
+	for name, stream := range map[string]string{
+		"plain build failure": "# example.test/one\none.go:3:1: syntax error\nFAIL\texample.test/one [build failed]\n",
+		"plain timeout":       "panic: test timed out after 1s\nFAIL\texample.test/one\t1.01s\n",
+		"json build failure":  `{"Action":"fail","Package":"example.test/one"}` + "\n",
+	} {
+		if failures, unattributed := goTestFailures(stream); len(failures) != 0 || !unattributed {
+			t.Fatalf("%s: failures=%v unattributed=%v, want none and unattributed", name, failures, unattributed)
+		}
+	}
+
+	// A named failed test beside a non-test failure in the same package (a timeout panic, a
+	// build or setup failure) still records the test, and the check is unattributed.
+	plainTimeout := "--- FAIL: TestFlaky (0.00s)\n    flaky_test.go:3: flaked\npanic: test timed out after 1s\n\trunning tests:\n\t\tTestHang (1s)\nFAIL\texample.test/one\t1.01s\n"
+	jsonTimeout := `{"Action":"run","Package":"example.test/one","Test":"TestFlaky"}
+{"Action":"fail","Package":"example.test/one","Test":"TestFlaky"}
+{"Action":"run","Package":"example.test/one","Test":"TestHang"}
+{"Action":"output","Package":"example.test/one","Output":"panic: test timed out after 1s\n"}
+{"Action":"output","Package":"example.test/one","Output":"FAIL\texample.test/one\t1.01s\n"}
+{"Action":"fail","Package":"example.test/one"}
+`
+	for name, stream := range map[string]string{
+		"plain timeout panic":   plainTimeout,
+		"json timeout panic":    jsonTimeout,
+		"plain panic":           "--- FAIL: TestFlaky (0.00s)\npanic: runtime error: index out of range\nFAIL\texample.test/one\t0.01s\n",
+		"plain setup failed":    "--- FAIL: TestFlaky (0.00s)\nFAIL\texample.test/one\t0.01s\nFAIL\texample.test/two [setup failed]\n",
+		"json build-fail":       `{"Action":"fail","Package":"example.test/one","Test":"TestFlaky"}` + "\n" + `{"ImportPath":"example.test/two","Action":"build-fail"}` + "\n",
+		"json build failed out": `{"Action":"fail","Package":"example.test/one","Test":"TestFlaky"}` + "\n" + `{"Action":"output","Package":"example.test/two","Output":"FAIL\texample.test/two [build failed]\n"}` + "\n",
+		// Go runtime aborts beside a flaky named failure: a deadlock and a killed binary.
+		"plain fatal error":       "--- FAIL: TestFlaky (0.00s)\n    flaky_test.go:3: flaked\nfatal error: all goroutines are asleep - deadlock!\n\ngoroutine 1 [chan receive]:\nexit status 2\nFAIL\texample.test/one\t0.01s\n",
+		"plain signal":            "--- FAIL: TestFlaky (0.00s)\n    flaky_test.go:3: flaked\nsignal: segmentation fault\nFAIL\texample.test/one\t0.01s\n",
+		"json fatal error output": `{"Action":"fail","Package":"example.test/one","Test":"TestFlaky"}` + "\n" + `{"Action":"output","Package":"example.test/one","Output":"fatal error: all goroutines are asleep - deadlock!\n"}` + "\n" + `{"Action":"fail","Package":"example.test/one"}` + "\n",
+		// An exit status with no failed test before it in its package, the stream cut before
+		// that package's result line.
+		"plain exit status outside a test": "--- FAIL: TestFlaky (0.00s)\nFAIL\nexit status 1\nFAIL\texample.test/one\t0.01s\nexit status 2\n",
+	} {
+		failures, unattributed := goTestFailures(stream)
+		if fmt.Sprint(failures) != fmt.Sprint([]GoTestFailure{{"example.test/one", "TestFlaky"}}) || !unattributed {
+			t.Fatalf("%s: failures=%v unattributed=%v, want TestFlaky and unattributed", name, failures, unattributed)
+		}
+	}
+
+	// The exit status go test prints after a package's named failures stays attributed.
+	if failures, unattributed := goTestFailures("--- FAIL: TestFlaky (0.00s)\nFAIL\nexit status 1\nFAIL\texample.test/one\t0.01s\n"); fmt.Sprint(failures) != fmt.Sprint([]GoTestFailure{{"example.test/one", "TestFlaky"}}) || unattributed {
+		t.Fatalf("exit status after a named failure: failures=%v unattributed=%v", failures, unattributed)
+	}
+
+	// A plain "--- FAIL:" line no result line follows keeps an empty package.
+	if failures, _ := goTestFailures("--- FAIL: TestCut (0.00s)\n"); fmt.Sprint(failures) != fmt.Sprint([]GoTestFailure{{"", "TestCut"}}) {
+		t.Fatalf("cut stream failures = %v", failures)
+	}
+}

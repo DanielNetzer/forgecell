@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,6 +50,8 @@ const (
 	replayGofmtTimeoutMS  = 120_000
 	// replayVerifyTimeout bounds each build-time hidden-test run.
 	replayVerifyTimeout = 10 * time.Minute
+	// replayMaxRunPatternBytes bounds the `go test -run` pattern naming the hidden tests.
+	replayMaxRunPatternBytes = 4000
 )
 
 // ReplayOptions configures BuildReplay. GH defaults to a read-only `gh api` GET.
@@ -372,6 +375,12 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 	if len(hiddenNames) == 0 {
 		return zero, "hidden test files define no runnable tests"
 	}
+	// Acceptance and both build-time validation runs execute only the PR's own tests, so an
+	// unrelated test in the same package can never decide the outcome.
+	runPattern, err := hiddenRunPattern(hiddenNames)
+	if err != nil {
+		return zero, err.Error()
+	}
 	pkgs, err := acceptancePackages(testFiles)
 	if err != nil {
 		return zero, err.Error()
@@ -398,7 +407,7 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 
 	// Verify the initial failure at the base tree: at baseCommit, with the hidden tests
 	// applied, at least one hidden test must fail and the package must build.
-	res, reason := runHiddenTests(ctx, o.Source, baseCommit, testFiles, contents, renamedOld, pkgs, gomodcache, gocache)
+	res, reason := runHiddenTests(ctx, o.Source, baseCommit, testFiles, contents, renamedOld, pkgs, runPattern, gomodcache, gocache)
 	if reason != "" {
 		return zero, reason
 	}
@@ -437,7 +446,7 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 	}
 
 	// Validity: the hidden tests must pass on the merge tree.
-	mres, reason := runHiddenTests(ctx, o.Source, p.MergeCommitSHA, testFiles, contents, renamedOld, pkgs, gomodcache, gocache)
+	mres, reason := runHiddenTests(ctx, o.Source, p.MergeCommitSHA, testFiles, contents, renamedOld, pkgs, runPattern, gomodcache, gocache)
 	if reason != "" {
 		return zero, reason
 	}
@@ -626,6 +635,30 @@ func hiddenTestNames(testFiles []string, contents map[string][]byte) []string {
 	return sortedKeys(set)
 }
 
+// errHiddenRunPatternTooLong is the skip reason for a PR whose hidden test names do not fit
+// in one bounded `go test -run` pattern.
+var errHiddenRunPatternTooLong = errors.New("hidden test name pattern too long")
+
+// hiddenRunPattern returns the anchored `go test -run` pattern `^(<names>)$` matching exactly
+// the given top-level test names, sorted and each quoted with regexp.QuoteMeta. A pattern over
+// replayMaxRunPatternBytes is refused.
+func hiddenRunPattern(names []string) (string, error) {
+	if len(names) == 0 {
+		return "", errors.New("hidden test files define no runnable tests")
+	}
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	quoted := make([]string, len(sorted))
+	for i, n := range sorted {
+		quoted[i] = regexp.QuoteMeta(n)
+	}
+	pattern := "^(" + strings.Join(quoted, "|") + ")$"
+	if len(pattern) > replayMaxRunPatternBytes {
+		return "", errHiddenRunPatternTooLong
+	}
+	return pattern, nil
+}
+
 // acceptancePackages returns the sorted, deduplicated module-relative `go test` targets for
 // the hidden test files.
 func acceptancePackages(testFiles []string) ([]string, error) {
@@ -647,10 +680,15 @@ func acceptancePackages(testFiles []string) ([]string, error) {
 }
 
 // buildAcceptanceScript emits a self-contained POSIX shell script that copies the workspace
-// to a temporary tree, writes the hidden test files into it and runs their packages. It runs
-// against a throwaway copy so grading never rewrites the workspace's tracked content. This
-// script embeds the hidden test content and therefore lives only under <out>/hidden/.
+// to a temporary tree, writes the hidden test files into it and runs, in their packages, only
+// the tests they define (`-run` from hiddenRunPattern). It runs against a throwaway copy so
+// grading never rewrites the workspace's tracked content. This script embeds the hidden test
+// content and therefore lives only under <out>/hidden/.
 func buildAcceptanceScript(testFiles []string, contents map[string][]byte, pkgs []string) ([]byte, error) {
+	runPattern, err := hiddenRunPattern(hiddenTestNames(testFiles, contents))
+	if err != nil {
+		return nil, err
+	}
 	h := sha256.New()
 	for _, f := range testFiles {
 		h.Write(contents[f])
@@ -680,7 +718,7 @@ func buildAcceptanceScript(testFiles []string, contents map[string][]byte, pkgs 
 		b.WriteString(delim + "\n")
 	}
 	b.WriteString("cd " + shQuote(replayModuleSubdir) + "\n")
-	args := []string{"go", "test", "-buildvcs=false"}
+	args := []string{"go", "test", "-buildvcs=false", "-run", runPattern}
 	args = append(args, pkgs...)
 	quoted := make([]string, len(args))
 	for i, a := range args {
@@ -720,11 +758,12 @@ type goTestEvent struct {
 }
 
 // runHiddenTests creates a hookless throwaway worktree at commit, applies the hidden test
-// files (deleting any renamed-away old paths), and runs their packages with `go test -json`
-// under a scrubbed environment allowlist. It parses the events to distinguish a genuine test
-// failure from a build or toolchain error. A non-empty reason is a recorded skip for an
-// inability to prepare the worktree.
-func runHiddenTests(ctx context.Context, source, commit string, testFiles []string, contents map[string][]byte, renamedOld []string, pkgs []string, gomodcache, gocache string) (hiddenRunResult, string) {
+// files (deleting any renamed-away old paths), and runs only the hidden tests (runPattern, the
+// same `-run` filter acceptance uses) in their packages with `go test -json` under a scrubbed
+// environment allowlist. It parses the events to distinguish a genuine test failure from a
+// build or toolchain error. A non-empty reason is a recorded skip for an inability to prepare
+// the worktree.
+func runHiddenTests(ctx context.Context, source, commit string, testFiles []string, contents map[string][]byte, renamedOld []string, pkgs []string, runPattern, gomodcache, gocache string) (hiddenRunResult, string) {
 	var res hiddenRunResult
 	parent, err := os.MkdirTemp("", "forgecell-replay-verify-")
 	if err != nil {
@@ -755,7 +794,7 @@ func runHiddenTests(ctx context.Context, source, commit string, testFiles []stri
 	if err != nil {
 		return res, "setup error: " + err.Error()
 	}
-	argv := append([]string{"go", "test", "-json", "-buildvcs=false"}, pkgs...)
+	argv := append([]string{"go", "test", "-json", "-buildvcs=false", "-run", runPattern}, pkgs...)
 	r := process.Run(ctx, process.Options{
 		Argv:           argv,
 		Dir:            filepath.Join(worktree, replayModuleSubdir),

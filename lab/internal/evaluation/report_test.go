@@ -179,6 +179,53 @@ func TestCohortReportHiddenAcceptanceIndependent(t *testing.T) {
 	}
 }
 
+// TestCohortReportCorrectExcludingBaseFlakes: the per-variant count adds, to the correct
+// attempts, those whose only regression failures are flaky at base (a record predating the
+// field counts only when correct); the Attempts section marks each flaky test "flaky at
+// base (k/3 failed)" and each broken one "broken at base", leaves a test that passed at base
+// unmarked and lists the unclassified ones. Correct is unchanged.
+func TestCohortReportCorrectExcludingBaseFlakes(t *testing.T) {
+	yes := true
+	flaky := reportAttempt("task-a", "base", 1, false, true, "", nil, nil, 1)
+	flaky.HiddenAcceptance = &yes
+	flaky.RegressionFailedTests = []string{"TestBaseFlake"}
+	flaky.RegressionFailures = []RegressionFailure{{Package: "example/pkg", Test: "TestBaseFlake", FlakyAtBase: true, BaseFails: 1, BasePasses: 2}}
+	flaky.CorrectExcludingBaseFlakes = true
+	mixed := reportAttempt("task-a", "base", 2, false, true, "", nil, nil, 1)
+	mixed.HiddenAcceptance = &yes
+	mixed.RegressionFailedTests = []string{"TestBaseFlake", "TestBroken", "TestCandidate", "TestLater"}
+	mixed.RegressionFailures = []RegressionFailure{
+		{Package: "example/pkg", Test: "TestBaseFlake", FlakyAtBase: true, BaseFails: 2, BasePasses: 1},
+		{Package: "example/pkg", Test: "TestBroken", BrokenAtBase: true, BaseFails: 3},
+		{Package: "example/pkg", Test: "TestCandidate", BasePasses: 3},
+		{Package: "example/pkg", Test: "TestLater", Unclassified: true},
+	}
+	// A correct record saved before the field existed still counts.
+	legacyCorrect := reportAttempt("task-a", "base", 3, true, true, "", nil, nil, 1)
+	r := buildCohortReport(CohortReport{SchemaVersion: 1, Tasks: 1, Repetitions: 3}, []string{"base"}, map[string]string{"base": "x"}, []string{"task-a"}, []CohortAttempt{flaky, mixed, legacyCorrect})
+	v := r.Variants[0]
+	if v.Correct != 1 || v.CorrectExcludingBaseFlakes != 2 {
+		t.Fatalf("correct=%d correctExcludingBaseFlakes=%d, want 1 and 2", v.Correct, v.CorrectExcludingBaseFlakes)
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"correctExcludingBaseFlakes":2`) || !strings.Contains(string(raw), `"flakyAtBase":true`) {
+		t.Fatalf("report.json lacks the base-flake fields:\n%s", raw)
+	}
+	md := renderCohortMarkdown(r)
+	for _, want := range []string{
+		"- Correct excluding base flakes (independent verification: acceptance and every non-test check passed; every failed regression test flaky at base): 2 (67%; n=3 attempts over 1 task(s) × 3 rep(s))\n",
+		"rep-1: failed; served: unavailable; cost unreported; elapsed 1 ms; hidden acceptance passed\n  - regression failed tests: TestBaseFlake [flaky at base (1/3 failed)]\n",
+		"  - regression failed tests: TestBaseFlake [flaky at base (2/3 failed)], TestBroken [broken at base], TestCandidate, TestLater\n  - unclassified at base: TestLater\n",
+	} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("report.md missing %q:\n%s", want, md)
+		}
+	}
+}
+
 // TestRegressionFailedTestsParsedFromTail: an attempt whose candidate verification passed
 // acceptance but failed a regression check records the sorted, unique Go tests named by
 // the "--- FAIL:" lines of the failed check's retained output (two in the candidate view,
