@@ -54,6 +54,11 @@ type VariantSummary struct {
 	Correct              int `json:"correct"`
 	HiddenAcceptancePass int `json:"hiddenAcceptancePass"`
 	HiddenAcceptanceN    int `json:"hiddenAcceptanceN"`
+	// CorrectExcludingBaseFlakes counts the correct attempts plus those whose independent
+	// verification passed acceptance and every non-test check and whose only regression
+	// failures are tests flaky at base. A record that predates the field counts only if it
+	// is correct.
+	CorrectExcludingBaseFlakes int `json:"correctExcludingBaseFlakes"`
 	// RequiredChecksPass is nullable: null (n/a) when no attempt had a non-acceptance
 	// plan check to measure. RequiredChecksN is the number of measurable (non-n/a)
 	// attempts the pass count and rate are computed over.
@@ -389,6 +394,9 @@ func buildCohortReport(base CohortReport, variantNames []string, variantHashes m
 			if a.Correct {
 				s.Correct++
 			}
+			if a.Correct || a.CorrectExcludingBaseFlakes {
+				s.CorrectExcludingBaseFlakes++
+			}
 			if a.HiddenAcceptance != nil {
 				s.HiddenAcceptanceN++
 				if *a.HiddenAcceptance {
@@ -576,6 +584,25 @@ func attemptOutcome(a Attempt) string {
 	return "failed"
 }
 
+// baseFlakeMarks returns, per failed test name, its base classification label ("flaky at
+// base (k/3 failed)" or "broken at base"; none when recorded failures of that name disagree)
+// and the sorted unique names left unclassified.
+func baseFlakeMarks(failures []RegressionFailure) (map[string]string, []string) {
+	marks := map[string]string{}
+	var unclassified []string
+	for _, f := range failures {
+		mark := baseFlakeMark(f)
+		if prior, seen := marks[f.Test]; seen && prior != mark {
+			mark = ""
+		}
+		marks[f.Test] = mark
+		if f.Unclassified {
+			unclassified = append(unclassified, f.Test)
+		}
+	}
+	return marks, uniqueSorted(unclassified)
+}
+
 // renderCohortMarkdown renders the side-by-side report. Counts and rates only, with no
 // significance claims; every rate states its n next to it.
 func renderCohortMarkdown(r CohortReport) string {
@@ -610,6 +637,7 @@ func renderCohortMarkdown(r CohortReport) string {
 		// Hidden acceptance runs first, so its pass rate is measured over the attempts where
 		// it ran, independently of any regression failure; correct requires every check.
 		fmt.Fprintf(&b, "- Hidden-acceptance pass %d of %d-ran (%s); correct (acceptance and every required check): %d (%s; %s)\n", v.HiddenAcceptancePass, v.HiddenAcceptanceN, rate(v.HiddenAcceptancePass, v.HiddenAcceptanceN), v.Correct, rate(v.Correct, valid), n)
+		fmt.Fprintf(&b, "- Correct excluding base flakes (independent verification: acceptance and every non-test check passed; every failed regression test flaky at base): %d (%s; %s)\n", v.CorrectExcludingBaseFlakes, rate(v.CorrectExcludingBaseFlakes, valid), n)
 		fmt.Fprintf(&b, "- Required-checks pass: %s\n", requiredChecksLine(v.RequiredChecksPass, v.RequiredChecksN))
 		fmt.Fprintf(&b, "- Scope violations: %d; scope-change: %d; amendments: %d; timeouts: %d; failures: %d (%s)\n", v.ScopeViolations, v.ScopeChanges, v.Amendments, v.Timeouts, v.Failures, n)
 		fmt.Fprintf(&b, "- Elapsed: median %s, p90 %s; harness: median %s, p90 %s (%s)\n", msOrNA(v.ElapsedMedianMS, valid), msOrNA(v.ElapsedP90MS, valid), msOrNA(v.HarnessMedianMS, valid), msOrNA(v.HarnessP90MS, valid), n)
@@ -675,7 +703,15 @@ func renderCohortMarkdown(r CohortReport) string {
 			}
 			fmt.Fprintf(&b, "- %s / %s / rep-%d: %s; served: %s; cost %s; elapsed %d ms; hidden acceptance %s\n", ca.Task, ca.Variant, ca.Repetition, attemptOutcome(ca.Attempt), served, costOrUnreported(reportedCost(ca.Attempt)), ca.ElapsedMS, hidden)
 			if len(ca.RegressionFailedTests) > 0 || ca.RegressionFailedTestsTruncated {
-				failed := strings.Join(ca.RegressionFailedTests, ", ")
+				marks, unclassified := baseFlakeMarks(ca.RegressionFailures)
+				names := make([]string, len(ca.RegressionFailedTests))
+				for i, name := range ca.RegressionFailedTests {
+					names[i] = name
+					if mark := marks[name]; mark != "" {
+						names[i] += " [" + mark + "]"
+					}
+				}
+				failed := strings.Join(names, ", ")
 				if failed == "" {
 					failed = "none found"
 				}
@@ -683,6 +719,9 @@ func renderCohortMarkdown(r CohortReport) string {
 					failed += " (output truncated)"
 				}
 				fmt.Fprintf(&b, "  - regression failed tests: %s\n", failed)
+				if len(unclassified) > 0 {
+					fmt.Fprintf(&b, "  - unclassified at base: %s\n", strings.Join(unclassified, ", "))
+				}
 			}
 			for _, f := range ca.FailedCheckOutput {
 				view := ""

@@ -390,6 +390,58 @@ them, so flakes in historical code are visible rather than read as the model's f
 When a failed check's stored stream was itself cut, `regressionFailedTestsTruncated` is
 set and the list is marked `(output truncated)`.
 
+Regression failures that are **flaky at base** are classified, so a test that fails in the
+untouched historical code does not decide the comparison. The failed-test extraction also
+records each test's package import path (the `Package` of a `go test -json` event, or the
+`FAIL\t<pkg>` result line that follows a plain stream's `--- FAIL:` lines), and notes an
+**unattributed** failure: a package failure no `--- FAIL` in that package explains, or any
+`panic:` line, Go runtime abort (`fatal error:`, such as a deadlock) or `signal: ` line (a
+test binary killed by a signal), `test timed out`, `[build failed]` or `[setup failed]` (in
+plain output or an event's `Output`), even beside a named failed test in the same package,
+and a plain `exit status N` line with no `--- FAIL` before it in its package. After independent
+verification, and before cleanup reclaims the per-attempt source, an attempt whose hidden
+acceptance passed re-runs each failed regression test in a fresh worktree of that source at
+the base commit (base only; no candidate change applied). The plan's `setup` commands run
+there first, as in verification (each from its directory with its own timeout), under the
+replay's scrubbed environment; a setup failure leaves every test unclassified. Each test then
+runs **exactly 3 times** (no early stop): `go test -count=1 -run '^<name>$' <pkg>` (with
+`-json` to read the result; each subtest level is anchored separately) from the check's
+directory, under the same scrubbed environment, with a 5-minute timeout each. A run fails
+only on the test's own `fail` event or a timeout after it started and before it passed; a
+non-zero exit after its `pass` event, a missing test or package, a build failure or an
+interruption is undecided. A test with at least one passing **and** one failing run is
+`flakyAtBase`; one that failed all 3 is `brokenAtBase` (it may be the very bug the PR
+fixes, so it excuses nothing); one that passed all 3 is neither; anything else is
+`unclassified`. At most 10 tests are re-run per attempt, in package and test order; the
+rest, and a test whose package is unknown, are `unclassified`. The attempt records
+`regressionFailures` (`package`, `test`, `flakyAtBase`, `brokenAtBase`, `baseFails`,
+`basePasses`, `unclassified`), keeping `regressionFailedTests`, and
+`correctExcludingBaseFlakes`: `correct`, or, judged **only from the evaluation's independent
+verification** (which runs every plan check without stopping at a failure), never from the
+Molecule's fail-fast verification: that verification ran with every plan check observed and
+complete, acceptance passed, every check that is not a `go test` check (go vet, gofmt and any
+other) passed, and every failed `go test` check failed only on named tests, none
+unattributed, each tagged `flakyAtBase`. `correctExcludingBaseFlakes` is always computed
+from that independent verification. It runs whenever coding completed with a captured tree,
+even when the Molecule's own fail-fast verification failed or errored on a check: the
+attempt's `verification` keeps the refusal (so `correct` and the required checks keep their
+strict, Molecule-gated meaning), and the full independent run is recorded as
+`evaluationVerification`, which only `hiddenAcceptance`, the regression failure lists and
+`correctExcludingBaseFlakes` read. It does not run when coding failed, was blocked, timed out
+or asked for a scope change, or the attempt is invalid. When the independent verification
+did not run or a check is unobserved, the flag is false: an unobserved check never counts as
+passing. The Molecule's own failure evidence must agree as well: every failed check in
+`failedCheckOutput` (candidate and protected views) must be a `go test` check that failed only
+on named tests tagged `flakyAtBase` (not `brokenAtBase` or unclassified), with no
+unattributed failure and a complete failure list, so a test the candidate broke
+deterministically in the Molecule's run keeps the flag false even when the independent run
+did not fail it; any other Molecule failure (a setup command, acceptance, go vet, gofmt or
+another check) does too. Each variant reports a `correctExcludingBaseFlakes` count (records that predate the
+field count only when correct), and the `## Attempts` section marks each test
+`[flaky at base (k/3 failed)]` or `[broken at base]` and lists the unclassified ones. The
+re-runs add up to 10 × 3 × 5 minutes per attempt, the base worktree is removed even after a
+cancellation, and a cancellation during the re-runs still discards the attempt.
+
 The protected regression of an evaluation attempt exempts the task's own test files
 (the plan's `candidateTestFiles`, which replay sets to the replayed PR's changed test files
 and which hidden acceptance grades with their real versions): the evaluation sets them,
@@ -454,7 +506,12 @@ The machine-consumed inputs, which embed or are the hidden tests, live under
   runner).
 - `acceptance.sh` (`Plan.Acceptance`), a self-contained script that copies the workspace to
   a throwaway tree, writes the changed test files (captured at the merge commit) into it and
-  runs their packages, so grading never rewrites tracked content.
+  runs, in their packages, **only the tests they define**, so grading never rewrites tracked
+  content and an unrelated (for example timing-sensitive) test in the same package can never
+  decide acceptance. The command is `go test -buildvcs=false -run '^(<names>)$' <pkgs>`,
+  where the names are the top-level `Test`/`Fuzz`/`Example` functions defined in the hidden
+  test files, sorted and each quoted with `regexp.QuoteMeta`. If that pattern would exceed
+  4,000 bytes the PR is skipped with `hidden test name pattern too long`.
 - `files/<repo-relative>`, the raw hidden test files for review.
 
 > **Assumption (recorded):** the frozen `Plan` schema and the #150 cohort runner require
@@ -469,7 +526,9 @@ environment allowlist (`PATH`, a private `HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACH
 `GOFLAGS=-mod=readonly`, `GOTOOLCHAIN=local`, `GOPROXY=off`, `LANG`) — never the inherited
 environment — and in throwaway worktrees created with `core.hooksPath=/dev/null`. In a
 worktree at `baseCommit` the hidden tests are applied (renamed-away old paths removed) and
-run with `go test -json`; the PR counts as reproducing the initial failure when at least one
+run with `go test -json` and the same `-run` filter as `acceptance.sh`, so the initial
+failure is reproduced by the task's own tests and the merge-pass validation below is not
+failed by an unrelated test; the PR counts as reproducing the initial failure when at least one
 hidden test reports a `fail` action (a **test-failure**) **or** when the failure is a
 **test-compile**: the test package does not compile at base because the hidden tests call
 identifiers the PR adds. To distinguish a test-compile from a real build error, when the base

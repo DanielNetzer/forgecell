@@ -579,6 +579,10 @@ func runCohortCoordinate(ctx context.Context, o CohortOptions, raw []byte, c Coh
 	// Keep failed-check stream tails before cleanup deletes the history files.
 	a.FailedCheckOutput = failedCheckOutput(a.Molecule)
 	setHiddenAcceptance(&a)
+	// Re-run the failed regression tests at base in the per-attempt source, which only holds
+	// the base commit, after the plan's setup, before cleanup reclaims it; a cancellation
+	// here still discards the attempt below.
+	classifyRegressionFailures(ctx, &a, lt.plan, attemptSource, acceptancePath)
 	ca := CohortAttempt{Task: lt.task.Name, Variant: vname, Repetition: rep, Attempt: a}
 	// The record, verification observations and captured diff are saved; by default
 	// reclaim the attempt's Lab, workspace and per-attempt source trees. A cleanup error is
@@ -603,7 +607,8 @@ func runCohortCoordinate(ctx context.Context, o CohortOptions, raw []byte, c Coh
 // setHiddenAcceptance records the hidden acceptance check's own result, independent of
 // every other check, and, when it passed but a regression check failed, the Go tests that
 // failure names. The result comes from the evaluation's independent verification, the run
-// that sets Correct and runs every check, so Correct always implies a passing hidden
+// that sets Correct and runs every check (or, when the Molecule's verification stopped the
+// tree, the independent run after it), so Correct always implies a passing hidden
 // acceptance; only when that verification observed no acceptance (it never ran) does the
 // Molecule's candidate verification supply it (its protected view never runs acceptance).
 // Acceptance counts as not run (nil) when coding did not complete, no acceptance was
@@ -615,9 +620,10 @@ func setHiddenAcceptance(a *Attempt) {
 	if a.Invalid != "" || !completed(*a) {
 		return
 	}
+	independent := evaluationVerification(*a)
 	var result process.Result
 	found := false
-	for _, obs := range a.Verification.Checks {
+	for _, obs := range independent.Checks {
 		if obs.Command.Name == "acceptance" {
 			result, found = obs.Result, true
 			break
@@ -649,7 +655,7 @@ func setHiddenAcceptance(a *Attempt) {
 			a.RegressionFailedTestsTruncated = a.RegressionFailedTestsTruncated || f.FailedTestsTruncated
 		}
 	}
-	for _, obs := range a.Verification.Checks {
+	for _, obs := range independent.Checks {
 		if obs.Command.Name != "acceptance" && !obs.Result.OK {
 			names = append(names, failedGoTests(harness.RedactSecrets(obs.Result.Stdout), harness.RedactSecrets(obs.Result.Stderr))...)
 			a.RegressionFailedTestsTruncated = a.RegressionFailedTestsTruncated || streamCut(obs.Result)
@@ -1151,6 +1157,13 @@ func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string
 		if a.Verification.Error != "" {
 			a.Error = a.Verification.Error
 		}
+		// The Molecule's verification stops at its first failed check, so a tree it stopped
+		// is still verified independently, every check run, for HiddenAcceptance and
+		// CorrectExcludingBaseFlakes alone; the refusal above keeps Correct strict.
+		if view, ok := stoppedAtVerification(a); ok {
+			v := verify(ctx, attemptSource, verifyDir, lt.acceptancePath, p, view)
+			a.EvaluationVerification = &v
+		}
 	}
 	// Grade the required (non-acceptance) plan checks once, with the plan in hand, and
 	// persist the tri-state so a resumed report never needs the plan to aggregate it.
@@ -1165,6 +1178,61 @@ func runCohortAttempt(ctx context.Context, f formula.Formula, variantName string
 func finalizeUsage(a *Attempt) {
 	markInvalid(a)
 	a.CostUSD = reportedCost(*a)
+}
+
+// stoppedAtVerification returns the view of a for the evaluation's independent verification
+// when verify refused a only because the Molecule's own verification stopped it: coding
+// completed validly within scope with a captured tree, the harness was served its pinned
+// model and did not time out or ask for a scope change, and the Molecule then stopped with
+// only its verification (check) Atoms failed. The view presents that run as recorded, so
+// verify runs every plan check; it never applies when coding failed, was blocked, timed out
+// or the attempt is invalid, nor when verify refused a for any other reason.
+func stoppedAtVerification(a Attempt) (Attempt, bool) {
+	if a.Verification.Error == "" || len(a.Verification.Setup) != 0 || len(a.Verification.Checks) != 0 {
+		return a, false
+	}
+	if !completed(a) || timedOut(a) || scopeChange(a) || !a.ScopeOK || !commitPattern.MatchString(a.Tree) {
+		return a, false
+	}
+	if _, _, mismatch := modelMismatch(a); mismatch {
+		return a, false
+	}
+	coded := false
+	for _, h := range a.Molecule.HarnessAttempts {
+		if h.Coding != nil && h.Coding.Outcome == "completed" {
+			coded = true
+		}
+	}
+	if !coded || a.Molecule.Status != "blocked" || a.Molecule.Verification == nil {
+		return a, false
+	}
+	view := a
+	view.Molecule.Atoms = append(view.Molecule.Atoms[:0:0], a.Molecule.Atoms...)
+	stopped := false
+	for i, atom := range view.Molecule.Atoms {
+		if atom.Status != "failed" && atom.Status != "blocked" {
+			continue
+		}
+		if atom.Type != "check" {
+			return a, false
+		}
+		view.Molecule.Atoms[i].Status, stopped = "done", true
+	}
+	if !stopped {
+		return a, false
+	}
+	view.Molecule.Status = "recorded"
+	return view, true
+}
+
+// evaluationVerification is the independent verification HiddenAcceptance and
+// CorrectExcludingBaseFlakes are judged from: the run after the Molecule's verification
+// stopped the tree when there was one, otherwise the attempt's verification.
+func evaluationVerification(a Attempt) Verification {
+	if a.EvaluationVerification != nil {
+		return *a.EvaluationVerification
+	}
+	return a.Verification
 }
 
 // runCohortMolecule runs one cohort attempt's Molecule. It is a variable only so tests
