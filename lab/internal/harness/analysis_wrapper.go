@@ -19,6 +19,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/pinned"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // AnalysisWrapperProtocol names the analysis-only stdin/stdout exchange: one JSON
@@ -568,11 +569,11 @@ func InvokeAnalysisWrapper(ctx context.Context, labDir string, d AnalysisWrapper
 	if request["kind"] != "ticket-analysis" {
 		return fail("an analysis wrapper only accepts ticket-analysis requests")
 	}
-	root, err := os.MkdirTemp("", "forgecell-analysis-wrapper-")
+	root, err := resources.MkdirTemp("", "forgecell-analysis-wrapper-")
 	if err != nil {
 		return fail(err.Error())
 	}
-	defer os.RemoveAll(root)
+	defer func() { _ = resources.Remove(root) }()
 	executable, err := materializeWrapper(root, m)
 	if err != nil {
 		return fail("analysis wrapper could not be materialized from its verified bytes: " + err.Error())

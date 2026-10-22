@@ -17,6 +17,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 var versionCore = regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)(?:-[A-Za-z0-9.-]+)?$`)
@@ -288,11 +289,11 @@ func DevInstall(ctx context.Context, o DevOptions) (r DevRelease, err error) {
 	if !versionPattern.MatchString(version) {
 		return r, fmt.Errorf("invalid dev version: %s", version)
 	}
-	work, err := os.MkdirTemp("", "forgecell-dev-")
+	work, err := resources.MkdirTemp("", "forgecell-dev-")
 	if err != nil {
 		return r, err
 	}
-	defer os.RemoveAll(work)
+	defer func() { _ = resources.Remove(work) }()
 	built := filepath.Join(work, "forgecell")
 	build := o.Build
 	if build == nil {

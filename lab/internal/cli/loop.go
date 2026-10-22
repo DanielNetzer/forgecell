@@ -7,10 +7,12 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/learning"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -34,6 +36,23 @@ var watchWait = func(ctx context.Context, d time.Duration) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// newResourceGuard builds the guard for a Lab's runs: the Lab's floors over the
+// volumes holding TMPDIR, the Lab and GOCACHE, and available memory, with each
+// soft-floor wait logged to stderr. A test binary gets no guard unless a test installs
+// one through this seam, so a busy CI disk never holds an unrelated test for the
+// guard's ten-minute wait.
+var newResourceGuard = func(lab string, stderr io.Writer) (*resources.Guard, error) {
+	if testing.Testing() {
+		return nil, nil
+	}
+	guard, err := resources.NewGuard(lab)
+	if err != nil {
+		return nil, err
+	}
+	guard.Log = func(line string) { fmt.Fprintln(stderr, "forgecell:", line) }
+	return guard, nil
 }
 
 // runLoopCommand validates every argument before it reads GitHub, writes a
@@ -82,7 +101,11 @@ func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, 
 	if err != nil {
 		return fail(err)
 	}
-	options := molecule.LoopOptions{Template: molecule.Options{LabDir: *lab, SourceRoot: cwd}, Select: selector, MaxConcurrent: *concurrent, Once: *once}
+	guard, err := newResourceGuard(*lab, stderr)
+	if err != nil {
+		return fail(err)
+	}
+	options := molecule.LoopOptions{Template: molecule.Options{LabDir: *lab, SourceRoot: cwd, Resources: guard}, Select: selector, MaxConcurrent: *concurrent, Once: *once}
 	if *watch {
 		return watchLoop(ctx, options, *interval, *learn, *lab, out, stderr)
 	}
@@ -113,6 +136,17 @@ func watchLoop(ctx context.Context, options molecule.LoopOptions, interval time.
 	errored := false
 	for n := 1; ctx.Err() == nil; n++ {
 		fmt.Fprintf(out, "Watch pass %d\n", n)
+		// Below a soft floor the pass is skipped, with its reason in the pass report;
+		// the next pass checks again after the interval.
+		if guard := options.Template.Resources; guard != nil {
+			if level, reason := guard.Check(); level != resources.OK {
+				fmt.Fprintf(out, "Pass skipped: %s\n", reason)
+				if !watchWait(ctx, interval) {
+					break
+				}
+				continue
+			}
+		}
 		report, err := runLoop(ctx, options)
 		renderLoop(out, report, options.Select, options.MaxConcurrent)
 		renderLearnNotices(out, stderr, lab)

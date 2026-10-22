@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,11 +49,11 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 	if o.Executable == "" {
 		return fail("harness executable is required")
 	}
-	dir, err := os.MkdirTemp("", "forgecell-adapter-")
+	dir, err := resources.MkdirTemp("", "forgecell-adapter-")
 	if err != nil {
 		return fail(err.Error())
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = resources.Remove(dir) }()
 	output := filepath.Join(dir, "result.txt")
 	call, err := BuildInvocation(o.ID, o.Request, output)
 	if err != nil {

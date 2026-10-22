@@ -41,7 +41,14 @@ func runEvaluateCohort(ctx context.Context, args []string, out, stderr io.Writer
 		// per-attempt evidence is untouched and can be regraded by a follow-up.
 		return fail(fmt.Errorf("cohort --recheck is deferred; recorded attempts are retained under %s/attempts and are not regraded here", *output))
 	}
-	report, err := evaluation.RunCohort(ctx, evaluation.CohortOptions{Cohort: *cohort, SourceRoot: *source, Output: *output, Approve: *approve, KeepWorkspaces: *keepWorkspaces, Parallel: *parallel})
+	// The cohort's attempts live under --out, so the guard measures that volume (with
+	// TMPDIR's and GOCACHE's) and reads optional floors from <out>/resources.json.
+	guard, err := newResourceGuard(*output, stderr)
+	if err != nil {
+		return fail(err)
+	}
+	logNote := func(line string) { fmt.Fprintln(stderr, "forgecell:", line) }
+	report, err := evaluation.RunCohort(ctx, evaluation.CohortOptions{Cohort: *cohort, SourceRoot: *source, Output: *output, Approve: *approve, KeepWorkspaces: *keepWorkspaces, Parallel: *parallel, Guard: guard, Log: logNote})
 	if err != nil {
 		return fail(err)
 	}

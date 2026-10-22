@@ -21,6 +21,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 )
 
@@ -1347,6 +1348,18 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	if roleErr != nil {
 		return r, roleErr
 	}
+	// The check-running stage does not start below a soft floor. The guard re-checks
+	// until readings recover or its wait ends; then the Molecule stops with the reason.
+	if o.Resources != nil {
+		if err := o.Resources.WaitForCapacity(ctx); err != nil {
+			reason, low := resources.AsLow(err)
+			if !low {
+				return r, err
+			}
+			atom(&r, roles.atoms[formula.Verification], "blocked", reason+"; verification was not started.")
+			return finishStopped(r, reason+"; verification was not started.")
+		}
+	}
 	if err := beginVerification(&r, p, capture.Tree); err != nil {
 		return r, err
 	}
@@ -1359,7 +1372,13 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 		return r, err
 	}
 	destination := filepath.Join(o.LabDir, "verification", fmt.Sprintf("%s-r%d", r.ID, p.Revision))
-	verified := verification.RunObserved(ctx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error {
+	// Below a hard floor the monitor cancels checkCtx, which kills the running check's
+	// process group; the verification error then starts with "resources-exhausted".
+	checkCtx, stopMonitor := ctx, func() {}
+	if o.Resources != nil {
+		checkCtx, stopMonitor = o.Resources.Monitor(ctx)
+	}
+	verified := verification.RunObserved(checkCtx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error {
 		if err := recordObservation(&r, obs); err != nil {
 			return err
 		}
@@ -1370,6 +1389,12 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 		observeAtomAction(&r, checkID, attemptID, "observe-verification", "partial-observations", refs...)
 		return save(r)
 	})
+	// A monitor that fired after every required check had already passed cancelled
+	// nothing that mattered, so the note is only added when the checks did not pass.
+	if reason, exhausted := resources.Exhausted(checkCtx); exhausted && !verified.RequiredChecksPassed {
+		r.Notes = append(r.Notes, reason+"; in-flight checks were cancelled.")
+	}
+	stopMonitor()
 	if err := completeVerification(&r, verified); err != nil {
 		return r, err
 	}

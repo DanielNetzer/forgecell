@@ -8,6 +8,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,11 +53,11 @@ func ProtectedTree(ctx context.Context, source string, p readiness.Plan, candida
 	if len(files) == 0 {
 		return candidate, nil
 	}
-	temp, err := os.MkdirTemp("", "forgecell-regression-")
+	temp, err := resources.MkdirTemp("", "forgecell-regression-")
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(temp)
+	defer func() { _ = resources.Remove(temp) }()
 	index := filepath.Join(temp, "index")
 	if _, err = git(ctx, source, index, nil, "read-tree", candidate); err != nil {
 		return "", err

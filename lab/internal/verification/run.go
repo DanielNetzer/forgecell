@@ -14,6 +14,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 type Observation struct {
@@ -86,6 +87,16 @@ type Result struct {
 	AcceptedDeltas []readiness.ProtectedDelta `json:"acceptedProtectedDeltas,omitempty"`
 	// Warnings name declared deltas that did not fail or were never exercised.
 	Warnings []string `json:"warnings,omitempty"`
+	// CleanupError records a temp directory that could not be removed. It never changes
+	// the verdict; the directory stays registered so exit cleanup tries again.
+	CleanupError string `json:"cleanupError,omitempty"`
+}
+
+// removeTemp removes a registered temp directory and records a failure on v.
+func removeTemp(v *Result, dir string) {
+	if err := resources.Remove(dir); err != nil {
+		v.CleanupError = strings.TrimPrefix(strings.Join([]string{v.CleanupError, err.Error()}, "; "), "; ")
+	}
 }
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -149,6 +160,10 @@ func runViewObserved(ctx context.Context, source, destination string, p readines
 func runViewDeltas(ctx context.Context, source, destination string, p readiness.Plan, c CaptureResult, observe func(Observation) error, protected bool) (v Result) {
 	v = Result{SchemaVersion: "v1", Workspace: destination, SourceTree: c.Tree, Setup: []Observation{}, Checks: []Observation{}, Containment: "Filtered environment and temporary HOME; no OS filesystem/network sandbox. Network access is unrestricted."}
 	fail := func(e error) Result {
+		// A hard-floor cancellation names itself, so the record says why checks stopped.
+		if reason, ok := resources.Exhausted(ctx); ok {
+			e = fmt.Errorf("%s: %w", reason, e)
+		}
 		v.Error = e.Error()
 		v.RequiredChecksPassed = false
 		v.IndependentAcceptanceVerified = false
@@ -292,20 +307,25 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	if _, err := git(ctx, destination, "", nil, "read-tree", c.Tree); err != nil {
 		return fail(err)
 	}
-	home, err := os.MkdirTemp("", "forgecell-check-home-")
+	// Go writes the module cache under the private HOME read-only, so these are removed
+	// with resources.Remove, which makes the tree writable first; they are also registered
+	// so a signal still removes them. A removal failure is recorded, not ignored.
+	home, err := resources.MkdirTemp("", "forgecell-check-home-")
 	if err != nil {
 		return fail(err)
 	}
-	defer os.RemoveAll(home)
+	defer removeTemp(&v, home)
 	env, secrets, err := commandEnvironment(p.Policy, home)
 	if err != nil {
 		return fail(err)
 	}
-	controls, err := os.MkdirTemp("", "forgecell-reviewed-checks-")
+	// A cohort attempt bounds each go command's build parallelism through GOFLAGS.
+	env = resources.ApplyGoParallelism(ctx, env)
+	controls, err := resources.MkdirTemp("", "forgecell-reviewed-checks-")
 	if err != nil {
 		return fail(err)
 	}
-	defer os.RemoveAll(controls)
+	defer removeTemp(&v, controls)
 	inputPaths := map[string]string{}
 	for id, input := range reviewed {
 		file := filepath.Join(controls, id)

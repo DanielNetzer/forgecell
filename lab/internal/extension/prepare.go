@@ -25,6 +25,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/pinned"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // MaxCacheBytes bounds the regular-file bytes of one cache entry, and of the
@@ -392,14 +393,10 @@ type scratch struct {
 }
 
 func newScratch() (*scratch, error) {
-	made, err := os.MkdirTemp("", "forgecell-extension-")
+	// resources.MkdirTemp registers the directory for exit and signal cleanup and
+	// returns an absolute path even for a relative TMPDIR.
+	root, err := resources.MkdirTemp("", "forgecell-extension-")
 	if err != nil {
-		return nil, err
-	}
-	// A relative TMPDIR makes MkdirTemp return a relative path.
-	root, err := filepath.Abs(made)
-	if err != nil {
-		_ = os.RemoveAll(made)
 		return nil, err
 	}
 	s := &scratch{
@@ -413,8 +410,7 @@ func newScratch() (*scratch, error) {
 	}
 	for _, d := range []string{s.source, s.work, s.home, s.tmp, s.execDir, s.interpDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
-			removeTree(root)
-			return nil, err
+			return nil, errors.Join(err, resources.Remove(root))
 		}
 	}
 	return s, nil
@@ -427,7 +423,7 @@ func (b *cacheBuild) runPrepare(ctx context.Context) string {
 	if err != nil {
 		return "cannot create a private temporary directory: " + err.Error()
 	}
-	defer removeTree(s.root)
+	defer func() { _ = resources.Remove(s.root) }()
 	p := b.m.Prepare
 	// Verify and copy before anything is extracted: an untrusted executable is
 	// never run and never sees a snapshot.

@@ -13,6 +13,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/pinned"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 const (
@@ -462,16 +463,11 @@ func attachExtensions(ctx context.Context, r *Record, f formula.Formula, role fo
 	if len(f.RoleExtensions(role)) == 0 {
 		return nil, noop, nil
 	}
-	made, err := os.MkdirTemp("", "forgecell-extension-servers-")
+	dir, err := resources.MkdirTemp("", "forgecell-extension-servers-")
 	if err != nil {
 		return nil, noop, fmt.Errorf("cannot create a private directory for extension servers: %w", err)
 	}
-	dir, err := filepath.Abs(made)
-	if err != nil {
-		_ = os.RemoveAll(made)
-		return nil, noop, err
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
+	cleanup := func() { _ = resources.Remove(dir) }
 	for _, forbidden := range []string{r.Workspace.Path, r.Workspace.SourceRoot, filepath.Join(r.LabDir, "extensions")} {
 		if forbidden == "" {
 			continue

@@ -11,6 +11,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"os"
 	"path/filepath"
@@ -226,6 +227,12 @@ type Options struct {
 	// environment names the review must never see.
 	InvokeReview func(context.Context, formula.Binding, string, time.Duration, map[string]any, []string) process.Result
 	ReviewDiff   func(context.Context, Workspace, string, string) (string, error)
+	// Resources, when set, guards the check-running verification stage: it does not start
+	// below a soft floor (the Molecule stops with the resources reason once the wait ends),
+	// and its check processes are cancelled below a hard floor. A cohort attempt leaves it
+	// unset because the cohort guards the whole attempt. GOFLAGS -p for a cohort attempt's
+	// checks travels on the context (resources.WithGoParallelism).
+	Resources *resources.Guard
 }
 
 func stamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
