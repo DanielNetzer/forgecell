@@ -69,6 +69,120 @@ func MkdirTemp(dir, pattern string) (string, error) {
 	return path, nil
 }
 
+// LabTempMarker is written into <lab>/tmp when LabTempDir creates it. Pruning touches a
+// <lab>/tmp only when the marker is there, so a tmp directory Forgecell did not create
+// is never emptied.
+const LabTempMarker = ".forgecell-check-tmp"
+
+// LabTempDir creates, or reuses, the stable per-Lab check TMPDIR <lab>/tmp at 0700 and
+// returns its absolute path. Concurrent runs of the Lab share it, their files kept apart in
+// the unique subdirectories Go and mktemp create under it, so unlike MkdirTemp it is never
+// registered for removal. Creating it writes LabTempMarker; an existing directory is
+// reused as it is. A symbolic link or non-directory at that path is refused.
+func LabTempDir(lab string) (string, error) {
+	dir, err := filepath.Abs(filepath.Join(lab, "tmp"))
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
+		return "", err
+	}
+	created := false
+	if err := os.Mkdir(dir, 0700); err == nil {
+		created = true
+	} else if !os.IsExist(err) {
+		return "", err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("lab temp directory is not a directory: %s", dir)
+	}
+	if info.Mode().Perm() != 0700 {
+		if err := os.Chmod(dir, 0700); err != nil {
+			return "", err
+		}
+	}
+	if created {
+		if err := os.WriteFile(filepath.Join(dir, LabTempMarker), []byte("Forgecell check TMPDIR; entries older than 24h are pruned.\n"), 0600); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+// ownedLabTemp reports whether dir is a Lab check TMPDIR that LabTempDir created: a real
+// directory (Lstat, never followed) holding a regular LabTempMarker. A missing dir, or one
+// without the marker, is not owned; a symbolic link or non-directory is refused.
+func ownedLabTemp(dir string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("refusing to prune a symbolic link: %s", dir)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("lab temp directory is not a directory: %s", dir)
+	}
+	marker, err := os.Lstat(filepath.Join(dir, LabTempMarker))
+	return err == nil && marker.Mode().IsRegular(), nil
+}
+
+// StaleLabTempEntries lists the entries directly under dir, a Lab's stable check TMPDIR,
+// that belong to the current user and were last modified more than StaleAge before now.
+// Go's per-run work directories go under each view's own GOTMPDIR, so what is left here
+// is what tests leaked. Only a dir LabTempDir created (it holds LabTempMarker, which is
+// never listed) has entries; a missing dir or one without the marker has none, and a
+// symbolic link is refused.
+func StaleLabTempEntries(dir string, now time.Time) ([]string, error) {
+	owned, err := ownedLabTemp(dir)
+	if err != nil || !owned {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	stale := []string{}
+	for _, e := range entries {
+		if e.Name() == LabTempMarker {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		info, err := os.Lstat(path)
+		if err != nil || !ownedByUser(path, info) || now.Sub(info.ModTime()) <= StaleAge {
+			continue
+		}
+		stale = append(stale, path)
+	}
+	return stale, nil
+}
+
+// PruneLabTemp removes, with RemoveTree, every entry StaleLabTempEntries lists under dir
+// at now. It returns the removed paths and every failure.
+func PruneLabTemp(dir string, now time.Time) ([]string, error) {
+	stale, err := StaleLabTempEntries(dir, now)
+	if err != nil {
+		return nil, err
+	}
+	removed := []string{}
+	var problems []error
+	for _, path := range stale {
+		if err := RemoveTree(path); err != nil {
+			problems = append(problems, err)
+			continue
+		}
+		removed = append(removed, path)
+	}
+	return removed, errors.Join(problems...)
+}
+
 // Remove removes a directory MkdirTemp created and unregisters it. A directory that could
 // not be removed stays registered, so exit cleanup tries again.
 func Remove(path string) error {

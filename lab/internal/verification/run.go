@@ -3,6 +3,7 @@ package verification
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,17 @@ type Observation struct {
 	AcceptedDeltas []readiness.ProtectedDelta `json:"acceptedDeltas,omitempty"`
 	// Warnings name declared deltas that did not fail.
 	Warnings []string `json:"warnings,omitempty"`
+	// Cache states whether the check could be served from the shared Go cache
+	// ("enabled") or always runs ("disabled (fresh)"). Packages counts the go test
+	// packages its output reports served (cached) and run; both survive the compact
+	// ledger projection that drops captured streams.
+	Cache    string         `json:"cache,omitempty"`
+	Packages *PackageCounts `json:"goTestPackages,omitempty"`
+	// GoEnvForwarded names the cache defaults (GOPROXY, GOTOOLCHAIN) the reviewed policy
+	// overrode by forwarding the caller's value.
+	GoEnvForwarded []string `json:"goEnvForwarded,omitempty"`
+	// Note explains a failure that Forgecell's own cache settings caused.
+	Note string `json:"note,omitempty"`
 }
 
 // MatchesCheckObservation binds delivery evidence to the approved command and
@@ -101,8 +113,11 @@ func removeTemp(v *Result, dir string) {
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-func commandEnvironment(p readiness.ExecutionPolicy, home string) ([]string, []string, error) {
-	env := []string{"HOME=" + home, "TMPDIR=" + home, "PATH=/usr/bin:/bin", "LANG=C.UTF-8"}
+// commandEnvironment builds a view's filtered environment: a private HOME, the given
+// TMPDIR and the reviewed forwarded names. Every view also gets the shared Go cache from
+// applyGoCache, so no go invocation falls back to a cache under its private HOME.
+func commandEnvironment(p readiness.ExecutionPolicy, home, tmp string) ([]string, []string, error) {
+	env := []string{"HOME=" + home, "TMPDIR=" + tmp, "PATH=/usr/bin:/bin", "LANG=C.UTF-8"}
 	secrets := []string{}
 	seen := map[string]bool{}
 	credentials := map[string]bool{}
@@ -136,6 +151,166 @@ func commandEnvironment(p readiness.ExecutionPolicy, home string) ([]string, []s
 	}
 	return env, secrets, nil
 }
+
+// goCommandEnv adds the process-wide shared Go cache to a view's env for one command:
+// GOCACHE, GOMODCACHE, GOPROXY and GOTOOLCHAIN defaults, and GOFLAGS with -trimpath (no
+// -mod, so a vendored module keeps vendor mode). fresh appends -count=1. cache is false
+// when go env could not resolve the cache (no go toolchain); env is then returned
+// unchanged.
+func goCommandEnv(ctx context.Context, env []string, fresh bool) (out, forwarded []string, cache bool) {
+	c, ok := resources.ResolveGoCache(ctx)
+	if !ok {
+		return env, nil, false
+	}
+	out, forwarded = resources.ApplyGoCache(env, c, resources.GoEnvOptions{Fresh: fresh})
+	return out, forwarded, true
+}
+
+// CacheStatus is the cache state a check record states, derived from the env the check
+// actually ran with: "disabled (fresh)" when that env's GOFLAGS or a go argv sets -count
+// (hidden acceptance, a non-module change, an explicit -count), "enabled" for any other
+// go argv, and empty for a non-go argv such as gofmt, whatever its GOFLAGS. nonModule
+// names why a fresh run was forced.
+func CacheStatus(argv, env []string, cache, nonModule bool) string {
+	if len(argv) == 0 || filepath.Base(argv[0]) != "go" {
+		return ""
+	}
+	if !cache {
+		return resources.CacheUnavailable
+	}
+	fresh := resources.GoFlagsCarryCount(env)
+	for i, arg := range argv {
+		if strings.HasPrefix(arg, "-count=") || strings.HasPrefix(arg, "--count=") || ((arg == "-count" || arg == "--count") && i+1 < len(argv)) {
+			fresh = true
+		}
+	}
+	switch {
+	case fresh && nonModule:
+		return resources.CacheFreshNonModule
+	case fresh:
+		return resources.CacheFresh
+	}
+	return resources.CacheEnabled
+}
+
+// AcceptanceCacheStatus is the cache state an independent-acceptance check records,
+// whatever its argv: it always runs with -count=1 when the cache is in use.
+func AcceptanceCacheStatus(cache bool) string {
+	if !cache {
+		return resources.CacheUnavailable
+	}
+	return resources.CacheFresh
+}
+
+type nonModuleKey struct{}
+
+// changesOutsideModules reports whether any changed path lies outside the root of any
+// go.mod module among the tree's files (or the tree has no module). Go's cache does not
+// track files outside a module (docs, scripts, data a test reads with ../), so a cached
+// pass of that module could be stale; with several modules (a root go.mod plus nested
+// ones, or go.work modules) a change outside one of them is enough. A go.mod that Go
+// itself ignores (under testdata/ or vendor/, or a directory starting with _ or .) is
+// a fixture, not a module.
+func changesOutsideModules(changed, files []string) bool {
+	roots := []string{}
+	for _, f := range files {
+		if f == "go.mod" {
+			roots = append(roots, "")
+		} else if dir, ok := strings.CutSuffix(f, "/go.mod"); ok && !goIgnoredDir(dir) {
+			roots = append(roots, dir+"/")
+		}
+	}
+	for _, f := range changed {
+		if len(roots) == 0 {
+			return true
+		}
+		for _, root := range roots {
+			if !strings.HasPrefix(f, root) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// goIgnoredDir reports whether Go ignores the slash-separated directory dir: any element
+// is testdata or vendor, or starts with _ or . .
+func goIgnoredDir(dir string) bool {
+	for _, elem := range strings.Split(dir, "/") {
+		if elem == "testdata" || elem == "vendor" || strings.HasPrefix(elem, "_") || strings.HasPrefix(elem, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// treeChangesOutsideModules is changesOutsideModules for the change from base to tree.
+func treeChangesOutsideModules(ctx context.Context, source, base, tree string) (bool, error) {
+	changed, err := git(ctx, source, "", nil, "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", base, tree, "--")
+	if err != nil {
+		return false, err
+	}
+	files, err := git(ctx, source, "", nil, "ls-tree", "-r", "--name-only", "-z", tree)
+	if err != nil {
+		return false, err
+	}
+	return changesOutsideModules(paths(changed), paths(files)), nil
+}
+
+// PackageCounts is the number of go test packages a check's output reports served from
+// the cache ("ok <pkg> (cached)") and actually run ("ok <pkg> <time>" or "FAIL <pkg> ...").
+type PackageCounts struct {
+	Cached int `json:"cached"`
+	Run    int `json:"run"`
+}
+
+var goTestPackageLine = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)(?:\s+(.*))?$`)
+
+// CountGoTestPackages reads the package summary lines of go test output, plain or -json
+// (package-level output events), and returns nil when there are none.
+func CountGoTestPackages(stdout string) *PackageCounts {
+	counts := PackageCounts{}
+	count := func(line string) {
+		m := goTestPackageLine.FindStringSubmatch(strings.TrimRight(line, "\r\n"))
+		if m == nil {
+			return
+		}
+		if m[1] == "ok" && strings.Contains(m[3], "(cached)") {
+			counts.Cached++
+		} else {
+			counts.Run++
+		}
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "{") {
+			var ev struct{ Action, Test, Output string }
+			if json.Unmarshal([]byte(t), &ev) == nil {
+				if ev.Action == "output" && ev.Test == "" {
+					count(ev.Output)
+				}
+				continue
+			}
+		}
+		count(line)
+	}
+	if counts.Cached == 0 && counts.Run == 0 {
+		return nil
+	}
+	return &counts
+}
+
+// CacheTotals sums the package counts of r's checks.
+func (r Result) CacheTotals() PackageCounts {
+	total := PackageCounts{}
+	for _, o := range r.Checks {
+		if o.Packages != nil {
+			total.Cached += o.Packages.Cached
+			total.Run += o.Packages.Run
+		}
+	}
+	return total
+}
+
 func scrub(r process.Result, secrets []string) process.Result {
 	for _, secret := range secrets {
 		r.Stdout = strings.ReplaceAll(r.Stdout, secret, "[redacted]")
@@ -197,6 +372,14 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	for _, file := range paths(changed) {
 		if !allowed[file] {
 			return fail(fmt.Errorf("captured tree includes unapproved path: %s", file))
+		}
+	}
+	// A change outside every Go module root runs every go command fresh. RunObserved
+	// decides once from the candidate tree, so the protected view follows it.
+	nonModule, decided := ctx.Value(nonModuleKey{}).(bool)
+	if !decided {
+		if nonModule, err = treeChangesOutsideModules(ctx, source, p.Inputs.BaseCommit, c.Tree); err != nil {
+			return fail(err)
 		}
 	}
 	refs := map[string]readiness.Evidence{}
@@ -315,12 +498,26 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		return fail(err)
 	}
 	defer removeTemp(&v, home)
-	env, secrets, err := commandEnvironment(p.Policy, home)
+	// A stable TMPDIR (the Lab's <lab>/tmp) keeps tests that read it cacheable across
+	// views; without one the private HOME doubles as TMPDIR, as before.
+	tmp, ok := resources.CheckTempDirFrom(ctx)
+	if !ok {
+		tmp = home
+	}
+	env, secrets, err := commandEnvironment(p.Policy, home, tmp)
 	if err != nil {
 		return fail(err)
 	}
-	// A cohort attempt bounds each go command's build parallelism through GOFLAGS.
-	env = resources.ApplyGoParallelism(ctx, env)
+	if ok {
+		// Go's work directories go to a per-view GOTMPDIR removed afterwards, so they never
+		// accumulate in the shared <lab>/tmp. Go does not key the cache on GOTMPDIR.
+		gotmp, err := resources.MkdirTemp("", "forgecell-gotmp-")
+		if err != nil {
+			return fail(err)
+		}
+		defer removeTemp(&v, gotmp)
+		env = append(slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "GOTMPDIR=") }), "GOTMPDIR="+gotmp)
+	}
 	controls, err := resources.MkdirTemp("", "forgecell-reviewed-checks-")
 	if err != nil {
 		return fail(err)
@@ -365,7 +562,13 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 				argv[i] = file
 			}
 		}
-		options := process.Options{Argv: argv, Dir: filepath.Join(destination, filepath.FromSlash(command.Dir)), Env: env, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
+		// Hidden acceptance is fresh by construction, whatever its argv runs.
+		dir := filepath.Join(destination, filepath.FromSlash(command.Dir))
+		commandEnv, forwarded, cache := goCommandEnv(ctx, env, nonModule || command.Category == "independent-acceptance")
+		// A cohort attempt bounds each go command's build parallelism through GOFLAGS, after
+		// the cache flags so both are kept.
+		commandEnv = resources.ApplyGoParallelism(ctx, commandEnv)
+		options := process.Options{Argv: argv, Dir: dir, Env: commandEnv, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
 		protectedRegression := protected && i >= len(p.Setup) && command.Required && command.Category == "regression"
 		declared := p.DeltasForCheck(command.ID)
 		// A required regression check with declared deltas asks for go test -json, which
@@ -397,7 +600,14 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if repaired[command.ID] {
 			category = "candidate"
 		}
-		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets)}
+		cacheState := CacheStatus(argv, commandEnv, cache, nonModule)
+		if command.Category == "independent-acceptance" {
+			cacheState = AcceptanceCacheStatus(cache)
+		}
+		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets), Cache: cacheState, Packages: CountGoTestPackages(result.Stdout), GoEnvForwarded: forwarded}
+		if cache && !result.OK {
+			observation.Note = resources.CacheSettingsNote(observation.Result.Stdout+"\n"+observation.Result.Stderr, forwarded)
+		}
 		var deltaErr error
 		evaluated := false
 		if protectedRegression {

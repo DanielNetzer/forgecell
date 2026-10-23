@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -437,6 +438,16 @@ func runDoctorClean(labDir, home string, in io.Reader, out, stderr io.Writer, ye
 		fmt.Fprintln(stderr, "forgecell: Lab trees:", err)
 		return 1
 	}
+	// <lab>/tmp is touched only in a directory that looks like a Lab (it has ledgers/),
+	// and StaleLabTempEntries lists entries only when Forgecell's marker is there.
+	labTmp := filepath.Join(labDir, "tmp")
+	tmpEntries := []string{}
+	if info, err := os.Lstat(filepath.Join(labDir, "ledgers")); err == nil && info.IsDir() {
+		if tmpEntries, err = resources.StaleLabTempEntries(labTmp, now); err != nil {
+			fmt.Fprintln(stderr, "forgecell: Lab check TMPDIR:", err)
+			return 1
+		}
+	}
 	total := uint64(0)
 	fmt.Fprintf(out, "Staged releases: %d; keeping the active one, the previous one, the %d newest and any a Lab Formula or pending suggestion references.\n", len(releases.Releases), install.KeepReleases)
 	for _, r := range releases.Releases {
@@ -458,7 +469,13 @@ func runDoctorClean(labDir, home string, in io.Reader, out, stderr io.Writer, ye
 			fmt.Fprintf(out, "    warning: %s is %s; after removal it can no longer be amended or recovered.\n", t.Molecule, t.Status)
 		}
 	}
-	count := len(releases.Prune) + len(trees)
+	fmt.Fprintf(out, "Entries under the Lab's check TMPDIR %s older than 24h (the directory itself is kept):\n", labTmp)
+	for _, path := range tmpEntries {
+		size, _ := resources.TreeSize(path, sizeBudget)
+		total += size
+		fmt.Fprintf(out, "  remove %s (%s)\n", path, resources.Format(size))
+	}
+	count := len(releases.Prune) + len(trees) + len(tmpEntries)
 	if count == 0 {
 		fmt.Fprintln(out, "Nothing to remove.")
 		return 0
@@ -512,6 +529,24 @@ func runDoctorClean(labDir, home string, in io.Reader, out, stderr io.Writer, ye
 			removedTrees++
 		}
 		unlock()
+	}
+	// Only listed entries that are still stale go; one a run touched since is kept.
+	if len(tmpEntries) > 0 {
+		still, err := resources.StaleLabTempEntries(labTmp, now)
+		if err != nil {
+			problems = append(problems, err)
+		}
+		for _, path := range tmpEntries {
+			if !slices.Contains(still, path) {
+				fmt.Fprintf(out, "skipped %s: it changed since the listing\n", path)
+				continue
+			}
+			if e := resources.RemoveTree(path); e != nil {
+				problems = append(problems, e)
+				continue
+			}
+			removed = append(removed, path)
+		}
 	}
 	for _, path := range removed {
 		fmt.Fprintf(out, "removed %s\n", path)

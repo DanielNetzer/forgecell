@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
+	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 )
 
 // guardReadings is a machine with ample disk and the given available memory.
@@ -116,7 +118,19 @@ func TestVerifyHardFloorCancelsInFlightCheckAndRecordsReason(t *testing.T) {
 }
 
 func TestVerifyPassingChecksGetNoCancellationNote(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain unavailable")
+	}
 	o, _ := fixture(t)
+	analyze := o.Analyze
+	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+		a, err := analyze(ctx, b, i, s)
+		if err == nil {
+			// A go argv records a cache state; a non-go one (sh, gofmt) records none.
+			a.Checks[0].Argv = []string{"go", "env", "GOFLAGS"}
+		}
+		return a, err
+	}
 	o.Resources = &resources.Guard{Floors: resources.DefaultFloors().Clamp(), Reader: resources.ReaderFunc(func() resources.Readings {
 		return guardReadings(8 * resources.GiB)
 	}), Sleep: waitForCancel}
@@ -129,5 +143,50 @@ func TestVerifyPassingChecksGetNoCancellationNote(t *testing.T) {
 	}
 	if noteContaining(r, "resources") {
 		t.Fatalf("notes %v; a passing verification must carry no resources note", r.Notes)
+	}
+	// The views ran with the Lab's stable TMPDIR and the shared Go cache, and the ledger
+	// states each check's cache state. The fixture has no go.mod, so its change lies
+	// outside every module root and every go check ran fresh, saying why.
+	if info, err := os.Stat(filepath.Join(o.LabDir, "tmp")); err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatalf("stable Lab TMPDIR: %v %v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(o.LabDir, "tmp", resources.LabTempMarker)); err != nil {
+		t.Fatalf("stable Lab TMPDIR has no Forgecell marker: %v", err)
+	}
+	if r.Verification == nil || len(r.Verification.Checks) == 0 {
+		t.Fatalf("verification %+v", r.Verification)
+	}
+	for _, c := range r.Verification.Checks {
+		want := ""
+		if c.Command.Argv[0] == "go" {
+			want = resources.CacheFreshNonModule
+		}
+		if c.Cache != want {
+			t.Fatalf("check %s cache state %q, want %q", c.ID, c.Cache, want)
+		}
+	}
+	ledger, err := os.ReadFile(filepath.Join(o.LabDir, "ledgers", r.ID+".md"))
+	if err != nil || !strings.Contains(string(ledger), "Candidate Go test cache: ") || !strings.Contains(string(ledger), "cache: disabled (fresh: non-module change)") {
+		t.Fatalf("ledger cache line missing: %v\n%s", err, ledger)
+	}
+}
+
+// TestGoCacheLinesReportCachedVersusRun renders the ledger cache summary per view, and
+// nothing for a record that predates the cache fields.
+func TestGoCacheLinesReportCachedVersusRun(t *testing.T) {
+	v := verification.Result{Checks: []verification.Observation{
+		{ID: "acceptance", Cache: resources.CacheFresh, Packages: &verification.PackageCounts{Run: 1}},
+		{ID: "go-test", Cache: resources.CacheEnabled, Packages: &verification.PackageCounts{Cached: 40, Run: 3}},
+		{ID: "gofmt", Cache: resources.CacheEnabled},
+	}}
+	v.Protected = &verification.Result{Checks: []verification.Observation{{ID: "go-test", Cache: resources.CacheEnabled, Packages: &verification.PackageCounts{Cached: 43}}}}
+	got := goCacheLines(v)
+	want := "Candidate Go test cache: 40 packages served (cached), 4 run; `acceptance` cache: disabled (fresh); `go-test` cache: enabled; `gofmt` cache: enabled\n" +
+		"Protected regression Go test cache: 43 packages served (cached), 0 run; `go-test` cache: enabled\n"
+	if got != want {
+		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+	if got := goCacheLines(verification.Result{Checks: []verification.Observation{{ID: "old"}}}); got != "" {
+		t.Fatalf("an old record rendered %q", got)
 	}
 }

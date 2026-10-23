@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,163 @@ func writeOwner(t *testing.T, dir string, pid int) {
 	raw, _ := json.Marshal(owner{PID: pid, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	if err := os.WriteFile(filepath.Join(dir, OwnerFile), raw, 0600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestLabTempDirIsStablePrivateAndUnregistered covers the stable per-Lab check TMPDIR:
+// <lab>/tmp at 0700, the same path on every call, never registered for exit removal, and
+// a symbolic link in its place is refused.
+func TestLabTempDirIsStablePrivateAndUnregistered(t *testing.T) {
+	lab := t.TempDir()
+	first, err := LabTempDir(lab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != filepath.Join(lab, "tmp") || !filepath.IsAbs(first) {
+		t.Fatalf("got %s", first)
+	}
+	if err := os.Chmod(first, 0755); err != nil {
+		t.Fatal(err)
+	}
+	second, err := LabTempDir(lab)
+	if err != nil || second != first {
+		t.Fatalf("not stable: %s %v", second, err)
+	}
+	info, err := os.Stat(second)
+	if err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("mode: %v %v", info, err)
+	}
+	for _, dir := range Registered() {
+		if dir == first {
+			t.Fatal("the shared Lab TMPDIR must not be registered for removal")
+		}
+	}
+	linked := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(linked, "tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LabTempDir(linked); err == nil {
+		t.Fatal("a symbolic link was accepted as the Lab TMPDIR")
+	}
+}
+
+// TestPruneLabTempRemovesOnlyOldEntriesOfTheUser: entries under <lab>/tmp older than 24h
+// that belong to the user go (read-only trees included); recent ones, other users' and
+// the directory itself stay. A missing directory has nothing stale.
+func TestPruneLabTempRemovesOnlyOldEntriesOfTheUser(t *testing.T) {
+	tmp, err := LabTempDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-25 * time.Hour)
+	oldDir := mkdir(t, filepath.Join(tmp, "TestLeak123", "001"))
+	if err := os.Chmod(oldDir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(tmp, "leaked.txt")
+	if err := os.WriteFile(oldFile, nil, 0400); err != nil {
+		t.Fatal(err)
+	}
+	recent := mkdir(t, filepath.Join(tmp, "TestRunning456"))
+	foreign := mkdir(t, filepath.Join(tmp, "someone-else"))
+	for _, p := range []string{filepath.Join(tmp, "TestLeak123"), oldFile, foreign} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig := ownedByUser
+	ownedByUser = func(path string, info os.FileInfo) bool { return path != foreign && orig(path, info) }
+	t.Cleanup(func() { ownedByUser = orig })
+	stale, err := StaleLabTempEntries(tmp, now)
+	want := []string{filepath.Join(tmp, "TestLeak123"), oldFile}
+	if err != nil || !slices.Equal(stale, want) {
+		t.Fatalf("stale %v %v, want %v", stale, err, want)
+	}
+	removed, err := PruneLabTemp(tmp, now)
+	if err != nil || !slices.Equal(removed, want) {
+		t.Fatalf("removed %v %v", removed, err)
+	}
+	for _, p := range want {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the prune", p)
+		}
+	}
+	for _, p := range []string{tmp, recent, foreign} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("%s must be kept: %v", p, err)
+		}
+	}
+	if stale, err := StaleLabTempEntries(filepath.Join(t.TempDir(), "missing"), now); err != nil || len(stale) != 0 {
+		t.Fatalf("missing dir: %v %v", stale, err)
+	}
+}
+
+// TestPruneLabTempTouchesOnlyMarkedDirectories: LabTempDir writes its marker only when it
+// creates <lab>/tmp; a tmp directory without the marker is never pruned, an old marker
+// itself is never listed, and a symbolic link in place of <lab>/tmp is refused.
+func TestPruneLabTempTouchesOnlyMarkedDirectories(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	tmp, err := LabTempDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(tmp, LabTempMarker)
+	if info, err := os.Lstat(marker); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("no marker written on creation: %v", err)
+	}
+	if err := os.Chtimes(marker, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := PruneLabTemp(tmp, now); err != nil || len(removed) != 0 {
+		t.Fatalf("the marker was pruned: %v %v", removed, err)
+	}
+	if _, err := os.Lstat(marker); err != nil {
+		t.Fatalf("marker removed: %v", err)
+	}
+
+	// A user's own <lab>/tmp, not created by LabTempDir, is reused but never pruned.
+	lab := t.TempDir()
+	own := mkdir(t, filepath.Join(lab, "tmp"))
+	keep := mkdir(t, filepath.Join(own, "my-work"))
+	if err := os.Chtimes(keep, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LabTempDir(lab); err != nil || got != own {
+		t.Fatalf("reuse: %s %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(own, LabTempMarker)); !os.IsNotExist(err) {
+		t.Fatalf("a marker was written into an existing directory: %v", err)
+	}
+	if removed, err := PruneLabTemp(own, now); err != nil || len(removed) != 0 {
+		t.Fatalf("unmarked tmp pruned: %v %v", removed, err)
+	}
+	if _, err := os.Lstat(keep); err != nil {
+		t.Fatalf("unmarked entry removed: %v", err)
+	}
+
+	// A symbolic link to a marked directory is refused, and its target is untouched.
+	target, err := LabTempDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim := mkdir(t, filepath.Join(target, "victim"))
+	if err := os.Chtimes(victim, old, old); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(t.TempDir(), "tmp")
+	if err := os.Symlink(target, linked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StaleLabTempEntries(linked, now); err == nil {
+		t.Fatal("a symbolic link was listed")
+	}
+	if _, err := PruneLabTemp(linked, now); err == nil {
+		t.Fatal("a symbolic link was pruned")
+	}
+	if _, err := os.Lstat(victim); err != nil {
+		t.Fatalf("symlink target entry removed: %v", err)
 	}
 }
 

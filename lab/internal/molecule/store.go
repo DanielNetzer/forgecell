@@ -6,6 +6,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"io"
 	"math"
 	"os"
@@ -194,6 +195,7 @@ func save(r Record) error {
 	}
 	if r.Verification != nil {
 		fmt.Fprintf(&b, "\n## Independent verification\n\nTree: `%s`\nRequired checks passed: %t\nIndependent acceptance verified: %t\n", r.Verification.SourceTree, r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified)
+		b.WriteString(goCacheLines(*r.Verification))
 		b.WriteString(reviewVerdictLine(r))
 		fmt.Fprintf(&b, "\n%s\n", r.Verification.Error)
 	}
@@ -208,6 +210,43 @@ func save(r Record) error {
 		fmt.Fprintf(&b, "\n- %s\n", note)
 	}
 	return atomicWrite(base+".md", []byte(b.String()))
+}
+
+// goCacheLines renders the shared Go cache summary of a verification: the go test
+// packages served (cached) versus run in each view, and each check's cache state.
+// Records that predate the cache fields render nothing.
+func goCacheLines(v verification.Result) string {
+	var b strings.Builder
+	views := []struct {
+		name   string
+		result *verification.Result
+	}{{"Candidate", &v}, {"Protected regression", v.Protected}}
+	for _, view := range views {
+		if view.result == nil {
+			continue
+		}
+		states := []string{}
+		notes := []string{}
+		for _, o := range view.result.Checks {
+			if o.Cache != "" {
+				state := fmt.Sprintf("`%s` cache: %s", o.ID, o.Cache)
+				if len(o.GoEnvForwarded) > 0 {
+					state += " (policy forwarded " + strings.Join(o.GoEnvForwarded, ", ") + ")"
+				}
+				states = append(states, state)
+			}
+			if o.Note != "" {
+				notes = append(notes, fmt.Sprintf("`%s` note: %s\n", o.ID, o.Note))
+			}
+		}
+		if len(states) == 0 {
+			continue
+		}
+		total := view.result.CacheTotals()
+		fmt.Fprintf(&b, "%s Go test cache: %d packages served (cached), %d run; %s\n", view.name, total.Cached, total.Run, strings.Join(states, "; "))
+		b.WriteString(strings.Join(notes, ""))
+	}
+	return b.String()
 }
 
 // usageAttempt pairs a harness attempt's label with its parsed usage (#149); a nil
