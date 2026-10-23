@@ -47,6 +47,24 @@ The command above pins `0.2.0-preview.2`. Repeating it safely reinstalls that ve
 
 `FORGECELL_HOME` and `FORGECELL_BIN` customize paths. Set these variables before the opening `sh -c` so they reach the downloaded installer, not only curl.
 
+## Resources and cleanup
+
+Forgecell runs full test suites, parallel cohort attempts and worktrees on your machine, so it guards disk and memory before and during that work.
+
+- **Floors.** Free disk is checked on the volumes holding `TMPDIR`, the Lab and `GOCACHE`: the soft floor is the larger of 15 GiB and 10% of the volume, capped at 30 GiB, and the hard floor the larger of 5 GiB and 3%, capped at 10 GiB, so a large disk never demands an unreasonable amount of free space (on a 2 TB disk the floors are 30 and 10 GiB). `forgecell doctor` shows the effective floors for each volume. Available memory (on macOS the kernel's memory-status level times physical memory, from `sysctl kern.memorystatus_level hw.memsize`, which is the figure `memory_pressure` reports, with free plus inactive pages from `vm_stat` only as a fallback; on Linux `MemAvailable` from `/proc/meminfo`) has a soft floor of 3 GiB and a hard floor of 1.5 GiB. Override them in `<lab>/resources.json`, for example `{"diskSoftFloorGiB": 20, "diskHardFloorGiB": 8, "memorySoftFloorGiB": 4, "memoryHardFloorGiB": 2}`. A configured disk floor replaces the percentage. No floor goes below 2 GiB of disk or 1 GiB of memory. For `evaluate --cohort` the file is read from `--out`.
+- **Below a soft floor**, a Molecule's verification stage or a cohort attempt is not started. Forgecell re-checks every 30 s for up to 10 min, then stops cleanly with the reason `resources: low disk` or `resources: low memory`. Work already running keeps running. `loop --watch` skips the pass and prints the reason in its pass report.
+- **Below a hard floor while work runs** (sampled every 10 s), the running check processes are killed through their process group and the reason `resources-exhausted` is recorded. A cohort attempt cancelled this way is discarded, not recorded, so resuming the cohort re-runs it.
+- **Parallelism.** `evaluate --cohort --parallel N` runs at most one attempt per 4 GiB of available memory and prints the reduced level. Each attempt's `go` commands get `GOFLAGS=-p=<CPUs / attempts>`.
+- **Temporary directories.** Every Forgecell temp directory holds a `.forgecell-owner` file (pid and start time) and is removed on exit and on SIGINT or SIGTERM. It is removed even when it contains a read-only Go module cache. At every start, Forgecell removes your own `$TMPDIR/forgecell-*` directories whose owner process is gone, or that have no owner file and are over 24 h old. It never touches anything else.
+
+`forgecell doctor` shows a **Resources** section: free disk and memory against the floors, the Lab size, the staged release count and size, the `GOCACHE` size and the stale temp-directory count. Above 20 GiB it suggests `go clean -cache`, which Forgecell never runs itself.
+
+`forgecell doctor --clean` lists what it would remove and asks before removing anything; `--yes` skips the question. It removes:
+- staged releases beyond the active one, the previous one (kept for `rollback`), the 5 newest and any release referenced by an absolute path into `~/.forgecell/releases/<version>/`. The listing says why each kept release is kept. Exactly these places are scanned for references: every file in the `formulas` directory of each Lab under `~/.forgecell/labs`, of the Lab given with `--lab` (or the default Lab), and of the legacy checkout Lab at `<checkout>/.forgecell` when it exists; and the proposed Formula of every `suggestions/*.json` with status `pending` in those same Labs. Symlinked Lab and `formulas` directories are followed, and each referenced path is also matched after resolving symlinks. Releases are re-checked under the install lock just before removal;
+- the verification trees (`verification/<id>-r<N>` and `verification/<id>-r<N>-protected`) and workspace trees of Molecules that finished more than 14 days ago. Trees of interrupted Molecules and of Molecules with a pending recovery proposal are kept, and a Molecule locked by a running loop or command is skipped. Under the Molecule's lock, just before removal, its ledger is read again: if its status changed, it is no longer prunable, or a tree's path changed or another ledger now uses its workspace, the trees are kept and the output says why. For a blocked or failed Molecule the listing warns that it can no longer be amended or recovered once its trees are removed.
+
+Ledgers, history and evidence files are never removed. A removed workspace stays registered as a Git worktree of its source until you run `git worktree prune` there.
+
 ## Contributors
 
 Core source may be used and distributed under MIT; retain its copyright and permission notice.

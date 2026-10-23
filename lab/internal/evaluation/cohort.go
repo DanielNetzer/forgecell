@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // maxCohortBytes bounds the reviewed cohort file. The strict JSON decoder rejects
@@ -72,6 +75,13 @@ type CohortOptions struct {
 	// part of the activation digest, so changing it never invalidates an approval or a
 	// resume, and the report is in coordinate order whatever it is.
 	Parallel int
+	// Guard, when set, caps Parallel by available memory (one attempt per 4 GiB), holds
+	// each attempt while readings are below a soft floor (stopping the run cleanly when
+	// they do not recover), and cancels every in-flight attempt below a hard floor; a
+	// cancelled attempt is discarded, so resume re-runs it.
+	Guard *resources.Guard
+	// Log, when set, receives operator notes such as a reduced parallel level.
+	Log func(string)
 }
 
 // maxCohortParallel bounds CohortOptions.Parallel.
@@ -360,6 +370,21 @@ func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err e
 	if resume {
 		base.Notes = append(base.Notes, "Resumed an existing output with a matching activation digest; attempts already recorded were skipped.")
 	}
+	// Each attempt is budgeted 4 GiB of available memory, and its go commands share the
+	// CPUs with the other attempts through GOFLAGS -p.
+	if o.Guard != nil {
+		if memory, known := o.Guard.Memory(); known {
+			if capped := resources.EffectiveParallel(parallel, memory); capped < parallel {
+				note := fmt.Sprintf("--parallel %d reduced to %d: %s of available memory allows one attempt per %s.", parallel, capped, resources.Format(memory), resources.Format(resources.MemoryPerAttempt))
+				base.Notes = append(base.Notes, note)
+				if o.Log != nil {
+					o.Log(note)
+				}
+				parallel = capped
+			}
+		}
+	}
+	goParallelism := resources.GoParallelism(runtime.NumCPU(), parallel)
 	report = buildCohortReport(base, variantNames, variantHashes, taskNames, nil)
 	if err = writeCohortReport(o.Output, report); err != nil {
 		return report, err
@@ -413,14 +438,27 @@ func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err e
 	// new starts and in-flight attempts are discarded before they are saved.
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	// Below a hard floor the monitor cancels runCtx, which kills every in-flight check
+	// process group; those attempts return before they are saved and are discarded.
+	if o.Guard != nil {
+		var stopMonitor func()
+		runCtx, stopMonitor = o.Guard.Monitor(runCtx)
+		defer stopMonitor()
+	}
+	runCtx = resources.WithGoParallelism(runCtx, goParallelism)
 	type result struct {
 		ca  CohortAttempt
 		err error
+		// notStarted is the soft-floor reason an attempt was never started for.
+		notStarted string
 	}
 	results := make(chan result)
 	inFlight := 0
 	var halt error
 	stopped := ""
+	// stopping tells a worker still waiting for capacity that the run has stopped, so it
+	// does not start its attempt once readings recover.
+	var stopping atomic.Bool
 	// complete records one finished attempt, rebuilds and saves the report and, unless the
 	// run already stopped or halted, evaluates the stop rules. A save error or a
 	// cancellation halts the run and cancels the in-flight attempts at once, so they are
@@ -470,8 +508,24 @@ func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err e
 			next++
 			inFlight++
 			go func() {
+				// Below a soft floor the attempt is not started: the guard re-checks until
+				// readings recover or its wait ends. In-flight attempts keep running.
+				if o.Guard != nil {
+					if e := o.Guard.WaitForCapacity(runCtx); e != nil {
+						if reason, low := resources.AsLow(e); low {
+							results <- result{notStarted: reason}
+						} else {
+							results <- result{err: e}
+						}
+						return
+					}
+					if stopping.Load() {
+						results <- result{notStarted: "run stopped while waiting for capacity"}
+						return
+					}
+				}
 				ca, e := runCohortCoordinate(runCtx, o, raw, c, lt, cd.variant, cd.rep, attemptDir, digest, decisionAt, parallel)
-				results <- result{ca, e}
+				results <- result{ca: ca, err: e}
 			}()
 		}
 		if inFlight == 0 {
@@ -479,14 +533,29 @@ func RunCohort(ctx context.Context, o CohortOptions) (report CohortReport, err e
 		}
 		r := <-results
 		inFlight--
-		if r.err != nil {
+		switch {
+		case r.notStarted != "":
+			// The coordinate stays unrecorded, so resume runs it.
+			if halt == nil && stopped == "" {
+				stopped = r.notStarted
+			}
+		case r.err != nil:
+			// A hard-floor cancellation stops the run cleanly with its reason; the
+			// cancelled attempts were discarded unsaved, so resume re-runs them.
+			if reason, exhausted := resources.Exhausted(runCtx); exhausted && ctx.Err() == nil {
+				if halt == nil && stopped == "" {
+					stopped = reason
+				}
+				break
+			}
 			if halt == nil {
 				halt = r.err
 			}
 			cancelRun()
-			continue
+		default:
+			complete(r.ca, parallel)
 		}
-		complete(r.ca, parallel)
+		stopping.Store(halt != nil || stopped != "")
 	}
 	if halt != nil {
 		// abort records status: aborted and the evidence gathered so far, so an error or a
@@ -536,7 +605,7 @@ func runCohortCoordinate(ctx context.Context, o CohortOptions, raw []byte, c Coh
 	// Every worktree an attempt allocates is registered in its own per-attempt source
 	// under attemptDir (never in --source), so reclaiming the directory left by a prior
 	// crashed or cancelled attempt is enough for a re-run to allocate cleanly.
-	if e := os.RemoveAll(attemptDir); e != nil {
+	if e := resources.RemoveTree(attemptDir); e != nil {
 		return CohortAttempt{}, e
 	}
 	if e := os.MkdirAll(attemptDir, 0700); e != nil {
@@ -797,7 +866,9 @@ func writeAttemptChangesCapped(ctx context.Context, attemptDir, source, base, tr
 func cleanupAttemptTrees(attemptDir, source string) error {
 	problems := []string{}
 	for _, tree := range []string{filepath.Join(attemptDir, "lab"), filepath.Join(attemptDir, "verification"), source} {
-		if e := os.RemoveAll(tree); e != nil {
+		// RemoveTree makes the tree writable first, so a read-only Go module cache under a
+		// private HOME never leaves the tree behind.
+		if e := resources.RemoveTree(tree); e != nil {
 			problems = append(problems, e.Error())
 		}
 	}

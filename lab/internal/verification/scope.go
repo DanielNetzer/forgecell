@@ -16,6 +16,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 type CaptureResult struct {
@@ -201,11 +202,11 @@ func Capture(ctx context.Context, dir, base string, allowed []string, artifacts 
 	if len(out.Changes) > 1000 {
 		return out, fmt.Errorf("more than 1000 changed paths; explicit artifact allowances or review required")
 	}
-	temp, err := os.MkdirTemp("", "forgecell-capture-")
+	temp, err := resources.MkdirTemp("", "forgecell-capture-")
 	if err != nil {
 		return out, err
 	}
-	defer os.RemoveAll(temp)
+	defer func() { _ = resources.Remove(temp) }()
 	index := filepath.Join(temp, "index")
 	if _, err = git(ctx, dir, index, nil, "read-tree", base); err != nil {
 		return out, err

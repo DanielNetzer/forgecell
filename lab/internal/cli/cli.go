@@ -37,7 +37,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	harness.SetRunningVersion(version)
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\ndoctor --clean [--yes] [--lab DIR]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -527,11 +527,27 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		preferred := flags.String("harness", "", "Preferred harness")
 		jsonFlag := flags.Bool("json", true, "Structured output (the default)")
 		verbose := flags.Bool("verbose", false, "Human-readable probe steps; with --json adds steps to the structured output")
+		clean := flags.Bool("clean", false, "List old staged releases and finished Molecules' trees older than 14 days, and remove them after confirmation")
+		yes := flags.Bool("yes", false, "With --clean, remove without asking")
 		if err := flags.Parse(args[1:]); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 {
 			return fail(fmt.Errorf("unexpected doctor arguments"))
+		}
+		if *yes && !*clean {
+			return fail(fmt.Errorf("--yes only applies to doctor --clean"))
+		}
+		root, err := resolvedCheckoutRoot()
+		if err != nil {
+			return fail(err)
+		}
+		home, err := forgecellHome(root)
+		if err != nil {
+			return fail(err)
+		}
+		if *clean {
+			return runDoctorClean(*lab, home, in, out, stderr, *yes, time.Now())
 		}
 		explicitJSON := false
 		flags.Visit(func(f *flag.Flag) { explicitJSON = explicitJSON || f.Name == "json" })
@@ -661,6 +677,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		note := "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."
 		learnItems, learnErr := listPendingLearn(labDir)
 		proposals, proposalErr := molecule.ReadRecoveryProposals(labDir, molecule.AnalysisTimeout(active.Formula))
+		// Resources are informational: a low reading or a large cache never changes
+		// doctor's readiness verdict.
+		machine := inspectResources(labDir, home)
 		if structured {
 			report := map[string]any{"schemaVersion": doctorSchemaVersion, "roles": roles, "metaBinding": meta, "metaCandidates": views, "activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": savedView, "learnBound": onboarding.LearnBound(active.Formula), "workflow": workflow, "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": views, "selection": selection, "note": note}
 			if next != "" {
@@ -673,6 +692,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				report["extensionLocks"] = extensionLocks
 			}
 			report["isolation"] = isolation
+			report["resources"] = machine
 			if len(learnItems) > 0 {
 				report["learnRequests"] = learnItems
 			}
@@ -690,6 +710,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			}
 		} else {
 			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr})
+			renderResources(out, machine)
 		}
 		if !ready {
 			return 2
@@ -834,7 +855,11 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			return fail(e)
 		}
 	}
-	r, err := molecule.Run(ctx, molecule.Options{LabDir: *lab, SourceRoot: cwd, Issue: args[1], FormulaID: *formula, Base: *base, Approve: *approve, TargetBranch: *target, MandatoryConstraints: requirements, CheckInputs: supplied.CheckInputs, Checks: supplied.Checks, Setup: supplied.Setup, Artifacts: supplied.Artifacts, Policy: supplied.Policy})
+	guard, err := newResourceGuard(*lab, stderr)
+	if err != nil {
+		return fail(err)
+	}
+	r, err := molecule.Run(ctx, molecule.Options{LabDir: *lab, SourceRoot: cwd, Issue: args[1], FormulaID: *formula, Base: *base, Approve: *approve, TargetBranch: *target, MandatoryConstraints: requirements, CheckInputs: supplied.CheckInputs, Checks: supplied.Checks, Setup: supplied.Setup, Artifacts: supplied.Artifacts, Policy: supplied.Policy, Resources: guard})
 	if err != nil {
 		return fail(err)
 	}

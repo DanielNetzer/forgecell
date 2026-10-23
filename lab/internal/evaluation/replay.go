@@ -18,6 +18,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // Replay builds frozen evaluation task plans from merged pull requests. The task text is
@@ -765,11 +766,13 @@ type goTestEvent struct {
 // the worktree.
 func runHiddenTests(ctx context.Context, source, commit string, testFiles []string, contents map[string][]byte, renamedOld []string, pkgs []string, runPattern, gomodcache, gocache string) (hiddenRunResult, string) {
 	var res hiddenRunResult
-	parent, err := os.MkdirTemp("", "forgecell-replay-verify-")
+	parent, err := resources.MkdirTemp("", "forgecell-replay-verify-")
 	if err != nil {
 		return res, "setup error: " + err.Error()
 	}
-	defer os.RemoveAll(parent)
+	// The private HOME below gains a read-only Go module cache; resources.Remove makes
+	// the tree writable before removing it.
+	defer func() { _ = resources.Remove(parent) }()
 	worktree := filepath.Join(parent, "wt")
 	if r := gitHookless(ctx, source, "worktree", "add", "--detach", worktree, commit); !r.OK {
 		return res, "setup error: cannot create verification worktree: " + strings.TrimSpace(r.Stderr)

@@ -16,6 +16,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 type Command struct {
@@ -209,6 +210,8 @@ func observe(ctx context.Context, c Command, workspace, acceptance string) Obser
 		}
 	}
 	env = append(env, "FORGECELL_EVAL_WORKSPACE="+workspace)
+	// A cohort attempt bounds each go command's build parallelism through GOFLAGS.
+	env = resources.ApplyGoParallelism(ctx, env)
 	r := process.Run(ctx, process.Options{Argv: argv, Dir: filepath.Join(workspace, c.Dir), Env: env, Stdin: []byte{}, Timeout: time.Duration(c.TimeoutMS) * time.Millisecond, MaxOutputBytes: 2_000_000})
 	return Observation{c, r}
 }
@@ -249,11 +252,12 @@ func outputTree(ctx context.Context, w molecule.Workspace, allowed []string) ([]
 		}
 	}
 	sort.Strings(files)
-	temp, err := os.MkdirTemp("", "forgecell-eval-index-")
+	temp, err := resources.MkdirTemp("", "forgecell-eval-index-")
 	if err != nil {
 		return files, false, "", err
 	}
-	defer os.RemoveAll(temp)
+	// Only a git index lives here; a failed removal stays registered for exit cleanup.
+	defer resources.Remove(temp)
 	env := []string{}
 	for _, v := range os.Environ() {
 		if !strings.HasPrefix(v, "GIT_INDEX_FILE=") {

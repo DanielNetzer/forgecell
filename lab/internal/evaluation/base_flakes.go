@@ -13,6 +13,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // Base-flake classification. A cohort attempt whose hidden acceptance passed can still fail
@@ -253,11 +254,13 @@ func classifyBaseFlakes(ctx context.Context, source, base string, setup []Comman
 	if !ok {
 		return unclassified()
 	}
-	parent, err := os.MkdirTemp("", "forgecell-base-flakes-")
+	parent, err := resources.MkdirTemp("", "forgecell-base-flakes-")
 	if err != nil {
 		return unclassified()
 	}
-	defer os.RemoveAll(parent)
+	// The private HOME below can hold a read-only Go tree, so removal makes it writable
+	// first; a failed removal stays registered for exit cleanup.
+	defer resources.Remove(parent)
 	worktree := filepath.Join(parent, "wt")
 	if r := gitHookless(ctx, source, "worktree", "add", "--detach", worktree, base); !r.OK {
 		return unclassified()
@@ -273,7 +276,8 @@ func classifyBaseFlakes(ctx context.Context, source, base string, setup []Comman
 	if err != nil {
 		return unclassified()
 	}
-	env := scrubbedGoEnv(home, gomodcache, gocache)
+	// A cohort attempt bounds each go command's build parallelism through GOFLAGS.
+	env := resources.ApplyGoParallelism(ctx, scrubbedGoEnv(home, gomodcache, gocache))
 	if !runBaseSetup(ctx, worktree, env, setup, acceptance) {
 		return unclassified()
 	}

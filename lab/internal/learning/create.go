@@ -10,6 +10,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"maps"
 	"os"
 	"path/filepath"
@@ -297,11 +298,11 @@ func create(ctx context.Context, o Options, invoke func(context.Context, []strin
 
 func yamlDiff(ctx context.Context, before, after string) (string, error) {
 	// Produce the review from exact bytes, never from model-provided diff text.
-	tmp, e := os.MkdirTemp("", "forgecell-formula-diff-")
+	tmp, e := resources.MkdirTemp("", "forgecell-formula-diff-")
 	if e != nil {
 		return "", e
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = resources.Remove(tmp) }()
 	for name, s := range map[string]string{"before.yaml": before, "after.yaml": after} {
 		if e = os.WriteFile(filepath.Join(tmp, name), []byte(s), 0600); e != nil {
 			return "", e
