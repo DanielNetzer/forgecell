@@ -513,12 +513,7 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 		OriginalCheckFiles:    testFiles,
 		CandidateTestFiles:    candidateTestFiles(testFiles),
 		RequireInitialFailure: true,
-		Checks: []Command{
-			{Name: "go-test", Dir: replayModuleSubdir, Argv: []string{"go", "test", "./..."}, TimeoutMS: replayGoTestTimeoutMS},
-			{Name: "go-vet", Dir: replayModuleSubdir, Argv: []string{"go", "vet", "./..."}, TimeoutMS: replayGoVetTimeoutMS},
-			{Name: "gofmt", Dir: replayModuleSubdir, Argv: []string{"sh", "-c", "test -z \"$(gofmt -l internal cmd)\""}, TimeoutMS: replayGofmtTimeoutMS},
-			{Name: "acceptance", Dir: ".", Argv: []string{"/bin/sh", "{acceptance}"}, TimeoutMS: replayGoTestTimeoutMS},
-		},
+		Checks:                replayChecks(),
 	}
 	if err = validatePlan(plan); err != nil {
 		return zero, "generated plan invalid: " + err.Error()
@@ -574,6 +569,18 @@ func buildReplayPR(ctx context.Context, o ReplayOptions, owner, name string, pr 
 		BaseRule:   baseRule,
 		TaskSource: taskSource,
 	}, ""
+}
+
+// replayChecks are the checks of every replay-generated plan. go-test runs only the
+// packages each attempt's captured change affects, falling back to ./... as the Lab's
+// selection rules require; hidden acceptance keeps its own -run filter.
+func replayChecks() []Command {
+	return []Command{
+		{Name: "go-test", Dir: replayModuleSubdir, Argv: []string{"go", "test", "./..."}, TimeoutMS: replayGoTestTimeoutMS, Select: readiness.SelectAffectedPackages},
+		{Name: "go-vet", Dir: replayModuleSubdir, Argv: []string{"go", "vet", "./..."}, TimeoutMS: replayGoVetTimeoutMS},
+		{Name: "gofmt", Dir: replayModuleSubdir, Argv: []string{"sh", "-c", "test -z \"$(gofmt -l internal cmd)\""}, TimeoutMS: replayGofmtTimeoutMS},
+		{Name: "acceptance", Dir: ".", Argv: []string{"/bin/sh", "{acceptance}"}, TimeoutMS: replayGoTestTimeoutMS},
+	}
 }
 
 // replayBaseCommit computes the base commit from the merge commit's parents. A reason is a

@@ -173,6 +173,51 @@ are development-build features until a new release is published; see [Install](i
 The coding harness implements the ticket. The learn Atom invokes the distinct meta harness,
 which proposes improvements to the process. See [Learning](learning.md).
 
+### Check selection: affected Go packages
+
+A Formula `requiredChecks` entry, or a reviewed evaluation plan command, can declare
+`select: affected-packages` on a direct `go test` check whose last argument is `./...`
+(argv[0] `go`, argv[1] `test`, no other `./...` and no `-args`). Its other arguments
+must be flags that leave the package graph unchanged (`-run`, `-skip`, `-count`, `-v`,
+`-json`, `-short`, `-race`, `-timeout`, `-failfast`, `-p`, `-cover`, `-covermode`,
+`-coverprofile`, `-bench`, `-benchtime`, `-benchmem`); `-tags`, `-mod`, `-modfile`,
+`-overlay`, `-C` or any other flag refuses the selection, because `go list` would not see
+the packages it changes. The analysis cannot declare it. At approval, a plan may carry
+`select` only on a Formula baseline check with the Formula's exact value or on a command
+the frozen evaluation plan declares with the same name, dir, argv and select, and its
+`fullSuiteTriggers` must equal what the Formula resolves to; an amendment or supplied
+verification inputs cannot add a selection or drop or replace the triggers. Verification
+then replaces `./...` with the module packages the captured change affects:
+
+- The changed packages are the directories of the changed `.go` files (base commit to
+  captured tree).
+- The affected set is the changed packages plus every module package whose own, test or
+  external-test dependencies include one (`go list -test -json ./...` in the
+  verification checkout, with the check's own environment).
+
+The check runs the full `./...` suite exactly as before when any of these holds:
+
+- a changed file lies outside the check's module, or is `go.mod`, `go.sum`, a `go.work`
+  file, under `testdata/`, any non-Go file (docs, scripts, `.github/**`, data), or a Go
+  file in a directory Go ignores;
+- a changed file is under a `cmd/` directory, or matches a Formula `fullSuiteTriggers`
+  path or glob (`*`, `?` and `[...]` within a segment, `**` across segments). An absent
+  key means `lab/cmd/**`, for packages whose tests build or exec the CLI binary;
+- the change adds or removes a package, or a changed file is embedded by a package;
+- `go list` fails, reports a package error, times out (5 minutes), exceeds 32 MiB of
+  output or 2,000 module packages, or returns packages of another module;
+- the affected set is empty while Go files changed, or nothing changed;
+- the selected import paths would exceed 128 KiB of argv.
+
+The protected regression view runs the same selection, computed once from the candidate
+view's captured change, so the two views stay comparable. If the candidate view never
+computed one, the protected view runs the full suite. Each such check's record carries
+the selection, and the ledger shows one line per view: `selection: affected-packages
+(N of M packages)` or `selection: full suite (reason: …)`. gofmt, vet and the hygiene
+scripts keep their scope. Replay-generated evaluation plans select on their `go-test`
+check; hidden acceptance keeps its own `-run` filter. GitHub CI still runs the full suite
+before merge, so a narrowed Lab run never replaces that gate.
+
 ## Review Atom (adversarial review)
 
 A `review` Atom runs a separately bound review harness once per coding attempt, after

@@ -7,7 +7,9 @@ import (
 )
 
 // AnalysisSchema matches the closed analysis DTO. Semantic/provenance validation
-// remains mandatory after provider-side structured output validation.
+// remains mandatory after provider-side structured output validation. A field tagged
+// analysis:"-" is set only by the Lab or a reviewed plan, never by the analysis, so it
+// stays out of the schema and the analysis contract is unchanged.
 func AnalysisSchema() string {
 	var schema func(reflect.Type) map[string]any
 	schema = func(t reflect.Type) map[string]any {
@@ -17,6 +19,9 @@ func AnalysisSchema() string {
 			required := []string{}
 			for i := 0; i < t.NumField(); i++ {
 				f := t.Field(i)
+				if f.Tag.Get("analysis") == "-" {
+					continue
+				}
 				name := strings.Split(f.Tag.Get("json"), ",")[0]
 				props[name] = schema(f.Type)
 				required = append(required, name)

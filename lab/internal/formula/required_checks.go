@@ -5,6 +5,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
 // MaxRequiredChecks bounds the reviewed baseline so a plan keeps room for its own checks.
@@ -19,6 +21,11 @@ type RequiredCheck struct {
 	TimeoutMS int      `yaml:"timeoutMs" json:"timeoutMs"`
 	Workflow  string   `yaml:"workflow" json:"workflow"`
 	Reason    string   `yaml:"reason" json:"reason"`
+	// Select narrows a direct `go test ... ./...` baseline check to the affected
+	// packages (readiness.SelectAffectedPackages). Absent keeps the Formula bytes, SHA
+	// and the full suite unchanged; omitempty keeps bootstrapped Formulas from
+	// writing an empty select.
+	Select string `yaml:"select,omitempty" json:"select,omitempty"`
 }
 
 var (
@@ -61,10 +68,14 @@ func (c RequiredCheck) Validate() error {
 	if strings.TrimSpace(c.Reason) == "" || len(c.Reason) > 2000 || strings.ContainsRune(c.Reason, 0) {
 		return fmt.Errorf("reason must be non-empty bounded text")
 	}
+	// A baseline check is a regression check, which is what the plan rule checks.
+	if err := readiness.ValidateCheckSelect(readiness.Check{ID: c.ID, Category: "regression", Argv: c.Argv, Select: c.Select}); err != nil {
+		return err
+	}
 	return nil
 }
 
-var requiredCheckKeys = map[string]bool{"id": true, "argv": true, "dir": true, "timeoutMs": true, "workflow": true, "reason": true}
+var requiredCheckKeys = map[string]bool{"id": true, "argv": true, "dir": true, "timeoutMs": true, "workflow": true, "reason": true, "select": true}
 
 func validateRequiredChecks(value any) error {
 	list, ok := value.([]any)
@@ -91,6 +102,13 @@ func validateRequiredChecks(value any) error {
 		c.Workflow, _ = m["workflow"].(string)
 		c.Reason, _ = m["reason"].(string)
 		c.TimeoutMS, _ = m["timeoutMs"].(int)
+		// An explicit empty or null select means the same as an absent one: the full
+		// suite. Any other value is checked by Validate.
+		if value, ok := m["select"]; ok && value != nil {
+			if c.Select, ok = value.(string); !ok {
+				return fmt.Errorf("requiredChecks[%d]: select must be %q", i, readiness.SelectAffectedPackages)
+			}
+		}
 		args, _ := m["argv"].([]any)
 		for _, arg := range args {
 			s, ok := arg.(string)

@@ -46,6 +46,9 @@ type Observation struct {
 	GoEnvForwarded []string `json:"goEnvForwarded,omitempty"`
 	// Note explains a failure that Forgecell's own cache settings caused.
 	Note string `json:"note,omitempty"`
+	// Selection is how a check that declares select ran: the affected packages or the
+	// full suite and why. Command keeps the approved argv.
+	Selection *Selection `json:"selection,omitempty"`
 }
 
 // MatchesCheckObservation binds delivery evidence to the approved command and
@@ -597,6 +600,33 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		}
 		return nil
 	}
+	// A selecting check runs the packages its directory's selection names. The candidate
+	// view computes it from the captured change against the base commit; the protected
+	// view reuses that exact selection (RunObserved shares it), or runs the full suite.
+	memo, _ := ctx.Value(selectionKey{}).(*selectionMemo)
+	selections := map[string]Selection{}
+	selectionFor := func(dir string, env []string) Selection {
+		if s, ok := selections[dir]; ok {
+			return s
+		}
+		var s Selection
+		if protected {
+			ok := false
+			if memo != nil {
+				s, ok = memo.get(dir)
+			}
+			if !ok {
+				s = fullSuite("the candidate view recorded no selection for this check directory")
+			}
+		} else {
+			s = computeSelection(ctx, source, p.Inputs.BaseCommit, c.Tree, destination, dir, env, p.FullSuiteTriggers)
+			if memo != nil {
+				memo.put(dir, s)
+			}
+		}
+		selections[dir] = s
+		return s
+	}
 	for i, command := range commands {
 		if err := regularAncestors(destination, filepath.ToSlash(filepath.Join(command.Dir, "placeholder"))); err != nil {
 			return fail(err)
@@ -621,6 +651,12 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		// A cohort attempt bounds each go command's build parallelism through GOFLAGS, after
 		// the cache flags so both are kept.
 		commandEnv = resources.ApplyGoParallelism(ctx, commandEnv)
+		var selection *Selection
+		if i >= len(p.Setup) && command.Select != "" {
+			s := selectionFor(command.Dir, commandEnv)
+			selection = &s
+			argv = s.Argv(argv)
+		}
 		options := process.Options{Argv: argv, Dir: dir, Env: commandEnv, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
 		protectedRegression := protected && i >= len(p.Setup) && command.Required && command.Category == "regression"
 		declared := p.DeltasForCheck(command.ID)
@@ -657,7 +693,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if command.Category == "independent-acceptance" {
 			cacheState = AcceptanceCacheStatus(cache)
 		}
-		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets), Cache: cacheState, Packages: CountGoTestPackages(result.Stdout), GoEnvForwarded: forwarded}
+		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets), Cache: cacheState, Packages: CountGoTestPackages(result.Stdout), GoEnvForwarded: forwarded, Selection: selection}
 		if cache && !result.OK {
 			observation.Note = resources.CacheSettingsNote(observation.Result.Stdout+"\n"+observation.Result.Stderr, forwarded)
 		}

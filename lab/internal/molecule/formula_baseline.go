@@ -1,8 +1,10 @@
 package molecule
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -24,7 +26,7 @@ func formulaBaselineChecks(f formula.Formula, evidence []readiness.Evidence) ([]
 		if !ok {
 			return nil, fmt.Errorf("Formula baseline check %s cites workflow %s, which is not in the frozen repository evidence; refresh intake or review a Formula change", rc.ID, rc.Workflow)
 		}
-		checks = append(checks, readiness.Check{ID: rc.ID, Category: "regression", Argv: append([]string(nil), rc.Argv...), Dir: rc.Dir, TimeoutMS: rc.TimeoutMS, Required: true, Definitions: []string{id}, Reason: "Formula baseline: " + rc.Reason, Evidence: []string{id}})
+		checks = append(checks, readiness.Check{ID: rc.ID, Category: "regression", Argv: append([]string(nil), rc.Argv...), Dir: rc.Dir, TimeoutMS: rc.TimeoutMS, Required: true, Definitions: []string{id}, Reason: "Formula baseline: " + rc.Reason, Evidence: []string{id}, Select: rc.Select})
 	}
 	return checks, nil
 }
@@ -49,7 +51,21 @@ func applyFormulaBaseline(f formula.Formula, p *readiness.Plan) error {
 		p.FormulaBaseline = append(p.FormulaBaseline, c.ID)
 	}
 	p.Analysis.Checks = append(p.Analysis.Checks, baseline...)
+	applyFullSuiteTriggers(f, p)
 	return requireFormulaBaseline(f, *p)
+}
+
+// applyFullSuiteTriggers places the Formula's resolved fullSuiteTriggers on a plan with
+// a check that declares select, so verification reads them and they join the digest.
+// A plan without one keeps none, and its digest is unchanged.
+func applyFullSuiteTriggers(f formula.Formula, p *readiness.Plan) {
+	p.FullSuiteTriggers = nil
+	for _, c := range append(append([]readiness.Check{}, p.Analysis.Checks...), p.Setup...) {
+		if c.Select != "" {
+			p.FullSuiteTriggers = f.ResolvedFullSuiteTriggers()
+			return
+		}
+	}
 }
 
 // requireFormulaBaseline refuses a plan that omits, alters or fails to label any
@@ -88,7 +104,74 @@ func requireFormulaBaseline(f formula.Formula, p readiness.Plan) error {
 		sort.Strings(extra)
 		return fmt.Errorf("plan labels %s as Formula baseline, but the approved Formula declares no such check", strings.Join(extra, ", "))
 	}
+	return requireFormulaSelection(f, p)
+}
+
+// requireFormulaSelection refuses a plan whose check selection the approved Formula or
+// a frozen evaluation plan did not declare. A check may carry select only as a Formula
+// baseline check (requireFormulaBaseline binds its exact value) or as a command of the
+// cited evaluation-plan check input declaring the same name, dir, argv and select. The
+// plan's fullSuiteTriggers must be exactly what the Formula resolves to, so neither an
+// amendment nor supplied verification inputs can drop, replace or add triggers.
+func requireFormulaSelection(f formula.Formula, p readiness.Plan) error {
+	baseline := map[string]bool{}
+	for _, id := range p.FormulaBaseline {
+		baseline[id] = true
+	}
+	for _, c := range p.Setup {
+		if c.Select != "" {
+			return fmt.Errorf("setup command %s cannot declare select", c.ID)
+		}
+	}
+	for _, c := range p.Analysis.Checks {
+		if c.Select == "" || baseline[c.ID] {
+			continue
+		}
+		if !evaluationPlanDeclaresSelect(p, c) {
+			return fmt.Errorf("check %s declares select, but neither the approved Formula baseline nor the frozen evaluation plan declares that selection for it", c.ID)
+		}
+	}
+	want := p
+	applyFullSuiteTriggers(f, &want)
+	if !slices.Equal(p.FullSuiteTriggers, want.FullSuiteTriggers) {
+		return fmt.Errorf("plan fullSuiteTriggers must match the approved Formula exactly")
+	}
 	return nil
+}
+
+// evaluationPlanCheckInput is the check input id under which an evaluation run freezes
+// its reviewed plan (evaluation.configureReadiness).
+const evaluationPlanCheckInput = "evaluation-plan"
+
+// evaluationPlanDeclaresSelect reports whether c cites the frozen evaluation-plan check
+// input and that input declares a command with c's exact name, dir, argv and select.
+// The content is bounded by readiness.MaxCheckInputBytes and hash-checked at intake.
+func evaluationPlanDeclaresSelect(p readiness.Plan, c readiness.Check) bool {
+	if !slices.Contains(c.Definitions, evaluationPlanCheckInput) {
+		return false
+	}
+	for _, input := range p.CheckInputs {
+		if input.ID != evaluationPlanCheckInput || len(input.Content) > readiness.MaxCheckInputBytes {
+			continue
+		}
+		var plan struct {
+			Checks []struct {
+				Name   string   `json:"name"`
+				Dir    string   `json:"dir"`
+				Argv   []string `json:"argv"`
+				Select string   `json:"select"`
+			} `json:"checks"`
+		}
+		if json.Unmarshal([]byte(input.Content), &plan) != nil {
+			return false
+		}
+		for _, command := range plan.Checks {
+			if command.Name == c.ID && command.Name != "acceptance" && command.Dir == c.Dir && command.Select == c.Select && slices.Equal(command.Argv, c.Argv) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // formulaBaselineNote names the baseline for the scope gate, apart from candidate checks.

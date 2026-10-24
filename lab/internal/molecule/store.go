@@ -196,6 +196,7 @@ func save(r Record) error {
 	if r.Verification != nil {
 		fmt.Fprintf(&b, "\n## Independent verification\n\nTree: `%s`\nRequired checks passed: %t\nIndependent acceptance verified: %t\n", r.Verification.SourceTree, r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified)
 		b.WriteString(goCacheLines(*r.Verification))
+		b.WriteString(selectionLines(*r.Verification))
 		b.WriteString(reviewVerdictLine(r))
 		fmt.Fprintf(&b, "\n%s\n", r.Verification.Error)
 	}
@@ -245,6 +246,29 @@ func goCacheLines(v verification.Result) string {
 		total := view.result.CacheTotals()
 		fmt.Fprintf(&b, "%s Go test cache: %d packages served (cached), %d run; %s\n", view.name, total.Cached, total.Run, strings.Join(states, "; "))
 		b.WriteString(strings.Join(notes, ""))
+	}
+	return b.String()
+}
+
+// selectionLines renders, per view, one line for each check that declared select:
+// `selection: affected-packages (N of M packages)` or `selection: full suite (reason:
+// …)`. The reason comes from the record, so it is bounded and stripped of control
+// characters. Checks without a selection render nothing.
+func selectionLines(v verification.Result) string {
+	var b strings.Builder
+	views := []struct {
+		name   string
+		result *verification.Result
+	}{{"Candidate", &v}, {"Protected regression", v.Protected}}
+	for _, view := range views {
+		if view.result == nil {
+			continue
+		}
+		for _, o := range view.result.Checks {
+			if o.Selection != nil {
+				fmt.Fprintf(&b, "%s `%s` %s\n", view.name, oneLine(o.ID), oneLine(o.Selection.Line()))
+			}
+		}
 	}
 	return b.String()
 }

@@ -78,7 +78,145 @@ type Check struct {
 	// ReviewedAcceptance explicitly permits candidate execution of scoped checker
 	// edits. Frozen definitions remain required in the protected regression view.
 	ReviewedAcceptance string `json:"reviewedAcceptance,omitempty"`
+	// Select narrows a direct `go test ... ./...` check to the packages the captured
+	// change affects (SelectAffectedPackages); verification falls back to ./... when it
+	// cannot prove a narrower set. Only a Formula or a reviewed evaluation plan sets
+	// it, so it is not part of the analysis schema. Empty keeps the digest of every
+	// earlier plan unchanged.
+	Select string `json:"select,omitempty" analysis:"-"`
 }
+
+// SelectAffectedPackages is the only supported check selection.
+const SelectAffectedPackages = "affected-packages"
+
+// ValidateCheckSelect requires a declared selection to be SelectAffectedPackages on a
+// regression or candidate check whose argv is a direct `go test` (argv[0] go, argv[1]
+// test) ending in the single package pattern ./..., which verification replaces. Every
+// other argument must be a flag from selectSafeFlags, because go list computes the
+// selection without the check's flags: a build-affecting flag such as -tags, -mod,
+// -modfile, -overlay or -C could change the package graph and silently drop tests.
+func ValidateCheckSelect(c Check) error {
+	if c.Select == "" {
+		return nil
+	}
+	if c.Select != SelectAffectedPackages {
+		return fmt.Errorf("check %s: unsupported selection; only %q is supported", c.ID, SelectAffectedPackages)
+	}
+	if c.Category != "regression" && c.Category != "candidate" {
+		return fmt.Errorf("check %s: select is allowed only on a regression or candidate check", c.ID)
+	}
+	n := len(c.Argv)
+	if n < 3 || c.Argv[0] != "go" || c.Argv[1] != "test" || c.Argv[n-1] != "./..." {
+		return fmt.Errorf("check %s: select needs a direct `go test` command (argv[0] go, argv[1] test) whose last argument is ./...", c.ID)
+	}
+	args := c.Argv[2 : n-1]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "./..." || arg == "-args" || arg == "--args" {
+			return fmt.Errorf("check %s: select needs ./... as the only package pattern, before any -args", c.ID)
+		}
+		name, hasValue := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), false
+		if !strings.HasPrefix(arg, "-") || name == "" {
+			return fmt.Errorf("check %s: select needs ./... as the only package pattern", c.ID)
+		}
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			name, hasValue = name[:eq], true
+		}
+		takesValue, ok := selectSafeFlags[name]
+		if !ok {
+			return fmt.Errorf("check %s: select does not support the go test flag -%s; only flags that leave the package graph unchanged are allowed", c.ID, boundedFlagName(name))
+		}
+		if takesValue && !hasValue {
+			if i+1 >= len(args) {
+				return fmt.Errorf("check %s: go test flag -%s needs a value", c.ID, name)
+			}
+			i++
+		}
+	}
+	return nil
+}
+
+// selectSafeFlags are the go test flags that do not change which packages build or
+// which test files compile, mapped to whether the flag takes a value.
+var selectSafeFlags = map[string]bool{
+	"run": true, "skip": true, "count": true, "timeout": true, "p": true,
+	"covermode": true, "coverprofile": true, "bench": true, "benchtime": true,
+	"v": false, "json": false, "short": false, "race": false, "failfast": false,
+	"cover": false, "benchmem": false,
+}
+
+func boundedFlagName(name string) string {
+	if len(name) > 32 {
+		name = name[:32]
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, name)
+}
+
+// MaxFullSuiteTriggers bounds the full-suite trigger patterns of a plan or Formula.
+const MaxFullSuiteTriggers = 64
+
+// ValidateFullSuiteTriggers accepts clean repository-relative paths or globs: each
+// segment is a path.Match pattern or exactly **, which matches any number of segments.
+func ValidateFullSuiteTriggers(patterns []string) error {
+	if len(patterns) > MaxFullSuiteTriggers {
+		return fmt.Errorf("at most %d fullSuiteTriggers permitted", MaxFullSuiteTriggers)
+	}
+	seen := map[string]bool{}
+	for _, p := range patterns {
+		if p == "" || len(p) > 256 || seen[p] || path.IsAbs(p) || path.Clean(p) != p || strings.ContainsAny(p, "\\\x00") {
+			return fmt.Errorf("fullSuiteTriggers entries must be distinct, clean repository-relative paths or globs of at most 256 bytes")
+		}
+		seen[p] = true
+		for _, r := range p {
+			if unicode.IsControl(r) {
+				return fmt.Errorf("control character in fullSuiteTriggers entry")
+			}
+		}
+		segments := strings.Split(p, "/")
+		if len(segments) > 32 {
+			return fmt.Errorf("fullSuiteTriggers entry has more than 32 segments")
+		}
+		for _, s := range segments {
+			if s == "." || s == ".." || strings.EqualFold(s, ".git") || (s != "**" && strings.Contains(s, "**")) {
+				return fmt.Errorf("unsafe or unsupported fullSuiteTriggers segment in %q", p)
+			}
+			if _, err := path.Match(s, ""); err != nil {
+				return fmt.Errorf("invalid fullSuiteTriggers glob %q", p)
+			}
+		}
+	}
+	return nil
+}
+
+// MatchFullSuiteTrigger reports whether the slash-separated repository path file
+// matches a validated trigger pattern. It runs in time bounded by the product of the
+// pattern's and the path's segment counts.
+func MatchFullSuiteTrigger(pattern, file string) bool {
+	p, f := strings.Split(pattern, "/"), strings.Split(file, "/")
+	// match[i][j] reports whether p[i:] matches f[j:].
+	match := make([][]bool, len(p)+1)
+	for i := range match {
+		match[i] = make([]bool, len(f)+1)
+	}
+	match[len(p)][len(f)] = true
+	for i := len(p) - 1; i >= 0; i-- {
+		for j := len(f); j >= 0; j-- {
+			if p[i] == "**" {
+				match[i][j] = match[i+1][j] || (j < len(f) && match[i][j+1])
+			} else if j < len(f) {
+				ok, _ := path.Match(p[i], f[j])
+				match[i][j] = ok && match[i+1][j+1]
+			}
+		}
+	}
+	return match[0][0]
+}
+
 type ArtifactRoot struct {
 	Path      string `json:"path"`
 	CommandID string `json:"commandId"`
@@ -155,6 +293,11 @@ type Plan struct {
 	// and verification re-checks the base commit. It joins the plan digest; empty keeps
 	// the digest of every earlier plan unchanged.
 	NewFiles []string `json:"newFiles,omitempty"`
+	// FullSuiteTriggers are the Formula's repository paths or globs whose change makes
+	// every selecting check run its full suite. The Lab sets them from the Formula when
+	// a check declares Select. They join the plan digest; empty keeps the digest of
+	// every earlier plan unchanged.
+	FullSuiteTriggers []string `json:"fullSuiteTriggers,omitempty"`
 }
 
 // ProtectedDelta names one test, matched by exact Go package import path and
@@ -307,6 +450,9 @@ func DecodeAnalysis(raw []byte) (Analysis, error) {
 	for _, c := range a.Checks {
 		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" || c.ReviewedAcceptance != "" {
 			return a, &PolicyViolation{Reason: LabellingViolationMessage}
+		}
+		if c.Select != "" {
+			return a, fmt.Errorf("analysis cannot declare a check selection; only the Formula or a reviewed evaluation plan sets select")
 		}
 	}
 	if err := ValidateEvidenceRequests(a.EvidenceRequests, nil); err != nil {
@@ -484,6 +630,9 @@ func (p Plan) Validate() error {
 	if err := p.validateFormulaBaseline(); err != nil {
 		return err
 	}
+	if err := ValidateFullSuiteTriggers(p.FullSuiteTriggers); err != nil {
+		return err
+	}
 	if err := validateCodingAllowlist(p.CodingAllowlist); err != nil {
 		return err
 	}
@@ -563,6 +712,9 @@ func (p Plan) ValidateConfiguration() error {
 		}
 	}
 	if err := p.validateFormulaBaseline(); err != nil {
+		return err
+	}
+	if err := ValidateFullSuiteTriggers(p.FullSuiteTriggers); err != nil {
 		return err
 	}
 	for _, r := range p.Artifacts {
@@ -674,6 +826,9 @@ func validateCommand(c Check, cited func([]string) error, newFiles map[string]bo
 	}
 	if strings.ContainsAny(c.Argv[0], "\r\n\t") || (!path.IsAbs(c.Argv[0]) && strings.Contains(c.Argv[0], " ")) {
 		return fmt.Errorf("command must be argv, not a shell string")
+	}
+	if err := ValidateCheckSelect(c); err != nil {
+		return err
 	}
 	if err := cited(c.Evidence); err != nil {
 		return err

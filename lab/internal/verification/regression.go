@@ -114,6 +114,9 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 			ctx = context.WithValue(ctx, nonModuleKey{}, nonModule)
 		}
 	}
+	// The candidate view computes each selecting check's package set once from the
+	// captured change against BaseCommit; the protected view runs that same set.
+	ctx = withSelectionMemo(ctx)
 	// Always retain the candidate result separately, even when old tests fail.
 	candidate := runViewObserved(ctx, source, destination, p, c, observe)
 	if persistenceFailed {
