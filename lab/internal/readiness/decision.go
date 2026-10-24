@@ -17,7 +17,23 @@ type Event struct {
 	Digest string `json:"digest"`
 	At     string `json:"at"`
 	Detail string `json:"detail"`
+	// FormulaFrom, FormulaTo and Decision are set only on a FormulaRebased event:
+	// the parent plan's and the rebased plan's Formula SHA-256, and the decision ID
+	// that activated the new Formula. Absent keeps every earlier ledger unchanged.
+	FormulaFrom string `json:"formulaFrom,omitempty"`
+	FormulaTo   string `json:"formulaTo,omitempty"`
+	Decision    string `json:"decision,omitempty"`
 }
+
+// FormulaRebased is the event kind of an amendment that carries a plan to a
+// launcher-only rebind of its Formula. It is the only boundary across which the
+// frozen Formula and binding identities of consecutive plans may differ.
+const FormulaRebased = "formula-rebased"
+
+// FormulaRebaseReason is the fixed reason a rebase event records.
+const FormulaRebaseReason = "Launcher-only rebind of the active Formula; retained tree, scope, checks and acceptance are unchanged and the successor plan requires exact approval."
+
+var decisionID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 // State is a ledger extension. Transitions return a deep copy, retaining earlier
 // proposals and observations. The orchestrator must hold its exclusive Molecule
@@ -56,9 +72,12 @@ func (s State) current() (Proposal, error) {
 		if err != nil || digest != p.Digest || p.Plan.Revision != i+1 {
 			return Proposal{}, fmt.Errorf("readiness proposal changed or is invalid")
 		}
-		if i > 0 && (p.Plan.ParentDigest != s.Plans[i-1].Digest || !sameInputs(p.Plan.Inputs, s.Plans[0].Plan.Inputs) || p.Plan.MoleculeID != s.Plans[0].Plan.MoleculeID) {
+		if i > 0 && (p.Plan.ParentDigest != s.Plans[i-1].Digest || p.Plan.MoleculeID != s.Plans[0].Plan.MoleculeID) {
 			return Proposal{}, fmt.Errorf("invalid amendment chain")
 		}
+	}
+	if err := s.ValidateFormulaLineage(); err != nil {
+		return Proposal{}, fmt.Errorf("invalid amendment chain")
 	}
 	return s.Plans[len(s.Plans)-1], nil
 }
@@ -66,6 +85,57 @@ func sameInputs(a, b Inputs) bool {
 	a.Issue.UpdatedAt = ""
 	b.Issue.UpdatedAt = ""
 	return reflect.DeepEqual(a, b)
+}
+
+// sameInputsExceptFormula compares inputs with the Formula and binding identities,
+// which a launcher-only rebind changes, set aside.
+func sameInputsExceptFormula(a, b Inputs) bool {
+	a.FormulaSHA256, a.BindingSHA256 = "", ""
+	b.FormulaSHA256, b.BindingSHA256 = "", ""
+	return sameInputs(a, b)
+}
+
+// ValidateFormulaLineage requires consecutive plans to share their frozen inputs,
+// except across exactly one valid FormulaRebased event recorded for the successor:
+// there the Formula and binding identities may differ, the Formula SHA-256 must,
+// and the event must name both SHAs and a well-formed activating decision. Any
+// rebase event that does not mark such a boundary is refused, so a ledger cannot
+// carry a stray or forged one.
+func (s State) ValidateFormulaLineage() error {
+	rebases := map[string]Event{}
+	for _, e := range s.Events {
+		if e.Kind != FormulaRebased {
+			if e.FormulaFrom != "" || e.FormulaTo != "" || e.Decision != "" {
+				return fmt.Errorf("Formula identity recorded outside a rebase event")
+			}
+			continue
+		}
+		if _, twice := rebases[e.Digest]; twice {
+			return fmt.Errorf("duplicate Formula rebase event")
+		}
+		rebases[e.Digest] = e
+	}
+	used := 0
+	for i := 1; i < len(s.Plans); i++ {
+		prev, next := s.Plans[i-1].Plan.Inputs, s.Plans[i].Plan.Inputs
+		e, rebased := rebases[s.Plans[i].Digest]
+		if !rebased {
+			if !sameInputs(prev, next) {
+				return fmt.Errorf("plan inputs changed without a Formula rebase")
+			}
+			continue
+		}
+		used++
+		if !sameInputsExceptFormula(prev, next) || prev.FormulaSHA256 == next.FormulaSHA256 ||
+			e.FormulaFrom != prev.FormulaSHA256 || e.FormulaTo != next.FormulaSHA256 ||
+			!hex256.MatchString(e.FormulaFrom) || !hex256.MatchString(e.FormulaTo) || !decisionID.MatchString(e.Decision) {
+			return fmt.Errorf("invalid Formula rebase boundary")
+		}
+	}
+	if used != len(rebases) {
+		return fmt.Errorf("Formula rebase event names no plan boundary")
+	}
+	return nil
 }
 func (s State) transition(kind, phase, detail, at string) (State, error) {
 	p, err := s.current()
@@ -167,6 +237,39 @@ func (s State) Amend(p Plan, at string) (State, error) {
 	out.Plans = append(out.Plans, Proposal{Plan: p, Digest: digest})
 	out.Phase = "scope-waiting"
 	out.Events = append(out.Events, Event{Kind: "amended", Digest: digest, At: at, Detail: "Retained work requires approval of the successor plan and paused tree."})
+	return cloneState(out), nil
+}
+
+// RebaseFormula records a successor plan that differs from the current one only in
+// its frozen Formula and binding identities and its runtime-owned lifecycle fields.
+// The caller proves that the Formula change is launcher-only and that decision
+// activated it; this transition binds those facts into one FormulaRebased event and
+// leaves the plan waiting for exact approval. It never approves.
+func (s State) RebaseFormula(p Plan, decision, at string) (State, error) {
+	previous, err := s.current()
+	if err != nil {
+		return s, err
+	}
+	if s.Phase != "blocked" && s.Phase != "unknown" && s.Phase != "scope-change" && s.Phase != "dismissed" && s.Phase != "scope-waiting" && s.Phase != "failed" && s.Phase != "interrupted" && s.Phase != "review-waiting" {
+		return s, fmt.Errorf("stop for a scope change before proposing an amendment")
+	}
+	from, to := previous.Plan.Inputs.FormulaSHA256, p.Inputs.FormulaSHA256
+	if p.Revision != previous.Plan.Revision+1 || p.ParentDigest != previous.Digest || p.MoleculeID != previous.Plan.MoleculeID ||
+		!sameInputsExceptFormula(p.Inputs, previous.Plan.Inputs) || from == to || !hex256.MatchString(to) || !decisionID.MatchString(decision) {
+		return s, fmt.Errorf("Formula rebase must retain intake identity, bind the previous plan and name its activating decision")
+	}
+	digest, err := p.Digest()
+	if err != nil {
+		return s, err
+	}
+	out := cloneState(s)
+	out.Plans = append(out.Plans, Proposal{Plan: p, Digest: digest})
+	out.Phase = "scope-waiting"
+	out.Events = append(out.Events, Event{Kind: FormulaRebased, Digest: digest, At: at, FormulaFrom: from, FormulaTo: to, Decision: decision,
+		Detail: fmt.Sprintf("Formula SHA-256 %s rebased to %s by activating decision %s. %s", from, to, decision, FormulaRebaseReason)})
+	if _, err = out.current(); err != nil {
+		return s, err
+	}
 	return cloneState(out), nil
 }
 
