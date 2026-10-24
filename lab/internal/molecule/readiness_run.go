@@ -1064,132 +1064,199 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if err = formula.Revalidate(o.LabDir, expected); err != nil {
 		return finishFailed(r, err.Error())
 	}
-	if len(r.HarnessAttempts) >= 100 {
-		return finishFailed(r, "harness history capacity reached; no process started")
-	}
-	// The approval may come long after intake, so the extensions are verified again
-	// here. A required one that is no longer usable starts no coding harness.
-	codingServers, cleanupExtensions, extErr := attachExtensions(ctx, &r, f, formula.CodingHarness)
-	defer cleanupExtensions()
-	if extErr != nil {
-		return finishFailed(r, "Extensions unavailable: "+extErr.Error())
-	}
-	attemptID, err := token()
-	if err != nil {
-		return r, err
-	}
-	launcher := harness.ResolveAttempt(codingBinding.Command)
-	forgecell := harness.RecordProvenanceWith(codingBinding.Command, launcher)
-	codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
-	if p.Revision > 1 {
-		added := newAcceptance(r, p)
-		codingRequest["newAcceptance"] = added
-		if len(added) > 0 {
-			codingRequest["instruction"] = codingRequest["instruction"].(string) + amendedPlanInstruction
-		}
-	}
-	if len(codingServers) > 0 {
-		codingRequest["mcpServers"] = codingServers
-	}
-	codingRequest = harness.WithModel(codingRequest, codingBinding.Model)
-	attempt := HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell}
-	attempt.RecordInvocation(codingBinding.Command, codingRequest)
-	r.HarnessAttempts = append(r.HarnessAttempts, attempt)
-	startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+codingBinding.Binding, "invoke-coding-harness")
-	recordExecutedBinding(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, codingBinding.Binding)
-	timeoutMS, timeoutSource := codingTimeout(codingBinding, p)
-	if p.HarnessTimeoutMS > 0 {
-		r.Notes = append(r.Notes, fmt.Sprintf("Coding harness timeout: plan harnessTimeoutMs %d applies to attempt %s (Formula timeoutMs %d, maxTimeoutMs ceiling %d).", p.HarnessTimeoutMS, attemptID, codingBinding.TimeoutMS, codingBinding.TimeoutCeilingMS()))
-	}
-	if err = save(r); err != nil {
-		return r, err
-	}
-	result := invokeHarnessWith(ctx, launcher, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, codingRequest)
-	cleanupExtensions()
-	r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
-	r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
-
-	a := &r.HarnessAttempts[len(r.HarnessAttempts)-1]
-	coding := harness.CodingOutcomeFromProcess(result)
-	a.Coding = &coding
-	// Parse the Claude CLI final JSON for the attempt's effective model, tokens and
-	// reported cost (#149) from the raw provider stdout before it is dropped below. A
-	// non-Claude binding or a run that emitted none records no usage (unavailable).
-	a.Usage = harness.AttemptUsage(codingBinding.Command, result.RawStdout, a.Model)
-	ref, err := historyFile(r, "harness-"+attemptID+"-result.json", struct {
-		process.Result
-		AttemptID  string `json:"attemptId"`
-		PlanDigest string `json:"planDigest"`
-	}{result, attemptID, o.Approve})
-	if err != nil {
-		return r, err
-	}
-	a.Result = result
-	a.Result.Stdout, a.Result.Stderr, a.Result.RawStdout = "", "", ""
-	a.Evidence = &ref
-	processOutcome := "process-failed"
-	if result.OK {
-		processOutcome = "process-succeeded"
-	}
-	if result.Interrupted {
-		processOutcome = "process-interrupted"
-	} else if result.TimedOut {
-		processOutcome = "process-timed-out"
-	} else if result.ParentDeadline {
-		processOutcome = "process-parent-deadline"
-	}
-	observeAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, "invoke-coding-harness", processOutcome, fileProvenance(ref))
-	if err = save(r); err != nil {
-		return r, err
-	}
-	captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-	capture, captureErr := verification.Capture(captureCtx, r.Workspace.Path, p.Inputs.BaseCommit, allowed, p.Artifacts)
-	cancelCapture()
-	// Claude Code hot-reloads project settings, so a run that created, edited or
-	// removed anything under .claude (for example through repository code that an
-	// allowed Bash entry ran, which the Edit deny does not cover) changed what its
-	// own next tool call is allowed to do. The comparison is against the base commit
-	// itself, so it holds even for a path the approved scope would otherwise allow.
-	if harness.ClaudeBinding(codingBinding.Command) {
-		changed, e := harness.ClaudeTreeChanges(r.Workspace.Path, p.Inputs.BaseCommit)
-		switch {
-		case e != nil:
-			if captureErr == nil {
-				captureErr = fmt.Errorf("cannot verify that .claude is unchanged: %w", e)
+	// A coding stage is one attempt plus at most maxTransientResumes automatic resumes
+	// after a transient provider error (#190). A resume runs the same approved plan digest
+	// on the retained workspace tree, so it needs no re-approval; every other failure
+	// leaves the loop after its first attempt.
+	var (
+		result                   process.Result
+		ref                      VerificationFile
+		capture                  verification.CaptureResult
+		captureErr               error
+		coding                   harness.CodingOutcome
+		attemptID, timeoutSource string
+		timeoutMS, resumes       int
+		waits                    int
+		resumed                  string
+		stage                    []string
+	)
+	for {
+		// A resume starts after a wait that may be long, so the Formula and its bindings
+		// are checked again: a change since approval stops the stage instead of resuming
+		// under an approval that no longer holds.
+		if resumed != "" {
+			if err = formula.Revalidate(o.LabDir, expected); err != nil {
+				return finishFailed(r, fmt.Sprintf("Automatic resume %d of %d after %s was not started: the Formula changed since approval: %v.", resumes, maxTransientResumes, harness.TransientProviderError, err))
 			}
-		case len(changed) > 0:
-			for _, name := range changed {
-				if !slices.Contains(capture.Violations, name) {
-					capture.Violations = append(capture.Violations, name)
+		}
+		if len(r.HarnessAttempts) >= 100 {
+			return finishFailed(r, "harness history capacity reached; no process started")
+		}
+		// The approval may come long after intake, so the extensions are verified again
+		// here. A required one that is no longer usable starts no coding harness.
+		codingServers, cleanupExtensions, extErr := attachExtensions(ctx, &r, f, formula.CodingHarness)
+		defer cleanupExtensions()
+		if extErr != nil {
+			return finishFailed(r, "Extensions unavailable: "+extErr.Error())
+		}
+		attemptID, err = token()
+		if err != nil {
+			return r, err
+		}
+		launcher := harness.ResolveAttempt(codingBinding.Command)
+		forgecell := harness.RecordProvenanceWith(codingBinding.Command, launcher)
+		codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
+		if p.Revision > 1 {
+			added := newAcceptance(r, p)
+			codingRequest["newAcceptance"] = added
+			if len(added) > 0 {
+				codingRequest["instruction"] = codingRequest["instruction"].(string) + amendedPlanInstruction
+			}
+		}
+		if len(codingServers) > 0 {
+			codingRequest["mcpServers"] = codingServers
+		}
+		if resumed != "" {
+			codingRequest["instruction"] = codingRequest["instruction"].(string) + resumeInstruction
+		}
+		codingRequest = harness.WithModel(codingRequest, codingBinding.Model)
+		attempt := HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell, Resumed: resumed}
+		attempt.RecordInvocation(codingBinding.Command, codingRequest)
+		r.HarnessAttempts = append(r.HarnessAttempts, attempt)
+		stage = append(stage, attemptID)
+		startAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, o.Approve, "bound-harness:"+codingBinding.Binding, "invoke-coding-harness")
+		recordExecutedBinding(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, codingBinding.Binding)
+		timeoutMS, timeoutSource = codingTimeout(codingBinding, p)
+		if p.HarnessTimeoutMS > 0 {
+			r.Notes = append(r.Notes, fmt.Sprintf("Coding harness timeout: plan harnessTimeoutMs %d applies to attempt %s (Formula timeoutMs %d, maxTimeoutMs ceiling %d).", p.HarnessTimeoutMS, attemptID, codingBinding.TimeoutMS, codingBinding.TimeoutCeilingMS()))
+		}
+		if err = save(r); err != nil {
+			return r, err
+		}
+		result = invokeHarnessWith(ctx, launcher, codingBinding.Command, r.Workspace.Path, time.Duration(timeoutMS)*time.Millisecond, codingRequest)
+		cleanupExtensions()
+		r.Atoms[roles.atoms[formula.Coding]].ExitCode = &result.Code
+		r.Atoms[roles.atoms[formula.Coding]].ElapsedMS = result.ElapsedMS
+
+		a := &r.HarnessAttempts[len(r.HarnessAttempts)-1]
+		coding = harness.CodingOutcomeFromProcess(result)
+		attemptCoding := coding
+		a.Coding = &attemptCoding
+		// Parse the Claude CLI final JSON for the attempt's effective model, tokens and
+		// reported cost (#149) from the raw provider stdout before it is dropped below. A
+		// non-Claude binding or a run that emitted none records no usage (unavailable).
+		a.Usage = harness.AttemptUsage(codingBinding.Command, result.RawStdout, a.Model)
+		a.Classification = harness.ClassifyCodingAttempt(codingBinding.Command, result)
+		ref, err = historyFile(r, "harness-"+attemptID+"-result.json", struct {
+			process.Result
+			AttemptID  string `json:"attemptId"`
+			PlanDigest string `json:"planDigest"`
+		}{result, attemptID, o.Approve})
+		if err != nil {
+			return r, err
+		}
+		a.Result = result
+		a.Result.Stdout, a.Result.Stderr, a.Result.RawStdout = "", "", ""
+		attemptRef := ref
+		a.Evidence = &attemptRef
+		processOutcome := "process-failed"
+		if result.OK {
+			processOutcome = "process-succeeded"
+		}
+		if result.Interrupted {
+			processOutcome = "process-interrupted"
+		} else if result.TimedOut {
+			processOutcome = "process-timed-out"
+		} else if result.ParentDeadline {
+			processOutcome = "process-parent-deadline"
+		}
+		observeAtomAction(&r, r.Atoms[roles.atoms[formula.Coding]].ID, attemptID, "invoke-coding-harness", processOutcome, fileProvenance(ref))
+		if err = save(r); err != nil {
+			return r, err
+		}
+		captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		capture, captureErr = verification.Capture(captureCtx, r.Workspace.Path, p.Inputs.BaseCommit, allowed, p.Artifacts)
+		cancelCapture()
+		// Claude Code hot-reloads project settings, so a run that created, edited or
+		// removed anything under .claude (for example through repository code that an
+		// allowed Bash entry ran, which the Edit deny does not cover) changed what its
+		// own next tool call is allowed to do. The comparison is against the base commit
+		// itself, so it holds even for a path the approved scope would otherwise allow.
+		if harness.ClaudeBinding(codingBinding.Command) {
+			changed, e := harness.ClaudeTreeChanges(r.Workspace.Path, p.Inputs.BaseCommit)
+			switch {
+			case e != nil:
+				if captureErr == nil {
+					captureErr = fmt.Errorf("cannot verify that .claude is unchanged: %w", e)
+				}
+			case len(changed) > 0:
+				for _, name := range changed {
+					if !slices.Contains(capture.Violations, name) {
+						capture.Violations = append(capture.Violations, name)
+					}
+				}
+				r.Notes = append(r.Notes, fmt.Sprintf("The coding harness changed Claude project configuration under .claude (%s); .claude must stay byte-identical to the base commit, so the attempt is a scope violation.", listPaths(changed)))
+			}
+		}
+		if captureErr != nil {
+			a.CaptureError = captureErr.Error()
+		}
+		captureRef, err := historyFile(r, "harness-"+attemptID+"-capture.json", struct {
+			verification.CaptureResult
+			CaptureError string `json:"captureError,omitempty"`
+		}{capture, a.CaptureError})
+		if err != nil {
+			return r, err
+		}
+		a.CaptureEvidence = append(a.CaptureEvidence, captureRef)
+		if provenance := atomProvenance(&r, r.Atoms[roles.atoms[formula.Coding]].ID); provenance != nil {
+			for i := range provenance.Actions {
+				action := &provenance.Actions[i]
+				if action.AttemptID == attemptID && action.Observed != nil {
+					action.Observed.Evidence = append(action.Observed.Evidence, fileProvenance(captureRef))
 				}
 			}
-			r.Notes = append(r.Notes, fmt.Sprintf("The coding harness changed Claude project configuration under .claude (%s); .claude must stay byte-identical to the base commit, so the attempt is a scope violation.", listPaths(changed)))
 		}
-	}
-	if captureErr != nil {
-		a.CaptureError = captureErr.Error()
-	}
-	captureRef, err := historyFile(r, "harness-"+attemptID+"-capture.json", struct {
-		verification.CaptureResult
-		CaptureError string `json:"captureError,omitempty"`
-	}{capture, a.CaptureError})
-	if err != nil {
-		return r, err
-	}
-	a.CaptureEvidence = append(a.CaptureEvidence, captureRef)
-	if provenance := atomProvenance(&r, r.Atoms[roles.atoms[formula.Coding]].ID); provenance != nil {
-		for i := range provenance.Actions {
-			action := &provenance.Actions[i]
-			if action.AttemptID == attemptID && action.Observed != nil {
-				action.Observed.Evidence = append(action.Observed.Evidence, fileProvenance(captureRef))
+		attemptCapture := capture
+		a.Capture = &attemptCapture
+		r.Capture = &attemptCapture
+		r.Captures = append(r.Captures, capture)
+		if err = save(r); err != nil {
+			return r, err
+		}
+		// Only a transient provider error whose retained tree stayed within scope is
+		// resumed; every other attempt, and a transient one with a scope or capture
+		// problem, is judged below exactly as before.
+		if a.Classification != harness.TransientProviderError || captureErr != nil || len(capture.Violations) > 0 {
+			break
+		}
+		// Only a resume that actually starts uses one of the maxTransientResumes; a wait
+		// whose provider check fails is noted and the next wait follows, up to
+		// maxProviderWaits for the stage.
+		message, _ := harness.TransientProviderFailure(result.RawStdout)
+		lastError, started := message, false
+		for !started && resumes < maxTransientResumes && waits < maxProviderWaits {
+			waits++
+			if e := waitForProvider(ctx, o, waits); e != nil {
+				if ctx.Err() != nil {
+					return finishFailed(r, fmt.Sprintf("Automatic resume %d of %d after %s was interrupted before it started: %v. Retained tree: %s. %s", resumes+1, maxTransientResumes, harness.TransientProviderError, e, capture.Tree, harnessOutcomeSummary(result, ref)))
+				}
+				lastError = e.Error()
+				r.Notes = append(r.Notes, fmt.Sprintf("Automatic resume %d of %d after %s was not started: %v.", resumes+1, maxTransientResumes, harness.TransientProviderError, e))
+				continue
 			}
+			started = true
 		}
-	}
-	a.Capture = &capture
-	r.Capture = &capture
-	r.Captures = append(r.Captures, capture)
-	if err = save(r); err != nil {
-		return r, err
+		if !started {
+			r.TransientExhausted = slices.Clone(stage)
+			return finishFailed(r, fmt.Sprintf("Coding stopped: %s retries exhausted after %s and %s; last error: %s. Retained tree: %s. %s", harness.TransientProviderError, plural(resumes, "automatic resume"), plural(waits, "provider check"), lastError, capture.Tree, harnessOutcomeSummary(result, ref)))
+		}
+		resumes++
+		resumed = fmt.Sprintf("resumed after %s (%d of %d)", harness.TransientProviderError, resumes, maxTransientResumes)
+		r.Notes = append(r.Notes, fmt.Sprintf("Coding attempt %s ended with %s (%s); %s as a new attempt on the same approved plan %s from the retained workspace tree %s.", attemptID, harness.TransientProviderError, message, resumed, o.Approve, capture.Tree))
+		if err = save(r); err != nil {
+			return r, err
+		}
 	}
 	if !result.OK {
 		summary := harnessOutcomeSummary(result, ref)

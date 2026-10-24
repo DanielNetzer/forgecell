@@ -1000,6 +1000,11 @@ func loadAttemptRecordAt(path, task, variant string, rep int) (CohortAttempt, in
 	if ca.Task != task || ca.Variant != variant || ca.Repetition != rep || ca.StartedAt == "" || ca.ElapsedMS == 0 {
 		return CohortAttempt{}, 0, false
 	}
+	// A provider that stayed unreachable says nothing about the variant, so that attempt
+	// is resumable: it is not done, and a resumed run re-runs the coordinate.
+	if ca.Invalid == invalidProviderUnavailable {
+		return CohortAttempt{}, 0, false
+	}
 	// A record saved before hiddenAcceptance existed lacks the key (a current one always
 	// writes it, null when acceptance never ran); the report excludes and notes it.
 	var keys map[string]json.RawMessage
@@ -1313,11 +1318,20 @@ var runCohortMolecule = molecule.Run
 // invalidModelMismatch marks an attempt whose harness was not served its pinned model.
 const invalidModelMismatch = "model-mismatch"
 
+// invalidProviderUnavailable marks an attempt whose coding stage ended on a transient
+// provider error after its automatic resumes (#190): it measured the provider, not the
+// variant. Unlike other recorded failures, a resumed cohort run re-runs it.
+const invalidProviderUnavailable = "provider-unavailable"
+
 // markInvalid marks an attempt invalid when any harness attempt was served a model other
-// than its pin. An invalid attempt is never correct, so it cannot be read as a pass.
+// than its pin, or when its coding exhausted the transient provider resumes. An invalid
+// attempt is never correct, so it cannot be read as a pass.
 func markInvalid(a *Attempt) {
 	if _, _, ok := modelMismatch(*a); ok {
 		a.Invalid = invalidModelMismatch
+		a.Correct = false
+	} else if molecule.TransientRetriesExhausted(a.Molecule) {
+		a.Invalid = invalidProviderUnavailable
 		a.Correct = false
 	}
 }
