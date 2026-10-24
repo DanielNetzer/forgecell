@@ -1169,6 +1169,123 @@ func TestCohortLaterModelMismatchDoesNotStop(t *testing.T) {
 	}
 }
 
+// TestCohortProviderUnavailableMarksExhaustedAttemptInvalid: a cohort attempt whose
+// coding ended on a transient provider error after its resumes is invalid
+// provider-unavailable and never correct; one whose transient attempt was resumed to a
+// later attempt stays valid (#190).
+func TestCohortProviderUnavailableMarksExhaustedAttemptInvalid(t *testing.T) {
+	a := completedAttempt(nil)
+	a.Correct = true
+	a.Molecule.HarnessAttempts = []molecule.HarnessAttempt{{ID: "a1", Classification: harness.TransientProviderError}, {ID: "a2", Classification: harness.TransientProviderError}, {ID: "a3", Classification: harness.TransientProviderError}}
+	unmarked := a
+	a.Molecule.TransientExhausted = []string{"a1", "a2", "a3"}
+	finalizeUsage(&a)
+	if a.Invalid != "provider-unavailable" || a.Correct {
+		t.Fatalf("exhausted attempt invalid=%q correct=%v", a.Invalid, a.Correct)
+	}
+	// The same shape left by any other stop (an interrupted wait, an extension, capacity
+	// or Formula failure) carries no marker and is not provider-unavailable.
+	finalizeUsage(&unmarked)
+	if unmarked.Invalid != "" {
+		t.Fatalf("unmarked transient attempt invalid=%q", unmarked.Invalid)
+	}
+	resumed := completedAttempt(nil)
+	resumed.Correct = true
+	resumed.Molecule.HarnessAttempts = []molecule.HarnessAttempt{{Classification: harness.TransientProviderError}, {Resumed: "resumed after transient-provider-error (1 of 2)"}}
+	finalizeUsage(&resumed)
+	if resumed.Invalid != "" || !resumed.Correct {
+		t.Fatalf("resumed attempt invalid=%q correct=%v", resumed.Invalid, resumed.Correct)
+	}
+}
+
+// TestCohortProviderUnavailableIsExcludedAndRerunOnResume runs a real cohort whose base
+// attempt exhausts its transient provider resumes (injected, since a custom stub command
+// is not a Claude binding). The attempt is invalid provider-unavailable, excluded from
+// completions, passes and rates, keeps its reported cost, and a resumed run re-runs that
+// coordinate while keeping the valid one.
+func TestCohortProviderUnavailableIsExcludedAndRerunOnResume(t *testing.T) {
+	o := cohortFixture(t, []variantSpec{{name: "base", body: completedHarness}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	approveCohort(t, &o)
+	original := runCohortMolecule
+	t.Cleanup(func() { runCohortMolecule = original })
+	runCohortMolecule = func(ctx context.Context, opts molecule.Options) (molecule.Record, error) {
+		r, err := original(ctx, opts)
+		if strings.Contains(opts.LabDir, string(filepath.Separator)+"base"+string(filepath.Separator)) {
+			for i := range r.HarnessAttempts {
+				r.HarnessAttempts[i].Classification = harness.TransientProviderError
+				r.HarnessAttempts[i].Usage = servedUsage(t, "claude-opus-5-5", "claude-opus-5-5", fp(0.5))
+				r.TransientExhausted = append(r.TransientExhausted, r.HarnessAttempts[i].ID)
+			}
+		}
+		return r, err
+	}
+	r, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "complete" || len(r.Attempts) != 2 {
+		t.Fatalf("status=%s stopped=%q attempts=%d", r.Status, r.Stopped, len(r.Attempts))
+	}
+	var first CohortAttempt
+	for _, a := range r.Attempts {
+		if a.Variant == "base" {
+			first = a
+		}
+	}
+	if first.Invalid != "provider-unavailable" || first.Correct {
+		t.Fatalf("base attempt invalid=%q correct=%v", first.Invalid, first.Correct)
+	}
+	var base VariantSummary
+	for _, v := range r.Variants {
+		if v.Name == "base" {
+			base = v
+		}
+	}
+	if base.Attempts != 1 || base.Invalid != 1 || base.InvalidReasons["provider-unavailable"] != 1 || base.Completions != 0 || base.HiddenAcceptancePass != 0 || base.N.Attempts != 0 || base.CostPerAcceptedUSD != nil {
+		t.Fatalf("provider-unavailable attempt not excluded from rates: %+v", base)
+	}
+	if base.ReportedCostUSD == nil || *base.ReportedCostUSD != 0.5 {
+		t.Fatalf("provider-unavailable attempt's spent cost dropped: %+v", base)
+	}
+	record := filepath.Join(o.Output, "attempts", "task-a", "base", "rep-1", "attempt.json")
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	json.Unmarshal(raw, &fields)
+	if string(fields["invalid"]) != `"provider-unavailable"` {
+		t.Fatalf("attempt.json invalid=%s", fields["invalid"])
+	}
+	if _, done := loadAttemptRecord(record, "task-a", "base", 1); done {
+		t.Fatal("a provider-unavailable record counts as done")
+	}
+	cand, done := loadAttemptRecord(filepath.Join(o.Output, "attempts", "task-a", "cand", "rep-1", "attempt.json"), "task-a", "cand", 1)
+	if !done {
+		t.Fatal("valid cand attempt was not recorded as done")
+	}
+	runCohortMolecule = original
+	r2, err := RunCohort(context.Background(), o)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if r2.Status != "complete" || len(r2.Attempts) != 2 {
+		t.Fatalf("resume status=%s attempts=%d", r2.Status, len(r2.Attempts))
+	}
+	for _, a := range r2.Attempts {
+		switch a.Variant {
+		case "base":
+			if a.StartedAt == first.StartedAt || a.Invalid != "" || !a.Correct {
+				t.Fatalf("provider-unavailable coordinate not re-run cleanly: invalid=%q correct=%v error=%s", a.Invalid, a.Correct, a.Attempt.Error)
+			}
+		case "cand":
+			if a.StartedAt != cand.StartedAt {
+				t.Fatal("resume re-ran the valid cand attempt")
+			}
+		}
+	}
+}
+
 // wrongValueHarness completes with a change the acceptance check rejects.
 const wrongValueHarness = "#!/bin/sh\ncat >/dev/null\nprintf wrong > value.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
 

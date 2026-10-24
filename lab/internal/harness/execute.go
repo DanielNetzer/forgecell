@@ -122,6 +122,15 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 	result.Process.RawStdout = result.Raw
 	if coding {
 		result.Text, result.Process.PermissionDenials, err = ReadCodingResult(o.ID, result.Raw)
+		// A transient provider error names itself instead of the bare exit status, so the
+		// attempt never reads as an unexplained "exit 1" (#190).
+		if _, transient := TransientProviderFailure(result.Raw); transient && err != nil {
+			if result.Process.Error != "" {
+				result.Process.Error = err.Error() + " (" + result.Process.Error + ")"
+			} else {
+				result.Process.Error = err.Error()
+			}
+		}
 	} else {
 		result.Text, err = ReadResult(o.ID, result.Raw, true)
 	}

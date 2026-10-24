@@ -294,7 +294,9 @@ and the exact approve command.
 For each task, for each repetition, variant A then variant B run interleaved (A first),
 sequentially, each in its own isolated per-attempt Lab under
 `<out>/attempts/<task>/<variant>/rep-<n>/`. A failed or timed-out attempt is recorded,
-never silently retried, and the run continues. An attempt cancelled by SIGINT or SIGTERM
+never silently retried, and the run continues. The one exception is the Molecule's own
+recovery from a transient provider error (below), which applies to cohort attempts too.
+An attempt cancelled by SIGINT or SIGTERM
 is discarded rather than saved, so resume re-runs that coordinate instead of skipping it,
 and the run is recorded as `status: aborted`. The stop rule is checked after each
 attempt; `maxCostUSD` counts only reported cost (list-price estimates included and
@@ -436,8 +438,42 @@ required checks, every median and p90 and the cost per accepted outcome; each va
 reports `invalid` and `invalidReasons`, and the report adds one note naming how many were
 excluded. When a variant's first attempt is invalid this way the run stops (`variant
 <name> was not served its pinned model (<pinned> → <served>)`), because the comparison
-cannot be made; a mismatch on a later attempt is recorded and the run continues. Each
-`attempt.json` records `costUsd` from the reported usage (`null` when nothing reported a
+cannot be made; a mismatch on a later attempt is recorded and the run continues.
+
+**Transient provider errors.** When the Claude CLI ends a coding attempt with
+`terminal_reason: "api_error"` and a network-class message (`ENOTFOUND`, `ECONNRESET`,
+`ECONNREFUSED`, `ETIMEDOUT`, `EAI_AGAIN`, `socket hang up`, `Connection error.`,
+`Request timed out.`, `Can't reach the API server`, `went to sleep mid-response`), an
+`overloaded` provider, or an error whose own status is HTTP 502, 503, 504 or 529 (the
+`API Error: NNN` prefix or a structured `api_error_status`), the harness attempt records
+`classification: "transient-provider-error"` and the provider message, not a bare
+`exit 1`. A 4xx status, or an `invalid_request_error`, `authentication_error` or
+`permission_error`, is never transient, whatever numbers or words its message contains.
+The Molecule then resumes automatically, at most twice per coding stage: it waits 30 s
+before the first provider check and 120 s before each later one, checks that the provider
+host resolves (the host of `ANTHROPIC_BASE_URL`, else `api.anthropic.com`; a host that does
+not resolve is noted and the next wait follows, without using a resume, up to four checks
+per stage), checks that the Formula approval is unchanged (a change stops the stage), and
+starts a new coding attempt on the same approved plan digest from the retained workspace
+tree, with the added instruction `The previous attempt was interrupted by a provider network
+error; the workspace contains its partial work. Review it and complete every acceptance
+item. If the retained work already satisfies every acceptance item, report outcome
+completed, not no-change.` No re-approval is needed. Each resumed attempt carries
+`resumed: "resumed after transient-provider-error (k of 2)"`, counting resumes that
+started, and a ledger note, and every attempt keeps its own usage, so the reported cost sums
+them. A transient attempt that wrote outside scope is not resumed. When the resumes or the
+provider checks are used up, the Molecule fails with `transient-provider-error retries
+exhausted after N automatic resumes and M provider checks; last error: ...` and records the
+stage's attempt IDs in `transientExhausted`. Model refusals, policy or permission errors,
+timeouts, budget stops and a non-network `api_error` are never retried automatically. A
+cohort attempt whose Molecule carries that marker on its last attempt is recorded with
+`invalid: "provider-unavailable"`: like `model-mismatch` it stays in the attempt count and
+reported cost but is excluded from completions, passes, rates and medians, and unlike other
+recorded failures it is resumable, so a resumed cohort run re-runs that coordinate. Any
+other stop after a transient attempt (an interrupt during the wait, a Formula, extension or
+capacity failure) is an ordinary failure.
+
+Each `attempt.json` records `costUsd` from the reported usage (`null` when nothing reported a
 cost), and, before the Lab is deleted, `failedCheckOutput`: for every failed Molecule
 setup command (`phase: setup`) and check (`phase: check`), in the candidate view and its
 protected run, the ID, exit code and the last 8 KiB of stdout and stderr, copied from the

@@ -13,6 +13,8 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -112,6 +114,80 @@ type HarnessAttempt struct {
 	// custom-command attempt, a Claude run that emitted none, and every earlier ledger
 	// carry no Usage, which reads as "unavailable" rather than as zero.
 	Usage *harness.Usage `json:"usage,omitempty"`
+	// Classification is harness.TransientProviderError when the provider reported a
+	// transient API error (#190); empty for every other attempt and in earlier ledgers.
+	Classification string `json:"classification,omitempty"`
+	// Resumed is "resumed after transient-provider-error (n of 2)" on an attempt the Lab
+	// started automatically from the retained tree of the transient attempt before it.
+	Resumed string `json:"resumed,omitempty"`
+}
+
+// maxTransientResumes bounds the automatic resumes of one coding stage after
+// transient provider errors (#190); maxProviderWaits bounds the waits and provider
+// checks before them, so a provider host that never resolves still ends the stage.
+const (
+	maxTransientResumes = 2
+	maxProviderWaits    = 2 * maxTransientResumes
+)
+
+// transientBackoff is the wait before provider check n (1-based); every check after the
+// last entry waits as long as the last entry.
+var transientBackoff = [maxTransientResumes]time.Duration{30 * time.Second, 120 * time.Second}
+
+// resumeInstruction is added to the coding instruction of an automatic resume.
+const resumeInstruction = " The previous attempt was interrupted by a provider network error; the workspace contains its partial work. Review it and complete every acceptance item. If the retained work already satisfies every acceptance item, report outcome completed, not no-change."
+
+// TransientRetriesExhausted reports whether the Molecule's coding stage ended because
+// its transient provider errors outlasted the automatic resumes. It reads only the
+// TransientExhausted marker that path records, and only while the marked attempt is
+// still the last one, so every other stop after a transient attempt (an interrupt
+// during the wait, an extension, capacity or Formula failure, a ledger error) is judged
+// by its own failure.
+func TransientRetriesExhausted(r Record) bool {
+	n, m := len(r.HarnessAttempts), len(r.TransientExhausted)
+	return n > 0 && m > 0 && r.TransientExhausted[m-1] == r.HarnessAttempts[n-1].ID
+}
+
+// plural counts n of noun, adding "s" unless n is 1.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// waitForProvider waits before provider check n and checks that the provider host
+// resolves. Options.TransientBackoff and Options.ResolveProvider replace both in tests.
+func waitForProvider(ctx context.Context, o Options, n int) error {
+	wait := o.TransientBackoff
+	if wait == nil {
+		wait = func(ctx context.Context, n int) error {
+			t := time.NewTimer(transientBackoff[min(n, len(transientBackoff))-1])
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-t.C:
+				return nil
+			}
+		}
+	}
+	if err := wait(ctx, n); err != nil {
+		return err
+	}
+	if o.ResolveProvider != nil {
+		return o.ResolveProvider(ctx)
+	}
+	host := "api.anthropic.com"
+	if u, err := url.Parse(os.Getenv("ANTHROPIC_BASE_URL")); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := net.DefaultResolver.LookupHost(resolveCtx, host); err != nil {
+		return fmt.Errorf("provider host %s did not resolve: %w", host, err)
+	}
+	return nil
 }
 
 // RecordInvocation records the model and isolation mode that the invocation for
@@ -207,6 +283,10 @@ type Record struct {
 	Capture              *verification.CaptureResult   `json:"capture,omitempty"`
 	Recovery             *verification.CaptureResult   `json:"recovery,omitempty"`
 	Verification         *verification.Result          `json:"verification,omitempty"`
+	// TransientExhausted lists the coding attempt IDs of a coding stage that stopped
+	// because its transient provider errors outlasted the automatic resumes (#190). Only
+	// that path writes it; see TransientRetriesExhausted.
+	TransientExhausted []string `json:"transientExhausted,omitempty"`
 }
 type Options struct {
 	MandatoryConstraints []string
@@ -237,6 +317,11 @@ type Options struct {
 	// unset because the cohort guards the whole attempt. GOFLAGS -p for a cohort attempt's
 	// checks travels on the context (resources.WithGoParallelism).
 	Resources *resources.Guard
+	// TransientBackoff and ResolveProvider replace the wait before provider check n
+	// (30 s, then 120 s) and the provider host resolution check after a transient
+	// provider error (#190), so tests never wait or touch DNS.
+	TransientBackoff func(ctx context.Context, n int) error
+	ResolveProvider  func(ctx context.Context) error
 }
 
 func stamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }

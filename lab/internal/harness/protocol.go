@@ -888,6 +888,11 @@ func ReadCodingResult(id, output string) (string, []string, error) {
 	if err := json.Unmarshal([]byte(output), &value); err != nil || value == nil {
 		return "", nil, fmt.Errorf("%s returned invalid JSON output", id)
 	}
+	// A transient provider error keeps its own classification and the bounded provider
+	// message, so the attempt is not reduced to a generic failure (#190).
+	if message, ok := TransientProviderFailure(output); ok {
+		return "", nil, fmt.Errorf("%s reported a %s: %s", id, TransientProviderError, message)
+	}
 	var subtype string
 	if raw := value["subtype"]; len(raw) > 0 && string(raw) != "null" {
 		if json.Unmarshal(raw, &subtype) != nil || strings.HasPrefix(subtype, "error") {
