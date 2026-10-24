@@ -88,6 +88,7 @@ func oneQuestion() []readiness.Question {
 }
 
 func TestGatePolicyScopeApprovesReadyMolecule(t *testing.T) {
+	t.Parallel()
 	_, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	got := EvaluateGatePolicy(r, formula.ScopeApproval)
 	if got.Outcome != PolicyApprove {
@@ -105,6 +106,7 @@ func TestGatePolicyScopeApprovesReadyMolecule(t *testing.T) {
 }
 
 func TestGatePolicyScopeDeclinesEachUnreadyCondition(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	if EvaluateGatePolicy(ready, formula.ScopeApproval).Outcome != PolicyApprove {
 		t.Fatal("fixture is not ready")
@@ -135,7 +137,7 @@ func TestGatePolicyScopeDeclinesEachUnreadyCondition(t *testing.T) {
 			r.Readiness.Plans[0].Plan.Analysis.Unknowns = []string{"Is the base branch stable?"}
 		}, "plan-has-unknowns"},
 		{"setup command", func(r *Record) {
-			r.Readiness.Plans[0].Plan.Setup = []readiness.Check{{ID: "setup", Category: "setup", Argv: []string{"/bin/sh", "-c", "true"}, Dir: ".", TimeoutMS: 1000}}
+			r.Readiness.Plans[0].Plan.Setup = []readiness.Check{{ID: "setup", Category: "setup", Argv: []string{"/bin/sh", "-c", "true"}, Dir: ".", TimeoutMS: 30000}}
 		}, "plan-has-setup"},
 		{"mandatory constraint", func(r *Record) {
 			r.Readiness.Plans[0].Plan.Inputs.MandatoryConstraints = []string{"signed commits"}
@@ -195,6 +197,7 @@ func TestGatePolicyScopeDeclinesEachUnreadyCondition(t *testing.T) {
 }
 
 func TestGatePolicyHumanGateNeverApproved(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, scope string }{
 		{"no mode", defaultScopeAtom},
 		{"mode human", "{id: scope, type: gate, purpose: scope, mode: human}"},
@@ -244,6 +247,7 @@ func TestGatePolicyHumanGateNeverApproved(t *testing.T) {
 	})
 }
 
+// Serial: sets PATH with t.Setenv.
 func TestGatePolicyEvaluationHasNoSideEffects(t *testing.T) {
 	o, _ := fixture(t)
 	calls := 0
@@ -274,7 +278,7 @@ func TestGatePolicyEvaluationHasNoSideEffects(t *testing.T) {
 	bin, markers := t.TempDir(), t.TempDir()
 	for _, name := range []string{"git", "gh", "curl", "sh"} {
 		script := "#!/bin/sh\ntouch " + filepath.Join(markers, name) + "\n"
-		if err = os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); err != nil {
+		if err = writeStub(filepath.Join(bin, name), []byte(script), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -304,6 +308,7 @@ func TestGatePolicyEvaluationHasNoSideEffects(t *testing.T) {
 }
 
 func TestGatePolicyDecisionsAreIndependentPerMolecule(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	asking := cloneRecord(t, ready)
 	asking.ID = "mol-12-asking"
@@ -422,6 +427,7 @@ func assertNothingApproved(t *testing.T, r Record) {
 }
 
 func TestGatePolicyRecordsIdentityAndEvidence(t *testing.T) {
+	t.Parallel()
 	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	jsonBefore, mdBefore := ledgerFiles(t, r)
 	if strings.Contains(mdBefore, "Policy decisions") {
@@ -519,6 +525,7 @@ func TestGatePolicyRecordsIdentityAndEvidence(t *testing.T) {
 }
 
 func TestGatePolicyAcceptsExactLabDefaultPolicy(t *testing.T) {
+	t.Parallel()
 	_, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	p := r.Readiness.Plans[0].Plan
 	if !reflect.DeepEqual(p.Policy.Environment, []string{"PATH"}) || len(p.Policy.CredentialNames) != 0 || p.Policy.SetupNetwork != "unrestricted" || p.Policy.CheckNetwork != "unrestricted" || p.Policy.Containment != "filtered-environment" {
@@ -533,6 +540,7 @@ func TestGatePolicyAcceptsExactLabDefaultPolicy(t *testing.T) {
 }
 
 func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
+	t.Parallel()
 	_, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	observe := func(r Record) map[string]string {
 		t.Helper()
@@ -598,6 +606,7 @@ func TestGatePolicyEvidenceHoldsObservedValues(t *testing.T) {
 }
 
 func TestGatePolicyApprovalPersistsDecisionWithApprovedEvent(t *testing.T) {
+	t.Parallel()
 	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	digest := r.Readiness.Plans[0].Digest
 	assertNothingApproved(t, r)
@@ -643,6 +652,7 @@ func TestGatePolicyApprovalPersistsDecisionWithApprovedEvent(t *testing.T) {
 }
 
 func TestGatePolicyApprovalDeclinesChangedIssue(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		edit func(*Issue)
@@ -674,6 +684,7 @@ func TestGatePolicyApprovalDeclinesChangedIssue(t *testing.T) {
 }
 
 func TestGatePolicyApprovalDeclinedByPolicyRecordsNothing(t *testing.T) {
+	t.Parallel()
 	t.Run("plan not ready", func(t *testing.T) {
 		o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 		r.Analysis.Unknowns = []string{"Is the base branch stable?"}
@@ -701,6 +712,7 @@ func TestGatePolicyApprovalDeclinedByPolicyRecordsNothing(t *testing.T) {
 }
 
 func TestGatePolicyHumanApprovalRecordsNoPolicyDecision(t *testing.T) {
+	t.Parallel()
 	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	if EvaluateGatePolicy(r, formula.ScopeApproval).Outcome != PolicyApprove {
 		t.Fatal("the policy would approve this plan, but Run must not apply it")
@@ -756,6 +768,7 @@ func assertPolicyApproves(t *testing.T, r Record) {
 }
 
 func TestGatePolicyDeclinesArtifactAllowancesAndCheckInputs(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	assertPolicyApproves(t, ready)
 	const content = "frozen human input"
@@ -789,6 +802,7 @@ func TestGatePolicyDeclinesArtifactAllowancesAndCheckInputs(t *testing.T) {
 }
 
 func TestGatePolicyDeclinesSensitiveScopePaths(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	assertPolicyApproves(t, ready)
 	scoped := func(t *testing.T, path string) Record {
@@ -838,6 +852,7 @@ func TestGatePolicyDeclinesSensitiveScopePaths(t *testing.T) {
 }
 
 func TestGatePolicyDeclinesScopeCitedByCheckDefinition(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	assertPolicyApproves(t, ready)
 	const defined = "tools/check.sh"
@@ -907,6 +922,7 @@ func TestGatePolicyDeclinesScopeCitedByCheckDefinition(t *testing.T) {
 }
 
 func TestGatePolicyPointerTargetRequiresPresentKey(t *testing.T) {
+	t.Parallel()
 	var doc any
 	if err := json.Unmarshal([]byte(`{"a":{"empty":[],"null":null,"list":[1]},"b":"text"}`), &doc); err != nil {
 		t.Fatal(err)
@@ -922,6 +938,7 @@ func TestGatePolicyPointerTargetRequiresPresentKey(t *testing.T) {
 }
 
 func TestGatePolicyRecordedPointersResolveInPersistedLedger(t *testing.T) {
+	t.Parallel()
 	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	if _, err := approveByPolicy(t, o, r); err != nil {
 		t.Fatal(err)
@@ -983,6 +1000,7 @@ func TestGatePolicyRecordedPointersResolveInPersistedLedger(t *testing.T) {
 }
 
 func TestGatePolicyApprovalDeclinesChangedLiveInputs(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		drift  func(t *testing.T, o *Options, r Record)
@@ -1032,6 +1050,7 @@ func TestGatePolicyApprovalDeclinesChangedLiveInputs(t *testing.T) {
 }
 
 func TestGatePolicyUnusualModeNeverApproves(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, mode string }{
 		{"integer", "7"},
 		{"boolean", "true"},
@@ -1062,6 +1081,7 @@ func TestGatePolicyUnusualModeNeverApproves(t *testing.T) {
 }
 
 func TestGatePolicyDecisionIsStampedByItsRecorder(t *testing.T) {
+	t.Parallel()
 	o, r := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	built, err := scopePolicyDecision(r)
 	if err != nil {
@@ -1088,6 +1108,7 @@ func TestGatePolicyDecisionIsStampedByItsRecorder(t *testing.T) {
 // Protected exemptions are runtime-owned: only the evaluation runner sets them, so an
 // amendment payload cannot add one and slip past the plan-has-protected-exemptions rule.
 func TestGatePolicyAmendIgnoresSubmittedProtectedExemptions(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {

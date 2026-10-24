@@ -16,6 +16,7 @@ import (
 )
 
 func TestCheckOnlyRetryRetainsHistoryAndNeverCodes(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	analyze := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
@@ -67,6 +68,7 @@ func TestCheckOnlyRetryRetainsHistoryAndNeverCodes(t *testing.T) {
 }
 
 func TestCheckOnlyRejectsDriftAndUncertainCoding(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"source", "scope", "binding", "uncertain"} {
 		t.Run(kind, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -110,6 +112,7 @@ func TestCheckOnlyRejectsDriftAndUncertainCoding(t *testing.T) {
 }
 
 func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	harness := filepath.Join(filepath.Dir(o.LabDir), "harness")
 	raw, err := os.ReadFile(harness)
@@ -117,7 +120,7 @@ func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *tes
 		t.Fatal(err)
 	}
 	raw = append(raw, []byte("\nprintf '%s' '{\"scripts\":{\"test\":\"true\"}}' > package.json\n")...)
-	if err = os.WriteFile(harness, raw, 0700); err != nil {
+	if err = writeStub(harness, raw, 0700); err != nil {
 		t.Fatal(err)
 	}
 	analyze := o.Analyze
@@ -206,6 +209,7 @@ func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *tes
 }
 
 func TestVerificationEvidenceSurvivesAmendmentAndRejectsCorruption(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, e := runApprovedFixture(t, o)
 	if e != nil {
@@ -239,6 +243,7 @@ func TestVerificationEvidenceSurvivesAmendmentAndRejectsCorruption(t *testing.T)
 }
 
 func TestLargeVerificationOutputIsRetainedOutsideLedger(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	a := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
@@ -271,6 +276,7 @@ func TestLargeVerificationOutputIsRetainedOutsideLedger(t *testing.T) {
 }
 
 func TestRecoverInterruptedVerificationRetainsCompletedObservations(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, e := runApprovedFixture(t, o)
 	if e != nil {
@@ -338,7 +344,7 @@ func pendingChecksFixture(t *testing.T) (Options, Record, string) {
 		t.Fatal(err)
 	}
 	raw = append(raw, []byte(fmt.Sprintf("\necho coding >> %q\n", filepath.Join(counts, "coding")))...)
-	if err = os.WriteFile(harness, raw, 0700); err != nil {
+	if err = writeStub(harness, raw, 0700); err != nil {
 		t.Fatal(err)
 	}
 	analyze := o.Analyze
@@ -378,6 +384,7 @@ func assertExecutionCounts(t *testing.T, dir string, coding, checks, setup int) 
 }
 
 func TestPendingChecksOnlyCorrectionsRetainHistoryWithoutExecution(t *testing.T) {
+	t.Parallel()
 	o, r, counts := pendingChecksFixture(t)
 
 	historicalPlans, _ := json.Marshal(r.Readiness.Plans)
@@ -450,6 +457,7 @@ func TestPendingChecksOnlyCorrectionsRetainHistoryWithoutExecution(t *testing.T)
 }
 
 func TestPendingChecksOnlyRejectsUnsafeAmendments(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"tree", "scope", "artifacts", "inventory", "paused-tree", "paused-inventory", "uncertain", "unapproved-coding", "unknown-coding-plan", "failed-coding", "violation", "issue", "formula", "binding", "repository", "base", "evidence", "coding-parent", "bad-input", "bad-reference"} {
 		t.Run(kind, func(t *testing.T) {
 			o, r, counts := pendingChecksFixture(t)
@@ -546,6 +554,7 @@ func TestPendingChecksOnlyRejectsUnsafeAmendments(t *testing.T) {
 }
 
 func TestPendingAmendmentsKeepLegacyVerificationReadable(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
@@ -586,6 +595,7 @@ func TestPendingAmendmentsKeepLegacyVerificationReadable(t *testing.T) {
 }
 
 func TestPendingChecksOnlyRetainsReviewedHistoricalViolation(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
 			o, r, counts := pendingChecksFixture(t)
@@ -616,6 +626,7 @@ func TestPendingChecksOnlyRetainsReviewedHistoricalViolation(t *testing.T) {
 }
 
 func TestClarificationHistoryValidatesIdentityAndOrdersTies(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	for _, id := range []string{"mol-b", "mol-a", "mol-other", "mol-wrong-name", "mol-wrong-lab"} {
 		r := Record{SchemaVersion: "v0", Kind: "molecule", ID: id, Mode: "ticket", Status: "blocked", FormulaID: "sample", LabDir: o.LabDir, StartedAt: "2026-01-01T00:00:00Z", Issue: Issue{Repo: "acme/widgets", Number: 12}, Workspace: Workspace{Repo: "acme/widgets"}}
@@ -649,6 +660,7 @@ func TestClarificationHistoryValidatesIdentityAndOrdersTies(t *testing.T) {
 }
 
 func TestInterruptedAnalysisRetainsStartedSnapshotWithoutCheckout(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		panic("synthetic interruption")
@@ -683,6 +695,7 @@ func TestInterruptedAnalysisRetainsStartedSnapshotWithoutCheckout(t *testing.T) 
 }
 
 func TestInterruptedAllocationCannotResolveRunnableApproval(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {

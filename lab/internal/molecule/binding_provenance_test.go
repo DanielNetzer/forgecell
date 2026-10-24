@@ -26,6 +26,7 @@ func TestHarnessAttemptProvenanceIsAdditiveInTheLedger(t *testing.T) {
 }
 
 func TestOlderHarnessAttemptsWithoutProvenanceStillRoundTrip(t *testing.T) {
+	t.Parallel()
 	legacy := `{"id":"a0","planDigest":"d","result":{"ok":true,"code":0}}`
 	var attempt HarnessAttempt
 	if err := json.Unmarshal([]byte(legacy), &attempt); err != nil || attempt.Forgecell != nil || attempt.ID != "a0" {

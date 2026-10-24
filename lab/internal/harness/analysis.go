@@ -19,8 +19,11 @@ func constrainAnalysis(ctx context.Context, o ExecuteOptions, args []string) ([]
 	// Moving analysis outside the repository must not silently lose a project-
 	// scoped model/provider selection. Until that selection is explicitly bound,
 	// retain the binding and stop instead of falling back to another model.
-	return analysisControls(ctx, o, args, process.Run)
+	return analysisControls(ctx, o, args, analysisProbeRun)
 }
+
+// analysisProbeRun executes the runtime analysis control probes. Tests swap it.
+var analysisProbeRun = process.Run
 
 // ProbeAnalysisControls reuses the runtime isolation checks without invoking a model.
 func ProbeAnalysisControls(ctx context.Context, id, executable, dir string, run func(context.Context, process.Options) process.Result) error {

@@ -62,6 +62,7 @@ func hasEntry(entries []string, want string) bool {
 }
 
 func TestPlanCreationStoresFormatterEntriesForARequiredGofmtCheck(t *testing.T) {
+	t.Parallel()
 	o := gofmtFixture(t, defaultScopeAtom, gofmtGoFile)
 	r, plan := baselinePlan(t, o)
 	want, err := harness.DeriveCodingAllowlist(r.FormulaSnapshot.YAML, plan.Analysis.Checks, plan.Analysis.Scope...)
@@ -95,6 +96,7 @@ func TestPlanCreationStoresFormatterEntriesForARequiredGofmtCheck(t *testing.T) 
 }
 
 func TestPlanCreationWithoutAGofmtCheckKeepsTheAllowlist(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, plan := baselinePlan(t, o)
 	want, err := harness.DerivePreFormatterAllowlist(r.FormulaSnapshot.YAML, plan.Analysis.Checks)
@@ -104,6 +106,7 @@ func TestPlanCreationWithoutAGofmtCheckKeepsTheAllowlist(t *testing.T) {
 }
 
 func TestApprovedCodingAllowlistAcceptsCurrentAndEarlierPlansOnly(t *testing.T) {
+	t.Parallel()
 	o := gofmtFixture(t, defaultScopeAtom, gofmtGoFile)
 	r, plan := baselinePlan(t, o)
 	f := formula.Formula{YAML: r.FormulaSnapshot.YAML}
@@ -153,6 +156,7 @@ func TestApprovedCodingAllowlistAcceptsCurrentAndEarlierPlansOnly(t *testing.T) 
 }
 
 func TestAmendDerivesFormatterEntriesFromTheAmendedScope(t *testing.T) {
+	t.Parallel()
 	o := gofmtFixture(t, defaultScopeAtom, gofmtGoFile)
 	r, err := Run(context.Background(), o)
 	if err != nil || r.Readiness == nil {
@@ -185,6 +189,7 @@ func TestAmendDerivesFormatterEntriesFromTheAmendedScope(t *testing.T) {
 }
 
 func TestGatePolicyAgreesWithApprovalOnFormatterAllowlists(t *testing.T) {
+	t.Parallel()
 	o := gofmtFixture(t, policyScopeAtom, gofmtGoFile)
 	run, err := Run(context.Background(), o)
 	if err != nil || run.Readiness == nil {

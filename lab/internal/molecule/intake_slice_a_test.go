@@ -45,6 +45,7 @@ func vetScripted(t *testing.T, o *Options, steps ...string) (*int, *[]analysisCo
 }
 
 func TestSliceAPlanValidationFailureGetsOneCorrectiveRetry(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	calls, corrections := vetScripted(t, &o, "vet", "valid")
 	r, err := Run(context.Background(), o)
@@ -81,6 +82,7 @@ func TestSliceAPlanValidationFailureGetsOneCorrectiveRetry(t *testing.T) {
 }
 
 func TestSliceAPlanValidationFailureTwiceStopsIntake(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	calls, _ := vetScripted(t, &o, "vet", "vet")
 	r, err := Run(context.Background(), o)
@@ -112,7 +114,7 @@ func switchFixture(t *testing.T, noop string) (Options, string) {
 	marker := filepath.Join(t.TempDir(), "noop")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
 	body := "#!/bin/sh\nif [ -e " + shellWord(marker) + " ]; then " + noop + "; else cat > request.json; printf changed > code.txt; fi\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"Implemented and tested\",\"paths\":[]}'\n"
-	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+	if err := writeStub(script, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
 	return o, marker
@@ -143,6 +145,7 @@ func amendWithAcceptance(t *testing.T, o Options, added ...string) (Record, Opti
 }
 
 func TestSliceANoOpAmendmentStopsWithoutVerification(t *testing.T) {
+	t.Parallel()
 	o, marker := noopSwitchFixture(t)
 	amended, o := amendWithAcceptance(t, o, "Code also records the amendment")
 	paused := amended.Readiness.Plans[1].Plan.PausedTree
@@ -186,6 +189,7 @@ func TestSliceANoOpAmendmentStopsWithoutVerification(t *testing.T) {
 }
 
 func TestSliceAAmendedCodingRequestCarriesExactlyTheNewAcceptance(t *testing.T) {
+	t.Parallel()
 	o, _ := noopSwitchFixture(t)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
@@ -249,6 +253,7 @@ func noChangeAmendment(t *testing.T, added string) (Record, Options, string) {
 }
 
 func TestSliceANewAcceptanceKeepsItemsOfASkippedRevision(t *testing.T) {
+	t.Parallel()
 	r, o, marker := noChangeAmendment(t, "X is implemented")
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
@@ -276,6 +281,7 @@ func TestSliceANewAcceptanceKeepsItemsOfASkippedRevision(t *testing.T) {
 }
 
 func TestSliceAChecksOnlyAmendmentVerifiesAnUnchangedTree(t *testing.T) {
+	t.Parallel()
 	r, o, _ := noChangeAmendment(t, "X is already implemented")
 	parent := r.Readiness.Plans[1]
 	next := copyPlan(t, parent.Plan)
@@ -297,6 +303,7 @@ func TestSliceAChecksOnlyAmendmentVerifiesAnUnchangedTree(t *testing.T) {
 }
 
 func TestSliceAArtifactOnlyChangeIsNotANoChange(t *testing.T) {
+	t.Parallel()
 	o, marker := switchFixture(t, "cat >/dev/null; mkdir -p output; printf after > output/cache")
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
@@ -331,6 +338,7 @@ func TestSliceAArtifactOnlyChangeIsNotANoChange(t *testing.T) {
 }
 
 func TestSliceAInvalidCheckInputStopsIntakeWithoutAnalysis(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	calls := 0
 	analyze := o.Analyze
@@ -355,6 +363,7 @@ func TestSliceAInvalidCheckInputStopsIntakeWithoutAnalysis(t *testing.T) {
 }
 
 func TestSliceAPlanValidationInstructionNamesCategoriesOnlyForACategoryError(t *testing.T) {
+	t.Parallel()
 	request := analysisRequest(withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: readiness.PlanValidationMessage + ": invalid command argv or timeout"}), Issue{}, readiness.RepositorySnapshot{}, readiness.VerificationInputs{})
 	instruction := request["correction"].(map[string]string)["instruction"]
 	if !strings.Contains(instruction, "Fix the plan error the validator message reports") || strings.Contains(instruction, "independent-acceptance") {
@@ -363,6 +372,7 @@ func TestSliceAPlanValidationInstructionNamesCategoriesOnlyForACategoryError(t *
 }
 
 func TestSliceAEmptyNewAcceptanceOmitsTheAmendedInstruction(t *testing.T) {
+	t.Parallel()
 	o, _ := noopSwitchFixture(t)
 	r, o := amendWithAcceptance(t, o)
 	r, err := Run(context.Background(), o)

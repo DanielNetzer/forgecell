@@ -12,6 +12,7 @@ import (
 // The golden copy of the v2 sensitive-path list. A change to the list is a reviewed
 // edit of this copy, of sensitivePathListVersion and of sensitive_paths.go together.
 func TestHardening129SensitivePathListV2IsPinned(t *testing.T) {
+	t.Parallel()
 	if sensitivePathListVersion != "v2" {
 		t.Fatalf("sensitive-path list version %q: a list change needs a reviewed version bump and test edit", sensitivePathListVersion)
 	}
@@ -71,6 +72,7 @@ func TestHardening129SensitivePathListV2IsPinned(t *testing.T) {
 }
 
 func TestHardening129SensitivePathsMatchAtAnyDepthIgnoringCase(t *testing.T) {
+	t.Parallel()
 	for _, file := range []string{
 		"scripts/x.sh", "lab/scripts/x.sh", "pkg/.claude/settings.json", "Pkg/.CLAUDE/x", "a/b/.github/workflows/x.yml", "lab/.HUSKY/pre-commit", "x/.githooks/pre-push", "web/vendor/x.go", "vendor/x.go",
 		"go.work", "lab/go.work", "lab/go.work.sum", ".gitmodules", "sub/.gitattributes", ".github/CODEOWNERS", "docs/CODEOWNERS", ".mcp.json", "x/CLAUDE.md", "agents.md", "docs/AGENTS.MD", ".cursor/rules/x.mdc", "a/.cursor/b",
@@ -103,6 +105,7 @@ func namedPlan(dir string, argv []string, scope ...string) readiness.Plan {
 }
 
 func TestHardening129ScopeFilesUnderAnythingACheckNamesAreDeclined(t *testing.T) {
+	t.Parallel()
 	const checkout = "/work/ws"
 	for name, tc := range map[string]struct {
 		dir   string
@@ -237,6 +240,7 @@ func TestHardening129ScopeFilesUnderAnythingACheckNamesAreDeclined(t *testing.T)
 }
 
 func TestHardening129GoPackageArgumentsExemptOnlyGoFiles(t *testing.T) {
+	t.Parallel()
 	const checkout = "/work/ws"
 	for name, tc := range map[string]struct {
 		dir   string
@@ -282,6 +286,7 @@ func TestHardening129GoPackageArgumentsExemptOnlyGoFiles(t *testing.T) {
 }
 
 func TestHardening129PolicyDeclinesSensitiveAndNamedScopePaths(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	assertPolicyApproves(t, ready)
 	scoped := func(t *testing.T, file string) Record {
@@ -324,6 +329,7 @@ func TestHardening129PolicyDeclinesSensitiveAndNamedScopePaths(t *testing.T) {
 }
 
 func TestHardening129PolicyDeclinesScopeFilesAChecksNamesOrRuns(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	assertPolicyApproves(t, ready)
 	for name, tc := range map[string]struct {
@@ -355,6 +361,7 @@ func TestHardening129PolicyDeclinesScopeFilesAChecksNamesOrRuns(t *testing.T) {
 }
 
 func TestHardening129PolicyEvidenceListsNewFileDefinitions(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	const newFile = "pinned/pinned_test.go"
 	plain := EvaluateGatePolicy(ready, formula.ScopeApproval)
@@ -388,6 +395,7 @@ func TestHardening129PolicyEvidenceListsNewFileDefinitions(t *testing.T) {
 }
 
 func TestHardening129ScopeGateShowsTheListWhenAPolicyMayApprove(t *testing.T) {
+	t.Parallel()
 	_, ready := scopeReadyRecord(t, policyScopeAtom, defaultReviewAtom)
 	f, err := formula.Parse([]byte(ready.FormulaSnapshot.YAML))
 	if err != nil {

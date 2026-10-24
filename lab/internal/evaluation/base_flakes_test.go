@@ -76,6 +76,7 @@ func countBaseRuns(t *testing.T) map[string]int {
 // on its second run is flaky at base (1/3 failed), one that passes three times is neither,
 // and a test or package that does not exist at base is unclassified.
 func TestClassifyBaseFlakesRunsGoTestAtBase(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base := baseFlakeFixture(t)
 	pkg := "forgecellreplayfixture/flaky"
 	runs := countBaseRuns(t)
@@ -112,6 +113,7 @@ func TestClassifyBaseFlakesRunsGoTestAtBase(t *testing.T) {
 // re-runs, so a test that needs a file setup creates passes there; without setup it fails
 // every run; and a failing setup leaves every test unclassified with no re-run.
 func TestClassifyBaseFlakesRunsSetupFirst(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base := baseFlakeFixture(t)
 	item := []baseFlakeItem{{dir: "lab", failure: GoTestFailure{Package: "forgecellreplayfixture/flaky", Test: "TestNeedsSetup"}}}
 	runs := countBaseRuns(t)

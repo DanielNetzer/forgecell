@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -429,13 +430,24 @@ func TestPrepareCacheInterruptedContextIsUnavailable(t *testing.T) {
 	m := e.scripted("sleep 30")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timer := time.AfterFunc(300*time.Millisecond, cancel)
-	defer timer.Stop()
+	// Cancel once the prepare process has recorded its start, not after a fixed
+	// delay that start-up under load can outlast.
+	go func() {
+		defer cancel()
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline) && ctx.Err() == nil; time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(e.rec("runs")); err == nil {
+				return
+			}
+		}
+	}()
 
 	res := e.prepareCtx(ctx, m, commit)
 	e.requireUnavailable(res, "interrupted")
 	if res.TimedOut {
 		t.Fatalf("a cancelled context is not a prepare timeout: %+v", res)
+	}
+	if e.runs() != 1 {
+		t.Fatalf("prepare was interrupted before it started (%d runs)", e.runs())
 	}
 }
 
@@ -677,17 +689,42 @@ func (e *cacheEnv) holdLock(commit string, owner string) string {
 func TestPrepareCacheWaitsForAHeldLockUntilTheContextEnds(t *testing.T) {
 	e := newCacheEnv(t)
 	commit := e.commitFile("a.txt", "committed")
-	lock := e.holdLock(commit, fmt.Sprint(os.Getpid()))
-	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	// The owner file is a FIFO, so the wait's read of it blocks until this test
+	// opens the other end: that open is the readiness signal that prepare is
+	// waiting on the held lock. The context ends while the read is held, and the
+	// live owner is written only then, so the wait gives up on its next check
+	// instead of after a fixed deadline.
+	lock := e.holdLock(commit, "")
+	owner := filepath.Join(lock, "owner")
+	if err := syscall.Mkfifo(owner, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	started := time.Now()
-	res := e.prepareCtx(ctx, e.scripted(`printf x > "$2/out"`), commit)
+	done := make(chan CacheResult, 1)
+	go func() { done <- e.prepareCtx(ctx, e.scripted(`printf x > "$2/out"`), commit) }()
+	var pipe *os.File
+	for deadline := time.Now().Add(30 * time.Second); pipe == nil; time.Sleep(10 * time.Millisecond) {
+		f, err := os.OpenFile(owner, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			pipe = f
+		} else if !errors.Is(err, syscall.ENXIO) || time.Now().After(deadline) {
+			t.Fatalf("prepare never read the held lock's owner: %v", err)
+		}
+	}
+	cancel()
+	if _, err := pipe.WriteString(fmt.Sprint(os.Getpid())); err != nil {
+		t.Fatal(err)
+	}
+	pipe.Close()
+	var res CacheResult
+	select {
+	case res = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("prepare kept waiting after its context ended")
+	}
 	if res.Outcome != CacheUnavailable || !strings.Contains(res.Reason, "waiting") {
 		t.Fatalf("result = %+v, want unavailable after waiting for the lock", res)
-	}
-	if time.Since(started) < 600*time.Millisecond {
-		t.Fatal("the held lock was not waited on")
 	}
 	if _, err := os.Stat(lock); err != nil {
 		t.Fatalf("a held lock must be left alone: %v", err)

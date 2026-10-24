@@ -24,21 +24,19 @@ func testGit(t *testing.T, cwd string, args ...string) string {
 	return strings.TrimSpace(string(b))
 }
 func fixture(t *testing.T) (Options, string) {
-	root := t.TempDir()
+	return fixtureAt(t, resolvedTempDir(t))
+}
+
+// fixtureAt builds the fixture under root, which the caller owns and removes.
+func fixtureAt(t *testing.T, root string) (Options, string) {
 	repo := filepath.Join(root, "repo")
-	os.Mkdir(repo, 0700)
-	testGit(t, repo, "init", "-q")
-	testGit(t, repo, "config", "user.name", "Test")
-	testGit(t, repo, "config", "user.email", "test@example.test")
-	os.WriteFile(filepath.Join(repo, "code.txt"), []byte("base"), 0600)
-	os.WriteFile(filepath.Join(repo, "package.json"), []byte(`{"scripts":{"test":"test x = x"}}`), 0600)
-	testGit(t, repo, "add", ".")
-	testGit(t, repo, "commit", "-qm", "base")
-	testGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	if err := os.CopyFS(repo, os.DirFS(baseRepo)); err != nil {
+		t.Fatal(err)
+	}
 	lab := filepath.Join(root, "lab")
 	os.MkdirAll(filepath.Join(lab, "formulas"), 0700)
 	harness := filepath.Join(root, "harness")
-	os.WriteFile(harness, []byte("#!/bin/sh\ncat > request.json\nprintf changed > code.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"Implemented and tested\",\"paths\":[]}'\n"), 0700)
+	writeStub(harness, []byte("#!/bin/sh\ncat > request.json\nprintf changed > code.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"Implemented and tested\",\"paths\":[]}'\n"), 0700)
 	command, _ := json.Marshal([]string{harness})
 	recipe := "schemaVersion: v0\nkind: formula\nid: sample\nintake: {source: github-issues, repo: acme/widgets}\nharness:\n  binding: custom\n  command: " + string(command) + "\natoms:\n  - {id: intake, type: intake}\n  - {id: scope, type: gate, purpose: scope}\n  - {id: harness, type: harness}\n  - {id: check, type: check}\n  - {id: gate, type: gate, purpose: review}\n  - {id: ship, type: ship}\n  - {id: document, type: document}\n"
 	os.WriteFile(filepath.Join(lab, "formulas", "sample.yaml"), []byte(recipe), 0600)
@@ -55,7 +53,36 @@ func fixture(t *testing.T) (Options, string) {
 		return Issue{Number: 12, Repo: "acme/widgets", Title: "Change code", Body: "Write changed", URL: "https://github.com/acme/widgets/issues/12", State: "OPEN"}, nil
 	}}, repo
 }
+
+// TestMoleculeRunsUnderTheUnresolvedSystemTempDir is deliberately serial and
+// never resolves its root: every other fixture resolves its temp root, so this
+// is the test that keeps a Molecule exercised under os.TempDir() as spelled,
+// which on macOS (/var/folders -> /private/var) lies behind a symlink.
+func TestMoleculeRunsUnderTheUnresolvedSystemTempDir(t *testing.T) {
+	root, err := os.MkdirTemp(os.TempDir(), "molecule-unresolved-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	if resolved, err := filepath.EvalSymlinks(root); err == nil && resolved != root {
+		t.Logf("running under %s, which resolves to %s", root, resolved)
+	}
+	o, _ := fixtureAt(t, root)
+	r, err := runApprovedFixture(t, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "waiting" || r.Workspace.BaseCommit == "" {
+		t.Fatalf("%+v", r)
+	}
+	data, _ := os.ReadFile(filepath.Join(r.Workspace.Path, "code.txt"))
+	if string(data) != "changed" {
+		t.Fatal("harness did not execute in isolation")
+	}
+}
+
 func TestIsolatedMoleculeLeavesLedgerAndWaits(t *testing.T) {
+	t.Parallel()
 	o, repo := fixture(t)
 	os.WriteFile(filepath.Join(repo, "code.txt"), []byte("user edits"), 0600)
 	r, err := runApprovedFixture(t, o)
@@ -86,6 +113,7 @@ func TestIsolatedMoleculeLeavesLedgerAndWaits(t *testing.T) {
 	}
 }
 func TestWrongRepoAndDraftCannotExecute(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Issue = "other/repo#12"
 	if _, err := Run(context.Background(), o); err == nil {
@@ -98,6 +126,7 @@ func TestWrongRepoAndDraftCannotExecute(t *testing.T) {
 	}
 }
 func TestMismatchedIssueResponseBlocksHarness(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.ReadIssue = func(context.Context, string, int64, string) (Issue, error) {
 		return Issue{Number: 99, Repo: "acme/widgets"}, nil
@@ -115,9 +144,10 @@ func TestMismatchedIssueResponseBlocksHarness(t *testing.T) {
 }
 
 func TestFailedHarnessSkipsLaterAtoms(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf failed >&2\nexit 7\n"), 0700)
+	writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf failed >&2\nexit 7\n"), 0700)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)
@@ -131,6 +161,7 @@ func TestFailedHarnessSkipsLaterAtoms(t *testing.T) {
 }
 
 func TestPreparationFailureRetainsLedgerWithoutCallingHarness(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.PrepareWorkspace = func(context.Context, Workspace) error { return fmt.Errorf("dependency setup blocked") }
 	r, err := runApprovedFixture(t, o)
@@ -162,6 +193,7 @@ func runApprovedFixture(t *testing.T, o Options) (Record, error) {
 }
 
 func TestBareFormulaNeverInvokesAnalysis(t *testing.T) {
+	t.Parallel()
 	for _, explicit := range []bool{false, true} {
 		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
 			o, _ := fixture(t)
@@ -213,6 +245,7 @@ func approveFixture(t *testing.T, dir, yaml, id string) {
 }
 
 func TestRejectedRecipesHaveZeroAnalysisCalls(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"edited", "missing", "injected", "historical", "restored", "stale"} {
 		t.Run(kind, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -248,6 +281,7 @@ func TestRejectedRecipesHaveZeroAnalysisCalls(t *testing.T) {
 	}
 }
 func TestCallbackMutationPreventsSubsequentHarness(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"issue", "analysis", "preparation", "same-byte-approval"} {
 		t.Run(kind, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -313,6 +347,7 @@ func TestCallbackMutationPreventsSubsequentHarness(t *testing.T) {
 }
 
 func TestExplicitCurrentFormulaStillWaitsForScope(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.FormulaID = "sample"
 	r, e := Run(context.Background(), o)
@@ -327,6 +362,7 @@ func TestExplicitCurrentFormulaStillWaitsForScope(t *testing.T) {
 	}
 }
 func TestResumeRejectionsNeverInvokeCoding(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"edited", "missing", "historical", "stale"} {
 		t.Run(kind, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -359,6 +395,7 @@ func TestResumeRejectionsNeverInvokeCoding(t *testing.T) {
 }
 
 func TestResumeRejectsRetiredLoadedSnapshot(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {
@@ -381,6 +418,7 @@ func TestResumeRejectsRetiredLoadedSnapshot(t *testing.T) {
 }
 
 func TestDeferredAllocationUsesFrozenBaseAndPreservesDirtySource(t *testing.T) {
+	t.Parallel()
 	o, repo := fixture(t)
 	base := testGit(t, repo, "rev-parse", "HEAD")
 	analyze := o.Analyze
@@ -411,6 +449,7 @@ func TestDeferredAllocationUsesFrozenBaseAndPreservesDirtySource(t *testing.T) {
 }
 
 func TestAllocationFailureRetainsProposalAndRefusesApproval(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	if err := os.WriteFile(filepath.Join(o.LabDir, "workspaces"), []byte("user-owned blocker"), 0600); err != nil {
 		t.Fatal(err)
@@ -435,6 +474,7 @@ func TestAllocationFailureRetainsProposalAndRefusesApproval(t *testing.T) {
 }
 
 func TestAllocationDurabilityRetainsPlannedDestination(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"interrupted", "final-save-failure"} {
 		t.Run(mode, func(t *testing.T) {
 			o, _ := fixture(t)

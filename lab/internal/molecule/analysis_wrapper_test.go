@@ -13,6 +13,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
@@ -93,7 +94,7 @@ func newWrapperLab(t *testing.T, opts wrapperOptions) *wrapperLab {
 	} else {
 		body = fmt.Sprintf("touch %q\n", w.ran) + body
 	}
-	if err = os.WriteFile(w.script, []byte("#!"+interp+"\n"+body), 0o700); err != nil {
+	if err = writeStub(w.script, []byte("#!"+interp+"\n"+body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	m := harness.AnalysisWrapperManifest{SchemaVersion: "v1", Kind: "analysis-wrapper", Args: []string{"--analysis-only"}}
@@ -164,6 +165,7 @@ func wrapperDecision(t *testing.T, o Options, r Record, ordinal int) harness.Ana
 }
 
 func TestAnalysisWrapperApprovedCustomAnalysisPreservesCodingBinding(t *testing.T) {
+	t.Parallel()
 	w := newWrapperLab(t, wrapperOptions{})
 	r, err := Run(context.Background(), w.o)
 	if err != nil {
@@ -238,6 +240,7 @@ func TestAnalysisWrapperApprovedCustomAnalysisPreservesCodingBinding(t *testing.
 }
 
 func TestAnalysisWrapperFailuresStopIntakeWithZeroCodingOrFallback(t *testing.T) {
+	t.Parallel()
 	appendTo := func(path, text string) func(*wrapperLab) {
 		return func(w *wrapperLab) {
 			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
@@ -294,7 +297,15 @@ func TestAnalysisWrapperFailuresStopIntakeWithZeroCodingOrFallback(t *testing.T)
 			if tc.after != nil {
 				tc.after(w)
 			}
-			r, err := Run(context.Background(), w.o)
+			ctx := context.Background()
+			if tc.name == "timeout" {
+				// The wrapper's deadline expires once it has started, not after
+				// the Formula timeout has been waited out.
+				var stop func()
+				ctx, stop = expireWhenStarted(t, w.ran)
+				defer stop()
+			}
+			r, err := Run(ctx, w.o)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -322,7 +333,34 @@ func TestAnalysisWrapperFailuresStopIntakeWithZeroCodingOrFallback(t *testing.T)
 	}
 }
 
+// TestAnalysisWrapperHonoursTheRealFormulaTimeout waits out a short real
+// timeoutMs with no started-marker cancel, so a wrong or dropped wrapper
+// Timeout is caught; the timeout case above only proves classification.
+func TestAnalysisWrapperHonoursTheRealFormulaTimeout(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("waits out a real 1.5 s wrapper deadline")
+	}
+	const timeoutMS = 1500
+	w := newWrapperLab(t, wrapperOptions{body: "cat >/dev/null\nsleep 60 &\nwait\n", timeoutMS: timeoutMS})
+	r, err := Run(context.Background(), w.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "blocked" || len(r.HarnessAttempts) != 0 || len(r.AnalysisAttempts) != 1 || !strings.Contains(r.AnalysisAttempts[0].Error, "deadline") {
+		t.Fatalf("a timed-out wrapper must stop intake: %s %+v", r.Status, r.AnalysisAttempts)
+	}
+	d := r.AnalysisAttempts[0].Diagnostics
+	if d == nil || d.TerminalState != process.StateTimeout {
+		t.Fatalf("the wrapper must be recorded as timed out: %+v", d)
+	}
+	if d.ElapsedMS < timeoutMS || d.ElapsedMS >= 30000 {
+		t.Fatalf("the wrapper ran %d ms, not until its %d ms timeout", d.ElapsedMS, timeoutMS)
+	}
+}
+
 func TestAnalysisWrapperStaleFormulaApprovalStartsNothing(t *testing.T) {
+	t.Parallel()
 	w := newWrapperLab(t, wrapperOptions{})
 	f, err := os.OpenFile(filepath.Join(w.o.LabDir, "formulas", "sample.yaml"), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
@@ -339,6 +377,7 @@ func TestAnalysisWrapperStaleFormulaApprovalStartsNothing(t *testing.T) {
 }
 
 func TestAnalysisWrapperHistoricalCustomBindingGainsNoAnalysisCapability(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Analyze = nil
 	r, err := Run(context.Background(), o)

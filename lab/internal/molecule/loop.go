@@ -675,11 +675,20 @@ func lockIssue(lab, repository string, number int64) (func(), error) {
 // is closed or the process exits, including on a crash, so no stale lock can
 // outlive its holder. Lock files are never removed: unlinking one while another
 // process waits on it would let two holders each lock a different inode.
+//
+// The open, lock and close hold syscall.ForkLock for reading, so no fork in
+// this process copies the descriptor mid-change. A child forked while the lock
+// is held still shares the lock until its exec closes the inherited copy, and
+// Go releases ForkLock before that exec, so release unlocks explicitly instead
+// of relying on close: the shared lock would otherwise outlive release and
+// refuse the next holder.
 func flockLedgerFile(lab, name string) (func(), error) {
 	dir := filepath.Join(lab, "ledgers")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
 	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
@@ -691,7 +700,12 @@ func flockLedgerFile(lab, name string) (func(), error) {
 		}
 		return nil, err
 	}
-	return func() { file.Close() }, nil
+	return func() {
+		syscall.ForkLock.RLock()
+		defer syscall.ForkLock.RUnlock()
+		syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		file.Close()
+	}, nil
 }
 
 // inventoryCause names why an inventory is incomplete: at most three

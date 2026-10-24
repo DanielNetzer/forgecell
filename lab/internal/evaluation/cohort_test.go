@@ -631,11 +631,33 @@ func TestCohortCostPerAcceptedPartialCoverage(t *testing.T) {
 // TestCohortDiscardsCancelledAttempt proves a cancelled attempt is not persisted, so
 // resume re-runs that coordinate, and the run is recorded as aborted (items 1 and 6).
 func TestCohortDiscardsCancelledAttempt(t *testing.T) {
-	o := cohortFixture(t, []variantSpec{{name: "base", body: stuckHarness, timeoutMS: 30000}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
+	marker := filepath.Join(t.TempDir(), "started")
+	stuck := fmt.Sprintf("#!/bin/sh\ncat >/dev/null\n: > %q\nsleep 60\n", marker)
+	o := cohortFixture(t, []variantSpec{{name: "base", body: stuck, timeoutMS: 30000}, {name: "cand", body: completedHarness}}, 1, 1, "hiddenAcceptancePassRate", nil)
 	approveCohort(t, &o)
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	// Cancel once the base harness has started, instead of on a fixed deadline
+	// that has to be waited out and that setup under load can use up.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	started := make(chan struct{})
+	go func() {
+		defer cancel()
+		for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := os.Stat(marker); err == nil {
+				close(started)
+				return
+			}
+		}
+	}()
 	r, err := RunCohort(ctx, o)
+	select {
+	case <-started:
+	default:
+		t.Fatalf("base harness never started before the run ended: %v", err)
+	}
 	if err == nil {
 		t.Fatal("expected a cancellation error")
 	}

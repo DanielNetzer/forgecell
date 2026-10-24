@@ -17,7 +17,7 @@ import (
 
 func checkPlan(dir, base string) readiness.Plan {
 	data, _ := os.ReadFile(filepath.Join(dir, "check.sh"))
-	return readiness.Plan{SchemaVersion: "v1", MoleculeID: "mol-test", Revision: 1, Inputs: readiness.Inputs{Repository: "owner/repo", TargetBranch: "main", BaseCommit: base, FormulaSHA256: strings.Repeat("a", 64), EvidenceSHA256: strings.Repeat("b", 64), BindingSHA256: strings.Repeat("c", 64), Issue: readiness.Issue{Repository: "owner/repo", Number: 1, URL: "https://github.com/owner/repo/issues/1", State: "OPEN", Title: "Update code"}}, Evidence: []readiness.Evidence{{ID: "check", Path: "check.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}}, Analysis: readiness.Analysis{Summary: "Update code", Acceptance: []readiness.Criterion{{Description: "Code returns changed", Evidence: []string{"issue"}}}, Scope: []readiness.ScopedPath{{Path: "code.txt", Reason: "Implementation", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "regression", Category: "regression", Dir: ".", Argv: []string{"/bin/sh", "check.sh"}, TimeoutMS: 1000, Required: true, Reason: "Verify implementation", Evidence: []string{"check"}, Definitions: []string{"check"}}}}, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
+	return readiness.Plan{SchemaVersion: "v1", MoleculeID: "mol-test", Revision: 1, Inputs: readiness.Inputs{Repository: "owner/repo", TargetBranch: "main", BaseCommit: base, FormulaSHA256: strings.Repeat("a", 64), EvidenceSHA256: strings.Repeat("b", 64), BindingSHA256: strings.Repeat("c", 64), Issue: readiness.Issue{Repository: "owner/repo", Number: 1, URL: "https://github.com/owner/repo/issues/1", State: "OPEN", Title: "Update code"}}, Evidence: []readiness.Evidence{{ID: "check", Path: "check.sh", SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}}, Analysis: readiness.Analysis{Summary: "Update code", Acceptance: []readiness.Criterion{{Description: "Code returns changed", Evidence: []string{"issue"}}}, Scope: []readiness.ScopedPath{{Path: "code.txt", Reason: "Implementation", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "regression", Category: "regression", Dir: ".", Argv: []string{"/bin/sh", "check.sh"}, TimeoutMS: 30000, Required: true, Reason: "Verify implementation", Evidence: []string{"check"}, Definitions: []string{"check"}}}}, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
 }
 func TestFreshVerificationDoesNotReuseIgnoredFilesOrSecrets(t *testing.T) {
 	dir, base := sourceFixture(t)
@@ -74,33 +74,57 @@ func envCheck(t *testing.T, files map[string]string, forward []string) (map[stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmp := t.TempDir()
+	// The stable TMPDIR is spelled through a symbolic link, as it is when <lab> sits
+	// behind one (or under macOS's /var), so the view must resolve it.
+	resolvedTmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(t.TempDir(), "lab-tmp")
+	if err := os.Symlink(resolvedTmp, tmp); err != nil {
+		t.Fatal(err)
+	}
 	ctx := resources.WithGoCache(resources.WithCheckTempDir(context.Background(), tmp), resources.GoCache{ModCache: "/private/mod", BuildCache: "/private/build"})
-	result := Run(resources.WithGoParallelism(ctx, 3), dir, filepath.Join(t.TempDir(), "verification"), p, capture)
-	if !result.RequiredChecksPassed || len(result.Checks) != 1 {
-		t.Fatalf("%+v", result)
+	view := func() (map[string]string, Observation) {
+		result := Run(resources.WithGoParallelism(ctx, 3), dir, filepath.Join(t.TempDir(), "verification"), p, capture)
+		if !result.RequiredChecksPassed || len(result.Checks) != 1 {
+			t.Fatalf("%+v", result)
+		}
+		got := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(result.Checks[0].Result.Stdout), "\n") {
+			k, v, _ := strings.Cut(line, "=")
+			got[k] = v
+		}
+		return got, result.Checks[0]
 	}
-	got := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(result.Checks[0].Result.Stdout), "\n") {
-		k, v, _ := strings.Cut(line, "=")
-		got[k] = v
+	got, o := view()
+	if got["TMPDIR"] != resolvedTmp || got["HOME"] == resolvedTmp || !strings.Contains(got["HOME"], "forgecell-check-home-") {
+		t.Fatalf("TMPDIR must be the resolved stable one %s and HOME private: %v", resolvedTmp, got)
 	}
-	if got["TMPDIR"] != tmp || got["HOME"] == tmp || !strings.Contains(got["HOME"], "forgecell-check-home-") {
-		t.Fatalf("TMPDIR must be the stable one and HOME private: %v", got)
+	if got["GOTMPDIR"] != filepath.Join(resolvedTmp, "gotmp") {
+		t.Fatalf("GOTMPDIR must be the stable gotmp directly under the resolved stable TMPDIR %s: %v", resolvedTmp, got)
 	}
-	if !strings.Contains(got["GOTMPDIR"], "forgecell-gotmp-") || strings.HasPrefix(got["GOTMPDIR"], tmp) {
-		t.Fatalf("GOTMPDIR must be a per-view directory outside the stable TMPDIR: %v", got)
+	for _, name := range []string{"TMPDIR", "GOTMPDIR"} {
+		if resolved, err := filepath.EvalSymlinks(got[name]); err != nil || resolved != got[name] {
+			t.Fatalf("%s %s has a symlinked component (%s, %v)", name, got[name], resolved, err)
+		}
 	}
-	if _, err := os.Lstat(got["GOTMPDIR"]); !os.IsNotExist(err) {
-		t.Fatalf("per-view GOTMPDIR %s was not removed: %v", got["GOTMPDIR"], err)
+	if info, err := os.Lstat(got["GOTMPDIR"]); err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatalf("stable GOTMPDIR %s must stay a 0700 directory: %v %v", got["GOTMPDIR"], info, err)
 	}
-	return got, result.Checks[0]
+	// A second view of the same tree sees identical temp roots, so the test-result cache,
+	// which keys on GOTMPDIR through testing.TempDir, is not defeated.
+	again, _ := view()
+	if again["TMPDIR"] != got["TMPDIR"] || again["GOTMPDIR"] != got["GOTMPDIR"] {
+		t.Fatalf("two views got different temp roots: %v then %v", got, again)
+	}
+	return got, o
 }
 
 // TestCheckEnvironmentCarriesSharedGoCache asserts that a view's check environment holds
 // the cache ctx resolves (never under the private HOME), GOPROXY=off, GOTOOLCHAIN=local
 // and GOFLAGS with -trimpath merged before the cohort's -p, while TMPDIR is the stable one
-// ctx carries, HOME stays private and Go's work directories go to a per-view GOTMPDIR. A
+// ctx carries, HOME stays private and Go's work directories go to the Lab's stable GOTMPDIR. A
 // forwarded -mod is kept, and a non-go argv records no cache state.
 func TestCheckEnvironmentCarriesSharedGoCache(t *testing.T) {
 	t.Setenv("GOCACHE", "")
@@ -370,7 +394,7 @@ func repairCheckPlan(p readiness.Plan, content string) readiness.Plan {
 	p.CheckInputs = []readiness.FileEvidence{input}
 	p.Evidence = append(p.Evidence, input.Evidence)
 	p.Analysis.Checks[0].ReviewedAcceptance = "human-check"
-	p.Analysis.Checks = append(p.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "separate human fixture review", Dir: ".", Argv: []string{"/bin/sh", "{input:human}"}, TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen human acceptance"})
+	p.Analysis.Checks = append(p.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "separate human fixture review", Dir: ".", Argv: []string{"/bin/sh", "{input:human}"}, TimeoutMS: 30000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen human acceptance"})
 	return p
 }
 func TestReviewedCheckerRepairRetainsAllCandidateAndProtectedCommands(t *testing.T) {
@@ -463,7 +487,7 @@ func TestExternalAcceptanceMutationStopsBeforeNextCommand(t *testing.T) {
 	// after setup; its successful exit cannot mask acceptance-input tampering.
 	p.Analysis.Scope = append(p.Analysis.Scope, readiness.ScopedPath{Path: "check.sh", Reason: "Checker", Evidence: []string{"check"}})
 	p = repairCheckPlan(p, "true\n")
-	p.Setup = []readiness.Check{{ID: "mutate-input", Category: "setup", Dir: ".", Argv: []string{"/bin/sh", "-c", "chmod u+w \"$1\"; printf tampered > \"$1\"", "setup", "{input:human}"}, TimeoutMS: 1000, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Synthetic tampering setup"}}
+	p.Setup = []readiness.Check{{ID: "mutate-input", Category: "setup", Dir: ".", Argv: []string{"/bin/sh", "-c", "chmod u+w \"$1\"; printf tampered > \"$1\"", "setup", "{input:human}"}, TimeoutMS: 30000, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Synthetic tampering setup"}}
 	c, err := Capture(context.Background(), dir, base, []string{"code.txt", "check.sh"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -526,6 +550,9 @@ func deltaFixture(t *testing.T, candidateBody, protectedBody string, deltas ...r
 	p := checkPlan(dir, base)
 	p.Analysis.Scope = []readiness.ScopedPath{{Path: "testdata/pin.txt", Reason: "Pinned fixture", Evidence: []string{"issue"}}}
 	p.Analysis.Checks[0].Argv = []string{"/bin/sh", "check.sh", "-json"}
+	// The streamed timeout case relies on this deadline expiring well before its
+	// 30 s sleep, so the delta checker keeps a short one of its own.
+	p.Analysis.Checks[0].TimeoutMS = 3000
 	p.ExpectedProtectedDeltas = deltas
 	if err := os.WriteFile(filepath.Join(dir, "testdata", "pin.txt"), []byte("new"), 0600); err != nil {
 		t.Fatal(err)

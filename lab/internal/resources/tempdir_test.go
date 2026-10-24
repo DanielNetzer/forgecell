@@ -111,6 +111,86 @@ func TestPruneLabTempRemovesOnlyOldEntriesOfTheUser(t *testing.T) {
 	}
 }
 
+// TestPruneLabTempTreatsGoTempAsContainer: the shared <lab>/tmp/gotmp is never removed,
+// even when old, while its old children (go-build* work dirs, leaked test temp dirs) go
+// and fresh ones stay, even when gotmp's own mtime is fresh. A gotmp of another user is
+// left alone with its children.
+func TestPruneLabTempTreatsGoTempAsContainer(t *testing.T) {
+	tmp, err := LabTempDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-25 * time.Hour)
+	gotmp := mkdir(t, filepath.Join(tmp, LabGoTempName))
+	oldBuild := mkdir(t, filepath.Join(gotmp, "go-build123", "b001"))
+	if err := os.Chmod(oldBuild, 0500); err != nil {
+		t.Fatal(err)
+	}
+	oldTest := mkdir(t, filepath.Join(gotmp, "TestKilled456"))
+	fresh := mkdir(t, filepath.Join(gotmp, "go-build789"))
+	for _, p := range []string{filepath.Join(gotmp, "go-build123"), oldTest} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{oldTest, filepath.Join(gotmp, "go-build123")}
+	removed, err := PruneLabTemp(tmp, now)
+	if err != nil || !slices.Equal(removed, want) {
+		t.Fatalf("removed %v %v, want %v", removed, err, want)
+	}
+	for _, p := range want {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the prune", p)
+		}
+	}
+	for _, p := range []string{tmp, gotmp, fresh} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("%s must be kept: %v", p, err)
+		}
+	}
+
+	// An old gotmp itself is still kept, and only its old children are listed.
+	if err := os.Chtimes(gotmp, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := StaleLabTempEntries(tmp, now); err != nil || len(stale) != 0 {
+		t.Fatalf("old gotmp listed: %v %v", stale, err)
+	}
+
+	// A gotmp that belongs to another user is not looked into.
+	leaked := mkdir(t, filepath.Join(gotmp, "TestOther"))
+	if err := os.Chtimes(leaked, old, old); err != nil {
+		t.Fatal(err)
+	}
+	orig := ownedByUser
+	ownedByUser = func(path string, info os.FileInfo) bool { return path != gotmp && orig(path, info) }
+	t.Cleanup(func() { ownedByUser = orig })
+	if stale, err := StaleLabTempEntries(tmp, now); err != nil || len(stale) != 0 {
+		t.Fatalf("foreign gotmp children listed: %v %v", stale, err)
+	}
+	ownedByUser = orig
+
+	// A symbolic link named gotmp is never followed: its target's entries stay.
+	if err := RemoveTree(gotmp); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	victim := mkdir(t, filepath.Join(target, "victim"))
+	if err := os.Chtimes(victim, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, gotmp); err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := StaleLabTempEntries(tmp, now); err != nil || len(stale) != 0 {
+		t.Fatalf("symlinked gotmp followed: %v %v", stale, err)
+	}
+	if _, err := os.Lstat(victim); err != nil {
+		t.Fatalf("symlink target entry removed: %v", err)
+	}
+}
+
 // TestPruneLabTempTouchesOnlyMarkedDirectories: LabTempDir writes its marker only when it
 // creates <lab>/tmp; a tmp directory without the marker is never pruned, an old marker
 // itself is never listed, and a symbolic link in place of <lab>/tmp is refused.

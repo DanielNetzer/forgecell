@@ -7,6 +7,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 )
 
+// Serial: swaps the harness package-level launcher resolver.
 func TestCodingAttemptResolvesItsLauncherOnceAndRecordsTheClassItWasGatedOn(t *testing.T) {
 	o, _ := claudeAllowlistFixture(t)
 	exe, err := os.Executable()

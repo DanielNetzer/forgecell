@@ -6,6 +6,7 @@ import (
 )
 
 func TestAnalysisLedgerNotAliasedAfterEvidenceThenTwoRejections(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	calls, _ := scripted(t, &o, "evidence", "policy", "policy")
 	r, err := Run(context.Background(), o)
@@ -30,6 +31,7 @@ func TestAnalysisLedgerNotAliasedAfterEvidenceThenTwoRejections(t *testing.T) {
 }
 
 func TestAnalysisLedgerNotAliasedCompletedAnalysisIsACopy(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	scripted(t, &o, "evidence", "policy", "valid")
 	r, err := Run(context.Background(), o)

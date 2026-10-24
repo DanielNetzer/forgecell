@@ -58,6 +58,7 @@ func triggersLedgerBytes(t *testing.T, lab, id string) []byte {
 }
 
 func TestTriggersRecoverProposalIsSavedForAnAbandonedMoleculeAndNeverRun(t *testing.T) {
+	t.Parallel()
 	for name, owner := range map[string]string{"no lock directory": "", "a dead owner": "dead"} {
 		t.Run(name, func(t *testing.T) {
 			o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
@@ -154,6 +155,7 @@ func TestTriggersRecoverProposalIsSavedForAnAbandonedMoleculeAndNeverRun(t *test
 }
 
 func TestTriggersChangedProposalIsReplacedAtomically(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := triggersInterrupted(t, o, "reconciled")
 	list := loopFixedList(loopOpen(12, 0))
@@ -182,6 +184,7 @@ func TestTriggersChangedProposalIsReplacedAtomically(t *testing.T) {
 }
 
 func TestTriggersNoProposalWhenRecoveryDoesNotApply(t *testing.T) {
+	t.Parallel()
 	list := loopFixedList(loopOpen(12, 0))
 	for name, attempt := range map[string]string{"no harness attempt": "", "unreconciled attempt": "unreconciled"} {
 		t.Run(name, func(t *testing.T) {
@@ -262,6 +265,7 @@ func TestTriggersNoProposalWhenRecoveryDoesNotApply(t *testing.T) {
 }
 
 func TestTriggersDoctorListsAProposalOnlyWhileTheLedgerIsStillInterrupted(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := triggersInterrupted(t, o, "tree")
 	if item := loopItem(t, loopOnce(t, o, loopFixedList(loopOpen(12, 0))).Passes[0], 12); item.Proposal == nil {
@@ -292,6 +296,7 @@ func TestTriggersDoctorListsAProposalOnlyWhileTheLedgerIsStillInterrupted(t *tes
 }
 
 func TestTriggersReadListsOnlyWhatTheLoopWouldStillReportAsAbandoned(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := triggersInterrupted(t, o, "tree")
 	if item := loopItem(t, loopOnce(t, o, loopFixedList(loopOpen(12, 0))).Passes[0], 12); item.Proposal == nil {
@@ -350,6 +355,7 @@ func TestTriggersReadListsOnlyWhatTheLoopWouldStillReportAsAbandoned(t *testing.
 }
 
 func TestTriggersPruneKeepsAProposalWhoseLedgerCannotBeRead(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := triggersInterrupted(t, o, "tree")
 	loopOnce(t, o, loopFixedList(loopOpen(12, 0)))
@@ -379,6 +385,7 @@ func TestTriggersPruneKeepsAProposalWhoseLedgerCannotBeRead(t *testing.T) {
 }
 
 func TestTriggersProposalCommandsQuoteEveryArgument(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := triggersInterrupted(t, o, "tree")
 	p, why := buildRecoveryProposal(o.LabDir, r.ID)
@@ -398,6 +405,7 @@ func TestTriggersProposalCommandsQuoteEveryArgument(t *testing.T) {
 }
 
 func TestTriggersListingAndInventoryFailuresAreTransientAndFormulaFailuresAreNot(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	failing := func(context.Context, string) (intake.OpenIssues, error) {
 		return intake.OpenIssues{}, errors.New("gh: network unreachable")
@@ -419,6 +427,7 @@ func TestTriggersListingAndInventoryFailuresAreTransientAndFormulaFailuresAreNot
 }
 
 func TestTriggersCancellingTheContextInterruptsAHungListing(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	ctx, cancel := context.WithCancel(loopBounded(t))
 	entered := make(chan struct{})
@@ -445,6 +454,7 @@ func TestTriggersCancellingTheContextInterruptsAHungListing(t *testing.T) {
 }
 
 func TestTriggersCancelledContextLeavesInFlightMoleculesOnTheWorkContext(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	gate := newLoopGate()
 	o.Analyze = triggersGatedAnalyze(gate, o.Analyze)
@@ -460,6 +470,7 @@ func TestTriggersCancelledContextLeavesInFlightMoleculesOnTheWorkContext(t *test
 }
 
 func TestTriggersDrainDispatchesNothingFurtherAndLetsInFlightMoleculesFinish(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	gate := newLoopGate()
 	analyze := o.Analyze
@@ -499,6 +510,7 @@ func TestTriggersDrainDispatchesNothingFurtherAndLetsInFlightMoleculesFinish(t *
 }
 
 func TestTriggersAClosedDrainEndsAnUnboundedLoopAfterOnePassWithoutStartingAnything(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	drain := make(chan struct{})
 	close(drain)
@@ -519,6 +531,7 @@ func TestTriggersAClosedDrainEndsAnUnboundedLoopAfterOnePassWithoutStartingAnyth
 	}
 }
 
+// Serial: loopTranscripts sets PATH with t.Setenv.
 func TestTriggersRepeatedPassesNeverApproveAHumanGateOrDeliver(t *testing.T) {
 	o, harnessLog := loopFixture(t, defaultScopeAtom, defaultReviewAtom, "")
 	ghLog, gitLog := loopTranscripts(t)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -68,12 +69,9 @@ printf '%s' '{"structured_output":{"schemaVersion":"v1","outcome":"completed","r
 
 func newExtensionEnv(t *testing.T, cfg extCfg) *extEnv {
 	t.Helper()
-	// The pinned-file placement rules refuse a path that resolves through a symlink.
-	tmp, err := filepath.EvalSymlinks(os.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", tmp)
+	// The pinned-file placement rules refuse a path that resolves through a
+	// symlink; fixture resolves its own temp root, whatever TMPDIR or GOTMPDIR
+	// the environment set.
 	o, _ := claudeAllowlistFixture(t)
 	root := filepath.Dir(o.SourceRoot)
 	t.Cleanup(func() {
@@ -85,12 +83,13 @@ func newExtensionEnv(t *testing.T, cfg extCfg) *extEnv {
 		})
 	})
 	records := filepath.Join(root, "records")
-	if err = os.MkdirAll(records, 0o700); err != nil {
+	err := os.MkdirAll(records, 0o700)
+	if err != nil {
 		t.Fatal(err)
 	}
 	e := &extEnv{t: t, o: o, root: root, records: records}
 	subst := func(s string) string { return strings.ReplaceAll(s, "RECORDS", records) }
-	if err = os.WriteFile(filepath.Join(root, "claude"), []byte(subst(fakeClaude)), 0o700); err != nil {
+	if err = writeStub(filepath.Join(root, "claude"), []byte(subst(fakeClaude)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	prepare, server := cfg.PrepareBody, cfg.ServerBody
@@ -160,7 +159,7 @@ func (e *extEnv) tool(name, body string) string {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		e.t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o700); err != nil {
+	if err := writeStub(path, []byte("#!/bin/sh\n"+body), 0o700); err != nil {
 		e.t.Fatal(err)
 	}
 	return path
@@ -199,6 +198,22 @@ func (e *extEnv) builds() int {
 
 func (e *extEnv) argv(role string) []string {
 	return strings.Split(strings.TrimSuffix(e.read("argv-"+role+".txt"), "\n"), "\n")
+}
+
+// requireAnalysisRan fails with the recorded intake outcome when the fake
+// claude never recorded its analysis argv. The fake analysis always fails, so
+// a blocked status alone cannot tell a run that reached the provider from one
+// that stopped before it, for example on a capability probe under heavy load.
+func (e *extEnv) requireAnalysisRan(r Record) {
+	e.t.Helper()
+	if e.exists("argv-analysis.txt") {
+		return
+	}
+	attempts := make([]string, len(r.AnalysisAttempts))
+	for i, a := range r.AnalysisAttempts {
+		attempts[i] = fmt.Sprintf("#%d %s: %s (diagnostics %+v)", a.Ordinal, a.Status, a.Error, a.Diagnostics)
+	}
+	e.t.Fatalf("the fake claude never ran for analysis: status %s, analysis attempts %q, extensions %+v, notes %q", r.Status, attempts, r.Extensions, r.Notes)
 }
 
 // isolatedServerPath checks that a server is launched through env -i with the
@@ -297,13 +312,23 @@ func TestExtensionCodingReceivesServerAndReusesIntakeBuild(t *testing.T) {
 	if strings.Contains(string(data), "forgecell-extension-servers") || strings.Contains(string(data), "mcpServers") {
 		t.Fatal("the ledger holds private server paths or MCP configuration")
 	}
-	privateLeft, _ := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "forgecell-extension-servers-*"))
-	if len(privateLeft) != 0 {
-		t.Fatalf("private server directory left behind: %v", privateLeft)
+	// Other tests and concurrent Lab views share TMPDIR, so only this run's own private
+	// directory (the forgecell-extension-servers-* ancestor of the server copy) is checked.
+	own := private
+	for !strings.HasPrefix(filepath.Base(own), "forgecell-extension-servers-") {
+		if parent := filepath.Dir(own); parent != own {
+			own = parent
+			continue
+		}
+		t.Fatalf("the server copy %s is not under a forgecell-extension-servers-* directory", private)
+	}
+	if _, err := os.Lstat(own); !os.IsNotExist(err) {
+		t.Fatalf("private server directory left behind: %s (%v)", own, err)
 	}
 }
 
 func TestExtensionAnalysisReceivesReadOnlyServerWithoutSafeMode(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Analysis: true})
 	e.o.Analyze = nil
 	r, err := Run(context.Background(), e.o)
@@ -313,6 +338,7 @@ func TestExtensionAnalysisReceivesReadOnlyServerWithoutSafeMode(t *testing.T) {
 	if r.Status != "blocked" {
 		t.Fatalf("the fake analysis answers with a failure: %+v", r.Atoms)
 	}
+	e.requireAnalysisRan(r)
 	lines := e.argv("analysis")
 	if lineAfter(lines, "--allowedTools") != "mcp__fake__query_graph" {
 		t.Fatalf("analysis must get only the read-only tool: %q", lineAfter(lines, "--allowedTools"))
@@ -339,13 +365,14 @@ func TestExtensionAnalysisReceivesReadOnlyServerWithoutSafeMode(t *testing.T) {
 }
 
 func TestExtensionOneBuildSharedByBothRoles(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Analysis: true, Coding: true})
 	f, r := e.formula(), e.record()
-	analysisServers, err := useExtensions(context.Background(), r, f, formula.AnalysisHarness, t.TempDir())
+	analysisServers, err := useExtensions(context.Background(), r, f, formula.AnalysisHarness, resolvedTempDir(t))
 	if err != nil || len(analysisServers) != 1 || !slices.Equal(analysisServers[0].Tools, []string{"query_graph"}) {
 		t.Fatalf("%v %+v", err, analysisServers)
 	}
-	codingDir := t.TempDir()
+	codingDir := resolvedTempDir(t)
 	codingServers, err := useExtensions(context.Background(), r, f, formula.CodingHarness, codingDir)
 	if err != nil || len(codingServers) != 1 || len(codingServers[0].Tools) != 2 {
 		t.Fatalf("%v %+v", err, codingServers)
@@ -372,6 +399,7 @@ func TestExtensionOneBuildSharedByBothRoles(t *testing.T) {
 }
 
 func TestExtensionUnusableForRoleIsSkippedNotFatal(t *testing.T) {
+	t.Parallel()
 	cases := map[string]extCfg{
 		"source placeholder in server args": {Coding: true, ServerArgs: []string{"{{SOURCE}}/x"}},
 		"tool entry over the bound":         {Coding: true, Tools: []extension.Tool{{Name: strings.Repeat("t", 60), Access: "read-only"}}},
@@ -386,7 +414,7 @@ func TestExtensionUnusableForRoleIsSkippedNotFatal(t *testing.T) {
 				f.Harnesses = map[string]formula.Binding{"analysis": {Binding: "claude-code", Command: f.Harness.Command, Extensions: []string{"fake"}}}
 				role = formula.AnalysisHarness
 			}
-			servers, err := useExtensions(context.Background(), r, f, role, t.TempDir())
+			servers, err := useExtensions(context.Background(), r, f, role, resolvedTempDir(t))
 			if err != nil || len(servers) != 0 {
 				t.Fatalf("an optional extension must be skipped: %v %+v", err, servers)
 			}
@@ -394,7 +422,7 @@ func TestExtensionUnusableForRoleIsSkippedNotFatal(t *testing.T) {
 				t.Fatalf("a skipped role must never be listed as attached: %+v", r.Extensions[0])
 			}
 			f.Extensions["fake"] = formula.ExtensionRef{Manifest: f.Extensions["fake"].Manifest, SHA256: f.Extensions["fake"].SHA256, Required: true}
-			if _, err = useExtensions(context.Background(), e.record(), f, role, t.TempDir()); err == nil {
+			if _, err = useExtensions(context.Background(), e.record(), f, role, resolvedTempDir(t)); err == nil {
 				t.Fatal("a required extension that cannot be attached must fail")
 			}
 		})
@@ -411,6 +439,7 @@ func pruneAll(t *testing.T, e *extEnv) []string {
 }
 
 func TestExtensionAttachHoldsTheCacheLeaseUntilCleanup(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Analysis: true, Coding: true})
 	f, r := e.formula(), e.record()
 	servers, cleanup, err := attachExtensions(context.Background(), r, f, formula.CodingHarness)
@@ -428,6 +457,7 @@ func TestExtensionAttachHoldsTheCacheLeaseUntilCleanup(t *testing.T) {
 }
 
 func TestExtensionResolveOnlyAndFailedAttachHoldNoLease(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Coding: true})
 	f, r := e.formula(), e.record()
 	if _, err := useExtensions(context.Background(), r, f, formula.CodingHarness, ""); err != nil {
@@ -454,6 +484,7 @@ func TestExtensionResolveOnlyAndFailedAttachHoldNoLease(t *testing.T) {
 }
 
 func TestServerArgsRefuseAnEscapingCacheSuffix(t *testing.T) {
+	t.Parallel()
 	for _, arg := range []string{"{{CACHE}}/../x", "{{CACHE}}//x", "{{CACHE}}/a/../../x", "{{CACHE}}/./x", "{{CACHE}}/x/", "{{CACHE}}/"} {
 		if _, err := serverArgs([]string{arg}, "/cache"); err == nil {
 			t.Fatalf("%q was accepted", arg)
@@ -466,6 +497,7 @@ func TestServerArgsRefuseAnEscapingCacheSuffix(t *testing.T) {
 }
 
 func TestExtensionLinesShowTheDroppedLinkNote(t *testing.T) {
+	t.Parallel()
 	e := ExtensionRecord{Name: "fake", Kind: "mcp-provider", Cache: ExtensionCache{Outcome: "built", Code: 0, Note: "the snapshot left out 1 tracked symbolic or hard links"}}
 	if lines := strings.Join(e.Lines(), "\n"); !strings.Contains(lines, "cache note: the snapshot left out 1 tracked") {
 		t.Fatalf("the note is missing:\n%s", lines)
@@ -477,10 +509,11 @@ func TestExtensionLinesShowTheDroppedLinkNote(t *testing.T) {
 }
 
 func TestExtensionUnsupportedAdapterIsUnavailable(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Coding: true})
 	f, r := e.formula(), e.record()
 	f.Harness.Command = []string{"/bin/custom-harness"}
-	servers, err := useExtensions(context.Background(), r, f, formula.CodingHarness, t.TempDir())
+	servers, err := useExtensions(context.Background(), r, f, formula.CodingHarness, resolvedTempDir(t))
 	if err != nil || len(servers) != 0 || !strings.Contains(r.Extensions[0].Skipped["coding"], "cannot attach extensions") {
 		t.Fatalf("%v %+v %+v", err, servers, r.Extensions)
 	}
@@ -490,6 +523,7 @@ func TestExtensionUnsupportedAdapterIsUnavailable(t *testing.T) {
 }
 
 func TestExtensionUnavailableOptionalDoesNotBlock(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Coding: true, PrepareBody: "echo run >> RECORDS/runs\nexit 1\n"})
 	r, err := runApprovedFixture(t, e.o)
 	if err != nil || r.Status != "waiting" {
@@ -506,6 +540,7 @@ func TestExtensionUnavailableOptionalDoesNotBlock(t *testing.T) {
 }
 
 func TestExtensionUnavailableRequiredStopsIntake(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Required: true, Coding: true, PrepareBody: "echo run >> RECORDS/runs\nexit 1\n"})
 	r, err := Run(context.Background(), e.o)
 	if err != nil {
@@ -528,12 +563,13 @@ func TestExtensionUnavailableRequiredStopsIntake(t *testing.T) {
 }
 
 func TestExtensionRequiredBecomingUnavailableStartsNoCodingHarness(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Required: true, Coding: true})
 	r, err := Run(context.Background(), e.o)
 	if err != nil || r.Readiness == nil {
 		t.Fatalf("%v %+v", err, r)
 	}
-	if err = os.WriteFile(e.server, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err = writeStub(e.server, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	e.o.Approve = r.Readiness.Plans[0].Digest
@@ -550,6 +586,7 @@ func TestExtensionRequiredBecomingUnavailableStartsNoCodingHarness(t *testing.T)
 }
 
 func TestExtensionServerDeathStillLetsTheRoleFinish(t *testing.T) {
+	t.Parallel()
 	e := newExtensionEnv(t, extCfg{Coding: true, ServerBody: "exit 1\n"})
 	r, err := runApprovedFixture(t, e.o)
 	if err != nil {
@@ -564,6 +601,7 @@ func TestExtensionServerDeathStillLetsTheRoleFinish(t *testing.T) {
 }
 
 func TestExtensionsLeaveTheWorkspaceCaptureUnchanged(t *testing.T) {
+	t.Parallel()
 	base, _ := claudeAllowlistFixture(t)
 	want, err := runApprovedFixture(t, base)
 	if err != nil || want.Capture == nil {
@@ -625,9 +663,11 @@ func (e *extEnv) runRole(role string) (claude, server []string) {
 	e.t.Helper()
 	if role == "analysis" {
 		e.o.Analyze = nil
-		if _, err := Run(context.Background(), e.o); err != nil {
+		r, err := Run(context.Background(), e.o)
+		if err != nil {
 			e.t.Fatal(err)
 		}
+		e.requireAnalysisRan(r)
 	} else if _, err := runApprovedFixture(e.t, e.o); err != nil {
 		e.t.Fatal(err)
 	}
@@ -694,11 +734,11 @@ func TestExtensionAttachingDoesNotChangeTheClaudeEnvironment(t *testing.T) {
 func TestExtensionUnavailableWithoutEnvBinary(t *testing.T) {
 	e := newExtensionEnv(t, extCfg{Coding: true})
 	f, r := e.formula(), e.record()
-	missing := filepath.Join(t.TempDir(), "env")
+	missing := filepath.Join(resolvedTempDir(t), "env")
 	was := serverEnvBinary
 	serverEnvBinary = missing
 	t.Cleanup(func() { serverEnvBinary = was })
-	servers, err := useExtensions(context.Background(), r, f, formula.CodingHarness, t.TempDir())
+	servers, err := useExtensions(context.Background(), r, f, formula.CodingHarness, resolvedTempDir(t))
 	if err != nil || len(servers) != 0 || !strings.Contains(r.Extensions[0].Skipped["coding"], missing) || r.Extensions[0].Cache.Outcome != "unavailable" {
 		t.Fatalf("an optional extension must be recorded unavailable: %v %+v %+v", err, servers, r.Extensions)
 	}
@@ -706,7 +746,7 @@ func TestExtensionUnavailableWithoutEnvBinary(t *testing.T) {
 		t.Fatal("an extension that cannot be hosted must not be prepared")
 	}
 	f.Extensions["fake"] = formula.ExtensionRef{Manifest: f.Extensions["fake"].Manifest, SHA256: f.Extensions["fake"].SHA256, Required: true}
-	if _, err = useExtensions(context.Background(), e.record(), f, formula.CodingHarness, t.TempDir()); err == nil || !strings.Contains(err.Error(), missing) {
+	if _, err = useExtensions(context.Background(), e.record(), f, formula.CodingHarness, resolvedTempDir(t)); err == nil || !strings.Contains(err.Error(), missing) {
 		t.Fatalf("a required extension must fail with the reason: %v", err)
 	}
 }
@@ -722,6 +762,7 @@ func (e *extEnv) analysisThroughOther(wrapper bool) (Record, error) {
 }
 
 func TestExtensionOptionalSkippedWhenAnalysisCannotAttach(t *testing.T) {
+	t.Parallel()
 	for name, wrapper := range map[string]bool{"supplied analysis function": false, "analysis wrapper": true} {
 		t.Run(name, func(t *testing.T) {
 			e := newExtensionEnv(t, extCfg{Analysis: !wrapper, Wrapper: wrapper})
@@ -755,6 +796,7 @@ func TestExtensionOptionalSkippedWhenAnalysisCannotAttach(t *testing.T) {
 }
 
 func TestExtensionRequiredStopsIntakeWhenAnalysisCannotAttach(t *testing.T) {
+	t.Parallel()
 	for name, wrapper := range map[string]bool{"supplied analysis function": false, "analysis wrapper": true} {
 		t.Run(name, func(t *testing.T) {
 			e := newExtensionEnv(t, extCfg{Required: true, Analysis: !wrapper, Wrapper: wrapper})
@@ -781,6 +823,7 @@ func TestExtensionRequiredStopsIntakeWhenAnalysisCannotAttach(t *testing.T) {
 }
 
 func TestExtensionHistoricalLedgerWithoutExtensionsVerifies(t *testing.T) {
+	t.Parallel()
 	o, _ := claudeAllowlistFixture(t)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
@@ -807,6 +850,7 @@ func TestExtensionHistoricalLedgerWithoutExtensionsVerifies(t *testing.T) {
 }
 
 func TestExtensionGatePolicyEvidenceListsOnlyActiveExtensions(t *testing.T) {
+	t.Parallel()
 	if _, ok := extensionEvidence(Record{}); ok {
 		t.Fatal("evidence must be absent when no extension was recorded")
 	}

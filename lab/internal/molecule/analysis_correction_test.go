@@ -123,6 +123,7 @@ func capRejected(t *testing.T, over readiness.Analysis) (readiness.Analysis, err
 }
 
 func TestAnalysisCorrectiveRetryEvidenceRequestCapThenTwelveYieldsPlan(t *testing.T) {
+	t.Parallel()
 	for _, first := range []string{"cap", "cap-rejected"} {
 		t.Run(first, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -190,6 +191,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapThenTwelveYieldsPlan(t *testin
 }
 
 func TestAnalysisCorrectiveRetryEvidenceRequestCapTwiceBlocks(t *testing.T) {
+	t.Parallel()
 	for _, steps := range [][]string{{"cap", "cap"}, {"cap-rejected", "cap-rejected"}, {"cap", "cap-rejected"}} {
 		t.Run(strings.Join(steps, "+"), func(t *testing.T) {
 			o, _ := fixture(t)
@@ -220,6 +222,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapTwiceBlocks(t *testing.T) {
 }
 
 func TestAnalysisCorrectiveRetryEvidenceRequestCapSharesTheSingleRetry(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		steps    []string
@@ -269,6 +272,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapSharesTheSingleRetry(t *testin
 }
 
 func TestAnalysisCorrectiveRetryEvidenceRequestCapBoundary(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		steps   []string
@@ -301,6 +305,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapBoundary(t *testing.T) {
 }
 
 func TestAnalysisCorrectiveRetryEvidenceRequestCapDoesNotRetryOtherRequestErrors(t *testing.T) {
+	t.Parallel()
 	for _, bad := range []string{"bad-path", "bad-citation"} {
 		t.Run("cap then "+bad, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -326,6 +331,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapDoesNotRetryOtherRequestErrors
 // rejected text must survive the harness boundary and the correction, with its
 // cap-specific instruction, must reach the provider prompt.
 func TestAnalysisCorrectiveRetryEvidenceRequestCapReachesProviderPrompt(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	valid := readiness.Analysis{Summary: "Change code"}
 	rejected, err := json.Marshal(withEvidenceRequests(valid, 20))
@@ -342,7 +348,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapReachesProviderPrompt(t *testi
 	}
 	provider := filepath.Join(dir, "provider")
 	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in --help) printf '%%s' '--safe-mode --tools --strict-mcp-config --json-schema --no-chrome --disable-slash-commands'; exit 0;; esac\ncat > '%s'\ncat '%s'\n", stdin, out)
-	if err = os.WriteFile(provider, []byte(script), 0700); err != nil {
+	if err = writeStub(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	ctx := withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: capMessage, PreviousResponse: "PREVIOUS-RESPONSE-MARKER"})
@@ -369,6 +375,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapReachesProviderPrompt(t *testi
 }
 
 func TestAnalysisCorrectiveRetryEvidenceRequestCapOnlyClassifiesValidatedRejections(t *testing.T) {
+	t.Parallel()
 	over, err := json.Marshal(withEvidenceRequests(readiness.Analysis{Summary: "Change code"}, 20))
 	if err != nil {
 		t.Fatal(err)
@@ -399,6 +406,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapOnlyClassifiesValidatedRejecti
 }
 
 func TestAnalysisCorrectiveRetryPolicyViolationThenValidYieldsPlan(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	calls, corrections := scripted(t, &o, "policy", "valid")
 	r, err := Run(context.Background(), o)
@@ -439,6 +447,7 @@ func TestAnalysisCorrectiveRetryPolicyViolationThenValidYieldsPlan(t *testing.T)
 }
 
 func TestAnalysisCorrectiveRetryBoundedSequences(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		steps    []string
@@ -501,6 +510,7 @@ func TestAnalysisCorrectiveRetryBoundedSequences(t *testing.T) {
 }
 
 func TestAnalysisCorrectiveRetryNeverRepeatsOtherErrors(t *testing.T) {
+	t.Parallel()
 	_, decodeErr := readiness.DecodeAnalysis([]byte(`{"summary":"x","surprise":1}`))
 	harnessErr := fmt.Errorf("analysis failed: %w", errors.New("timed out"))
 	badPath := readiness.Analysis{Summary: "x", EvidenceRequests: []readiness.EvidenceRequest{{Path: "../escape", Reason: "needs content", Evidence: []string{"issue"}}}}
@@ -537,6 +547,7 @@ func TestAnalysisCorrectiveRetryNeverRepeatsOtherErrors(t *testing.T) {
 }
 
 func TestAnalysisCorrectiveRetryNeverRelaxesValidator(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	valid := o.Analyze
 	calls := 0
@@ -564,6 +575,7 @@ func TestAnalysisCorrectiveRetryNeverRelaxesValidator(t *testing.T) {
 }
 
 func TestAnalysisCorrectiveRetryDefaultAnalysisOnlyClassifiesValidatedRejections(t *testing.T) {
+	t.Parallel()
 	rejected, err := json.Marshal(readiness.Analysis{Summary: "Change code", Checks: []readiness.Check{{ID: "check", Category: "independent-acceptance", Argv: []string{"true"}, Dir: ".", TimeoutMS: 1000, Required: true, Reason: "r"}}})
 	if err != nil {
 		t.Fatal(err)
@@ -597,6 +609,7 @@ func TestAnalysisCorrectiveRetryDefaultAnalysisOnlyClassifiesValidatedRejections
 // A fake provider drives the real Execute path: the rejected text must survive the
 // harness boundary, and the correction must reach the provider prompt.
 func TestAnalysisCorrectiveRetryReachesProviderPrompt(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	rejected, err := json.Marshal(readiness.Analysis{Summary: "Change code", Checks: []readiness.Check{{ID: "check", Category: "independent-acceptance", Argv: []string{"true"}, Dir: ".", TimeoutMS: 1000, Required: true, Reason: "r"}}})
 	if err != nil {
@@ -612,7 +625,7 @@ func TestAnalysisCorrectiveRetryReachesProviderPrompt(t *testing.T) {
 	}
 	provider := filepath.Join(dir, "provider")
 	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in --help) printf '%%s' '--safe-mode --tools --strict-mcp-config --json-schema --no-chrome --disable-slash-commands'; exit 0;; esac\ncat > '%s'\ncat '%s'\n", stdin, out)
-	if err = os.WriteFile(provider, []byte(script), 0700); err != nil {
+	if err = writeStub(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	ctx := withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: policyMessage, PreviousResponse: "PREVIOUS-RESPONSE-MARKER"})

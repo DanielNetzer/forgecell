@@ -47,4 +47,7 @@ func reconcileProcess(cmd *exec.Cmd) (bool, string) {
 
 // reconcileGrace bounds how long reconciliation waits for killed group members
 // to be reaped. It never signals the group, so leader-PID reuse is not a risk.
-var reconcileGrace = 500 * time.Millisecond
+// The wait ends as soon as the group is gone, so the bound is only reached
+// while members are still alive; a loaded machine can take well over 500 ms to
+// reap a killed group, which must not read as an unreconciled process.
+var reconcileGrace = 5 * time.Second

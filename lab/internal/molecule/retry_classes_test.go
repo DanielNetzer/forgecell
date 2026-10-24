@@ -64,6 +64,7 @@ func runClasses(t *testing.T, steps ...string) (Record, *int, *[]analysisCorrect
 }
 
 func TestHardening129EachPolicyClassGetsItsOwnCorrectiveRetry(t *testing.T) {
+	t.Parallel()
 	r, calls, corrections := runClasses(t, "policy", "def", "valid")
 	if *calls != 3 || r.Status != "waiting" || r.Readiness == nil || r.Readiness.Phase != "scope-waiting" {
 		t.Fatalf("a labelling violation followed by an in-scope-definition rejection must reach a second correction: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
@@ -91,6 +92,7 @@ func TestHardening129EachPolicyClassGetsItsOwnCorrectiveRetry(t *testing.T) {
 }
 
 func TestHardening129EveryOrderOfDistinctClassesIsRetried(t *testing.T) {
+	t.Parallel()
 	for _, steps := range [][]string{
 		{"def", "policy", "valid"}, {"cap", "policy", "valid"}, {"policy", "cap", "valid"}, {"cap", "def", "valid"}, {"def", "cap", "valid"},
 		{"issue-def", "policy", "valid"}, {"policy", "def", "cap", "valid"},
@@ -105,6 +107,7 @@ func TestHardening129EveryOrderOfDistinctClassesIsRetried(t *testing.T) {
 }
 
 func TestHardening129TheSameClassTwiceStopsIntake(t *testing.T) {
+	t.Parallel()
 	for _, steps := range [][]string{{"policy", "policy"}, {"def", "def"}, {"cap", "cap"}, {"issue-def", "issue-def"}, {"policy", "def", "policy"}, {"policy", "def", "def"}} {
 		t.Run(strings.Join(steps, "+"), func(t *testing.T) {
 			r, calls, _ := runClasses(t, steps...)
@@ -119,6 +122,7 @@ func TestHardening129TheSameClassTwiceStopsIntake(t *testing.T) {
 }
 
 func TestHardening129CorrectiveRetriesAreBoundedByThree(t *testing.T) {
+	t.Parallel()
 	r, calls, _ := runClasses(t, "policy", "def", "cap", "issue-def")
 	if *calls != 4 || r.Status != "blocked" || r.Readiness != nil || len(r.HarnessAttempts) != 0 || len(r.AnalysisAttempts) != 4 {
 		t.Fatalf("a fourth class must not get a fourth retry: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
@@ -134,6 +138,7 @@ func TestHardening129CorrectiveRetriesAreBoundedByThree(t *testing.T) {
 }
 
 func TestHardening129SupplementalPassStillFitsAfterAllThreeRetries(t *testing.T) {
+	t.Parallel()
 	r, calls, _ := runClasses(t, "policy", "def", "cap", "evidence", "valid")
 	if *calls != 5 || r.Status != "waiting" || r.Readiness == nil || len(r.AnalysisAttempts) != 5 {
 		t.Fatalf("three retries, one supplemental pass and the final analysis must fit: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
@@ -141,6 +146,7 @@ func TestHardening129SupplementalPassStillFitsAfterAllThreeRetries(t *testing.T)
 }
 
 func TestHardening129NonPolicyFailuresAreNotRetried(t *testing.T) {
+	t.Parallel()
 	for _, step := range []string{"bad-path", "bad-citation"} {
 		t.Run(step, func(t *testing.T) {
 			r, calls, _ := runClasses(t, step)
@@ -152,6 +158,7 @@ func TestHardening129NonPolicyFailuresAreNotRetried(t *testing.T) {
 }
 
 func TestHardening129CheckForANewFileReachesThePlan(t *testing.T) {
+	t.Parallel()
 	r, calls, corrections := runClasses(t, "new-file")
 	if *calls != 1 || r.Status != "waiting" || r.Readiness == nil || (*corrections)[0] != (analysisCorrection{}) {
 		t.Fatalf("a check defined by a new in-scope file must need no retry: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
@@ -177,6 +184,7 @@ func TestHardening129CheckForANewFileReachesThePlan(t *testing.T) {
 }
 
 func TestHardening129PlansWithoutNewFileDefinitionsHaveNoNewFileNote(t *testing.T) {
+	t.Parallel()
 	r, _, _ := runClasses(t, "valid")
 	if r.Readiness == nil || strings.Contains(strings.Join(r.Notes, "\n"), "new file") {
 		t.Fatalf("a plan without a new-file definition must not carry the note: %v", r.Notes)
@@ -184,6 +192,7 @@ func TestHardening129PlansWithoutNewFileDefinitionsHaveNoNewFileNote(t *testing.
 }
 
 func TestHardening129AmendDerivesNewFilesFromTheFrozenTree(t *testing.T) {
+	t.Parallel()
 	for name, forged := range map[string][]string{
 		"dropped":                 nil,
 		"claims an existing file": {"code.txt"},
@@ -214,6 +223,7 @@ func TestHardening129AmendDerivesNewFilesFromTheFrozenTree(t *testing.T) {
 }
 
 func TestHardening129ExistingFileCannotPoseAsANewFile(t *testing.T) {
+	t.Parallel()
 	// Citing an existing scope path as a new file fails plan validation, which gets
 	// one plan-validation retry; repeating it stops intake.
 	r, calls, _ := runClasses(t, "existing-file", "existing-file")
@@ -223,6 +233,7 @@ func TestHardening129ExistingFileCannotPoseAsANewFile(t *testing.T) {
 }
 
 func TestHardening129DefinitionCorrectionNamesTheNewFileAlternative(t *testing.T) {
+	t.Parallel()
 	_, _, corrections := runClasses(t, "issue-def", "valid")
 	second := (*corrections)[1]
 	if !strings.HasPrefix(second.ValidatorMessage, readiness.DefinitionReferenceMessage) {

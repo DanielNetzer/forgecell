@@ -51,6 +51,7 @@ func baselinePlan(t *testing.T, o Options) (Record, readiness.Plan) {
 }
 
 func TestFormulaBaselineJoinsEveryPlanAndAppearsInVerification(t *testing.T) {
+	t.Parallel()
 	o := baselineFixture(t)
 	r, plan := baselinePlan(t, o)
 	var baseline *readiness.Check
@@ -97,6 +98,7 @@ func TestFormulaBaselineJoinsEveryPlanAndAppearsInVerification(t *testing.T) {
 }
 
 func TestFormulaBaselineFailureBlocksVerification(t *testing.T) {
+	t.Parallel()
 	o := baselineFixtureCommand(t, `test "$(cat code.txt)" = base`)
 	r, _ := baselinePlan(t, o)
 	o.Approve = r.Readiness.Plans[0].Digest
@@ -119,6 +121,7 @@ func TestFormulaBaselineFailureBlocksVerification(t *testing.T) {
 }
 
 func TestFormulaBaselineIsNotRedefinedByTheAnalysis(t *testing.T) {
+	t.Parallel()
 	o := baselineFixture(t)
 	analyze := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
@@ -136,6 +139,7 @@ func TestFormulaBaselineIsNotRedefinedByTheAnalysis(t *testing.T) {
 }
 
 func TestFormulaBaselineWithoutRequiredChecksKeepsPlansUnchanged(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, plan := baselinePlan(t, o)
 	raw, err := json.Marshal(plan)
@@ -145,6 +149,7 @@ func TestFormulaBaselineWithoutRequiredChecksKeepsPlansUnchanged(t *testing.T) {
 }
 
 func TestFormulaBaselineRequireRefusesOmittedAlteredOrUnlabelled(t *testing.T) {
+	t.Parallel()
 	o := baselineFixture(t)
 	_, plan := baselinePlan(t, o)
 	loaded, err := formula.Load(o.LabDir, "")
@@ -218,6 +223,7 @@ func TestFormulaBaselineRequireRefusesOmittedAlteredOrUnlabelled(t *testing.T) {
 }
 
 func TestFormulaBaselineApprovalRefusesAmendedPlanWithoutBaseline(t *testing.T) {
+	t.Parallel()
 	o := baselineFixture(t)
 	r, plan := baselinePlan(t, o)
 	old := r.Readiness.Plans[0]

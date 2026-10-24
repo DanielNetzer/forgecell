@@ -57,6 +57,7 @@ func inScopeScripted(t *testing.T, o *Options, steps ...string) (*int, *[]analys
 }
 
 func TestInScopeDefinitionRetriedOnceThenYieldsPlanWithoutTheCheck(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ first, in string }{
 		{"def", `"path":"package.json"`},
 		{"argv", `"test","-f","code.txt"`},
@@ -123,6 +124,7 @@ func TestInScopeDefinitionRetriedOnceThenYieldsPlanWithoutTheCheck(t *testing.T)
 }
 
 func TestInScopeDefinitionTwiceBlocksWithoutCoding(t *testing.T) {
+	t.Parallel()
 	for _, steps := range [][]string{{"def", "def"}, {"argv", "argv"}, {"def", "argv"}} {
 		t.Run(strings.Join(steps, "+"), func(t *testing.T) {
 			o, _ := fixture(t)
@@ -153,6 +155,7 @@ func TestInScopeDefinitionTwiceBlocksWithoutCoding(t *testing.T) {
 }
 
 func TestInScopeDefinitionSharesTheSingleRetry(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		steps    []string
@@ -202,6 +205,7 @@ func TestInScopeDefinitionSharesTheSingleRetry(t *testing.T) {
 }
 
 func TestInScopeDefinitionAbsentTakesNoRetry(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, step, note string
 	}{
@@ -229,11 +233,12 @@ func TestInScopeDefinitionAbsentTakesNoRetry(t *testing.T) {
 }
 
 func TestInScopeDefinitionRuleSkipsHumanSuppliedChecks(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	content := "independently reviewed acceptance contract"
 	input := readiness.FileEvidence{Evidence: readiness.Evidence{ID: "human-acceptance", Path: "acceptance.txt", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content}
 	o.CheckInputs = []readiness.FileEvidence{input}
-	o.Checks = []readiness.Check{{ID: "human-check", Category: "independent-acceptance", Argv: []string{"test", "-f", "code.txt"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{input.ID}, Evidence: []string{input.ID}, Reason: "Human-defined behavior", IndependentProvenance: "reviewed fixture"}}
+	o.Checks = []readiness.Check{{ID: "human-check", Category: "independent-acceptance", Argv: []string{"test", "-f", "code.txt"}, Dir: ".", TimeoutMS: 30000, Required: true, Definitions: []string{input.ID}, Evidence: []string{input.ID}, Reason: "Human-defined behavior", IndependentProvenance: "reviewed fixture"}}
 	calls, _ := inScopeScripted(t, &o, "valid")
 	r, err := Run(context.Background(), o)
 	if err != nil {

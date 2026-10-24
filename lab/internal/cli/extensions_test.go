@@ -92,6 +92,9 @@ type doctorEnv struct {
 
 func newDoctorEnv(t *testing.T) *doctorEnv {
 	t.Helper()
+	// Doctor probes the fake scripts below; full-suite load must not turn a
+	// briefly busy just-written stub into a failed probe.
+	loadTolerantDoctorProbes(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

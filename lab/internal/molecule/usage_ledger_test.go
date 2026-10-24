@@ -34,6 +34,7 @@ func usageWith(model string, cost float64, mismatch bool) *harness.Usage {
 // shows coverage "N of M" with the list-price label, keeps an unavailable attempt as
 // an explicit line item (#149 item 7), and raises a non-blocking mismatch notice.
 func TestUsageSummaryCoversEveryRoleAndUnavailable(t *testing.T) {
+	t.Parallel()
 	r := Record{
 		AnalysisAttempts: []AnalysisAttempt{{Ordinal: 1, Usage: usageWith("claude-opus-4-8", 0.10, true)}},
 		HarnessAttempts:  []HarnessAttempt{{ID: "abc123", Usage: usageWith("claude-opus-4-8", 0.20, false)}},
@@ -63,6 +64,7 @@ func TestUsageSummaryCoversEveryRoleAndUnavailable(t *testing.T) {
 // TestUsageSummaryHiddenWhenNoneReported shows nothing until an attempt reports usage
 // (#149 item 11): an attempt with no usage object yields no summary.
 func TestUsageSummaryHiddenWhenNoneReported(t *testing.T) {
+	t.Parallel()
 	r := Record{HarnessAttempts: []HarnessAttempt{{ID: "x"}}, AnalysisAttempts: []AnalysisAttempt{{Ordinal: 1}}}
 	if lines := UsageSummaryLines(r); lines != nil {
 		t.Fatalf("expected no summary, got:\n%s", strings.Join(lines, "\n"))
@@ -73,6 +75,7 @@ func TestUsageSummaryHiddenWhenNoneReported(t *testing.T) {
 // tokens but no total_cost_usd: the attempt still appears, cost reads unavailable, and
 // coverage is 0 of 1.
 func TestUsageSummaryCostUnavailableButTokensReported(t *testing.T) {
+	t.Parallel()
 	u := &harness.Usage{
 		Total:           harness.TokenCategories{Input: i64(7)},
 		EffectiveModels: []string{"claude-opus-4-8"},
@@ -89,6 +92,7 @@ func TestUsageSummaryCostUnavailableButTokensReported(t *testing.T) {
 // TestUsageOldLedgerDecodesAsUnavailable proves an additive field: a ledger written
 // before #149 decodes with no error and renders no usage (never zero).
 func TestUsageOldLedgerDecodesAsUnavailable(t *testing.T) {
+	t.Parallel()
 	old := []byte(`{
 		"schemaVersion":"v0",
 		"analysisAttempts":[{"ordinal":1,"snapshotSha256":"s","startedAt":"t","status":"completed"}],
@@ -110,6 +114,7 @@ func TestUsageOldLedgerDecodesAsUnavailable(t *testing.T) {
 // TestUsageRoundTripsThroughLedger keeps the recorded usage object through a JSON
 // marshal/unmarshal cycle, as the ledger does.
 func TestUsageRoundTripsThroughLedger(t *testing.T) {
+	t.Parallel()
 	r := Record{HarnessAttempts: []HarnessAttempt{{ID: "abc", Usage: usageWith("claude-opus-4-8", 0.5, false)}}}
 	raw, err := json.Marshal(r)
 	if err != nil {
@@ -129,6 +134,7 @@ func TestUsageRoundTripsThroughLedger(t *testing.T) {
 // "unreported" (never 0) both per attempt and in the totals, and shows "+N more" for
 // models the parser dropped from untrusted output (#149 review fixes 1 and 6).
 func TestUsageSummaryUnreportedCategoriesAndTruncation(t *testing.T) {
+	t.Parallel()
 	u := &harness.Usage{
 		Models:          []harness.ModelUsage{{Model: "claude-opus-4-8", Tokens: harness.TokenCategories{Input: i64(5)}}},
 		Total:           harness.TokenCategories{Input: i64(5)},
@@ -153,6 +159,7 @@ func TestUsageSummaryUnreportedCategoriesAndTruncation(t *testing.T) {
 // unavailable" and never prints a bare dollar figure; disagreeing attempt bases make
 // the aggregate "mixed" (#149 review fix 4).
 func TestUsageSummaryBasisLabels(t *testing.T) {
+	t.Parallel()
 	noBasis := &harness.Usage{Total: cat(1, 1, 1, 1), EffectiveModels: []string{"claude-opus-4-8"}, TotalCostUSD: f64(0.10)}
 	listBasis := usageWith("claude-opus-4-8", 0.20, false)
 	r := Record{HarnessAttempts: []HarnessAttempt{{ID: "a", Usage: noBasis}, {ID: "b", Usage: listBasis}}}

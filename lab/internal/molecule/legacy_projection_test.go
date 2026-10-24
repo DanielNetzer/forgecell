@@ -1,7 +1,6 @@
 package molecule
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,8 +12,9 @@ import (
 // a failed spawn or timeout was stored as "...: EOF". Both projections must
 // stay verifiable; any other reason is still tampering.
 func TestHistoricalCodingProjectionStaysVerifiable(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
-	if err := os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nexit 3\n"), 0700); err != nil {
+	if err := writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nexit 3\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)

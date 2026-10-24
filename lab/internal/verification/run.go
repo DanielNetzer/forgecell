@@ -111,6 +111,32 @@ func removeTemp(v *Result, dir string) {
 	}
 }
 
+// labGoTempDir creates, or reuses, the stable GOTMPDIR <tmp>/gotmp at 0700 under a Lab's
+// resolved check TMPDIR. testing.TempDir reads GOTMPDIR and the test-result cache keys on
+// it, so every view of a Lab gets the same one; Go's own go-build* work directories in it
+// are unique per invocation and removed by Go. It sits directly under <lab>/tmp, whose
+// marker-based stale prune keeps it and prunes its old children. A symbolic link or
+// non-directory at that path is refused.
+func labGoTempDir(tmp string) (string, error) {
+	dir := filepath.Join(tmp, resources.LabGoTempName)
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("lab GOTMPDIR is not a directory: %s", dir)
+	}
+	if info.Mode().Perm() != 0700 {
+		if err := os.Chmod(dir, 0700); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // commandEnvironment builds a view's filtered environment: a private HOME, the given
@@ -503,19 +529,24 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	tmp, ok := resources.CheckTempDirFrom(ctx)
 	if !ok {
 		tmp = home
+	} else {
+		// Resolved first, so tests never see a symlinked TMPDIR when <lab> sits behind a
+		// symbolic link (/var -> /private/var on macOS).
+		resolved, err := filepath.EvalSymlinks(tmp)
+		if err != nil {
+			return fail(err)
+		}
+		tmp = resolved
 	}
 	env, secrets, err := commandEnvironment(p.Policy, home, tmp)
 	if err != nil {
 		return fail(err)
 	}
 	if ok {
-		// Go's work directories go to a per-view GOTMPDIR removed afterwards, so they never
-		// accumulate in the shared <lab>/tmp. Go does not key the cache on GOTMPDIR.
-		gotmp, err := resources.MkdirTemp("", "forgecell-gotmp-")
+		gotmp, err := labGoTempDir(tmp)
 		if err != nil {
 			return fail(err)
 		}
-		defer removeTemp(&v, gotmp)
 		env = append(slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "GOTMPDIR=") }), "GOTMPDIR="+gotmp)
 	}
 	controls, err := resources.MkdirTemp("", "forgecell-reviewed-checks-")
