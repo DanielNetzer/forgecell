@@ -24,7 +24,19 @@ func resolveExecutionRoles(r Record) (executionRoles, error) {
 		return executionRoles{}, fmt.Errorf("execution Formula snapshot identity mismatch")
 	}
 	if r.Readiness != nil {
-		for _, p := range r.Readiness.Plans {
+		// Every plan from the latest Formula rebase onward must bind the snapshot.
+		// An earlier plan may bind an earlier Formula only across a validated
+		// rebase boundary; earlier immutable plans are never rewritten.
+		latest := 0
+		for i, p := range r.Readiness.Plans {
+			if p.Plan.Inputs.FormulaSHA256 != r.Readiness.Plans[latest].Plan.Inputs.FormulaSHA256 {
+				latest = i
+			}
+		}
+		if latest > 0 && r.Readiness.ValidateFormulaLineage() != nil {
+			return executionRoles{}, fmt.Errorf("plan Formula hash does not match exact snapshot")
+		}
+		for _, p := range r.Readiness.Plans[latest:] {
 			if p.Plan.Inputs.FormulaSHA256 != f.SHA256 {
 				return executionRoles{}, fmt.Errorf("plan Formula hash does not match exact snapshot")
 			}
