@@ -1,0 +1,392 @@
+// Package ui serves the local, read-only Lab UI on the loopback interface. It
+// reads the Lab only through engine Go functions, never a shell, and serves GET
+// requests only: it never writes, recovers, approves or locks anything.
+package ui
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"io"
+	"io/fs"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+//go:embed web
+var web embed.FS
+
+// Options configure one UI launch.
+type Options struct {
+	// LabDir is the Lab to read; it is ignored in demo mode.
+	LabDir  string
+	Version string
+	// Demo serves the prototype's synthetic data, labeled Sample data, instead of
+	// the Lab. Real mode never serves synthetic values.
+	Demo bool
+	// Port is the loopback port; zero chooses a free one.
+	Port int
+}
+
+// Server is a UI listening on 127.0.0.1.
+type Server struct {
+	// URL carries the single-use launch token; the first visit exchanges it for a
+	// session cookie and every later visit to it is refused.
+	URL      string
+	listener net.Listener
+	server   *http.Server
+	handler  *handler
+}
+
+// Exchanged is closed by the first successful token exchange, after which the
+// launch URL is spent and any launch page that carried it can be deleted.
+func (s *Server) Exchanged() <-chan struct{} { return s.handler.exchanged }
+
+// Listen binds 127.0.0.1 and prepares the handler with a fresh random token.
+func Listen(o Options) (*Server, error) {
+	if o.Port < 0 || o.Port > 65535 {
+		return nil, fmt.Errorf("invalid port %d", o.Port)
+	}
+	if !o.Demo {
+		abs, err := filepath.Abs(o.LabDir)
+		if err != nil {
+			return nil, err
+		}
+		o.LabDir = abs
+	}
+	token, err := newToken()
+	if err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(o.Port)))
+	if err != nil {
+		return nil, err
+	}
+	host := ln.Addr().String()
+	h, err := NewHandler(o, token, host)
+	if err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return &Server{
+		URL:      "http://" + host + "/?t=" + token,
+		listener: ln,
+		handler:  h.(*handler),
+		server:   &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10},
+	}, nil
+}
+
+// Serve answers requests until ctx is cancelled, then shuts down gracefully.
+func (s *Server) Serve(ctx context.Context) error {
+	done := make(chan error, 1)
+	go func() { done <- s.server.Serve(s.listener) }()
+	select {
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// A connection still open after the grace period (for example one a browser
+		// opened speculatively) is closed rather than failing the stop.
+		if err := s.server.Shutdown(shutdown); err != nil {
+			s.server.Close()
+		}
+		<-done
+		return nil
+	case err := <-done:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func newToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+type handler struct {
+	opts  Options
+	token string
+	// used is set by the first valid exchange; the launch token is single-use.
+	used      atomic.Bool
+	exchanged chan struct{}
+	// session is the cookie value: a separate random secret, so the launch URL
+	// and the cookie never carry the same value.
+	session string
+	// tab is the X-Forgecell-Session value every API request must also carry. A
+	// browser sends 127.0.0.1 cookies to every port, so the cookie alone can reach
+	// another local server; tab is handed over only once, in the exchange page, and
+	// kept in the tab's origin-scoped sessionStorage.
+	tab    string
+	host   string
+	origin string
+	cookie string
+	static fs.FS
+	// records and receipts read ledgers and delivery receipts; tests may replace
+	// them.
+	records  func(lab, id string) (molecule.Record, error)
+	receipts receiptReader
+	cache    *listCache
+}
+
+// staticFiles are the only embedded files served, with their content types.
+var staticFiles = map[string]string{
+	"/":          "index.html",
+	"/app.js":    "app.js",
+	"/style.css": "style.css",
+	// session.js only copies the exchange page's value into sessionStorage; it
+	// holds no secret, so it is served without the cookie.
+	"/session.js": "session.js",
+}
+
+const sessionHeader = "X-Forgecell-Session"
+
+var contentTypes = map[string]string{".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
+
+var moleculeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
+
+// unavailable lists capabilities the UI shows as Unavailable in this slice.
+var unavailable = []string{"analytics", "cost per merged PR", "logs", "gates", "suggestions", "evaluation", "pause"}
+
+// NewHandler serves the UI for host (127.0.0.1:PORT) with the given launch token.
+func NewHandler(o Options, token, host string) (http.Handler, error) {
+	static, err := fs.Sub(web, "web")
+	if err != nil {
+		return nil, err
+	}
+	if len(token) < 32 {
+		return nil, fmt.Errorf("launch token is too short")
+	}
+	_, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return nil, err
+	}
+	session, err := newToken()
+	if err != nil {
+		return nil, err
+	}
+	tab, err := newToken()
+	if err != nil {
+		return nil, err
+	}
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache()}, nil
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	header := w.Header()
+	header.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Referrer-Policy", "no-referrer")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Cross-Origin-Opener-Policy", "same-origin")
+	header.Set("Cross-Origin-Resource-Policy", "same-origin")
+	header.Set("Cache-Control", "no-store")
+	// The Host check refuses DNS rebinding; the Origin and Fetch Metadata checks
+	// refuse other sites and other local pages. There are no CORS headers.
+	if r.Host != h.host {
+		h.refuse(w, http.StatusForbidden, "unexpected Host")
+		return
+	}
+	if origin := r.Header.Get("Origin"); origin != "" && origin != h.origin {
+		h.refuse(w, http.StatusForbidden, "cross-origin request refused")
+		return
+	}
+	launch := r.Method == http.MethodGet && r.URL.Path == "/" && r.URL.Query().Has("t")
+	// The launch page opened from a local file navigates here cross-site, so the
+	// token exchange alone accepts a top-level document navigation from anywhere;
+	// it needs the single-use token and serves no Lab data.
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" && !(launch && navigation(r)) {
+		h.refuse(w, http.StatusForbidden, "cross-site request refused")
+		return
+	}
+	if r.Method != http.MethodGet {
+		header.Set("Allow", http.MethodGet)
+		h.refuse(w, http.StatusMethodNotAllowed, "the Lab UI is read-only; only GET is served")
+		return
+	}
+	if launch {
+		h.exchange(w, r)
+		return
+	}
+	if r.URL.Path == "/session.js" {
+		h.file(w, staticFiles[r.URL.Path])
+		return
+	}
+	if !h.authorized(r) {
+		h.refuse(w, http.StatusForbidden, "open the URL printed by forgecell ui")
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") && subtle.ConstantTimeCompare([]byte(r.Header.Get(sessionHeader)), []byte(h.tab)) != 1 {
+		h.refuse(w, http.StatusForbidden, "this tab has no Lab UI session; open a new launch link from forgecell ui")
+		return
+	}
+	switch path := r.URL.Path; {
+	case path == "/api/lab":
+		h.lab(w)
+	case path == "/api/molecules":
+		h.molecules(w, r)
+	case strings.HasPrefix(path, "/api/molecules/"):
+		h.molecule(w, r, strings.TrimPrefix(path, "/api/molecules/"))
+	case staticFiles[path] != "":
+		h.file(w, staticFiles[path])
+	default:
+		h.refuse(w, http.StatusNotFound, "not found")
+	}
+}
+
+func navigation(r *http.Request) bool {
+	mode, dest := r.Header.Get("Sec-Fetch-Mode"), r.Header.Get("Sec-Fetch-Dest")
+	return (mode == "" || mode == "navigate") && (dest == "" || dest == "document")
+}
+
+// forwardPage is served once, on the successful exchange (never cached, as every
+// response is no-store). It carries the tab value in a meta element; the
+// external session.js copies it into sessionStorage and replaces the page with
+// "/", which drops the token from the address bar and starts a same-origin
+// navigation, so the SameSite=Strict cookie is sent even when the launch came
+// from a local file. The value is hex, so it needs no escaping.
+func forwardPage(tab string) string {
+	return `<!doctype html><meta charset="utf-8"><meta name="forgecell-session" content="` + tab + `"><title>Forgecell Lab UI</title><script src="/session.js"></script><p>Opening the Forgecell Lab UI…</p>`
+}
+
+// exchange trades the launch token, once, for an HttpOnly, SameSite=Strict
+// session cookie and the tab value. Every later exchange is refused, also from a
+// browser holding the cookie, so the tab value is never handed out again.
+func (h *handler) exchange(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("t")), []byte(h.token)) != 1 {
+		h.refuse(w, http.StatusForbidden, "invalid launch token")
+		return
+	}
+	if !h.used.CompareAndSwap(false, true) {
+		h.refuse(w, http.StatusForbidden, "this launch URL was already used; restart forgecell ui for a new one")
+		return
+	}
+	close(h.exchanged)
+	http.SetCookie(w, &http.Cookie{Name: h.cookie, Value: h.session, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	w.Header().Set("Content-Type", contentTypes[".html"])
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, forwardPage(h.tab))
+}
+
+func (h *handler) authorized(r *http.Request) bool {
+	c, err := r.Cookie(h.cookie)
+	return err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(h.session)) == 1
+}
+
+func (h *handler) refuse(w http.ResponseWriter, code int, message string) {
+	h.json(w, code, map[string]string{"error": message})
+}
+
+func (h *handler) json(w http.ResponseWriter, code int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	// The default encoder escapes <, > and &, so no response is parsed as markup.
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (h *handler) file(w http.ResponseWriter, name string) {
+	data, err := fs.ReadFile(h.static, name)
+	if err != nil {
+		h.refuse(w, http.StatusNotFound, "not found")
+		return
+	}
+	w.Header().Set("Content-Type", contentTypes[filepath.Ext(name)])
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// LabView is GET /api/lab.
+type LabView struct {
+	Sample      bool             `json:"sample"`
+	ReadOnly    bool             `json:"readOnly"`
+	Name        string           `json:"name"`
+	Version     string           `json:"version"`
+	Repository  string           `json:"repository"`
+	Binding     string           `json:"binding"`
+	Model       string           `json:"model"`
+	Formula     formula.Identity `json:"formula"`
+	Unavailable []string         `json:"unavailable"`
+}
+
+func (h *handler) lab(w http.ResponseWriter) {
+	if h.opts.Demo {
+		h.json(w, http.StatusOK, demoLab(h.opts.Version))
+		return
+	}
+	id := formula.ActiveIdentity(h.opts.LabDir)
+	h.json(w, http.StatusOK, LabView{ReadOnly: true, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable})
+}
+
+func (h *handler) molecules(w http.ResponseWriter, r *http.Request) {
+	if h.opts.Demo {
+		h.json(w, http.StatusOK, demoList())
+		return
+	}
+	// The tag is taken before reading, so a change during the read shows next poll.
+	etag := ledgerETag(h.opts.LabDir)
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	h.json(w, http.StatusOK, h.list(etag))
+}
+
+// counts tallies lanes from the same summaries the response carries.
+func counts(ms []Summary) map[string]int {
+	c := map[string]int{"all": len(ms)}
+	for _, lane := range Lanes {
+		c[lane] = 0
+	}
+	for _, m := range ms {
+		c[m.Lane]++
+	}
+	return c
+}
+
+func (h *handler) molecule(w http.ResponseWriter, r *http.Request, id string) {
+	withYAML := r.URL.Query().Get("yaml") == "1"
+	if !moleculeID.MatchString(id) {
+		h.refuse(w, http.StatusBadRequest, "invalid Molecule id")
+		return
+	}
+	if h.opts.Demo {
+		d, ok := demoDetail(id, withYAML)
+		if !ok {
+			h.refuse(w, http.StatusNotFound, "no such sample Molecule")
+			return
+		}
+		h.json(w, http.StatusOK, d)
+		return
+	}
+	record, err := h.records(h.opts.LabDir, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist):
+		h.refuse(w, http.StatusNotFound, "no such Molecule")
+		return
+	default:
+		// Error text can name local paths, so only the category is returned.
+		h.refuse(w, http.StatusUnprocessableEntity, "the ledger was refused: it is invalid, unsafe, oversized or not this Lab's")
+		return
+	}
+	h.json(w, http.StatusOK, project(h.opts.LabDir, record, h.receipts, withYAML))
+}

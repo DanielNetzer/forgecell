@@ -95,6 +95,9 @@ func labArgs(args []string) (rest []string, name string, explicitLab bool, err e
 	return rest, strings.ToLower(name), explicitLab, nil
 }
 
+// resolveLab is resolveDefaultLab; a variable only so tests can observe it.
+var resolveLab = resolveDefaultLab
+
 // resolveDefaultLab keys the default Lab by the checkout's GitHub identity
 // rather than its path. It only reads local state and never creates anything.
 func resolveDefaultLab(ctx context.Context, name string) (labResolution, error) {

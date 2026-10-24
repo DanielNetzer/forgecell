@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Forgecell · Local Lab</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="field" aria-hidden="true"></div>
+<main>
+<header>
+  <span class="brand"><svg width="29" height="29" viewBox="0 0 40 40" aria-hidden="true"><g fill="currentColor"><circle cx="20" cy="8" r="7"/><circle cx="8" cy="20" r="7"/><circle cx="32" cy="20" r="7"/><circle cx="20" cy="32" r="7"/></g></svg>Forgecell <span class="divider"></span><small>Local Lab</small></span>
+  <span id="lab-repo" class="repo"></span>
+  <span id="sample-badge" class="sample-badge" title="Synthetic sample data. No Lab is read." hidden>Sample data</span>
+  <span class="readonly-badge" title="This UI only reads the Lab.">Read-only</span>
+</header>
+
+<p id="load-error" class="banner" role="alert" hidden></p>
+
+<section class="glass shelf" aria-labelledby="shelf-title">
+  <div class="shelf-head">
+    <div><h1 id="shelf-title">Inside your Lab.</h1><p id="shelf-count" class="shelf-count"></p></div>
+  </div>
+  <div id="active-formula" class="active-formula"></div>
+  <p id="inventory-note" class="inventory-note" role="status" hidden></p>
+  <div class="grid-tools">
+    <div id="run-filters" class="run-filters" role="group" aria-label="Filter Molecules"></div>
+    <div class="grid-search">
+      <label class="sr-only" for="molecule-search">Search Molecules by issue number, title or Formula</label>
+      <span aria-hidden="true">⌕</span>
+      <input type="search" id="molecule-search" placeholder="Issue, title or Formula" autocomplete="off" spellcheck="false">
+      <button type="button" id="clear-search" aria-label="Clear search" hidden>×</button>
+    </div>
+  </div>
+  <span id="search-status" class="search-status" role="status" aria-live="polite"></span>
+  <p id="outside-filter" class="outside-filter" role="status" hidden></p>
+  <div class="culture-scroll" role="region" aria-label="Molecule grid, scroll horizontally for more Molecules" tabindex="0">
+    <div class="grid-axis" aria-hidden="true"><span>Earlier Molecules</span><span>Recent Molecules</span></div>
+    <div id="cubes" class="cubes" role="group" aria-label="Molecules, one cell per Molecule"></div>
+    <p id="filter-empty" class="filter-empty" role="status" hidden></p>
+  </div>
+  <div class="shelf-caption">
+    <span id="selection-label">Select a Molecule</span>
+    <span class="legend">◌ Running · ◇ Needs you · ! Blocked · ✓ Draft published · · Other
+      <label class="motion-option"><input id="motion-toggle" type="checkbox" checked> Motion</label>
+    </span>
+  </div>
+</section>
+
+<section id="selected" class="workspace" aria-label="Selected Molecule" hidden>
+  <div class="glass run-panel">
+    <div class="panel-head"><span class="mono">MOLECULE / <span id="run-id"></span></span><span id="run-state" class="pill"></span></div>
+    <h2 id="run-title"></h2>
+    <div id="run-origin" class="origin"></div>
+    <div id="molecule-totals" class="molecule-totals"></div>
+    <div class="formula card">
+      <span class="icon-tile" aria-hidden="true">≡</span>
+      <div class="formula-text"><span class="label">FORMULA SNAPSHOT</span><strong id="formula-name"></strong><small id="formula-sha" class="mono-text"></small></div>
+      <button type="button" class="text-button" id="yaml">View YAML ↗</button>
+    </div>
+    <p id="run-delivery" class="delivery-line" hidden></p>
+    <div class="section-label"><span class="mono">ATOMS</span><span>Select a step to inspect its record</span></div>
+    <div id="atoms" class="atoms"></div>
+    <details class="ledger-inline"><summary>Readiness revisions and events</summary><div id="readiness"></div></details>
+    <details class="ledger-inline"><summary>Harness attempts · model and usage as recorded</summary><div id="attempts"></div></details>
+    <ul id="run-diagnostics" class="diagnostics" hidden></ul>
+  </div>
+  <aside class="glass decision-panel">
+    <div class="panel-head"><span class="mono">NEXT ACTION</span></div>
+    <h2 id="action-title"></h2>
+    <p id="action-copy" class="aside-copy"></p>
+    <div class="action-card card">
+      <span class="label">GATES AND DECISIONS</span>
+      <p class="unavailable">Unavailable</p>
+      <p class="scope-note">Approvals, pause and retries are not wired into this read-only UI. Use the forgecell CLI; this page updates from the ledger.</p>
+    </div>
+    <div class="action-card card">
+      <span class="label">LOGS · SUGGESTIONS · EVALUATION</span>
+      <p class="unavailable">Unavailable</p>
+      <p class="scope-note">Not connected in this slice. Nothing is inferred in their place.</p>
+    </div>
+  </aside>
+</section>
+
+<section id="aggregate" class="glass aggregate" aria-labelledby="aggregate-title">
+  <div class="panel-head"><span class="mono">LAB OVERVIEW</span><span id="aggregate-count"></span></div>
+  <h2 id="aggregate-title">Lab overview</h2>
+  <p class="aggregate-intro">Select a cell to inspect its Molecule. Published, merged and production-verified are separate outcomes.</p>
+  <div class="metrics">
+    <article class="card"><span class="label">ANALYTICS</span><strong>Unavailable</strong><p>Duration and cost aggregation is not connected. Unknown is not zero.</p></article>
+    <article class="card"><span class="label">COST PER MERGED PR</span><strong>Unavailable</strong><p>Needs verified merge attribution. A draft publication receipt does not qualify.</p></article>
+    <article class="card"><span class="label">FORMULA SUGGESTIONS</span><strong>Unavailable</strong><p>Suggestion review is not connected in this slice.</p></article>
+  </div>
+  <div class="approval-queue">
+    <div class="section-label"><span class="mono">NEEDS YOUR DECISION</span><span>Decide with the forgecell CLI</span></div>
+    <div id="review-queue"></div>
+  </div>
+  <div class="outcome-chart">
+    <div class="section-label"><span class="mono">MOLECULES BY LANE</span><span>Counts from the ledger inventory</span></div>
+    <div id="outcome-bars"></div>
+  </div>
+</section>
+
+<footer><span>Atom → Molecule · arranged by a Formula · inside your Lab</span><span id="footer-version"></span></footer>
+</main>
+
+<div id="cube-tooltip" role="tooltip" hidden></div>
+<dialog id="detail" aria-labelledby="dialog-title">
+  <div class="dialog-head"><h2 id="dialog-title"></h2><button type="button" class="text-button" id="close-dialog">Close ×</button></div>
+  <pre id="dialog-body"></pre>
+</dialog>
+<script src="/app.js"></script>
+</body>
+</html>
