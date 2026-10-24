@@ -14,7 +14,24 @@ Packages: macOS and Linux, arm64 and amd64. The bootstrap needs curl, standard s
 
 ## First run
 
-Ensure `~/.local/bin` is on PATH. The installer does not edit shell profiles. Inside the
+Ensure `~/.local/bin` is on PATH. The installer does not edit shell profiles. Then run
+the demo first:
+
+```sh
+forgecell demo
+```
+
+`forgecell demo` runs one complete Molecule against a built-in sample repository with a
+deterministic stub harness, printing each stage as it runs: intake and the plan, scope
+approval (auto-approved by the demo Formula's policy and labelled as such), coding, the
+independent checks and the protected regression, review, and a local delivery preview
+with the diff and the PR body that would be opened. It needs only Git and Go on PATH: no
+API key, no GitHub token, no `gh`, no network and no repository of your own, and it
+publishes nothing. The Lab is a temporary directory that is removed afterwards; add
+`--keep DIR` (an absent path or an empty directory you own) to keep it, then inspect the
+Molecule with `forgecell ledger MOLECULE_ID --lab DIR`.
+
+To work on a real repository, open it. Inside the
 repository you want Forgecell to work on, you may choose an explicit local Lab name
 and use the same path for every command:
 

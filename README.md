@@ -77,7 +77,22 @@ Checksums share the binaries’ GitHub HTTPS endpoint; they are not independent 
 
 </details>
 
-After installing, open the repository you want Forgecell to work on. Ticket execution
+After installing, run the demo first. It needs only Git and Go on PATH, and no API key,
+GitHub token or repository of your own:
+
+```sh
+forgecell demo
+```
+
+It runs one complete Molecule against a built-in sample repository with a deterministic
+stub harness, printing each stage as it runs: intake and the plan, scope approval
+(auto-approved inside the demo and labelled as such), coding, the independent checks and
+the protected regression, review, and a local delivery preview with the diff and the PR
+body that would be opened. It makes no model calls, never runs `gh` or touches the
+network, and publishes nothing. Add `--keep DIR` to keep its Lab for
+`forgecell ledger MOLECULE_ID --lab DIR`.
+
+Then open the repository you want Forgecell to work on. Ticket execution
 requires Git, authenticated GitHub CLI (`gh`), and an authenticated coding harness.
 You can choose an explicit Lab directory and use it throughout:
 
