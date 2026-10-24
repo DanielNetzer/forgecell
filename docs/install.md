@@ -88,6 +88,21 @@ Both temp locations are considered only when the Lab has a `ledgers/` directory.
 
 Ledgers, history and evidence files are never removed. A removed workspace stays registered as a Git worktree of its source until you run `git worktree prune` there.
 
+## Local UI
+
+```sh
+forgecell ui [--lab DIR] [--port N] [--no-open] [--demo]
+```
+
+`forgecell ui` serves a read-only view of a Lab in your browser: the Molecule grid with filters and search, the selected Molecule (intake, Formula snapshot SHA-256 and YAML, readiness revisions and events, harness attempts with model and usage as recorded) and each Atom's status, provenance and evidence list. It picks the Lab the same way as the other Lab commands (`--lab DIR`, `--lab-name NAME`, `FORGECELL_LAB` or the default Lab for the checkout).
+
+- It listens on `127.0.0.1` only, on a free port unless `--port N` is given, prints a `http://127.0.0.1:<port>/?t=<token>` URL and, unless `--no-open` is given, opens it through a private (0600) launch page in a Forgecell temp directory, so the token never appears in a process's arguments; the page is deleted at the first exchange, or when the UI stops. The URL is always printed too, for a browser that cannot read the page (such as a snap-confined one). Press Ctrl-C (SIGINT or SIGTERM) to stop it.
+- The token is new for every launch and single-use: the first visit exchanges it for an HttpOnly, SameSite=Strict cookie holding a separate random session secret, plus a second random value that the page keeps in that tab's `sessionStorage` and sends as an `X-Forgecell-Session` header on every API request (browsers send `127.0.0.1` cookies to every port, so the cookie alone is not enough). Any later visit to the URL gets 403; a new tab has no session and says so; restart `forgecell ui` for a new link. Requests without that cookie, with another `Host`, or from another origin get 403. Do not share the URL.
+- The UI only serves GET requests and only reads the Lab: it never writes, recovers, approves or takes locks. It never returns credentials, the environment, the Lab or workspace directory, or other absolute local paths: in free text the Lab, workspace, source and home directories become `<lab>`, `<workspace>`, `<source>` and `~`, any other path under a local root (`/Users`, `/home`, `/root`, `/private`, `/var`, `/tmp`, `/Volumes`, `/opt`, `/etc`, `/mnt`, `/srv`, `/System`, `/Library`, also as `file://`) becomes `[local path]`, and evidence paths are shown relative to the Lab.
+- Lanes: **Blocked** (status blocked or failed, even with a receipt), then **Needs my decision** (phase `scope-waiting` or `review-waiting`), then **Running** (status running or allocating, or an active phase), then **Finished · Draft published** (a `published` delivery receipt whose lifecycle is not CLOSED, UNKNOWN, MISSING or AMBIGUOUS). Anything else counts as **Other**, so the lane counts always add up to All. A prepared or committed receipt is shown as "Delivery in progress" with its exact state. Draft published never means merged.
+- Not wired in this version, and shown as Unavailable: analytics, cost per merged PR, logs, gates and approvals, Formula suggestions, evaluation and pause. Use the CLI for every decision.
+- `--demo` serves the design prototype's synthetic Molecules, labeled Sample data, and reads no Lab; it does not resolve the default Lab. The real mode never shows synthetic values.
+
 ## Contributors
 
 Core source may be used and distributed under MIT; retain its copyright and permission notice.
