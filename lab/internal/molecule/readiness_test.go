@@ -18,6 +18,7 @@ import (
 )
 
 func TestRunWaitsForExactReadinessApproval(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {
@@ -43,6 +44,7 @@ func TestRunWaitsForExactReadinessApproval(t *testing.T) {
 	}
 }
 func TestAmbiguousAnalysisNeverCodes(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		return readiness.Analysis{Summary: "Need behavior clarified", Questions: []readiness.Question{{Question: "Which error should callers receive?", Reason: "Ticket does not specify public behavior", Evidence: []string{"issue"}}}}, nil
@@ -59,6 +61,7 @@ func TestAmbiguousAnalysisNeverCodes(t *testing.T) {
 	}
 }
 func TestStaleIssueAndWorkspaceRefuseCoding(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"issue", "workspace", "formula"} {
 		t.Run(kind, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -93,6 +96,7 @@ func TestStaleIssueAndWorkspaceRefuseCoding(t *testing.T) {
 }
 
 func TestDefinitionOverlapIsReviewableButCannotStartCoding(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {
@@ -123,6 +127,7 @@ func TestDefinitionOverlapIsReviewableButCannotStartCoding(t *testing.T) {
 }
 
 func TestRepairCannotDropEarlierProtectedGate(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	analyze := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
@@ -143,7 +148,7 @@ func TestRepairCannotDropEarlierProtectedGate(t *testing.T) {
 	// A new check with a new identity must not substitute for the retained gate.
 	next.Analysis.Checks[0].ID = "replacement"
 	next.Analysis.Checks[0].ReviewedAcceptance = "human-check"
-	next.Analysis.Checks = append(next.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "human review fixture", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 1000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen external acceptance"})
+	next.Analysis.Checks = append(next.Analysis.Checks, readiness.Check{ID: "human-check", Category: "independent-acceptance", IndependentProvenance: "human review fixture", Argv: []string{"/bin/sh", "{input:human}"}, Dir: ".", TimeoutMS: 30000, Required: true, Definitions: []string{"human"}, Evidence: []string{"human"}, Reason: "Frozen external acceptance"})
 	r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, "")
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +163,7 @@ func TestRepairCannotDropEarlierProtectedGate(t *testing.T) {
 }
 
 func TestRepairHistoryRetainsGatesAfterRepairMarkerRemoval(t *testing.T) {
+	t.Parallel()
 	check := readiness.Check{ID: "baseline", Category: "regression", Required: true, Definitions: []string{"frozen"}}
 	before := readiness.Plan{Analysis: readiness.Analysis{Checks: []readiness.Check{check}}}
 	repaired := copyPlan(t, before)
@@ -172,6 +178,7 @@ func TestRepairHistoryRetainsGatesAfterRepairMarkerRemoval(t *testing.T) {
 }
 
 func TestInterruptedRecoveryPreservesWorkAndDoesNotReplay(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {
@@ -212,6 +219,7 @@ func TestInterruptedRecoveryPreservesWorkAndDoesNotReplay(t *testing.T) {
 }
 
 func TestAmendmentRetainsMoleculeAndRequiresNewApproval(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {
@@ -242,6 +250,7 @@ func TestAmendmentRetainsMoleculeAndRequiresNewApproval(t *testing.T) {
 }
 
 func TestOwnerlessLockIsNotRecoveredDuringApprovalStartup(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {
@@ -257,6 +266,7 @@ func TestOwnerlessLockIsNotRecoveredDuringApprovalStartup(t *testing.T) {
 }
 
 func TestAmendmentBindsArtifactInventory(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Artifacts = []readiness.ArtifactRoot{{Path: "output", CommandID: "check"}}
 	// Use the actual approved check id from the controlled analysis.
@@ -291,6 +301,7 @@ func TestAmendmentBindsArtifactInventory(t *testing.T) {
 }
 
 func TestHumanVerificationInputsJoinPendingPlanWithoutExecution(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	content := "independently reviewed acceptance contract"
 	sum := sha256.Sum256([]byte(content))
@@ -320,6 +331,7 @@ func TestHumanVerificationInputsJoinPendingPlanWithoutExecution(t *testing.T) {
 }
 
 func TestPendingChecksOnlyAmendmentDefersLiveRefreshToExactApproval(t *testing.T) {
+	t.Parallel()
 	for _, drift := range []string{"none", "issue", "formula", "binding", "origin", "workspace", "artifacts"} {
 		t.Run(drift, func(t *testing.T) {
 			o, r, counts := pendingChecksFixture(t)
@@ -346,7 +358,7 @@ func TestPendingChecksOnlyAmendmentDefersLiveRefreshToExactApproval(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = os.WriteFile(changed, append(raw, []byte("\n# changed\n")...), 0700); err != nil {
+				if err = writeStub(changed, append(raw, []byte("\n# changed\n")...), 0700); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -408,6 +420,7 @@ func TestPendingChecksOnlyAmendmentDefersLiveRefreshToExactApproval(t *testing.T
 }
 
 func TestSupplementalAnalysisRecordedBeforeInvocation(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	original := o.Analyze
 	calls := 0
@@ -466,6 +479,7 @@ func TestSupplementalAnalysisRecordedBeforeInvocation(t *testing.T) {
 }
 
 func TestSupplementalAnalysisExhaustedNeverCodes(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		return readiness.Analysis{Summary: "Missing content", EvidenceRequests: []readiness.EvidenceRequest{{Path: "missing/checker.sh", Reason: "Need behavior", Evidence: []string{"issue"}}}}, nil
@@ -483,6 +497,7 @@ func TestSupplementalAnalysisExhaustedNeverCodes(t *testing.T) {
 }
 
 func TestClarificationRevisionsRetainEvidenceWithoutCheckout(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	clear, reader := o.Analyze, o.ReadIssue
 	prepared := 0
@@ -554,6 +569,7 @@ func TestClarificationRevisionsRetainEvidenceWithoutCheckout(t *testing.T) {
 }
 
 func TestHistoricalAtomProvenanceStaysUnknown(t *testing.T) {
+	t.Parallel()
 	r := Record{LabDir: t.TempDir(), ID: "mol-history", Atoms: []Atom{{ID: "old", Type: "ship", Status: "done", Detail: "legacy detail"}}}
 	if err := save(r); err != nil {
 		t.Fatal(err)
@@ -577,6 +593,7 @@ func TestHistoricalAtomProvenanceStaysUnknown(t *testing.T) {
 }
 
 func TestAtomProvenanceSeparatesIntentAndObservedExecution(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	file := filepath.Join(o.LabDir, "formulas", "sample.yaml")
 	raw, err := os.ReadFile(file)
@@ -650,7 +667,7 @@ func TestAtomProvenanceSeparatesIntentAndObservedExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	guard := fmt.Sprintf("grep -q '\"resolvedSource\": \"bound-harness:custom\"' %q/ledgers/*.json || exit 23\n", o.LabDir)
-	if err = os.WriteFile(script, []byte(strings.Replace(string(body), "cat > request.json", guard+"cat > request.json", 1)), 0700); err != nil {
+	if err = writeStub(script, []byte(strings.Replace(string(body), "cat > request.json", guard+"cat > request.json", 1)), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)
@@ -684,6 +701,7 @@ func TestAtomProvenanceSeparatesIntentAndObservedExecution(t *testing.T) {
 	}
 }
 func TestAnalysisFailureRetainsIntentWithoutClaimingExternalAction(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		return readiness.Analysis{}, fmt.Errorf("synthetic failure")
@@ -698,6 +716,7 @@ func TestAnalysisFailureRetainsIntentWithoutClaimingExternalAction(t *testing.T)
 	}
 }
 func TestInterruptedAnalysisRetainsUnknownObservation(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	o.Analyze = func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		panic("interrupted")
@@ -738,9 +757,10 @@ func TestInterruptedAnalysisRetainsUnknownObservation(t *testing.T) {
 	}
 }
 func TestFailedProcessProvenanceSurvivesRecoveryAndAmendment(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700); err != nil {
+	if err := writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)
@@ -776,6 +796,7 @@ func TestFailedProcessProvenanceSurvivesRecoveryAndAmendment(t *testing.T) {
 	}
 }
 func TestChecksOnlyRetainsOriginalCodingActionIdentity(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
@@ -804,10 +825,11 @@ func TestChecksOnlyRetainsOriginalCodingActionIdentity(t *testing.T) {
 	}
 }
 func TestInterruptedHarnessRetainsProcessObservation(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	signal := filepath.Join(t.TempDir(), "started")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nsleep 10\n", signal)), 0700); err != nil {
+	if err := writeStub(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nsleep 10\n", signal)), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := Run(context.Background(), o)
@@ -845,6 +867,7 @@ func TestInterruptedHarnessRetainsProcessObservation(t *testing.T) {
 	}
 }
 func TestVerificationFailureRetainsIndependentEvidence(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	analyze := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {

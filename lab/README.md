@@ -580,6 +580,11 @@ go build ./cmd/forgecell
 The build writes `lab/forgecell`; `--help` lists the development CLI commands.
 For the wider project, see the [repository README](../README.md).
 
+For a quick local loop while you edit, run `go test -short ./...`. It skips the
+tests that drive the real Go toolchain (install builds, evaluation replay and
+base-flake re-runs) and the ones that wait out real process deadlines over
+5 s. CI runs the full suite without `-short`, so run it before you push.
+
 ### Gate scenario suite
 
 `TestGateScenarios` in `lab/internal/cli/gate_scenarios_test.go` is one table that

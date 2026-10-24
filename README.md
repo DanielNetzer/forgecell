@@ -132,6 +132,10 @@ go vet ./...
 go build -o bin/forgecell ./cmd/forgecell
 ```
 
+While you iterate, `go test -short ./...` is the quick loop: it skips the
+tests that run real Go builds or wait out long process deadlines. CI runs the
+full `go test ./...`.
+
 The target is **issue → production**. Current delivery stops at explicitly approved draft
 PRs; merge, deployment and production verification are not automated. Local UI work is
 still design exploration. Contributions should preserve clear ledgers, explicit gates

@@ -44,7 +44,12 @@ func TestReturnedProcessHasReconciliationEvidence(t *testing.T) {
 	}
 }
 
+// The descendant outlives the whole grace, so this is the one case that waits
+// it out; a short grace keeps the test fast without changing the verdict.
 func TestLiveManagedDescendantMakesResultUncertain(t *testing.T) {
+	previous := reconcileGrace
+	reconcileGrace = 500 * time.Millisecond
+	t.Cleanup(func() { reconcileGrace = previous })
 	r := Run(context.Background(), Options{Argv: []string{"/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & exit 0"}})
 	if r.OK || r.Reconciled || r.Uncertainty == "" {
 		t.Fatalf("live descendant accepted: %+v", r)

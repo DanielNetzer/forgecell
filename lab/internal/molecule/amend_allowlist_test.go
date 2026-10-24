@@ -11,6 +11,7 @@ import (
 // The coding allowlist is runtime-owned: an amendment payload can neither
 // smuggle extra entries nor drop the derived list.
 func TestAmendDerivesCodingAllowlist(t *testing.T) {
+	t.Parallel()
 	for name, submitted := range map[string][]string{
 		"smuggled": {"Read", "Bash(go run ./evil)"},
 		"dropped":  nil,

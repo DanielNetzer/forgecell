@@ -12,6 +12,7 @@ import (
 )
 
 func TestCodingNonCompletionSkipsVerification(t *testing.T) {
+	t.Parallel()
 	for _, output := range []string{`{"schemaVersion":"v1","outcome":"blocked","reason":"Go cache is unwritable","paths":[]}`, `Implementation blocked by unwritable Go cache`, `{"schemaVersion":"v1","outcome":"completed","reason":"done","paths":[],"extra":true}`} {
 		for _, edit := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/edit=%t", output, edit), func(t *testing.T) {
@@ -22,7 +23,7 @@ func TestCodingNonCompletionSkipsVerification(t *testing.T) {
 					body += "printf partial > code.txt\n"
 				}
 				body += "printf '%s' '" + output + "'\n"
-				if err := os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(body), 0700); err != nil {
+				if err := writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(body), 0700); err != nil {
 					t.Fatal(err)
 				}
 				r, err := Run(context.Background(), o)
@@ -68,6 +69,7 @@ func TestCodingNonCompletionSkipsVerification(t *testing.T) {
 }
 
 func TestCodingCompletionRequiresEditsOrExactNoChangePermission(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		outcome           string
 		allow, edit, want bool
@@ -83,7 +85,7 @@ func TestCodingCompletionRequiresEditsOrExactNoChangePermission(t *testing.T) {
 				body += "printf changed > code.txt\n"
 			}
 			body += "printf '%s' '" + output + "'\n"
-			os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(body), 0700)
+			writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(body), 0700)
 			analyze := o.Analyze
 			o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 				a, e := analyze(ctx, b, i, s)
@@ -124,8 +126,9 @@ func TestCodingCompletionRequiresEditsOrExactNoChangePermission(t *testing.T) {
 }
 
 func TestCodingScopeChangeRetainsWorkAndCannotStartChecks(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
-	os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf partial > code.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"scope-change\",\"reason\":\"helper needed\",\"paths\":[\"helper.go\"]}'\n"), 0700)
+	writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf partial > code.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"scope-change\",\"reason\":\"helper needed\",\"paths\":[\"helper.go\"]}'\n"), 0700)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)

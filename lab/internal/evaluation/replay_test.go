@@ -102,6 +102,7 @@ func prJSON(merge, base, ref, body, title string) string {
 }
 
 func TestReplayBuildsTaskFromMergedPR(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	f.git("checkout", "-q", "-b", "feature")
 	f.write("lab/calc/calc.go", valueGo(2))
@@ -275,6 +276,7 @@ func TestReplayBuildsTaskFromMergedPR(t *testing.T) {
 }
 
 func TestReplayBuildsFromSquashMerge(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	// A squash/rebase merge is a single-parent commit on the default branch.
 	f.write("lab/calc/calc.go", valueGo(2))
@@ -305,6 +307,7 @@ func TestReplayBuildsFromSquashMerge(t *testing.T) {
 }
 
 func TestReplayHandlesRenamedTestFile(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	// Base carries an existing test file so the rename has an old path to remove.
 	f.write("lab/calc/calc_test.go", valueTest(1))
@@ -351,6 +354,7 @@ func TestReplayHandlesRenamedTestFile(t *testing.T) {
 // test-compile initial failure: the PR is built, not skipped, and the task gains an interface
 // contract listing the new function's signature.
 func TestReplayBuildsTestCompileTask(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	f.git("checkout", "-q", "-b", "feature")
 	f.write("lab/calc/calc.go", valueGo(1)+"\nfunc Value2() int { return 2 }\n")
@@ -417,6 +421,7 @@ func TestReplayBuildsTestCompileTask(t *testing.T) {
 // TestReplaySkipsBuildErrorAtBase: the non-test package itself fails to build at base (not the
 // test), so the failure is a genuine build error and the PR is skipped.
 func TestReplaySkipsBuildErrorAtBase(t *testing.T) {
+	skipToolchainInShort(t)
 	f, _, def := newFixture(t)
 	// Make a base whose non-test calc.go does not compile.
 	f.write("lab/calc/calc.go", "package calc\n\nfunc Value() int { return missingSymbol }\n")
@@ -455,6 +460,7 @@ func TestReplaySkipsBuildErrorAtBase(t *testing.T) {
 // the package directory has no non-test Go files, which is a test-compile initial failure, so
 // the PR is built.
 func TestReplayBuildsBrandNewPackage(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	f.git("checkout", "-q", "-b", "feature")
 	f.write("lab/widget/widget.go", "package widget\n\nfunc New() int { return 7 }\n")
@@ -491,6 +497,7 @@ func TestReplayBuildsBrandNewPackage(t *testing.T) {
 // but its TestMain panics before any test runs. That is a runtime build-failure with no compile
 // errors, so it is not reclassified as test-compile and stays the "build failed at base" skip.
 func TestReplaySkipsTestMainPanicAtBase(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	f.git("checkout", "-q", "-b", "feature")
 	f.write("lab/calc/calc.go", valueGo(2))
@@ -528,6 +535,7 @@ func TestReplaySkipsTestMainPanicAtBase(t *testing.T) {
 // names only the predeclared `string`, which is dropped: no interface identifier is recognized and
 // the PR is skipped (prefix preserved, build detail appended).
 func TestReplaySkipsWhenOnlyPredeclaredIdents(t *testing.T) {
+	skipToolchainInShort(t)
 	f, _, def := newFixture(t)
 	f.write("lab/calc/calc.go", "package calc\n\nfunc F() int { return 0 }\n")
 	f.git("add", ".")
@@ -568,6 +576,7 @@ func TestReplaySkipsWhenOnlyPredeclaredIdents(t *testing.T) {
 // root — colliding with the package directory itself and failing spuriously; `go build -o
 // os.DevNull` discards the artifact, so the PR is correctly built rather than skipped.
 func TestReplayBuildsMainPackageTestCompile(t *testing.T) {
+	skipToolchainInShort(t)
 	f, _, def := newFixture(t)
 	f.write("lab/tool/main.go", "package main\n\nfunc main() {}\n")
 	f.git("add", ".")
@@ -610,6 +619,7 @@ func TestReplayBuildsMainPackageTestCompile(t *testing.T) {
 // error) while the new package has no non-test files. The per-package build classification must
 // treat the existing package's failure as a genuine build error and skip the PR.
 func TestReplaySkipsBrokenNonTestWithNewPackage(t *testing.T) {
+	skipToolchainInShort(t)
 	f, _, def := newFixture(t)
 	f.write("lab/calc/calc.go", "package calc\n\nfunc Value() int { return missingSymbol }\n")
 	f.git("add", ".")
@@ -649,6 +659,7 @@ func TestReplaySkipsBrokenNonTestWithNewPackage(t *testing.T) {
 // complete, the test-compile classification cannot be trusted, so the PR is skipped with a setup
 // error rather than built from an unreliable contract. The collector is injected to simulate it.
 func TestReplaySkipsWhenCompileCollectionIncomplete(t *testing.T) {
+	skipToolchainInShort(t)
 	orig := collectCompileErrors
 	collectCompileErrors = func(context.Context, string, []string, []string) (string, bool) { return "", true }
 	t.Cleanup(func() { collectCompileErrors = orig })
@@ -830,6 +841,7 @@ func TestReplaySkipsOverlongRunPattern(t *testing.T) {
 // reproduced by its own test and the merge-pass validation is not failed by the unrelated
 // one), and the generated acceptance fails on the base tree and passes on the merge tree.
 func TestReplayAcceptanceIgnoresUnrelatedFailingTest(t *testing.T) {
+	skipToolchainInShort(t)
 	f, _, def := newFixture(t)
 	f.write("lab/calc/unrelated_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestUnrelatedAlwaysFails(t *testing.T) { t.Fatal(\"unrelated\") }\n")
 	f.git("add", ".")
@@ -960,6 +972,7 @@ func TestReplaySkipsTooManyFiles(t *testing.T) {
 }
 
 func TestReplaySkipsInitialFailureNotReproduced(t *testing.T) {
+	skipToolchainInShort(t)
 	// The hidden test asserts Value()==1, which the base tree already satisfies.
 	f, base, def := newFixture(t)
 	f.git("checkout", "-q", "-b", "feature")
@@ -1117,6 +1130,16 @@ func TestObserveEnvIsScrubbedWithSharedCache(t *testing.T) {
 }
 
 // --- helpers ---
+
+// skipToolchainInShort skips a test that drives the real Go toolchain (replay's
+// base and merge runs, base-flake re-runs) under go test -short. The full
+// suite, as CI runs it, keeps them.
+func skipToolchainInShort(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("runs the real Go toolchain")
+	}
+}
 
 func assertSkip(t *testing.T, report ReplayReport, pr int, reason string) {
 	t.Helper()

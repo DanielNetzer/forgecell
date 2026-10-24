@@ -19,8 +19,16 @@ func constrainAnalysis(ctx context.Context, o ExecuteOptions, args []string) ([]
 	// Moving analysis outside the repository must not silently lose a project-
 	// scoped model/provider selection. Until that selection is explicitly bound,
 	// retain the binding and stop instead of falling back to another model.
-	return analysisControls(ctx, o, args, process.Run)
+	return analysisControls(ctx, o, args, analysisProbeRun)
 }
+
+// analysisProbeRun executes the runtime analysis control probes. Tests swap it.
+var analysisProbeRun = process.Run
+
+// AnalysisProbeTimeout bounds each analysis control probe. Production never
+// changes it; test binaries widen it once before any test runs, so a fake
+// provider's --help on a heavily loaded machine does not fail on this budget.
+var AnalysisProbeTimeout = 10 * time.Second
 
 // ProbeAnalysisControls reuses the runtime isolation checks without invoking a model.
 func ProbeAnalysisControls(ctx context.Context, id, executable, dir string, run func(context.Context, process.Options) process.Result) error {
@@ -52,7 +60,7 @@ func analysisControls(ctx context.Context, o ExecuteOptions, args []string, run 
 			}
 		}
 	}
-	help := run(ctx, process.Options{Argv: []string{o.Executable, "--help"}, Dir: o.Dir, Env: o.Env, Stdin: []byte{}, Timeout: 10 * time.Second, MaxOutputBytes: 64000})
+	help := run(ctx, process.Options{Argv: []string{o.Executable, "--help"}, Dir: o.Dir, Env: o.Env, Stdin: []byte{}, Timeout: AnalysisProbeTimeout, MaxOutputBytes: 64000})
 	if !help.OK {
 		return nil, fmt.Errorf("cannot verify %s analysis controls", o.ID)
 	}
@@ -74,7 +82,7 @@ func analysisControls(ctx context.Context, o ExecuteOptions, args []string, run 
 	if err != nil {
 		return nil, err
 	}
-	execHelp := run(ctx, process.Options{Argv: []string{o.Executable, "exec", "--help"}, Dir: o.Dir, Env: o.Env, Stdin: []byte{}, Timeout: 10 * time.Second, MaxOutputBytes: 64000})
+	execHelp := run(ctx, process.Options{Argv: []string{o.Executable, "exec", "--help"}, Dir: o.Dir, Env: o.Env, Stdin: []byte{}, Timeout: AnalysisProbeTimeout, MaxOutputBytes: 64000})
 	if !execHelp.OK {
 		return nil, fmt.Errorf("cannot verify Codex analysis controls from exec --help; analysis not started")
 	}
@@ -96,7 +104,7 @@ func analysisControls(ctx context.Context, o ExecuteOptions, args []string, run 
 	}
 	// Listing configured servers reads configuration only. Output may contain
 	// configuration values, so only server names are parsed and never logged.
-	listed := run(ctx, process.Options{Argv: []string{o.Executable, "--disable", "plugins", "--disable", "apps", "mcp", "list", "--json"}, Dir: o.Dir, Env: o.Env, Stdin: []byte{}, Timeout: 10 * time.Second, MaxOutputBytes: 1_000_000})
+	listed := run(ctx, process.Options{Argv: []string{o.Executable, "--disable", "plugins", "--disable", "apps", "mcp", "list", "--json"}, Dir: o.Dir, Env: o.Env, Stdin: []byte{}, Timeout: AnalysisProbeTimeout, MaxOutputBytes: 1_000_000})
 	if !listed.OK {
 		return nil, fmt.Errorf("cannot enumerate Codex MCP configuration; analysis not started")
 	}

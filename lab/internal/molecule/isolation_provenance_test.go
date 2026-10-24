@@ -30,7 +30,7 @@ func dotClaudeFixture(t *testing.T, committed map[string]string, providerShell s
 	if script == string(raw) && providerShell != "" {
 		t.Fatal("fixture provider was not rewritten")
 	}
-	if err = os.WriteFile(provider, []byte(script), 0o700); err != nil {
+	if err = writeStub(provider, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	commitToSource(t, o.SourceRoot, committed)
@@ -58,6 +58,7 @@ func commitToSource(t *testing.T, repo string, files map[string]string) string {
 }
 
 func TestClaudeCodingIsRefusedWhenTheBaseCarriesProjectClaudeConfiguration(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/pre.sh", ".claude/agents/reviewer.md"} {
 		t.Run(name, func(t *testing.T) {
 			o, argv := dotClaudeFixture(t, map[string]string{name: "{}"}, "")
@@ -107,6 +108,7 @@ func TestClaudeCodingIsRefusedWhenTheBaseCarriesProjectClaudeConfiguration(t *te
 }
 
 func TestClaudeCodingThatChangesDotClaudeFailsAsAScopeViolation(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		committed map[string]string
@@ -157,7 +159,7 @@ func TestClaudeCodingThatChangesDotClaudeFailsAsAScopeViolation(t *testing.T) {
 			t.Fatal(err)
 		}
 		body := strings.Replace(string(raw), "printf changed > code.txt\n", "printf changed > code.txt\nmkdir -p .claude && printf '{}' > .claude/settings.json\n", 1)
-		if err = os.WriteFile(script, []byte(body), 0o700); err != nil {
+		if err = writeStub(script, []byte(body), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		r, err := runApprovedFixture(t, o)
@@ -171,6 +173,7 @@ func TestClaudeCodingThatChangesDotClaudeFailsAsAScopeViolation(t *testing.T) {
 }
 
 func TestProjectSettingsAreFingerprintedFromTheBaseCommit(t *testing.T) {
+	t.Parallel()
 	o, argv := dotClaudeFixture(t, nil, "")
 	first := commitToSource(t, o.SourceRoot, nil)
 	second := commitToSource(t, o.SourceRoot, map[string]string{".claude/settings.json": `{"permissions":{"allow":["Bash(ls)"]}}`})
@@ -217,6 +220,7 @@ func TestProjectSettingsAreFingerprintedFromTheBaseCommit(t *testing.T) {
 }
 
 func TestStaleBindingNamesTheAdapterProtocolAndRefreshes(t *testing.T) {
+	t.Parallel()
 	o, argv := dotClaudeFixture(t, nil, "")
 	r, err := Run(context.Background(), o)
 	if err != nil || r.Readiness == nil {
@@ -261,6 +265,7 @@ func TestStaleBindingNamesTheAdapterProtocolAndRefreshes(t *testing.T) {
 }
 
 func TestRunLedgerRecordsModelAndIsolationOfTheCodingAttempt(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, pinned, model string }{
 		{"unpinned", "", harness.ModelUnpinned},
 		{"pinned", "model-fixture", "model-fixture"},
@@ -326,6 +331,7 @@ func TestRunLedgerRecordsModelAndIsolationOfTheCodingAttempt(t *testing.T) {
 }
 
 func TestHarnessAttemptRecordsModelAndIsolation(t *testing.T) {
+	t.Parallel()
 	claude := []string{"/forgecell", "__adapter", "claude-code", "/claude"}
 	for _, tc := range []struct {
 		name      string

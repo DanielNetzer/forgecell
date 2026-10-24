@@ -53,7 +53,7 @@ func loopFixture(t *testing.T, scopeAtom, reviewAtom, delay string) (Options, st
 	}
 	log := filepath.Join(t.TempDir(), "harness.log")
 	script := "#!/bin/sh\ncat > request.json\necho start >> '" + log + "'\n" + delay + "printf changed > code.txt\necho end >> '" + log + "'\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"Implemented and tested\",\"paths\":[]}'\n"
-	if err := os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(script), 0700); err != nil {
+	if err := writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	return o, log
@@ -209,16 +209,17 @@ func loopTranscripts(t *testing.T, remotes ...string) (ghLog, gitLog string) {
 	if err = os.Mkdir(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\necho \"$*\" >> '"+ghLog+"'\ncat '"+page+"'\n"), 0700); err != nil {
+	if err = writeStub(filepath.Join(bin, "gh"), []byte("#!/bin/sh\necho \"$*\" >> '"+ghLog+"'\ncat '"+page+"'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho \"$*\" >> '"+gitLog+"'\nexec '"+realGit+"' \"$@\"\n"), 0700); err != nil {
+	if err = writeStub(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho \"$*\" >> '"+gitLog+"'\nexec '"+realGit+"' \"$@\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	return ghLog, gitLog
 }
 
+// Serial: loopTranscripts sets PATH with t.Setenv.
 func TestLoopDrainsThreeIssuesOldestFirstWithConcurrencyTwo(t *testing.T) {
 	o, harnessLog := loopFixture(t, policyScopeAtom, policyReviewAtom, "")
 	ghLog, gitLog := loopTranscripts(t, loopRemote(13, "2026-01-03T00:00:00Z"), loopRemote(12, "2026-01-02T00:00:00Z"), loopRemote(11, "2026-01-01T00:00:00Z"))
@@ -361,6 +362,7 @@ func TestLoopDrainsThreeIssuesOldestFirstWithConcurrencyTwo(t *testing.T) {
 }
 
 func TestLoopPolicyDecisionRecordsIdentityAndEvidence(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	report := loopOnce(t, o, loopFixedList(loopOpen(12, 0)))
 	item := loopItem(t, report.Passes[0], 12)
@@ -404,6 +406,7 @@ func TestLoopPolicyDecisionRecordsIdentityAndEvidence(t *testing.T) {
 }
 
 func TestLoopNeverApprovesAHumanGate(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, scope string }{
 		{"no mode", defaultScopeAtom},
 		{"mode human", "{id: scope, type: gate, purpose: scope, mode: human}"},
@@ -439,6 +442,7 @@ func TestLoopNeverApprovesAHumanGate(t *testing.T) {
 }
 
 func TestLoopQuestionAtIntakeStopsOnlyThatMolecule(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	analyze := o.Analyze
 	o.Analyze = func(c context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
@@ -473,6 +477,7 @@ func TestLoopQuestionAtIntakeStopsOnlyThatMolecule(t *testing.T) {
 }
 
 func TestLoopQuestionAtScopeGateIsDeclinedAndOthersStillAdvance(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	asked := loopMolecule(t, o, 11)
 	loopMolecule(t, o, 12)
@@ -497,6 +502,7 @@ func TestLoopQuestionAtScopeGateIsDeclinedAndOthersStillAdvance(t *testing.T) {
 }
 
 func TestLoopReportsAnApprovalThatCouldNotBeApplied(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	var mu sync.Mutex
 	reads := 0
@@ -525,9 +531,10 @@ func TestLoopReportsAnApprovalThatCouldNotBeApplied(t *testing.T) {
 }
 
 func TestLoopCountsFailedAndBlockedMoleculesButNotWaiting(t *testing.T) {
+	t.Parallel()
 	t.Run("failed coding", func(t *testing.T) {
 		o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
-		if err := os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf failed >&2\nexit 7\n"), 0700); err != nil {
+		if err := writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf failed >&2\nexit 7\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
 		report := loopOnce(t, o, loopFixedList(loopOpen(12, 0)))
@@ -577,6 +584,7 @@ func TestLoopCountsFailedAndBlockedMoleculesButNotWaiting(t *testing.T) {
 }
 
 func TestLoopNeverStartsAnIssueThatAlreadyHasAMolecule(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, defaultScopeAtom, defaultReviewAtom, "")
 	existing := loopMolecule(t, o, 12)
 	analyses := countAnalysis(&o)
@@ -591,6 +599,7 @@ func TestLoopNeverStartsAnIssueThatAlreadyHasAMolecule(t *testing.T) {
 }
 
 func TestLoopFailsWhenTheLedgerInventoryIsIncomplete(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, file, cause string
 		prepare           func(t *testing.T, path string)
@@ -636,6 +645,7 @@ func TestLoopFailsWhenTheLedgerInventoryIsIncomplete(t *testing.T) {
 }
 
 func TestLoopRestartDoesNotDuplicateCompletedWork(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	analyses := countAnalysis(&o)
 	list := loopFixedList(loopOpen(12, 0))
@@ -653,6 +663,7 @@ func TestLoopRestartDoesNotDuplicateCompletedWork(t *testing.T) {
 }
 
 func TestLoopRestartMidAttemptDoesNotReinvokeTheHarness(t *testing.T) {
+	t.Parallel()
 	for _, status := range []string{"running", "allocating"} {
 		t.Run(status, func(t *testing.T) {
 			o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
@@ -693,6 +704,7 @@ func TestLoopRestartMidAttemptDoesNotReinvokeTheHarness(t *testing.T) {
 }
 
 func TestLoopSkipsAMoleculeWhoseLockIsHeld(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := loopMolecule(t, o, 12)
 	list := loopFixedList(loopOpen(12, 0))
@@ -790,6 +802,7 @@ func loopBounded(t *testing.T) context.Context {
 }
 
 func TestLoopTwoConcurrentLoopsInvokeTheHarnessOnce(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := loopMolecule(t, o, 12)
 	list := loopFixedList(loopOpen(12, 0))
@@ -824,6 +837,7 @@ func TestLoopTwoConcurrentLoopsInvokeTheHarnessOnce(t *testing.T) {
 }
 
 func TestLoopOverlappingLoopDuringIntakeCreatesNoSecondMolecule(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	analyses := countAnalysis(&o)
 	gate := newLoopGate()
@@ -861,6 +875,7 @@ func TestLoopOverlappingLoopDuringIntakeCreatesNoSecondMolecule(t *testing.T) {
 // loop's inventory therefore still shows the Issue untouched, which is the
 // window a pass-start inventory alone cannot close. A fake git blocks on named
 // pipes to hold that point without sleeping.
+// Serial: puts a fake git on PATH with t.Setenv.
 func TestLoopStartWindowIsSerialisedPerIssue(t *testing.T) {
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	analyses := countAnalysis(&o)
@@ -880,7 +895,7 @@ func TestLoopStartWindowIsSerialisedPerIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := "#!/bin/sh\nif mkdir '" + gate + "' 2>/dev/null; then\n  echo entered > '" + entered + "'\n  read line < '" + release + "'\nfi\nexec '" + realGit + "' \"$@\"\n"
-	if err = os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+	if err = writeStub(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
@@ -941,6 +956,7 @@ func TestLoopStartWindowIsSerialisedPerIssue(t *testing.T) {
 }
 
 func TestLoopRereadsTheLedgersUnderTheStartLockBeforeStarting(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, defaultScopeAtom, defaultReviewAtom, "")
 	loaded, err := formula.Load(o.LabDir, o.FormulaID)
 	if err != nil {
@@ -963,6 +979,7 @@ func TestLoopRereadsTheLedgersUnderTheStartLockBeforeStarting(t *testing.T) {
 }
 
 func TestLoopSkipsAnIssueWhoseStartLockIsHeld(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	analyses := countAnalysis(&o)
 	list := loopFixedList(loopOpen(12, 0))
@@ -983,6 +1000,7 @@ func TestLoopSkipsAnIssueWhoseStartLockIsHeld(t *testing.T) {
 	}
 }
 
+// Serial: helper-process entry point that reads its environment.
 func TestLoopLockHolderHelper(t *testing.T) {
 	lab, id := os.Getenv("LOOP_LOCK_LAB"), os.Getenv("LOOP_LOCK_ID")
 	if lab == "" {
@@ -996,6 +1014,7 @@ func TestLoopLockHolderHelper(t *testing.T) {
 	time.Sleep(time.Minute)
 }
 
+// Serial: launches TestLoopLockHolderHelper as a helper process.
 func TestLoopLockIsReleasedWhenItsHolderCrashes(t *testing.T) {
 	lab := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(lab, "ledgers"), 0700); err != nil {
@@ -1033,6 +1052,7 @@ func TestLoopLockIsReleasedWhenItsHolderCrashes(t *testing.T) {
 }
 
 func TestLoopSelectionRestrictsWhichIssuesStart(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	analyses := countAnalysis(&o)
 	selector, err := intake.ParseSelector("label:bug")
@@ -1055,6 +1075,7 @@ func TestLoopSelectionRestrictsWhichIssuesStart(t *testing.T) {
 }
 
 func TestLoopRepeatsPassesUntilNothingProgresses(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	calls := 0
 	sets := [][]intake.OpenIssue{{loopOpen(11, 0)}, {loopOpen(11, 0), loopOpen(12, 1)}, {loopOpen(11, 0), loopOpen(12, 1)}}
@@ -1076,6 +1097,7 @@ func TestLoopRepeatsPassesUntilNothingProgresses(t *testing.T) {
 }
 
 func TestLoopFailuresBeforeAnyEffectAreErrors(t *testing.T) {
+	t.Parallel()
 	t.Run("no approved Formula", func(t *testing.T) {
 		o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 		if err := os.Remove(filepath.Join(o.LabDir, "lab.json")); err != nil {

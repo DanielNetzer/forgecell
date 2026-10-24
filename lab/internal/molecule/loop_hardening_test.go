@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 )
 
 func TestHardeningIssueLockNamesDoNotCollide(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	one, err := lockIssue(lab, "a-b/c", 7)
 	if err != nil {
@@ -54,7 +56,51 @@ func TestHardeningIssueLockNamesDoNotCollide(t *testing.T) {
 	}
 }
 
+// A child forked while a lock is held keeps a copy of its descriptor until it
+// execs. A dup stands in for that copy, so the test needs no timing.
+func TestHardeningReleasedLockIsFreeWhileAnInheritedCopyIsOpen(t *testing.T) {
+	t.Parallel()
+	lab := t.TempDir()
+	release, err := lockMolecule(lab, "mol-1-inherited")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want syscall.Stat_t
+	if err = syscall.Stat(filepath.Join(lab, "ledgers", "mol-1-inherited"+loopLockSuffix), &want); err != nil {
+		t.Fatal(err)
+	}
+	// The holder's descriptor is the only one open on this lock file.
+	copied := -1
+	for fd := 3; fd < 1<<16 && copied < 0; fd++ {
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) != nil || st.Dev != want.Dev || st.Ino != want.Ino {
+			continue
+		}
+		syscall.ForkLock.RLock()
+		if dup, err := syscall.Dup(fd); err == nil {
+			syscall.CloseOnExec(dup)
+			if syscall.Fstat(dup, &st) == nil && st.Dev == want.Dev && st.Ino == want.Ino {
+				copied = dup
+			} else {
+				syscall.Close(dup)
+			}
+		}
+		syscall.ForkLock.RUnlock()
+	}
+	if copied < 0 {
+		t.Fatal("the holder's descriptor was not found")
+	}
+	defer syscall.Close(copied)
+	release()
+	again, err := lockMolecule(lab, "mol-1-inherited")
+	if err != nil {
+		t.Fatalf("an inherited descriptor kept the released lock: %v", err)
+	}
+	again()
+}
+
 func TestHardeningLoopPinsTheApprovalToThePlansFrozenBase(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	unmoved := loopMolecule(t, o, 11)
 	r := loopMolecule(t, o, 12)
@@ -97,6 +143,7 @@ func TestHardeningLoopPinsTheApprovalToThePlansFrozenBase(t *testing.T) {
 }
 
 func TestHardeningLoopRefusesAPlanWhoseBaseIsNotTheWorkspaceBase(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := loopMolecule(t, o, 12)
 	ledger := filepath.Join(o.LabDir, "ledgers", r.ID+".json")
@@ -123,6 +170,7 @@ func TestHardeningLoopRefusesAPlanWhoseBaseIsNotTheWorkspaceBase(t *testing.T) {
 }
 
 func TestHardeningLoopReportsAHeldApprovalLockAsNonProgressAndNeverRemovesIt(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := loopMolecule(t, o, 12)
 	lock := filepath.Join(o.LabDir, "ledgers", r.ID+".lock")
@@ -168,6 +216,7 @@ func TestHardeningLoopReportsAHeldApprovalLockAsNonProgressAndNeverRemovesIt(t *
 }
 
 func TestHardeningWaitingAtAHumanGateAndASkippedLockAreNotNonProgress(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, defaultScopeAtom, defaultReviewAtom, "")
 	loopMolecule(t, o, 11)
 	locked := loopMolecule(t, o, 12)
@@ -189,6 +238,7 @@ func TestHardeningWaitingAtAHumanGateAndASkippedLockAreNotNonProgress(t *testing
 }
 
 func TestHardeningNonProgressCountsOnlyTheFinalPass(t *testing.T) {
+	t.Parallel()
 	report := LoopReport{Passes: []LoopPass{
 		{Items: []LoopItem{{State: LoopStalled}, {State: LoopWaiting}}},
 		{Items: []LoopItem{{State: LoopWaiting}}},
@@ -210,6 +260,7 @@ func TestHardeningNonProgressCountsOnlyTheFinalPass(t *testing.T) {
 }
 
 func TestHardeningAmendAndRecoverRefuseWhileTheMoleculeFlockIsHeld(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, defaultScopeAtom, defaultReviewAtom, "")
 	r := loopMolecule(t, o, 12)
 	digest := r.Readiness.Plans[0].Digest
@@ -263,6 +314,7 @@ func TestHardeningAmendAndRecoverRefuseWhileTheMoleculeFlockIsHeld(t *testing.T)
 }
 
 func TestHardeningManualApprovalTakesTheMoleculeFlockBeforeTheLockDirectory(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, defaultScopeAtom, defaultReviewAtom, "")
 	r := loopMolecule(t, o, 13)
 	o.Approve = r.Readiness.Plans[0].Digest
@@ -332,6 +384,7 @@ func reapprove(t *testing.T, lab, id string, edit func(string) string) {
 }
 
 func TestHardeningLoopReloadsTheFormulaEveryPass(t *testing.T) {
+	t.Parallel()
 	o, harnessLog := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	calls := 0
 	list := func(context.Context, string) (intake.OpenIssues, error) {
@@ -361,6 +414,7 @@ func TestHardeningLoopReloadsTheFormulaEveryPass(t *testing.T) {
 }
 
 func TestHardeningLoopStopsBeforeAnyWorkWhenTheFormulaCannotBeReloaded(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		change func(t *testing.T, o Options)
 		want   string
@@ -416,6 +470,7 @@ func crashedLedger(t *testing.T, o Options, number int64, status string, planned
 }
 
 func TestHardeningCrashedStartLedgerIsReportedAsStalledNotRecoverable(t *testing.T) {
+	t.Parallel()
 	for _, status := range []string{"running", "allocating"} {
 		t.Run(status, func(t *testing.T) {
 			o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
@@ -453,6 +508,7 @@ func TestHardeningCrashedStartLedgerIsReportedAsStalledNotRecoverable(t *testing
 }
 
 func TestHardeningLedgerWrittenWithinTheAnalysisTimeoutIsStillActive(t *testing.T) {
+	t.Parallel()
 	for _, status := range []string{"running", "allocating"} {
 		for _, planned := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s planned=%t", status, planned), func(t *testing.T) {
@@ -481,6 +537,7 @@ func deadProcessID(t *testing.T) int {
 }
 
 func TestHardeningInterruptedApprovalIsStalledOnlyWithoutALiveOwner(t *testing.T) {
+	t.Parallel()
 	old := time.Now().Add(-24 * time.Hour)
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	r := crashedLedger(t, o, 12, "running", true, old)
@@ -536,6 +593,7 @@ func TestHardeningInterruptedApprovalIsStalledOnlyWithoutALiveOwner(t *testing.T
 }
 
 func TestHardeningLoopLockFilesDoNotCountTowardTheInventoryCap(t *testing.T) {
+	t.Parallel()
 	o, _ := loopFixture(t, defaultScopeAtom, defaultReviewAtom, "")
 	r := loopMolecule(t, o, 12)
 	dir := filepath.Join(o.LabDir, "ledgers")
@@ -555,6 +613,7 @@ func TestHardeningLoopLockFilesDoNotCountTowardTheInventoryCap(t *testing.T) {
 }
 
 func TestHardeningTheEntryCapStillBoundsEverythingElse(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	dir := filepath.Join(lab, "ledgers")
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -572,6 +631,7 @@ func TestHardeningTheEntryCapStillBoundsEverythingElse(t *testing.T) {
 }
 
 func TestHardeningTruncatedListingUnderASelectorStartsNothing(t *testing.T) {
+	t.Parallel()
 	for _, input := range []string{"label:bug", "milestone:v1"} {
 		t.Run(input, func(t *testing.T) {
 			o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
@@ -595,6 +655,7 @@ func TestHardeningTruncatedListingUnderASelectorStartsNothing(t *testing.T) {
 }
 
 func TestHardeningOneLineStripsTerminalControlText(t *testing.T) {
+	t.Parallel()
 	override := string(rune(0x202e))
 	got := oneLine("a\x1b[31mred\x1b[0m\nb\x07" + override + "c\x1b]0;title\x07d")
 	if got != "ared b cd" {
@@ -605,6 +666,7 @@ func TestHardeningOneLineStripsTerminalControlText(t *testing.T) {
 	}
 }
 
+// Serial: loopTranscripts sets PATH with t.Setenv.
 func TestHardeningDefaultListerCarriesTheSelector(t *testing.T) {
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
 	ghLog, _ := loopTranscripts(t)

@@ -360,12 +360,14 @@ func TestAnalysisWrapperTimeoutReconcilesDescendants(t *testing.T) {
 		t.Skip("process groups are Unix-only")
 	}
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	fx := newWrapperFixture(t, fmt.Sprintf("cat >/dev/null\nsleep 60 &\necho $! > %q\nwait\n", pidFile))
+	// The pid file appears atomically once the descendant runs, and the deadline
+	// expires then rather than after wrapperStallTimeout has been waited out.
+	fx := newWrapperFixture(t, fmt.Sprintf("cat >/dev/null\nsleep 60 &\necho $! > %q.tmp\nmv %q.tmp %q\nwait\n", pidFile, pidFile, pidFile))
 	d := fx.approve()
 	if err := d.Err(); err != nil {
 		t.Fatal(err)
 	}
-	result := InvokeAnalysisWrapper(context.Background(), fx.lab, d, analysisRequestFixture(), wrapperStallTimeout)
+	result := InvokeAnalysisWrapper(expireOnceExists(t, pidFile), fx.lab, d, analysisRequestFixture(), wrapperStallTimeout)
 	if result.OK || !result.TimedOut {
 		t.Fatalf("a timed-out wrapper must fail intake: %+v", result)
 	}

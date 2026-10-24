@@ -134,24 +134,51 @@ func ownedLabTemp(dir string) (bool, error) {
 	return err == nil && marker.Mode().IsRegular(), nil
 }
 
+// LabGoTempName is the stable GOTMPDIR every view of a Lab shares, directly under its
+// check TMPDIR. The prune treats it as a container: it is kept, and its own children are
+// pruned instead.
+const LabGoTempName = "gotmp"
+
 // StaleLabTempEntries lists the entries directly under dir, a Lab's stable check TMPDIR,
-// that belong to the current user and were last modified more than StaleAge before now.
-// Go's per-run work directories go under each view's own GOTMPDIR, so what is left here
-// is what tests leaked. Only a dir LabTempDir created (it holds LabTempMarker, which is
-// never listed) has entries; a missing dir or one without the marker has none, and a
-// symbolic link is refused.
+// that belong to the current user and were last modified more than StaleAge before now:
+// what tests and killed runs leaked. The shared GOTMPDIR dir/LabGoTempName is never
+// listed itself, whatever its age; when it is a real directory of the user, its direct
+// children (go-build* work directories and test temp directories) are listed by the same
+// rules. Only a dir LabTempDir created (it holds LabTempMarker, which is never listed) has
+// entries; a missing dir or one without the marker has none, and a symbolic link is
+// refused.
 func StaleLabTempEntries(dir string, now time.Time) ([]string, error) {
 	owned, err := ownedLabTemp(dir)
 	if err != nil || !owned {
 		return nil, err
 	}
+	stale, err := staleChildren(dir, now, func(name string) bool { return name == LabTempMarker || name == LabGoTempName })
+	if err != nil {
+		return nil, err
+	}
+	gotmp := filepath.Join(dir, LabGoTempName)
+	info, err := os.Lstat(gotmp)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ownedByUser(gotmp, info) {
+		return stale, nil
+	}
+	children, err := staleChildren(gotmp, now, func(string) bool { return false })
+	if err != nil {
+		return nil, err
+	}
+	return append(stale, children...), nil
+}
+
+// staleChildren lists the entries directly under dir, except those skip names, that
+// belong to the current user and were last modified more than StaleAge before now.
+// Entries are inspected with Lstat, so a symbolic link is listed as itself, never followed.
+func staleChildren(dir string, now time.Time, skip func(name string) bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
 	stale := []string{}
 	for _, e := range entries {
-		if e.Name() == LabTempMarker {
+		if skip(e.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())

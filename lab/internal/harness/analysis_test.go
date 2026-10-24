@@ -60,14 +60,29 @@ func TestCustomAnalysisDoesNotInvokeCodingCommand(t *testing.T) {
 func TestCodexAnalysisDisablesConfiguredServers(t *testing.T) {
 	dir := t.TempDir()
 	provider := filepath.Join(dir, "provider")
-	script := `#!/bin/sh
-if [ "$1" = "--help" ]; then printf '%s' '--config -c --disable'; exit 0; fi
-if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then printf '%s' '--sandbox --ephemeral --color --output-last-message --output-schema --strict-config --skip-git-repo-check --ignore-rules'; exit 0; fi
-if [ "$5" = "mcp" ]; then printf '[{"name":"deploy","command":"secret config must not enter evidence"},{"name":"with-dash"}]'; exit 0; fi
-exit 99
-`
-	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
-		t.Fatal(err)
+	// The provider is answered in process, so no freshly written script is
+	// forked and exec never meets a "text file busy" handle.
+	previous := analysisProbeRun
+	t.Cleanup(func() { analysisProbeRun = previous })
+	analysisProbeRun = func(_ context.Context, o process.Options) process.Result {
+		if len(o.Argv) == 0 || o.Argv[0] != provider {
+			t.Fatalf("probed another executable: %v", o.Argv)
+		}
+		arg := func(i int) string {
+			if i < len(o.Argv) {
+				return o.Argv[i]
+			}
+			return ""
+		}
+		switch {
+		case arg(1) == "--help":
+			return process.Result{OK: true, Stdout: "--config -c --disable"}
+		case arg(1) == "exec" && arg(2) == "--help":
+			return process.Result{OK: true, Stdout: "--sandbox --ephemeral --color --output-last-message --output-schema --strict-config --skip-git-repo-check --ignore-rules"}
+		case arg(5) == "mcp":
+			return process.Result{OK: true, Stdout: `[{"name":"deploy","command":"secret config must not enter evidence"},{"name":"with-dash"}]`}
+		}
+		return process.Result{Code: 99}
 	}
 	call, err := BuildInvocation("codex", map[string]any{"kind": "ticket-analysis"}, "/tmp/result")
 	if err != nil {
@@ -158,13 +173,16 @@ func TestCodexAnalysisRejectsWrongHelpEvidence(t *testing.T) {
 }
 
 func TestCodexAnalysisUsesBoundedHelpSurfaces(t *testing.T) {
+	if productionAnalysisProbeTimeout <= 0 || productionAnalysisProbeTimeout > 10*time.Second {
+		t.Fatalf("production analysis probe budget %v is unbounded", productionAnalysisProbeTimeout)
+	}
 	for _, failed := range []string{"", "--help", "exec --help"} {
 		t.Run("failed="+failed, func(t *testing.T) {
 			var calls []string
 			run := func(_ context.Context, o process.Options) process.Result {
 				args := strings.Join(o.Argv[1:], " ")
 				calls = append(calls, args)
-				if o.Timeout <= 0 || o.Timeout > 10*time.Second || o.MaxOutputBytes <= 0 || o.MaxOutputBytes > 1_000_000 || len(o.Stdin) != 0 {
+				if o.Timeout != AnalysisProbeTimeout || o.MaxOutputBytes <= 0 || o.MaxOutputBytes > 1_000_000 || len(o.Stdin) != 0 {
 					t.Fatalf("unbounded probe: %+v", o)
 				}
 				if args == failed {

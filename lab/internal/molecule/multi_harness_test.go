@@ -25,12 +25,13 @@ func executedBindings(r Record, atomID string) map[string]string {
 }
 
 func TestMultiHarnessRoles(t *testing.T) {
+	t.Parallel()
 	o, repo := fixture(t)
 	root := filepath.Dir(repo)
 	marker := func(name string) string { return filepath.Join(root, name+".calls") }
 	script := func(name, body string) string {
 		path := filepath.Join(root, name)
-		os.WriteFile(path, []byte("#!/bin/sh\ncat > request.json\necho run >> "+marker(name)+"\n"+body), 0700)
+		writeStub(path, []byte("#!/bin/sh\ncat > request.json\necho run >> "+marker(name)+"\n"+body), 0700)
 		return path
 	}
 	completed := "printf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"done\",\"paths\":[]}'\n"
@@ -84,6 +85,7 @@ func TestMultiHarnessRoles(t *testing.T) {
 }
 
 func TestMultiHarnessRolesSingleBindingRecordsDefault(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
@@ -107,6 +109,7 @@ func TestMultiHarnessRolesSingleBindingRecordsDefault(t *testing.T) {
 }
 
 func TestMultiHarnessRolesLegacyLedgerActionsRoundTrip(t *testing.T) {
+	t.Parallel()
 	legacy := `{"attemptId":"analysis-1","plannedAction":"analyze-ticket","startedAt":"2026-01-01T00:00:00Z"}`
 	var action AtomAction
 	if err := json.Unmarshal([]byte(legacy), &action); err != nil {
@@ -119,6 +122,7 @@ func TestMultiHarnessRolesLegacyLedgerActionsRoundTrip(t *testing.T) {
 }
 
 func TestMultiHarnessRolesRejectsConflictingAtomBinding(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	recipe := "schemaVersion: v0\nkind: formula\nid: sample\nintake: {source: github-issues, repo: acme/widgets}\nharness:\n  binding: custom\n  command: [/bin/true]\nharnesses:\n  coding: {binding: coder, command: [/bin/true]}\natoms:\n  - {id: intake, type: intake}\n  - {id: scope, type: gate, purpose: scope}\n  - {id: harness, type: harness, binding: other}\n  - {id: check, type: check}\n  - {id: gate, type: gate, purpose: review}\n  - {id: ship, type: ship}\n  - {id: document, type: document}\n"
 	approveFixture(t, o.LabDir, recipe, "conflict")

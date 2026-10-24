@@ -7,6 +7,7 @@ import (
 )
 
 func TestTryLockForCleanupReportsAHeldLock(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	held, err := lockMolecule(lab, "mol-1")
 	if err != nil {
@@ -31,6 +32,7 @@ func TestTryLockForCleanupReportsAHeldLock(t *testing.T) {
 }
 
 func TestHasRecoveryProposal(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	if has, err := HasRecoveryProposal(lab, "mol-1"); err != nil || has {
 		t.Fatalf("has=%v err=%v; want no proposal", has, err)

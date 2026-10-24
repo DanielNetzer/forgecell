@@ -32,6 +32,7 @@ func codingRoleAmendment(t *testing.T, defaults, coding string, timeoutMS int) e
 }
 
 func TestAmendTimeoutCeilingFollowsTheCodingRole(t *testing.T) {
+	t.Parallel()
 	const defaults = "  timeoutMs: 1000\n  maxTimeoutMs: 2000\n"
 	for _, c := range []struct {
 		name, coding string

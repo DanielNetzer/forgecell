@@ -14,6 +14,7 @@ import (
 
 // Corruption must be rejected before approval consumption or any ledger write.
 func TestExecutionIdentityRejectsWithoutMutation(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"yaml", "coherent-snapshot", "hash", "formula-id", "extra", "missing", "duplicate", "type"} {
 		for _, operation := range []string{"resume", "amend", "recover"} {
 			t.Run(kind+"/"+operation, func(t *testing.T) {
@@ -25,7 +26,7 @@ func TestExecutionIdentityRejectsWithoutMutation(t *testing.T) {
 					t.Fatal(e)
 				}
 				body = append(body, []byte(fmt.Sprintf("echo call >> %q\n", calls))...)
-				if e = os.WriteFile(script, body, 0700); e != nil {
+				if e = writeStub(script, body, 0700); e != nil {
 					t.Fatal(e)
 				}
 				r, err := Run(context.Background(), o)
@@ -134,11 +135,12 @@ func namedAtom(t *testing.T, r Record, id string) Atom {
 }
 
 func TestRoleExecutionLifecycle(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"ordinary", "amend", "recovery-checks-only", "failed-adoption"} {
 		t.Run(mode, func(t *testing.T) {
 			o := roleFixture(t)
 			if mode == "failed-adoption" {
-				if err := os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat > request.json\nprintf changed > code.txt\nprintf partial\nexit 7\n"), 0700); err != nil {
+				if err := writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat > request.json\nprintf changed > code.txt\nprintf partial\nexit 7\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
 			}

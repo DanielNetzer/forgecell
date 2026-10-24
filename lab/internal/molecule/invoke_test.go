@@ -19,6 +19,7 @@ import (
 )
 
 func TestBoundAdapterTimeoutStopsProviderDescendants(t *testing.T) {
+	t.Parallel()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +29,7 @@ func TestBoundAdapterTimeoutStopsProviderDescendants(t *testing.T) {
 	// The descendant records its own pid and then sleeps far past the test, so only
 	// a group stop can end it.
 	script := "#!/bin/sh\nsh -c 'printf %s $$ > pid.tmp && mv pid.tmp pid; exec sleep 60' &\nwait\n"
-	if err = os.WriteFile(provider, []byte(script), 0700); err != nil {
+	if err = writeStub(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	// Wait for the descendant to exist before expiring the parent deadline.
@@ -81,6 +82,7 @@ func TestBoundAdapterTimeoutStopsProviderDescendants(t *testing.T) {
 }
 
 func TestNativeBindingRetainsBlockedContractAndTransport(t *testing.T) {
+	t.Parallel()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +90,7 @@ func TestNativeBindingRetainsBlockedContractAndTransport(t *testing.T) {
 	dir := t.TempDir()
 	provider := filepath.Join(dir, "provider")
 	report := `{"schemaVersion":"v1","outcome":"blocked","reason":"cache denied","paths":[]}`
-	if err = os.WriteFile(provider, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"structured_output\":"+report+"}'\n"), 0700); err != nil {
+	if err = writeStub(provider, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"structured_output\":"+report+"}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	result := invokeHarness(context.Background(), []string{exe, "__adapter", "claude-code", provider}, dir, 30*time.Second, map[string]any{"kind": "molecule"})
@@ -117,6 +119,7 @@ func echoedAllowedTools(t *testing.T, file string) string {
 }
 
 func TestNativeBindingPassesAllowlistToClaudeArgv(t *testing.T) {
+	t.Parallel()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +127,7 @@ func TestNativeBindingPassesAllowlistToClaudeArgv(t *testing.T) {
 	dir := t.TempDir()
 	provider := filepath.Join(dir, "provider")
 	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\ncat >/dev/null\nprintf '%%s' '{\"structured_output\":{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"ok\",\"paths\":[]}}'\n", filepath.Join(dir, "argv.txt"))
-	if err = os.WriteFile(provider, []byte(body), 0700); err != nil {
+	if err = writeStub(provider, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
 	list := append(append([]string{}, codingBase...), "Bash(go -C lab test ./...)")
@@ -150,7 +153,7 @@ func claudeAllowlistFixture(t *testing.T) (Options, string) {
 	provider := filepath.Join(root, "claude")
 	argv := filepath.Join(root, "argv.txt")
 	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\ncat >/dev/null\nprintf changed > code.txt\nprintf '%%s' '{\"structured_output\":{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"implemented\",\"paths\":[]}}'\n", argv)
-	if err = os.WriteFile(provider, []byte(script), 0700); err != nil {
+	if err = writeStub(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	file := filepath.Join(o.LabDir, "formulas", "sample.yaml")
@@ -180,6 +183,7 @@ func claudeAllowlistFixture(t *testing.T) (Options, string) {
 }
 
 func TestHarnessAttemptRecordsTheExactAllowlistTheProviderReceived(t *testing.T) {
+	t.Parallel()
 	o, argv := claudeAllowlistFixture(t)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
@@ -213,6 +217,7 @@ func TestHarnessAttemptRecordsTheExactAllowlistTheProviderReceived(t *testing.T)
 }
 
 func TestLedgerWithoutAllowlistMeansUnrecordedNotEmpty(t *testing.T) {
+	t.Parallel()
 	raw, err := json.Marshal(HarnessAttempt{ID: "legacy", PlanDigest: "d"})
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +232,7 @@ func TestLedgerWithoutAllowlistMeansUnrecordedNotEmpty(t *testing.T) {
 }
 
 func TestApprovedAllowlistMustMatchRederivation(t *testing.T) {
+	t.Parallel()
 	o, argv := claudeAllowlistFixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil || r.Readiness == nil {
@@ -250,6 +256,7 @@ func TestApprovedAllowlistMustMatchRederivation(t *testing.T) {
 }
 
 func TestPlanWithoutStoredAllowlistKeepsTheLegacyAllowance(t *testing.T) {
+	t.Parallel()
 	o, argv := claudeAllowlistFixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil || r.Readiness == nil {

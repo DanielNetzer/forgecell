@@ -17,6 +17,7 @@ import (
 )
 
 func TestFailedHarnessCapturesPartialWork(t *testing.T) {
+	t.Parallel()
 	for _, outside := range []bool{false, true} {
 		t.Run(map[bool]string{false: "in-scope", true: "out-of-scope"}[outside], func(t *testing.T) {
 			o, _ := fixture(t)
@@ -26,7 +27,7 @@ func TestFailedHarnessCapturesPartialWork(t *testing.T) {
 				body += "printf stray > stray.txt\n"
 			}
 			body += "exit 7\n"
-			if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+			if err := writeStub(script, []byte(body), 0700); err != nil {
 				t.Fatal(err)
 			}
 			r, err := runApprovedFixture(t, o)
@@ -51,11 +52,12 @@ func TestFailedHarnessCapturesPartialWork(t *testing.T) {
 }
 
 func TestApprovedFailedTreeVerificationDoesNotReplayHarness(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	count := filepath.Join(t.TempDir(), "calls")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
 	body := fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\necho call >> %q\nprintf partial-output\nprintf failed >&2\nexit 7\n", count)
-	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+	if err := writeStub(script, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)
@@ -108,11 +110,12 @@ func TestApprovedFailedTreeVerificationDoesNotReplayHarness(t *testing.T) {
 }
 
 func TestFailedTreeAdoptionRejectsDriftAndUncertainty(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"tree", "attempt", "artifacts", "process", "lost-result", "unreviewed", "issue"} {
 		t.Run(kind, func(t *testing.T) {
 			o, _ := fixture(t)
 			script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-			os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700)
+			writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700)
 			r, err := runApprovedFixture(t, o)
 			if err != nil {
 				t.Fatal(err)
@@ -151,9 +154,10 @@ func TestFailedTreeAdoptionRejectsDriftAndUncertainty(t *testing.T) {
 }
 
 func TestFailedHarnessCaptureErrorRetainsOutcome(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nrm code.txt\nmkdir code.txt\nprintf kept\nexit 9\n"), 0700)
+	writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nrm code.txt\nmkdir code.txt\nprintf kept\nexit 9\n"), 0700)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)
@@ -171,9 +175,10 @@ func TestFailedHarnessCaptureErrorRetainsOutcome(t *testing.T) {
 }
 
 func TestFailedOutOfScopeAdoptionRequiresSeparateDiffReview(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf stray > stray.txt\nexit 7\n"), 0700)
+	writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf stray > stray.txt\nexit 7\n"), 0700)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)
@@ -211,10 +216,11 @@ func TestFailedOutOfScopeAdoptionRequiresSeparateDiffReview(t *testing.T) {
 }
 
 func TestInterruptedHarnessCapturesUsingUncancelledContext(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	signal := filepath.Join(t.TempDir(), "started")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nsleep 10\n", signal)), 0700)
+	writeStub(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nsleep 10\n", signal)), 0700)
 	r, err := Run(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
@@ -260,8 +266,9 @@ func TestTimedOutHarnessRetainsPartialTree(t *testing.T) {
 	text := strings.Replace(string(recipe), "harness:\n", "harness:\n  timeoutMs: 10000\n", 1)
 	approveFixture(t, o.LabDir, text, "timeout-fixture")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nsleep 60\n"), 0700)
-	r, err := runApprovedFixture(t, o)
+	marker := filepath.Join(t.TempDir(), "started")
+	writeStub(script, []byte(stuckHarnessAt(marker)), 0700)
+	r, err := runApprovedExpiring(t, o, marker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,6 +278,7 @@ func TestTimedOutHarnessRetainsPartialTree(t *testing.T) {
 }
 
 func TestLostHarnessResultRefusesRecoveryWithSurvivingProcess(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	r, err := Run(context.Background(), o)
 	if err != nil {
@@ -305,9 +313,10 @@ func TestLostHarnessResultRefusesRecoveryWithSurvivingProcess(t *testing.T) {
 }
 
 func TestRecoveryKeepsDurableFailureBeforePhaseSelection(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700)
+	writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)
@@ -332,11 +341,12 @@ func TestRecoveryKeepsDurableFailureBeforePhaseSelection(t *testing.T) {
 }
 
 func TestRecoveryRefusesLaterUncertainVerification(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"started", "missing", "setup", "check", "protected", "stopped"} {
 		t.Run(kind, func(t *testing.T) {
 			o, _ := fixture(t)
 			script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-			if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700); err != nil {
+			if err := writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nexit 7\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
 			r, err := runApprovedFixture(t, o)
@@ -405,9 +415,10 @@ func TestRecoveryRefusesLaterUncertainVerification(t *testing.T) {
 }
 
 func TestFailureOutputRemainsInEvidenceWithoutLedgerDuplication(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nawk 'BEGIN { for (i=0; i<900000; i++) printf \"%c\", 1 }'\nexit 7\n"), 0700); err != nil {
+	if err := writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nawk 'BEGIN { for (i=0; i<900000; i++) printf \"%c\", 1 }'\nexit 7\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)
@@ -452,6 +463,7 @@ func TestFailureOutputRemainsInEvidenceWithoutLedgerDuplication(t *testing.T) {
 }
 
 func TestUncertainCompletedVerificationBlocksAmendmentAndExecution(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"setup", "check", "protected"} {
 		for _, continuation := range []string{"", "checks-only"} {
 			for _, entry := range []string{"amend", "execute"} {
@@ -525,11 +537,12 @@ func TestUncertainCompletedVerificationBlocksAmendmentAndExecution(t *testing.T)
 }
 
 func TestSemanticFailedTreeAdoptionPreservesProcessSuccess(t *testing.T) {
+	t.Parallel()
 	for _, report := range []string{`{"schemaVersion":"v1","outcome":"blocked","reason":"cache denied","paths":[]}`, `malformed`} {
 		for _, crash := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/crash=%t", report, crash), func(t *testing.T) {
 				o, _ := fixture(t)
-				os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf '%s' '"+report+"'\n"), 0700)
+				writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf '%s' '"+report+"'\n"), 0700)
 				r, err := runApprovedFixture(t, o)
 				if err != nil {
 					t.Fatal(err)
@@ -575,9 +588,10 @@ func TestSemanticFailedTreeAdoptionPreservesProcessSuccess(t *testing.T) {
 }
 
 func TestRecoveryAfterAdoptedViolationPreservesCaptureEvidence(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf stray > stray.txt\nexit 7\n"), 0700)
+	writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf stray > stray.txt\nexit 7\n"), 0700)
 	r, err := runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)
@@ -632,6 +646,7 @@ func TestRecoveryAfterAdoptedViolationPreservesCaptureEvidence(t *testing.T) {
 }
 
 func TestRecoveryCompletedCaptureBeforePhaseSelection(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t)
 	counter := filepath.Join(t.TempDir(), "calls")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
@@ -640,7 +655,7 @@ func TestRecoveryCompletedCaptureBeforePhaseSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	body = append(body, []byte(fmt.Sprintf("echo call >> %q\n", counter))...)
-	if err = os.WriteFile(script, body, 0700); err != nil {
+	if err = writeStub(script, body, 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)
@@ -687,6 +702,7 @@ func TestRecoveryCompletedCaptureBeforePhaseSelection(t *testing.T) {
 }
 
 func TestSemanticViolationRetainsBothOutcomes(t *testing.T) {
+	t.Parallel()
 	for _, outcome := range []string{"blocked", "unknown", "scope-change"} {
 		t.Run(outcome, func(t *testing.T) {
 			o, _ := fixture(t)
@@ -698,7 +714,7 @@ func TestSemanticViolationRetainsBothOutcomes(t *testing.T) {
 			if outcome == "scope-change" {
 				report = `{"schemaVersion":"v1","outcome":"scope-change","reason":"need scope","paths":["stray.txt"]}`
 			}
-			os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf stray > stray.txt\nprintf '%s' '"+report+"'\n"+fmt.Sprintf("echo call >> %q\n", counter)), 0700)
+			writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf stray > stray.txt\nprintf '%s' '"+report+"'\n"+fmt.Sprintf("echo call >> %q\n", counter)), 0700)
 			r, err := runApprovedFixture(t, o)
 			if err != nil {
 				t.Fatal(err)

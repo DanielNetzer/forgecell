@@ -70,9 +70,12 @@ func stallScript(marker, body string) string {
 }
 
 // stallTimeoutMS is the Formula or wrapper timeout under test for every stall
-// fixture. It is far above any start-up delay a loaded machine adds, and the
-// fixtures sleep well past it, so only the timeout can end the run.
-const stallTimeoutMS = 10000
+// fixture. It is far above any start-up delay a loaded machine adds (10 s was
+// not: under go test -count=3 -p 8 a wrapper's deadline expired before its
+// script had started), and the fixtures sleep past it. The stall tests reach
+// their timeout through expireWhenStarted once the fixture has started, so the
+// timeout is never waited out; process.Run tests its own wall-clock timeout.
+const stallTimeoutMS = 45000
 
 // maxGateMessageBytes bounds a coding gate message with room for the longest
 // temporary paths; the message must not grow with the harness output.
@@ -154,9 +157,12 @@ func requireStoredAttemptMatches(t *testing.T, o Options, r Record, a HarnessAtt
 
 func TestSilentCodingStallIsDiagnosableAndNeverReplayed(t *testing.T) {
 	t.Parallel()
-	marker := filepath.Join(t.TempDir(), "starts")
-	o := timeoutFixture(t, stallTimeoutMS, 0, 0, stallScript(marker, "exec sleep 60\n"))
-	r, err := runApprovedFixture(t, o)
+	dir := t.TempDir()
+	marker, ready := filepath.Join(dir, "starts"), filepath.Join(dir, "ready")
+	// The shell creates the starts file before it writes the line, so the
+	// deadline waits for a separate marker made after the start is recorded.
+	o := timeoutFixture(t, stallTimeoutMS, 0, 0, stallScript(marker, fmt.Sprintf(": > %q\nexec sleep 60\n", ready)))
+	r, err := runApprovedExpiring(t, o, ready)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,9 +173,6 @@ func TestSilentCodingStallIsDiagnosableAndNeverReplayed(t *testing.T) {
 	}
 	if act := a.Result.Activity; act == nil || act.StdoutBytes != 0 || act.StderrBytes != 0 || act.LastOutputMS != nil {
 		t.Fatalf("a silent stall must be a recorded silent run, not an unrecorded one: %+v", act)
-	}
-	if a.Result.ElapsedMS < stallTimeoutMS {
-		t.Fatalf("elapsed %d ms is below the %d ms timeout", a.Result.ElapsedMS, stallTimeoutMS)
 	}
 	requireStoredAttemptMatches(t, o, r, a, digest)
 
@@ -205,10 +208,12 @@ func TestSilentCodingStallIsDiagnosableAndNeverReplayed(t *testing.T) {
 
 func TestPartialOutputThenCodingTimeoutKeepsOutputOutOfDiagnostics(t *testing.T) {
 	t.Parallel()
-	marker := filepath.Join(t.TempDir(), "starts")
-	body := fmt.Sprintf("printf %s\nprintf %s >&2\nexec sleep 60\n", stallSecret, stallSecret)
+	dir := t.TempDir()
+	marker, written := filepath.Join(dir, "starts"), filepath.Join(dir, "written")
+	// The deadline expires only after both pipes carry the sentinel.
+	body := fmt.Sprintf("printf %s\nprintf %s >&2\n: > %q\nexec sleep 60\n", stallSecret, stallSecret, written)
 	o := timeoutFixture(t, stallTimeoutMS, 0, 0, stallScript(marker, body))
-	r, err := runApprovedFixture(t, o)
+	r, err := runApprovedExpiring(t, o, written)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +317,7 @@ func TestNonTimeoutFailureGateMessageCarriesTheBoundedDiagnostics(t *testing.T) 
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
 	body := fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf %s\nprintf %s >&2\nexit 7\n", stallSecret, stallSecret)
-	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+	if err := writeStub(script, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)
@@ -513,12 +518,14 @@ func TestAnalysisAttemptsRecordStallInterruptionAndSuccessDiagnostics(t *testing
 	t.Run("silent stall times out", func(t *testing.T) {
 		t.Parallel()
 		w := newWrapperLab(t, wrapperOptions{body: "cat >/dev/null\nexec sleep 60\n", timeoutMS: stallTimeoutMS})
-		r, err := Run(context.Background(), w.o)
+		ctx, stop := expireWhenStarted(t, w.ran)
+		defer stop()
+		r, err := Run(ctx, w.o)
 		if err != nil {
 			t.Fatal(err)
 		}
 		d := requireAnalysisDiagnostics(t, w.o, r, "failed", process.StateTimeout)
-		if d.Activity.StdoutBytes != 0 || d.Activity.StderrBytes != 0 || d.Activity.LastOutputMS != nil || d.ElapsedMS < stallTimeoutMS {
+		if d.Activity.StdoutBytes != 0 || d.Activity.StderrBytes != 0 || d.Activity.LastOutputMS != nil {
 			t.Fatalf("a silent stall must be recorded as silence: %+v", d)
 		}
 		if !strings.Contains(r.AnalysisAttempts[0].Error, "deadline") || len(r.HarnessAttempts) != 0 {
@@ -527,8 +534,11 @@ func TestAnalysisAttemptsRecordStallInterruptionAndSuccessDiagnostics(t *testing
 	})
 	t.Run("partial output then stall", func(t *testing.T) {
 		t.Parallel()
-		w := newWrapperLab(t, wrapperOptions{body: "cat >/dev/null\nprintf partial\nexec sleep 60\n", timeoutMS: stallTimeoutMS})
-		r, err := Run(context.Background(), w.o)
+		written := filepath.Join(t.TempDir(), "written")
+		w := newWrapperLab(t, wrapperOptions{body: fmt.Sprintf("cat >/dev/null\nprintf partial\n: > %q\nexec sleep 60\n", written), timeoutMS: stallTimeoutMS})
+		ctx, stop := expireWhenStarted(t, written)
+		defer stop()
+		r, err := Run(ctx, w.o)
 		if err != nil {
 			t.Fatal(err)
 		}

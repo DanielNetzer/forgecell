@@ -16,6 +16,7 @@ func queueFixture(t *testing.T, dir, id, repo, status, at string) {
 	}
 }
 func TestIssueQueueInventory(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	dir := filepath.Join(lab, "ledgers")
 	if s := ReadQueueInventory(lab).Summarize("o/r", 1); s.State != "untouched" || s.Partial {
@@ -46,6 +47,7 @@ func TestIssueQueueInventory(t *testing.T) {
 	}
 }
 func TestIssueQueueUnsafeAndBounds(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"symlink", "malformed", "schema", "identity", "large", "files", "entries", "directory", "repo", "url", "fifo"} {
 		t.Run(kind, func(t *testing.T) {
 			lab := t.TempDir()
@@ -102,6 +104,7 @@ func TestIssueQueueUnsafeAndBounds(t *testing.T) {
 	}
 }
 func TestIssueQueueTotalBytesAndOrdering(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	dir := filepath.Join(lab, "ledgers")
 	if err := os.Mkdir(dir, 0700); err != nil {

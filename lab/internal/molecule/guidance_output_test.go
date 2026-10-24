@@ -10,6 +10,7 @@ import (
 )
 
 func TestGuidanceOutputShellQuotesTheLabInRecoveryCommands(t *testing.T) {
+	t.Parallel()
 	for _, lab := range []string{"/tmp/plain", "/tmp/lab $(touch pwned)", "/tmp/it's `x`", "/tmp/a\"b"} {
 		summary := harnessTimeoutSummary(timeoutGate{Molecule: "mol-1", Lab: lab, Digest: "d1", Attempt: "a1", TimeoutMS: 1000, Source: "formula", CeilingMS: 2000},
 			process.Result{TimedOut: true}, VerificationFile{Path: "verification-history/mol-1/x.json", SHA256: "abc"}, verification.CaptureResult{Tree: "tree1"}, nil)
@@ -30,6 +31,7 @@ func TestGuidanceOutputShellQuotesTheLabInRecoveryCommands(t *testing.T) {
 }
 
 func TestGuidanceOutputCapsAndQuotesViolations(t *testing.T) {
+	t.Parallel()
 	var violations []string
 	for i := 0; i < 25; i++ {
 		violations = append(violations, fmt.Sprintf("dir/file%02d.go", i))
@@ -50,6 +52,7 @@ func TestGuidanceOutputCapsAndQuotesViolations(t *testing.T) {
 }
 
 func TestGuidanceOutputQuotesInvisibleDirectionCharacters(t *testing.T) {
+	t.Parallel()
 	// right-to-left override, zero-width space, line separator, byte order mark, isolate
 	invisible := []rune{0x202e, 0x200b, 0x2028, 0xfeff, 0x2066}
 	for _, r := range invisible {
@@ -62,6 +65,7 @@ func TestGuidanceOutputQuotesInvisibleDirectionCharacters(t *testing.T) {
 }
 
 func TestGuidanceOutputCaptureErrorIsOneBoundedLine(t *testing.T) {
+	t.Parallel()
 	err := fmt.Errorf("walk failed\nFORGED: ok \x1b[31m%s", strings.Repeat("x", 5000))
 	summary := harnessTimeoutSummary(timeoutGate{Molecule: "mol-1", Lab: "/lab", Digest: "d1", Attempt: "a1", TimeoutMS: 1000, Source: "formula"},
 		process.Result{TimedOut: true}, VerificationFile{Path: "p", SHA256: "s"}, verification.CaptureResult{}, err)
@@ -74,6 +78,7 @@ func TestGuidanceOutputCaptureErrorIsOneBoundedLine(t *testing.T) {
 }
 
 func TestGuidanceOutputListPathsQuotesControlCharactersOnly(t *testing.T) {
+	t.Parallel()
 	if got := listPaths([]string{".claude/a.json", "b c/d.go"}); got != ".claude/a.json, b c/d.go" {
 		t.Fatalf("plain paths must print unchanged: %q", got)
 	}

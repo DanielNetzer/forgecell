@@ -197,7 +197,17 @@ func TestDevBuildEnvAllowsOnlyTheNamedVariables(t *testing.T) {
 	}
 }
 
+// skipRealBuildInShort skips a test that drives the real Go toolchain under
+// go test -short; the full suite, as CI runs it, still builds.
+func skipRealBuildInShort(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("runs a real Go build")
+	}
+}
+
 func TestDevGoBuildIgnoresTheAmbientGoEnvironment(t *testing.T) {
+	skipRealBuildInShort(t)
 	marker := filepath.Join(t.TempDir(), "toolexec-ran")
 	wrapper := filepath.Join(t.TempDir(), "toolexec.sh")
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\necho ran >> '"+marker+"'\nexec \"$@\"\n"), 0755); err != nil {
@@ -205,7 +215,10 @@ func TestDevGoBuildIgnoresTheAmbientGoEnvironment(t *testing.T) {
 	}
 	t.Setenv("GOFLAGS", "-toolexec="+wrapper)
 	t.Setenv("GOEXPERIMENT", "forgecell-test-unknown-experiment")
-	t.Setenv("GOCACHE", t.TempDir())
+	// The build keeps the shared GOCACHE: an empty one forces a full standard
+	// library rebuild, and the pass-through of GOCACHE itself is covered by
+	// TestDevBuildEnvAllowsOnlyTheNamedVariables. A leaked -toolexec changes
+	// the build's cache key, so a warm cache cannot hide one.
 	root := t.TempDir()
 	lean := "package main\n\nimport \"os\"\n\nvar version = \"dev-go\"\n\nfunc main() { os.Stdout.WriteString(version + \"\\n\") }\n"
 	writeTree(t, root, map[string]string{"lab/go.mod": "module fakeforgecell\n\ngo 1.21\n", "lab/cmd/forgecell/main.go": lean})
@@ -222,6 +235,7 @@ func TestDevGoBuildIgnoresTheAmbientGoEnvironment(t *testing.T) {
 }
 
 func TestDevInstallStagesARealBuildWithoutActivating(t *testing.T) {
+	skipRealBuildInShort(t)
 	checkout := devCheckout(t)
 	o := devOptions(t, checkout)
 	o.Build = nil
@@ -282,6 +296,7 @@ func TestDevInstallRecordsTheBuiltBinarysProtocol(t *testing.T) {
 		}
 	})
 	t.Run("real build of a checkout with another protocol", func(t *testing.T) {
+		skipRealBuildInShort(t)
 		o := devOptions(t, newCheckout(t, fakeProtocol))
 		o.Build = nil
 		r, err := DevInstall(context.Background(), o)

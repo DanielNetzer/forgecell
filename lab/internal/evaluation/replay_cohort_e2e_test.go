@@ -92,6 +92,7 @@ func e2eCohort(t *testing.T, out, name string, tasks []string, bodies [2]string)
 // change scores hiddenAcceptancePass, while a no-op harness does not. It also proves task A's
 // attempt cannot see PR B's base commit (which holds A's solution) or its replay ref.
 func TestReplayCohortEndToEnd(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	addPR := func(branch, rel, body, testRel, testBody string) string {
 		f.git("checkout", "-q", "-b", branch)
@@ -252,6 +253,7 @@ const wrongWidgetHarness = "#!/bin/sh\ncat >/dev/null\nmkdir -p lab/widget\nprin
 // change records false; a harness that never completes records nil and is excluded from
 // HiddenAcceptanceN.
 func TestReplayCohortHiddenAcceptanceIndependentOfRegressionFailure(t *testing.T) {
+	skipToolchainInShort(t)
 	f, base, def := newFixture(t)
 	f.git("checkout", "-q", "-b", "widget")
 	f.write("lab/widget/widget.go", "package widget\n\nfunc New() int { return 7 }\n")
@@ -352,6 +354,7 @@ func TestReplayCohortHiddenAcceptanceIndependentOfRegressionFailure(t *testing.T
 // protected run passing. With the exemption stripped the protected run restores the old test
 // and fails, so no attempt is graded correct.
 func TestReplayCohortExemptsModifiedExistingTest(t *testing.T) {
+	skipToolchainInShort(t)
 	f, _, def := newFixture(t)
 	f.write("lab/calc/calc_test.go", valueTest(1))
 	f.git("add", ".")

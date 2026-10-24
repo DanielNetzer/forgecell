@@ -36,6 +36,7 @@ func intakeStopped(reason string, suffix string) func(*Record) {
 }
 
 func TestFailureClassTimedOut(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		mutate func(*Record)
 		want   bool
@@ -81,6 +82,7 @@ func TestFailureClassTimedOut(t *testing.T) {
 }
 
 func TestFailureClassAnalysisPolicyViolation(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		mutate func(*Record)
 		want   string
@@ -140,6 +142,7 @@ func TestFailureClassAnalysisPolicyViolation(t *testing.T) {
 }
 
 func TestFailureClassProtectedRegressionFailed(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		mutate func(*Record)
 		want   bool
@@ -173,6 +176,7 @@ func TestFailureClassProtectedRegressionFailed(t *testing.T) {
 }
 
 func TestFailureClassSurvivesTheLedgerRoundTrip(t *testing.T) {
+	t.Parallel()
 	r := classRecord(func(r *Record) {
 		r.HarnessAttempts = []HarnessAttempt{{Result: process.Result{TimedOut: true}}}
 		r.Verification = &verification.Result{Protected: &verification.Result{}}
@@ -194,6 +198,7 @@ func TestFailureClassSurvivesTheLedgerRoundTrip(t *testing.T) {
 }
 
 func TestFailureClassOldLedgerWithoutAttemptResultsIsNotCounted(t *testing.T) {
+	t.Parallel()
 	raw := `{"schemaVersion":"v0","kind":"molecule","id":"mol-old","mode":"ticket","status":"failed","formulaId":"sample","finishedAt":"2026-10-10T10:00:00Z","harnessAttempts":[{"id":"a1"}]}`
 	var r Record
 	if err := json.Unmarshal([]byte(raw), &r); err != nil {
@@ -205,6 +210,7 @@ func TestFailureClassOldLedgerWithoutAttemptResultsIsNotCounted(t *testing.T) {
 }
 
 func TestFailureClassAnalysisPolicyViolationOnTheRealIntakeStopPath(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		steps []string
 		want  string
@@ -252,6 +258,7 @@ func writeClassLedger(t *testing.T, lab string, r Record) {
 }
 
 func TestFailureClassReadRecentFinishedOrdersAndFilters(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	if records, skipped, err := ReadRecentFinished(lab); err != nil || records != nil || skipped != nil {
 		t.Fatalf("a Lab without ledgers has no records: %v %v %v", records, skipped, err)
@@ -285,6 +292,7 @@ func TestFailureClassReadRecentFinishedOrdersAndFilters(t *testing.T) {
 }
 
 func TestFailureClassReadRecentFinishedSkipsAndReportsAnUnreadableLedger(t *testing.T) {
+	t.Parallel()
 	lab := t.TempDir()
 	writeClassLedger(t, lab, classRecord(nil))
 	if err := os.WriteFile(filepath.Join(lab, "ledgers", "mol-bad.json"), []byte(`{"schemaVersion":"v0","kind":"molecule","id":"mol-bad","formulaId":"sample","status":"failed","finishedAt":7}`), 0600); err != nil {

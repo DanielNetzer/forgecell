@@ -22,6 +22,30 @@ const (
 	stuckHarness          = "#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nsleep 60\n"
 )
 
+// stuckHarnessAt is stuckHarness that also creates marker, outside the
+// workspace, once it has started.
+func stuckHarnessAt(marker string) string {
+	return fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\n: > %q\nexec sleep 60\n", marker)
+}
+
+// runApprovedExpiring is runApprovedFixture whose approval run reaches a
+// harness timeout as soon as the harness creates marker (expireWhenStarted),
+// instead of waiting the Formula timeout out.
+func runApprovedExpiring(t *testing.T, o Options, marker string) (Record, error) {
+	t.Helper()
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		return r, err
+	}
+	if r.Readiness == nil {
+		t.Fatalf("fixture not ready: %+v", r)
+	}
+	o.Approve = r.Readiness.Plans[0].Digest
+	ctx, stop := expireWhenStarted(t, marker)
+	defer stop()
+	return Run(ctx, o)
+}
+
 // timeoutFixture approves a Formula with the given timeouts and a harness script,
 // and widens the fixture scope so intake sees a larger ticket.
 func timeoutFixture(t *testing.T, timeoutMS, maxMS, extraScope int, script string) Options {
@@ -39,7 +63,7 @@ func timeoutFixture(t *testing.T, timeoutMS, maxMS, extraScope int, script strin
 		fields += fmt.Sprintf("  maxTimeoutMs: %d\n", maxMS)
 	}
 	approveFixture(t, o.LabDir, strings.Replace(string(raw), "harness:\n", "harness:\n"+fields, 1), "timeout-fixture")
-	if err = os.WriteFile(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(script), 0700); err != nil {
+	if err = writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	base := o.Analyze
@@ -65,6 +89,7 @@ func codingDetail(t *testing.T, r Record) string {
 }
 
 func TestHarnessTimeoutProposalIsDeterministicAndBounded(t *testing.T) {
+	t.Parallel()
 	granted := formula.Binding{TimeoutMS: 900000, MaxTimeoutMS: 1800000}
 	for _, tc := range []struct {
 		name    string
@@ -97,6 +122,7 @@ func TestHarnessTimeoutProposalIsDeterministicAndBounded(t *testing.T) {
 }
 
 func TestHarnessTimeoutIntakeProposesFromScopeAndOmitsItOtherwise(t *testing.T) {
+	t.Parallel()
 	large := timeoutFixture(t, 900000, 1800000, 11, stuckHarness)
 	r, err := Run(context.Background(), large)
 	if err != nil {
@@ -131,9 +157,13 @@ func TestHarnessTimeoutIntakeProposesFromScopeAndOmitsItOtherwise(t *testing.T) 
 }
 
 // The control run proves the harness needs more than the Formula timeout: the only
-// difference between the two runs is the reviewed plan value.
+// difference between the two runs is the reviewed plan value. Both runs wait
+// out real process deadlines, which is the behavior under test.
 func TestHarnessTimeoutPlanValueIsHonouredAndRecorded(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("waits out real 10 s and 11 s process deadlines")
+	}
 	control := timeoutFixture(t, 10000, 20000, 0, slowCompletingHarness)
 	r, err := runApprovedFixture(t, control)
 	if err != nil {
@@ -167,6 +197,7 @@ func TestHarnessTimeoutPlanValueIsHonouredAndRecorded(t *testing.T) {
 }
 
 func TestHarnessTimeoutAboveMaximumIsRejectedBeforeCoding(t *testing.T) {
+	t.Parallel()
 	marker := filepath.Join(t.TempDir(), "coding-ran")
 	script := fmt.Sprintf("#!/bin/sh\ncat >/dev/null\necho ran >> %q\n", marker)
 	o := timeoutFixture(t, 300, 30000, 0, script)
@@ -247,8 +278,9 @@ func TestHarnessTimeoutGateMessageListsRecoverAndAmendCommands(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			o := timeoutFixture(t, 10000, tc.maxMS, tc.extra, stuckHarness)
-			r, err := runApprovedFixture(t, o)
+			marker := filepath.Join(t.TempDir(), "started")
+			o := timeoutFixture(t, 10000, tc.maxMS, tc.extra, stuckHarnessAt(marker))
+			r, err := runApprovedExpiring(t, o, marker)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -298,7 +330,7 @@ func TestHarnessTimeoutNonTimeoutFailureMessageIsUnchanged(t *testing.T) {
 	t.Parallel()
 	o, _ := fixture(t)
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf failed >&2\nexit 7\n"), 0700); err != nil {
+	if err := writeStub(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf failed >&2\nexit 7\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := runApprovedFixture(t, o)

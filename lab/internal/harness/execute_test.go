@@ -18,6 +18,31 @@ func fake(t *testing.T, body string) string {
 	}
 	return p
 }
+
+// expireOnceExists returns a context that is cancelled with
+// context.DeadlineExceeded once path exists. process.Run reports that cause as
+// its own timeout, so a test reaches a timeout as soon as the fixture has
+// provably started instead of waiting a real deadline out. A fixture that
+// never starts is reported as an interruption, which no timeout check accepts.
+func expireOnceExists(t *testing.T, path string) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(context.Canceled) })
+	go func() {
+		for deadline := time.Now().Add(60 * time.Second); ctx.Err() == nil; time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(path); err == nil {
+				cancel(context.DeadlineExceeded)
+				return
+			}
+			if time.Now().After(deadline) {
+				cancel(context.Canceled)
+				return
+			}
+		}
+	}()
+	return ctx
+}
+
 func TestProviderExecution(t *testing.T) {
 	dir := t.TempDir()
 	executable := fake(t, `cat > request.txt
@@ -110,6 +135,9 @@ func TestStuckProviderHelper(t *testing.T) {
 	}
 	fmt.Fprint(os.Stdout, `{"structured_output":{"schemaVersion":"v1","outcome":"completed","reason":"implemented","paths":[]}}`)
 	fmt.Fprint(os.Stderr, "provider is stuck\n")
+	if marker := os.Getenv("FORGECELL_STUCK_MARKER"); marker != "" {
+		os.WriteFile(marker, nil, 0600)
+	}
 	time.Sleep(30 * time.Second)
 	os.Exit(0)
 }
@@ -129,12 +157,18 @@ func TestProviderTimeoutFailsClosed(t *testing.T) {
 		// An already expired deadline deterministically exercises the short-timeout
 		// path without depending on process startup speed.
 		{"expired-deadline", time.Nanosecond, false},
-		// The helper prints its result and then sleeps 30 s, so only this timeout can
-		// end it; it is long enough for the helper to start and print under load.
+		// The helper prints its result, creates its marker and then sleeps 30 s.
+		// The deadline expires once the marker exists, so the run neither waits the
+		// timeout out nor depends on how fast the helper starts under load.
 		{"stuck-after-result", 10 * time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: t.TempDir(), Request: map[string]any{"kind": "molecule"}, Env: append(os.Environ(), "FORGECELL_STUCK_PROVIDER=1", "FORGECELL_PROVIDER_TEST_BINARY="+binary), Timeout: tc.timeout})
+			ctx := context.Background()
+			marker := filepath.Join(t.TempDir(), "printed")
+			if tc.started {
+				ctx = expireOnceExists(t, marker)
+			}
+			r := Execute(ctx, ExecuteOptions{ID: "claude-code", Executable: executable, Dir: t.TempDir(), Request: map[string]any{"kind": "molecule"}, Env: append(os.Environ(), "FORGECELL_STUCK_PROVIDER=1", "FORGECELL_PROVIDER_TEST_BINARY="+binary, "FORGECELL_STUCK_MARKER="+marker), Timeout: tc.timeout})
 			if !r.Process.TimedOut || r.Process.OK || r.Process.Interrupted || r.Process.Overflow || r.Process.Error != context.DeadlineExceeded.Error() {
 				t.Fatalf("timeout did not fail closed: %+v", r)
 			}
