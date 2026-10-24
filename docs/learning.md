@@ -343,15 +343,35 @@ embeds that path and every package misses the cache; with it, Go serves `(cached
 for every package whose code, dependencies, and read files and environment are unchanged.
 Go keys a test only on the environment variables and files it actually reads, so:
 
-- the Molecule's views use one stable `TMPDIR` per Lab, `<lab>/tmp` (0700, shared by
-  concurrent runs, whose files stay apart in the unique subdirectories Go creates under it),
-  because `t.TempDir()` reads `TMPDIR`. Go's own work directories go to a per-view
-  `GOTMPDIR`, removed afterwards, so they never accumulate there; each verification first
-  removes the user's entries under `<lab>/tmp` older than 24h, and `forgecell doctor --clean`
-  lists and removes them too, with the same confirmation. Pruning touches only a `<lab>/tmp`
-  that Forgecell created: creating it writes a `.forgecell-check-tmp` marker, a directory
-  without the marker is never pruned, a symbolic link at `<lab>/tmp` is refused, and
-  `doctor --clean` also requires the Lab to have a `ledgers/` directory;
+- the Molecule's views use one stable `TMPDIR` per Lab,
+  `<temp root>/forgecell-lab-<first 16 hex of sha256(resolved Lab path)>`
+  (0700, shared by concurrent runs, whose files stay apart in the unique subdirectories Go
+  creates under it), because `t.TempDir()` reads `TMPDIR`. The temp root, resolved, is
+  `$FORGECELL_LAB_TMP_ROOT`, else `$TMPDIR`, each only when set, usable and not inside your
+  home, else the per-user default: the per-user temp dir on macOS
+  (`getconf DARWIN_USER_TEMP_DIR`; if that fails, the system temp dir with a recorded note)
+  and `/tmp` on Linux. Following the environment keeps a disk-backed `$TMPDIR` and keeps
+  tests and nested runs inside a check view under that view's `TMPDIR`, so they never leak
+  directories into your real temp dir. It lies outside the Lab, which usually sits under
+  your home, so a test that walks up from its temp dir and stops at the private `HOME` never
+  reaches your real home's `.claude` or `.codex` config; a root inside your home is passed
+  over (with a note), and a per-user default inside it is refused outright. Moving or
+  symlinking a Lab elsewhere gives it a new path and a cold test cache. Go's `GOTMPDIR` is
+  its stable `gotmp` subdirectory; each verification first removes the user's entries there
+  older than 24h (old children of `gotmp` included), and `forgecell doctor --clean` lists
+  and removes them too, with the same confirmation. Pruning touches only a directory that
+  Forgecell created: creating it writes a `.forgecell-check-tmp` marker and a `lab` file
+  naming its Lab, and reusing your own directory at that path makes it 0700 and writes
+  either again if it went missing; a directory without the marker is never pruned, a symbolic link,
+  non-directory or another user's directory at the path is refused (the views then fall
+  back to a private `TMPDIR`, and the Molecule records a note, as they do when the
+  directory vanishes mid-run), and `doctor --clean` also
+  requires the Lab to have a `ledgers/` directory. The earlier location, `<lab>/tmp`, is no
+  longer used; when it carries the marker `doctor --clean` lists it and removes it only
+  after confirmation, never automatically. A marked `forgecell-lab-*` directory older than
+  24h whose `lab` file names a path that no longer exists, or that has none, is an orphan:
+  the start sweep and each verification remove it, and `doctor --clean` lists and removes
+  orphans under both the per-user default root and the current one;
 - `HOME` stays private per view. A test that reads it (`os.UserHomeDir`) is a known cache
   miss; few do.
 

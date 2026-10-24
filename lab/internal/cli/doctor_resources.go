@@ -422,10 +422,15 @@ func groupByMolecule(trees []labTree) [][]labTree {
 	return groups
 }
 
+// labTempRoots is resources.LabTempRoots; a variable only so tests keep doctor --clean out
+// of the user's real temp dirs.
+var labTempRoots = resources.LabTempRoots
+
 // runDoctorClean lists the staged releases beyond the active one, the previous one and
-// the 5 newest, and the finished Molecules' trees older than 14 days, then removes them
-// only after the user confirms (or with --yes). Ledgers, history and evidence are never
-// removed, and GOCACHE is never cleaned.
+// the 5 newest, the finished Molecules' trees older than 14 days, the entries of the Lab's
+// check TMPDIR older than 24h, a marked legacy <lab>/tmp and the orphaned check TMPDIRs of
+// Labs that no longer exist, then removes them only after the user confirms (or with
+// --yes). Ledgers, history and evidence are never removed, and GOCACHE is never cleaned.
 func runDoctorClean(labDir, home string, in io.Reader, out, stderr io.Writer, yes bool, now time.Time) int {
 	labs := releaseLabs(labDir)
 	releases, err := install.InspectReleases(home, labs...)
@@ -438,15 +443,36 @@ func runDoctorClean(labDir, home string, in io.Reader, out, stderr io.Writer, ye
 		fmt.Fprintln(stderr, "forgecell: Lab trees:", err)
 		return 1
 	}
-	// <lab>/tmp is touched only in a directory that looks like a Lab (it has ledgers/),
-	// and StaleLabTempEntries lists entries only when Forgecell's marker is there.
-	labTmp := filepath.Join(labDir, "tmp")
+	// The Lab's check TMPDIR (under the system temp dir) and a legacy <lab>/tmp are touched
+	// only for a directory that looks like a Lab (it has ledgers/), and only when Forgecell's
+	// marker is there. One that cannot be inspected (a symbolic link or a file in its place,
+	// or no usable temp root) is warned about and skipped, and the rest is still cleaned.
+	labTmp, legacyTmp := "", ""
 	tmpEntries := []string{}
 	if info, err := os.Lstat(filepath.Join(labDir, "ledgers")); err == nil && info.IsDir() {
-		if tmpEntries, err = resources.StaleLabTempEntries(labTmp, now); err != nil {
-			fmt.Fprintln(stderr, "forgecell: Lab check TMPDIR:", err)
-			return 1
+		if path, err := resources.LabTempPath(labDir); err != nil {
+			fmt.Fprintln(stderr, "forgecell: warning: skipping the Lab's check TMPDIR:", err)
+		} else if entries, err := resources.StaleLabTempEntries(path, now); err != nil {
+			fmt.Fprintln(stderr, "forgecell: warning: skipping the Lab's check TMPDIR:", err)
+		} else {
+			labTmp, tmpEntries = path, entries
 		}
+		if legacy, marked, err := resources.LegacyLabTemp(labDir); err != nil {
+			fmt.Fprintln(stderr, "forgecell: warning: skipping the legacy Lab check TMPDIR:", err)
+		} else if marked {
+			legacyTmp = legacy
+		}
+	}
+	// Other Labs' check TMPDIRs whose Lab is gone are looked for under both the per-user
+	// default root and the current one, which differ when the environment chose another.
+	orphans := []resources.StaleDir{}
+	for _, root := range labTempRoots() {
+		found, err := resources.OrphanLabTemps(root, now)
+		if err != nil {
+			fmt.Fprintf(stderr, "forgecell: warning: skipping orphaned Lab check TMPDIRs under %s: %v\n", root, err)
+			continue
+		}
+		orphans = append(orphans, found...)
 	}
 	total := uint64(0)
 	fmt.Fprintf(out, "Staged releases: %d; keeping the active one, the previous one, the %d newest and any a Lab Formula or pending suggestion references.\n", len(releases.Releases), install.KeepReleases)
@@ -469,13 +495,35 @@ func runDoctorClean(labDir, home string, in io.Reader, out, stderr io.Writer, ye
 			fmt.Fprintf(out, "    warning: %s is %s; after removal it can no longer be amended or recovered.\n", t.Molecule, t.Status)
 		}
 	}
-	fmt.Fprintf(out, "Entries under the Lab's check TMPDIR %s older than 24h (the directory itself is kept):\n", labTmp)
+	if labTmp != "" {
+		fmt.Fprintf(out, "Entries under the Lab's check TMPDIR %s older than 24h (the directory itself is kept):\n", labTmp)
+	}
 	for _, path := range tmpEntries {
 		size, _ := resources.TreeSize(path, sizeBudget)
 		total += size
 		fmt.Fprintf(out, "  remove %s (%s)\n", path, resources.Format(size))
 	}
 	count := len(releases.Prune) + len(trees) + len(tmpEntries)
+	if legacyTmp != "" {
+		size, _ := resources.TreeSize(legacyTmp, sizeBudget)
+		total += size
+		count++
+		if labTmp != "" {
+			fmt.Fprintf(out, "Legacy check TMPDIR inside the Lab, no longer used (check temp files now live in %s):\n", labTmp)
+		} else {
+			fmt.Fprintln(out, "Legacy check TMPDIR inside the Lab, no longer used:")
+		}
+		fmt.Fprintf(out, "  remove %s (%s)\n", legacyTmp, resources.Format(size))
+	}
+	if len(orphans) > 0 {
+		fmt.Fprintln(out, "Check TMPDIRs of Labs that no longer exist, older than 24h:")
+	}
+	for _, o := range orphans {
+		size, _ := resources.TreeSize(o.Path, sizeBudget)
+		total += size
+		fmt.Fprintf(out, "  remove %s (%s): %s\n", o.Path, resources.Format(size), o.Reason)
+	}
+	count += len(orphans)
 	if count == 0 {
 		fmt.Fprintln(out, "Nothing to remove.")
 		return 0
@@ -546,6 +594,28 @@ func runDoctorClean(labDir, home string, in io.Reader, out, stderr io.Writer, ye
 				continue
 			}
 			removed = append(removed, path)
+		}
+	}
+	// The legacy <lab>/tmp goes whole, and only while it still carries the marker.
+	if legacyTmp != "" {
+		if _, marked, err := resources.LegacyLabTemp(labDir); err != nil {
+			problems = append(problems, err)
+		} else if !marked {
+			fmt.Fprintf(out, "skipped %s: it changed since the listing\n", legacyTmp)
+		} else if e := resources.RemoveTree(legacyTmp); e != nil {
+			problems = append(problems, e)
+		} else {
+			removed = append(removed, legacyTmp)
+		}
+	}
+	// An orphan goes only while it still is one; one whose Lab came back is kept.
+	for _, o := range orphans {
+		if _, ok := resources.OrphanLabTemp(o.Path, now); !ok {
+			fmt.Fprintf(out, "skipped %s: it changed since the listing\n", o.Path)
+		} else if e := resources.RemoveTree(o.Path); e != nil {
+			problems = append(problems, e)
+		} else {
+			removed = append(removed, o.Path)
 		}
 	}
 	for _, path := range removed {

@@ -102,6 +102,9 @@ type Result struct {
 	// CleanupError records a temp directory that could not be removed. It never changes
 	// the verdict; the directory stays registered so exit cleanup tries again.
 	CleanupError string `json:"cleanupError,omitempty"`
+	// Notes record how the view's environment departed from the usual one, such as a
+	// stable check TMPDIR that vanished and was replaced by a private one.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // removeTemp removes a registered temp directory and records a failure on v.
@@ -114,9 +117,10 @@ func removeTemp(v *Result, dir string) {
 // labGoTempDir creates, or reuses, the stable GOTMPDIR <tmp>/gotmp at 0700 under a Lab's
 // resolved check TMPDIR. testing.TempDir reads GOTMPDIR and the test-result cache keys on
 // it, so every view of a Lab gets the same one; Go's own go-build* work directories in it
-// are unique per invocation and removed by Go. It sits directly under <lab>/tmp, whose
-// marker-based stale prune keeps it and prunes its old children. A symbolic link or
-// non-directory at that path is refused.
+// are unique per invocation and removed by Go. It sits directly under the Lab's check
+// TMPDIR (resources.LabTempDir), whose marker-based stale prune keeps it and prunes its old
+// children. As for resources.LabTempDir, a symbolic link, a non-directory or another
+// user's directory at that path is refused.
 func labGoTempDir(tmp string) (string, error) {
 	dir := filepath.Join(tmp, resources.LabGoTempName)
 	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
@@ -126,8 +130,14 @@ func labGoTempDir(tmp string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("lab GOTMPDIR is a symbolic link: %s", dir)
+	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("lab GOTMPDIR is not a directory: %s", dir)
+	}
+	if !resources.OwnedByUser(dir, info) {
+		return "", fmt.Errorf("lab GOTMPDIR belongs to another user: %s", dir)
 	}
 	if info.Mode().Perm() != 0700 {
 		if err := os.Chmod(dir, 0700); err != nil {
@@ -530,19 +540,25 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		return fail(err)
 	}
 	defer removeTemp(&v, home)
-	// A stable TMPDIR (the Lab's <lab>/tmp) keeps tests that read it cacheable across
-	// views; without one the private HOME doubles as TMPDIR, as before.
+	// A stable TMPDIR (the Lab's check TMPDIR under the system temp dir, outside the user's
+	// home) keeps tests that read it cacheable across views; without one the private HOME
+	// doubles as TMPDIR, as before.
 	tmp, ok := resources.CheckTempDirFrom(ctx)
 	if !ok {
 		tmp = home
 	} else {
 		// Resolved first, so tests never see a symlinked TMPDIR when <lab> sits behind a
-		// symbolic link (/var -> /private/var on macOS).
+		// symbolic link (/var -> /private/var on macOS). One that vanished since the run
+		// began (an OS temp cleaner) leaves this view with the private HOME as TMPDIR.
 		resolved, err := filepath.EvalSymlinks(tmp)
-		if err != nil {
+		if os.IsNotExist(err) {
+			v.Notes = append(v.Notes, "The Lab's check TMPDIR "+tmp+" vanished during verification; this view used a private TMPDIR, so tests that read it were not cacheable.")
+			tmp, ok = home, false
+		} else if err != nil {
 			return fail(err)
+		} else {
+			tmp = resolved
 		}
-		tmp = resolved
 	}
 	env, secrets, err := commandEnvironment(p.Policy, home, tmp)
 	if err != nil {

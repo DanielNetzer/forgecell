@@ -33,6 +33,8 @@ func newCleanFixture(t *testing.T) cleanFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// doctor --clean never looks for orphaned check TMPDIRs in the user's real temp dirs.
+	setLabTempRoots(t)
 	f := cleanFixture{home: filepath.Join(root, "home"), lab: filepath.Join(root, "lab")}
 	base := time.Now().Add(-100 * time.Hour)
 	for i := 0; i < 8; i++ {
@@ -400,14 +402,36 @@ func TestDoctorWarnsAboutLargeGoCacheWithoutCleaningIt(t *testing.T) {
 	}
 }
 
-// TestDoctorCleanListsAndRemovesStaleLabTmpEntries: doctor --clean lists entries under
-// <lab>/tmp older than 24h, removes them only once confirmed, and keeps recent ones and
-// the directory itself.
+// TestDoctorCleanListsAndRemovesStaleLabTmpEntries: doctor --clean lists entries under the
+// Lab's check TMPDIR (under the system temp dir) older than 24h and a marked legacy
+// <lab>/tmp, removes them only once confirmed, and keeps recent ones and the check TMPDIR
+// itself.
 func TestDoctorCleanListsAndRemovesStaleLabTmpEntries(t *testing.T) {
 	f := newCleanFixture(t)
 	t.Setenv("FORGECELL_HOME", f.home)
+	// The check TMPDIR follows a usable $TMPDIR outside the home.
+	callerTmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(resources.LabTempRootEnv, "")
+	t.Setenv("TMPDIR", callerTmp)
 	tmp, err := resources.LabTempDir(f.lab)
 	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resources.RemoveTree(tmp) })
+	if filepath.Dir(tmp) != callerTmp {
+		t.Fatalf("check TMPDIR %s does not follow $TMPDIR %s", tmp, callerTmp)
+	}
+	if path, err := resources.LabTempPath(f.lab); err != nil || path != tmp {
+		t.Fatalf("LabTempPath %s %v, want %s", path, err, tmp)
+	}
+	legacy := filepath.Join(f.lab, "tmp")
+	if err := os.MkdirAll(filepath.Join(legacy, "TestFresh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, resources.LabTempMarker), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	stale := filepath.Join(tmp, "TestLeak123")
@@ -428,6 +452,9 @@ func TestDoctorCleanListsAndRemovesStaleLabTmpEntries(t *testing.T) {
 	if !strings.Contains(out.String(), "remove "+stale) || strings.Contains(out.String(), recent) || !exists(stale) {
 		t.Fatalf("dry run listing:\n%s", out.String())
 	}
+	if !strings.Contains(out.String(), "check TMPDIR "+tmp) || !strings.Contains(out.String(), "remove "+legacy+" (") || !exists(legacy) {
+		t.Fatalf("dry run must name the check TMPDIR and list the legacy <lab>/tmp:\n%s", out.String())
+	}
 	out.Reset()
 	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", f.lab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 {
 		t.Fatalf("exit %d: %s\n%s", code, stderr.String(), out.String())
@@ -435,11 +462,15 @@ func TestDoctorCleanListsAndRemovesStaleLabTmpEntries(t *testing.T) {
 	if exists(stale) || !exists(recent) || !exists(tmp) || !strings.Contains(out.String(), "removed "+stale) {
 		t.Fatalf("stale %t recent %t tmp %t:\n%s", exists(stale), exists(recent), exists(tmp), out.String())
 	}
+	if exists(legacy) || !strings.Contains(out.String(), "removed "+legacy+"\n") {
+		t.Fatalf("legacy <lab>/tmp not removed after confirmation:\n%s", out.String())
+	}
 }
 
-// TestDoctorCleanLeavesForeignTmpAlone: doctor --clean --yes --lab touches <lab>/tmp only
-// in a directory that looks like a Lab and only when Forgecell's marker is there; a
-// symbolic link in place of <lab>/tmp is refused and its target untouched.
+// TestDoctorCleanLeavesForeignTmpAlone: doctor --clean --yes --lab touches the check
+// TMPDIR and a legacy <lab>/tmp only for a directory that looks like a Lab and only when
+// Forgecell's marker is there; a symbolic link in place of <lab>/tmp is refused and its
+// target untouched.
 func TestDoctorCleanLeavesForeignTmpAlone(t *testing.T) {
 	old := time.Now().Add(-48 * time.Hour)
 	oldEntry := func(path string) string {
@@ -464,33 +495,134 @@ func TestDoctorCleanLeavesForeignTmpAlone(t *testing.T) {
 		t.Fatalf("unmarked <lab>/tmp entry touched:\n%s", out.String())
 	}
 
-	// A directory that is not a Lab (no ledgers/) keeps even a marked tmp/.
+	// A directory that is not a Lab (no ledgers/) keeps even a marked check TMPDIR and a
+	// marked legacy tmp/.
 	notLab := t.TempDir()
 	tmp, err := resources.LabTempDir(notLab)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = resources.RemoveTree(tmp) })
 	marked := oldEntry(filepath.Join(tmp, "TestLeak"))
+	legacy := oldEntry(filepath.Join(notLab, "tmp"))
+	if err := os.WriteFile(filepath.Join(legacy, resources.LabTempMarker), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	out.Reset()
 	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", notLab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 {
 		t.Fatalf("exit %d: %s\n%s", code, stderr.String(), out.String())
 	}
-	if !exists(marked) {
+	if !exists(marked) || !exists(legacy) {
 		t.Fatalf("tmp of a non-Lab directory pruned:\n%s", out.String())
 	}
 
-	// A symbolic link at <lab>/tmp is refused.
+	// A symbolic link at <lab>/tmp is refused with a warning, and the rest is still cleaned.
 	linkLab := newCleanFixture(t)
 	if err := os.Symlink(tmp, filepath.Join(linkLab.lab, "tmp")); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", linkLab.lab}, strings.NewReader(""), &out, &stderr, "dev"); code == 0 || !strings.Contains(stderr.String(), "symbolic link") {
-		t.Fatalf("symlinked <lab>/tmp not refused: exit %d %s\n%s", code, stderr.String(), out.String())
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", linkLab.lab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 || !strings.Contains(stderr.String(), "warning: skipping the legacy") || !strings.Contains(stderr.String(), "symbolic link") {
+		t.Fatalf("symlinked <lab>/tmp not refused with a warning: exit %d %s\n%s", code, stderr.String(), out.String())
 	}
 	if !exists(marked) {
 		t.Fatal("symlink target entry removed")
+	}
+	if !strings.Contains(out.String(), "removed ") {
+		t.Fatalf("the rest of the Lab was not cleaned:\n%s", out.String())
+	}
+
+	// A file at <lab>/tmp is warned about too, without failing.
+	fileLab := newCleanFixture(t)
+	if err := os.WriteFile(filepath.Join(fileLab.lab, "tmp"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", fileLab.lab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 || !strings.Contains(stderr.String(), "not a directory") {
+		t.Fatalf("a file at <lab>/tmp: exit %d %s\n%s", code, stderr.String(), out.String())
+	}
+
+	// No usable temp root ($TMPDIR and the per-user default both lie inside the home) makes
+	// LabTempPath fail: the section is skipped with a warning and doctor still succeeds.
+	homeLab := newCleanFixture(t)
+	def, _ := resources.DefaultLabTempRoot()
+	resolvedDef, err := filepath.EvalSymlinks(def)
+	if err != nil {
+		t.Skipf("no per-user default temp root: %v", err)
+	}
+	t.Setenv("HOME", resolvedDef)
+	t.Setenv("TMPDIR", resolvedDef)
+	t.Setenv(resources.LabTempRootEnv, "")
+	out.Reset()
+	stderr.Reset()
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", homeLab.lab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 || !strings.Contains(stderr.String(), "warning: skipping the Lab's check TMPDIR") {
+		t.Fatalf("an unusable temp root: exit %d %s\n%s", code, stderr.String(), out.String())
+	}
+}
+
+// setLabTempRoots makes roots the only places doctor --clean looks for orphaned check
+// TMPDIRs until the test ends.
+func setLabTempRoots(t *testing.T, roots ...string) {
+	t.Helper()
+	saved := labTempRoots
+	labTempRoots = func() []string { return roots }
+	t.Cleanup(func() { labTempRoots = saved })
+}
+
+// TestDoctorCleanRemovesOrphanedLabTemps: doctor --clean looks under both the per-user
+// default root and the current one for marked check TMPDIRs older than 24h whose Lab is gone
+// or that have no lab file, removes them once confirmed, and keeps a live Lab's one and a
+// recent orphan.
+func TestDoctorCleanRemovesOrphanedLabTemps(t *testing.T) {
+	f := newCleanFixture(t)
+	t.Setenv("FORGECELL_HOME", f.home)
+	currentRoot, defaultRoot := t.TempDir(), t.TempDir()
+	setLabTempRoots(t, currentRoot, defaultRoot)
+	old := time.Now().Add(-48 * time.Hour)
+	labTemp := func(root, hash, lab string, at time.Time) string {
+		t.Helper()
+		dir := filepath.Join(root, resources.LabTempPrefix+hash)
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, resources.LabTempMarker), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if lab != "" {
+			if err := os.WriteFile(filepath.Join(dir, resources.LabTempLabFile), []byte(lab+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chtimes(dir, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	gone := labTemp(defaultRoot, "0000000000000001", filepath.Join(t.TempDir(), "removed-lab"), old)
+	noLab := labTemp(currentRoot, "0000000000000002", "", old)
+	live := labTemp(defaultRoot, "0000000000000003", f.lab, old)
+	recent := labTemp(currentRoot, "0000000000000004", filepath.Join(t.TempDir(), "removed-too"), time.Now())
+	var out, stderr bytes.Buffer
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--lab", f.lab}, strings.NewReader("n\n"), &out, &stderr, "dev"); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(out.String(), "remove "+gone+" (") || !strings.Contains(out.String(), "remove "+noLab+" (") || strings.Contains(out.String(), live) || strings.Contains(out.String(), recent) {
+		t.Fatalf("dry run listing:\n%s", out.String())
+	}
+	if !exists(gone) || !exists(noLab) {
+		t.Fatal("the dry run removed an orphan")
+	}
+	out.Reset()
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", f.lab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr.String(), out.String())
+	}
+	if exists(gone) || exists(noLab) || !strings.Contains(out.String(), "removed "+gone+"\n") || !strings.Contains(out.String(), "removed "+noLab+"\n") {
+		t.Fatalf("orphans not removed after confirmation:\n%s", out.String())
+	}
+	if !exists(live) || !exists(recent) {
+		t.Fatalf("a live Lab's or a recent check TMPDIR was removed:\n%s", out.String())
 	}
 }
 

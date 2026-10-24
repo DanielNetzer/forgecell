@@ -122,6 +122,12 @@ func TestVerifyPassingChecksGetNoCancellationNote(t *testing.T) {
 		t.Skip("go toolchain unavailable")
 	}
 	o, _ := fixture(t)
+	// The Lab's check TMPDIR is created under the temp root (the test's $TMPDIR); remove it after.
+	t.Cleanup(func() {
+		if labTmp, err := resources.LabTempPath(o.LabDir); err == nil {
+			_ = resources.RemoveTree(labTmp)
+		}
+	})
 	analyze := o.Analyze
 	o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 		a, err := analyze(ctx, b, i, s)
@@ -147,11 +153,19 @@ func TestVerifyPassingChecksGetNoCancellationNote(t *testing.T) {
 	// The views ran with the Lab's stable TMPDIR and the shared Go cache, and the ledger
 	// states each check's cache state. The fixture has no go.mod, so its change lies
 	// outside every module root and every go check ran fresh, saying why.
-	if info, err := os.Stat(filepath.Join(o.LabDir, "tmp")); err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+	// That TMPDIR sits under the temp root, outside the Lab, and <lab>/tmp is unused.
+	labTmp, err := resources.LabTempPath(o.LabDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(labTmp); err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		t.Fatalf("stable Lab TMPDIR: %v %v", info, err)
 	}
-	if _, err := os.Lstat(filepath.Join(o.LabDir, "tmp", resources.LabTempMarker)); err != nil {
+	if _, err := os.Lstat(filepath.Join(labTmp, resources.LabTempMarker)); err != nil {
 		t.Fatalf("stable Lab TMPDIR has no Forgecell marker: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(o.LabDir, "tmp")); !os.IsNotExist(err) {
+		t.Fatalf("<lab>/tmp must no longer be created: %v", err)
 	}
 	if r.Verification == nil || len(r.Verification.Checks) == 0 {
 		t.Fatalf("verification %+v", r.Verification)
