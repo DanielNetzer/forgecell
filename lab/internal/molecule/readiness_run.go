@@ -1378,6 +1378,17 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	if o.Resources != nil {
 		checkCtx, stopMonitor = o.Resources.Monitor(ctx)
 	}
+	// Both views share the Lab's stable <lab>/tmp as TMPDIR, so tests that read it can
+	// still be served from the shared Go cache. Without it each view keeps a private one.
+	if tmp, err := resources.LabTempDir(o.LabDir); err == nil {
+		checkCtx = resources.WithCheckTempDir(checkCtx, tmp)
+		// What tests leaked there more than 24h ago goes first, so <lab>/tmp stays bounded.
+		if _, err := resources.PruneLabTemp(tmp, time.Now()); err != nil {
+			r.Notes = append(r.Notes, "Stale entries under the Lab's check TMPDIR could not all be removed: "+err.Error())
+		}
+	} else {
+		r.Notes = append(r.Notes, "Stable check TMPDIR unavailable ("+err.Error()+"); views used a private TMPDIR, so tests that read it were not cacheable.")
+	}
 	verified := verification.RunObserved(checkCtx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error {
 		if err := recordObservation(&r, obs); err != nil {
 			return err

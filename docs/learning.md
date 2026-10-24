@@ -317,6 +317,68 @@ run with N above 1 records `parallel: N`, and whenever any recorded attempt ran 
 including after a resume, the report notes that elapsed and harness durations include
 contention from concurrent attempts.
 
+#### Shared Go cache across checkouts
+
+Every Lab and evaluation `go` invocation shares one build and test cache: the Molecule's
+candidate and protected views (Formula baseline checks included), evaluation `verify()`,
+setup and preflight, base-flake re-runs and replay. The absolute `GOCACHE` and `GOMODCACHE`
+are resolved once per process with `go env` under the caller's environment (with
+`GOTOOLCHAIN=local`), so no invocation falls back to a cache under its private per-run
+`HOME`, also when `GOCACHE` is unset in the caller's environment. Each scrubbed check
+environment also sets `GOPROXY=off`, `GOTOOLCHAIN=local` and `-trimpath` in `GOFLAGS`. No
+`-mod` is added: without one Go already uses readonly mode, or vendor mode for a module with
+a `vendor` directory, and a forwarded `-mod` (`-mod=vendor`, `-mod=mod`) is kept. A
+cohort attempt's memory-capped `-p` is merged into the same `GOFLAGS` afterwards. A reviewed
+policy that forwards `GOPROXY` or `GOTOOLCHAIN` keeps the caller's value, and the check
+record names the override. A module missing from the caller's module cache now fails a check
+instead of being downloaded; when a failed check's output shows `module lookup disabled by
+GOPROXY=off` or a `GOTOOLCHAIN=local` toolchain error, its record carries a note naming
+Forgecell's cache settings: warm the module cache (`go mod download`) or forward `GOPROXY`
+rather than reading it as a candidate defect. Evaluation commands no longer inherit the caller's environment:
+they get a private `HOME`, the caller's `PATH`, `LANG` and `TMPDIR`, the cache settings and
+`FORGECELL_EVAL_WORKSPACE`.
+
+Each verification checkout lives at a unique path. Without `-trimpath` the test binary
+embeds that path and every package misses the cache; with it, Go serves `(cached)` results
+for every package whose code, dependencies, and read files and environment are unchanged.
+Go keys a test only on the environment variables and files it actually reads, so:
+
+- the Molecule's views use one stable `TMPDIR` per Lab, `<lab>/tmp` (0700, shared by
+  concurrent runs, whose files stay apart in the unique subdirectories Go creates under it),
+  because `t.TempDir()` reads `TMPDIR`. Go's own work directories go to a per-view
+  `GOTMPDIR`, removed afterwards, so they never accumulate there; each verification first
+  removes the user's entries under `<lab>/tmp` older than 24h, and `forgecell doctor --clean`
+  lists and removes them too, with the same confirmation. Pruning touches only a `<lab>/tmp`
+  that Forgecell created: creating it writes a `.forgecell-check-tmp` marker, a directory
+  without the marker is never pruned, a symbolic link at `<lab>/tmp` is refused, and
+  `doctor --clean` also requires the Lab to have a `ledgers/` directory;
+- `HOME` stays private per view. A test that reads it (`os.UserHomeDir`) is a known cache
+  miss; few do.
+
+Hidden acceptance always runs fresh: every independent-acceptance check gets `-count=1` in
+`GOFLAGS` whatever its argv runs, the generated `acceptance.sh` passes `-count=1` too, and
+base-flake re-runs already do. When the captured change touches a path outside the root of
+any `go.mod` module in the candidate tree (for example `docs/`), which that module's cache
+cannot see, every view of that verification runs with `-count=1`. With several modules (a
+root `go.mod` plus nested ones, or `go.work` modules) a change outside any one of them is
+enough. Regression `go test` and `go vet` checks, candidate and
+protected, may otherwise hit the cache. Each go check record states its cache state, derived
+from the environment it actually ran with: `cache: enabled`, `cache: disabled (fresh)`
+(`-count` in `GOFLAGS` or argv), `cache: disabled (fresh: non-module change)` or
+`disabled (go cache unavailable)` without a go toolchain; a non-go check such as `gofmt` or
+a shell script states none, even when its `GOFLAGS` carries `-count`. The ledger's verification summary reports per view how many `go test` packages
+were served `(cached)` versus run, read from the `ok <pkg> (cached)` summary lines.
+
+**`-trimpath` differs from CI.** CI runs without `-trimpath`, so a test that reads source
+paths (`runtime.Caller`, file names in stack traces) sees
+module-relative paths in Forgecell's checks and absolute paths in CI. A reviewed policy can
+opt out by forwarding `GOFLAGS` containing `-trimpath=false`, which the merge keeps; that
+check then misses the cache across checkouts.
+
+**Safety note.** Go's cache does not track subprocess behaviour or files outside the module.
+A test whose result depends on external tools or state can be served a stale cached result.
+The full-suite run in GitHub CI stays the final gate.
+
 By default each attempt's Lab, workspace and verification trees are deleted once its
 record and verification observations are saved, to bound disk growth. Before deletion the
 run writes `<attempt>/changes.diff` (the unified diff from the base commit to the captured
@@ -523,7 +585,7 @@ The machine-consumed inputs, which embed or are the hidden tests, live under
 
 Replay executes repository test code at build time. It does so only under a scrubbed
 environment allowlist (`PATH`, a private `HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE`,
-`GOFLAGS=-mod=readonly`, `GOTOOLCHAIN=local`, `GOPROXY=off`, `LANG`) — never the inherited
+`GOFLAGS=-trimpath`, `GOTOOLCHAIN=local`, `GOPROXY=off`, `LANG`) — never the inherited
 environment — and in throwaway worktrees created with `core.hooksPath=/dev/null`. In a
 worktree at `baseCommit` the hidden tests are applied (renamed-away old paths removed) and
 run with `go test -json` and the same `-run` filter as `acceptance.sh`, so the initial

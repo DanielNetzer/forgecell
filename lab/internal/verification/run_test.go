@@ -12,6 +12,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 func checkPlan(dir, base string) readiness.Plan {
@@ -47,6 +48,241 @@ func TestFreshVerificationDoesNotReuseIgnoredFilesOrSecrets(t *testing.T) {
 		t.Fatal("ignored coding data copied")
 	}
 }
+
+// envCheck runs one verification whose check prints the Go-related environment it got.
+// files are added to the base commit (go.mod for a module root, vendor/modules.txt for a
+// vendored module), and the change edits code.txt. The views use a private cache.
+func envCheck(t *testing.T, files map[string]string, forward []string) (map[string]string, Observation) {
+	t.Helper()
+	dir, _ := sourceFixture(t)
+	files["check.sh"] = "#!/bin/sh\nfor k in HOME TMPDIR GOTMPDIR GOCACHE GOMODCACHE GOPROXY GOFLAGS GOTOOLCHAIN; do eval \"echo $k=\\$$k\"; done\n"
+	for file, data := range files {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(file)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "env")
+	base := gitTest(t, dir, "rev-parse", "HEAD")
+	p := checkPlan(dir, base)
+	p.Policy.Environment = append([]string{"PATH"}, forward...)
+	os.WriteFile(filepath.Join(dir, "code.txt"), []byte("changed"), 0600)
+	capture, err := Capture(context.Background(), dir, base, []string{"code.txt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	ctx := resources.WithGoCache(resources.WithCheckTempDir(context.Background(), tmp), resources.GoCache{ModCache: "/private/mod", BuildCache: "/private/build"})
+	result := Run(resources.WithGoParallelism(ctx, 3), dir, filepath.Join(t.TempDir(), "verification"), p, capture)
+	if !result.RequiredChecksPassed || len(result.Checks) != 1 {
+		t.Fatalf("%+v", result)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(result.Checks[0].Result.Stdout), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		got[k] = v
+	}
+	if got["TMPDIR"] != tmp || got["HOME"] == tmp || !strings.Contains(got["HOME"], "forgecell-check-home-") {
+		t.Fatalf("TMPDIR must be the stable one and HOME private: %v", got)
+	}
+	if !strings.Contains(got["GOTMPDIR"], "forgecell-gotmp-") || strings.HasPrefix(got["GOTMPDIR"], tmp) {
+		t.Fatalf("GOTMPDIR must be a per-view directory outside the stable TMPDIR: %v", got)
+	}
+	if _, err := os.Lstat(got["GOTMPDIR"]); !os.IsNotExist(err) {
+		t.Fatalf("per-view GOTMPDIR %s was not removed: %v", got["GOTMPDIR"], err)
+	}
+	return got, result.Checks[0]
+}
+
+// TestCheckEnvironmentCarriesSharedGoCache asserts that a view's check environment holds
+// the cache ctx resolves (never under the private HOME), GOPROXY=off, GOTOOLCHAIN=local
+// and GOFLAGS with -trimpath merged before the cohort's -p, while TMPDIR is the stable one
+// ctx carries, HOME stays private and Go's work directories go to a per-view GOTMPDIR. A
+// forwarded -mod is kept, and a non-go argv records no cache state.
+func TestCheckEnvironmentCarriesSharedGoCache(t *testing.T) {
+	t.Setenv("GOCACHE", "")
+	os.Unsetenv("GOCACHE")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	got, o := envCheck(t, map[string]string{"go.mod": "module example.test/env\n\ngo 1.22\n"}, []string{"GOFLAGS"})
+	if got["GOCACHE"] != "/private/build" || got["GOMODCACHE"] != "/private/mod" {
+		t.Fatalf("shared cache not passed: %v", got)
+	}
+	if strings.HasPrefix(got["GOCACHE"], got["HOME"]) || strings.HasPrefix(got["GOMODCACHE"], got["HOME"]) {
+		t.Fatalf("cache fell back under the private HOME: %v", got)
+	}
+	if got["GOPROXY"] != "off" || got["GOTOOLCHAIN"] != "local" || got["GOFLAGS"] != "-trimpath -mod=mod -p=3" {
+		t.Fatalf("go settings: %v", got)
+	}
+	if o.Cache != "" || len(o.GoEnvForwarded) != 0 {
+		t.Fatalf("a /bin/sh check records cache %q forwarded %v", o.Cache, o.GoEnvForwarded)
+	}
+}
+
+// TestVendoredModuleIsNotForcedReadonly: no -mod is added, so a module with
+// vendor/modules.txt keeps Go's default vendor mode.
+func TestVendoredModuleIsNotForcedReadonly(t *testing.T) {
+	t.Setenv("GOFLAGS", "")
+	got, _ := envCheck(t, map[string]string{"go.mod": "module example.test/env\n\ngo 1.22\n", "vendor/modules.txt": "# example.test/dep v1.0.0\n"}, nil)
+	if got["GOFLAGS"] != "-trimpath -p=3" {
+		t.Fatalf("vendored module GOFLAGS: %v", got)
+	}
+}
+
+// TestPolicyForwardedGoSettingsWin: a reviewed policy that forwards GOPROXY, GOTOOLCHAIN
+// and GOFLAGS=-trimpath=false keeps them, and the observation records the override.
+func TestPolicyForwardedGoSettingsWin(t *testing.T) {
+	t.Setenv("GOPROXY", "https://proxy.example.test")
+	t.Setenv("GOTOOLCHAIN", "auto")
+	t.Setenv("GOFLAGS", "-trimpath=false")
+	got, o := envCheck(t, map[string]string{"go.mod": "module example.test/env\n\ngo 1.22\n"}, []string{"GOPROXY", "GOTOOLCHAIN", "GOFLAGS"})
+	if got["GOPROXY"] != "https://proxy.example.test" || got["GOTOOLCHAIN"] != "auto" || got["GOFLAGS"] != "-trimpath=false -p=3" {
+		t.Fatalf("forwarded settings: %v", got)
+	}
+	if strings.Join(o.GoEnvForwarded, ",") != "GOPROXY,GOTOOLCHAIN" {
+		t.Fatalf("override not recorded: %v", o.GoEnvForwarded)
+	}
+}
+
+// TestNonModuleChangeRunsFresh: a change outside every go.mod root (here the tree has no
+// module at all) runs every check with -count=1; the /bin/sh check itself records no
+// cache state, and a go argv in that env records why it ran fresh.
+func TestNonModuleChangeRunsFresh(t *testing.T) {
+	t.Setenv("GOFLAGS", "")
+	got, o := envCheck(t, map[string]string{"lab/go.mod": "module example.test/env\n\ngo 1.22\n"}, nil)
+	if got["GOFLAGS"] != "-trimpath -count=1 -p=3" || o.Cache != "" {
+		t.Fatalf("non-module change: %v cache %q", got, o.Cache)
+	}
+	if s := CacheStatus([]string{"go", "test", "./..."}, []string{"GOFLAGS=" + got["GOFLAGS"]}, true, true); s != resources.CacheFreshNonModule {
+		t.Fatalf("go argv in a non-module env: %q", s)
+	}
+	if !changesOutsideModules([]string{"docs/a.md"}, []string{"lab/go.mod", "docs/a.md"}) || changesOutsideModules([]string{"lab/x.go"}, []string{"lab/go.mod"}) || changesOutsideModules([]string{"docs/a.md"}, []string{"go.mod"}) {
+		t.Fatal("changesOutsideModules misclassified a path")
+	}
+	if !changesOutsideModules([]string{"docs/a.md"}, nil) || changesOutsideModules(nil, nil) {
+		t.Fatal("a tree without modules misclassified")
+	}
+}
+
+// TestNonModuleChangeIsPerModule: with a root go.mod and a nested one, a docs-only change
+// lies inside the root module but outside the nested one, so it forces fresh; so does a
+// root-module file outside the nested module. Only a change inside every module root (in
+// the nested module, which the root module also covers) stays cached.
+func TestNonModuleChangeIsPerModule(t *testing.T) {
+	files := []string{"go.mod", "main.go", "lab/go.mod", "lab/x.go", "docs/a.md"}
+	if !changesOutsideModules([]string{"docs/a.md"}, files) {
+		t.Fatal("docs-only change in a root+nested repo must force fresh")
+	}
+	if !changesOutsideModules([]string{"main.go"}, files) {
+		t.Fatal("a change outside the nested module must force fresh")
+	}
+	if changesOutsideModules([]string{"lab/x.go"}, files) {
+		t.Fatal("a change inside every module root must stay cached")
+	}
+	work := []string{"go.work", "a/go.mod", "a/a.go", "b/go.mod", "b/b.go"}
+	if !changesOutsideModules([]string{"a/a.go"}, work) {
+		t.Fatal("a go.work change outside module b must force fresh")
+	}
+}
+
+// TestNonModuleChangeIgnoresFixtureModules: go.mod files Go itself ignores (under
+// testdata/ or vendor/, or a directory starting with _ or .) are not module roots, so a
+// change inside lab/ outside such a fixture stays cacheable.
+func TestNonModuleChangeIgnoresFixtureModules(t *testing.T) {
+	files := []string{"lab/go.mod", "lab/x.go", "lab/internal/x/testdata/mod/go.mod", "lab/vendor/dep/go.mod", "lab/_old/go.mod", "lab/.hidden/go.mod"}
+	if changesOutsideModules([]string{"lab/x.go"}, files) {
+		t.Fatal("a change inside lab/ outside an ignored fixture module must stay cacheable")
+	}
+	if !changesOutsideModules([]string{"docs/a.md"}, files) {
+		t.Fatal("a change outside lab/ must still force fresh")
+	}
+}
+
+// TestAcceptanceCacheStatusIsFresh: independent acceptance records "disabled (fresh)"
+// whatever its argv, since it always runs with -count=1.
+func TestAcceptanceCacheStatusIsFresh(t *testing.T) {
+	if s := AcceptanceCacheStatus(true); s != resources.CacheFresh {
+		t.Fatalf("acceptance with cache: %q", s)
+	}
+	if s := AcceptanceCacheStatus(false); s != resources.CacheUnavailable {
+		t.Fatalf("acceptance without cache: %q", s)
+	}
+}
+
+// TestDocsOnlyChangeInNestedModuleRepoRunsFresh: end to end, a docs-only change in a tree
+// with a root go.mod and a nested lab/go.mod runs the checks with -count=1.
+func TestDocsOnlyChangeInNestedModuleRepoRunsFresh(t *testing.T) {
+	t.Setenv("GOFLAGS", "")
+	got, _ := envCheck(t, map[string]string{"go.mod": "module example.test/root\n\ngo 1.22\n", "lab/go.mod": "module example.test/lab\n\ngo 1.22\n"}, nil)
+	if got["GOFLAGS"] != "-trimpath -count=1 -p=3" {
+		t.Fatalf("root+nested docs-only change: %v", got)
+	}
+}
+
+// TestCacheSettingsFailureGetsNote: a check that fails because GOPROXY=off blocked a module
+// lookup is recorded with a note naming Forgecell's cache settings.
+func TestCacheSettingsFailureGetsNote(t *testing.T) {
+	dir, _ := sourceFixture(t)
+	os.WriteFile(filepath.Join(dir, "check.sh"), []byte("#!/bin/sh\necho 'go: example.test/dep@v1.0.0: module lookup disabled by GOPROXY=off' >&2\nexit 1\n"), 0600)
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "offline")
+	base := gitTest(t, dir, "rev-parse", "HEAD")
+	p := checkPlan(dir, base)
+	os.WriteFile(filepath.Join(dir, "code.txt"), []byte("changed"), 0600)
+	capture, err := Capture(context.Background(), dir, base, []string{"code.txt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := resources.WithGoCache(context.Background(), resources.GoCache{ModCache: "/private/mod", BuildCache: "/private/build"})
+	result := Run(ctx, dir, filepath.Join(t.TempDir(), "verification"), p, capture)
+	if result.RequiredChecksPassed || len(result.Checks) != 1 || !strings.Contains(result.Checks[0].Note, "go mod download") || !strings.Contains(result.Checks[0].Note, "GOPROXY=off") {
+		t.Fatalf("missing cache settings note: %+v", result.Checks)
+	}
+}
+
+func TestCacheStatusAndPackageCounts(t *testing.T) {
+	freshEnv := []string{"GOFLAGS=-trimpath -count=1"}
+	cacheEnv := []string{"GOFLAGS=-trimpath"}
+	for _, c := range []struct {
+		argv      []string
+		env       []string
+		cache     bool
+		nonModule bool
+		want      string
+	}{
+		{[]string{"go", "test", "./..."}, cacheEnv, true, false, resources.CacheEnabled},
+		{[]string{"/usr/local/go/bin/go", "vet", "./..."}, cacheEnv, true, false, resources.CacheEnabled},
+		{[]string{"go", "test", "-count=1", "./..."}, cacheEnv, true, false, resources.CacheFresh},
+		{[]string{"go", "test", "-count", "1", "./..."}, cacheEnv, true, false, resources.CacheFresh},
+		// A non-go argv records no cache state, even when its GOFLAGS carries -count.
+		{[]string{"/bin/sh", "acceptance.sh"}, freshEnv, true, false, ""},
+		{[]string{"sh", "-c", "go test ./..."}, freshEnv, true, true, ""},
+		{[]string{"go", "test", "./..."}, freshEnv, true, true, resources.CacheFreshNonModule},
+		{[]string{"sh", "-c", "test -z \"$(gofmt -l .)\""}, cacheEnv, true, false, ""},
+		{[]string{"go", "test", "./..."}, nil, false, false, resources.CacheUnavailable},
+		{[]string{"gofmt", "-l", "."}, nil, false, false, ""},
+	} {
+		if got := CacheStatus(c.argv, c.env, c.cache, c.nonModule); got != c.want {
+			t.Errorf("CacheStatus(%v, %v, %t, %t) = %q, want %q", c.argv, c.env, c.cache, c.nonModule, got, c.want)
+		}
+	}
+	plain := "ok  \texample.test/a\t(cached)\nok  \texample.test/b\t0.12s\n?   \texample.test/c\t[no test files]\n--- FAIL: TestX (0.00s)\nFAIL\texample.test/d\t0.01s\nFAIL\n"
+	if got := CountGoTestPackages(plain); got == nil || *got != (PackageCounts{Cached: 1, Run: 2}) {
+		t.Fatalf("plain counts: %+v", got)
+	}
+	events := `{"Action":"output","Package":"example.test/a","Output":"ok  \texample.test/a\t(cached)\n"}` + "\n" +
+		`{"Action":"output","Package":"example.test/b","Test":"TestB","Output":"ok  \tnot a package line\t(cached)\n"}` + "\n" +
+		`{"Action":"output","Package":"example.test/b","Output":"ok  \texample.test/b\t0.2s\n"}` + "\n"
+	if got := CountGoTestPackages(events); got == nil || *got != (PackageCounts{Cached: 1, Run: 1}) {
+		t.Fatalf("json counts: %+v", got)
+	}
+	if got := CountGoTestPackages("all good\n"); got != nil {
+		t.Fatalf("non-go output must record no counts: %+v", got)
+	}
+}
+
 func TestChangedCheckDefinitionStopsBeforeExecution(t *testing.T) {
 	dir, base := sourceFixture(t)
 	p := checkPlan(dir, base)

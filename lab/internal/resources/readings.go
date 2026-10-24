@@ -6,11 +6,13 @@ package resources
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -209,14 +211,37 @@ func TreeSize(path string, budget time.Duration) (size uint64, complete bool) {
 	return size, complete
 }
 
-// GoCacheDir is GOCACHE, or Go's default build cache under the user cache directory.
-// It is empty when neither is known or GOCACHE=off.
+// goCacheRetry is how long GoCacheDir remembers a failed go env resolution.
+const goCacheRetry = time.Minute
+
+var goCacheMiss struct {
+	sync.Mutex
+	at time.Time
+}
+
+// GoCacheDir is the build cache the disk guard watches. An explicit GOCACHE in the current
+// environment wins, even when set after the process-wide resolution (GOCACHE=off means
+// none); otherwise it is the shared cache every check uses (ResolveGoCache), and without
+// a go toolchain Go's default build cache under the user cache directory. A failed
+// resolution is not retried for goCacheRetry, so the guard does not run go env on every
+// sample.
 func GoCacheDir() string {
 	if v := os.Getenv("GOCACHE"); v != "" {
 		if v == "off" {
 			return ""
 		}
 		return v
+	}
+	goCacheMiss.Lock()
+	recent := !goCacheMiss.at.IsZero() && time.Since(goCacheMiss.at) < goCacheRetry
+	goCacheMiss.Unlock()
+	if !recent {
+		if c, ok := ResolveGoCache(context.Background()); ok {
+			return c.BuildCache
+		}
+		goCacheMiss.Lock()
+		goCacheMiss.at = time.Now()
+		goCacheMiss.Unlock()
 	}
 	dir, err := os.UserCacheDir()
 	if err != nil {

@@ -373,17 +373,124 @@ func TestDoctorResourcesSectionReportsFloorsAndSizes(t *testing.T) {
 	}
 }
 
+// TestDoctorWarnsAboutLargeGoCacheWithoutCleaningIt measures the shared cache checks use
+// (resources.GoCacheDir), presented here as 25 GiB without walking it.
 func TestDoctorWarnsAboutLargeGoCacheWithoutCleaningIt(t *testing.T) {
-	cache := t.TempDir()
+	cache := resources.GoCacheDir()
+	if cache == "" {
+		t.Skip("no Go build cache known")
+	}
+	existed := exists(cache)
+	previous, measured := goCacheSizes.Load(cache)
 	goCacheSizes.Store(cache, resourceSize{Path: cache, Size: "25.0 GiB", Bytes: 25 * resources.GiB, Complete: true})
-	t.Setenv("GOCACHE", cache)
+	t.Cleanup(func() {
+		if measured {
+			goCacheSizes.Store(cache, previous)
+		} else {
+			goCacheSizes.Delete(cache)
+		}
+	})
 	d := inspectResources(t.TempDir(), t.TempDir())
 	found := false
 	for _, w := range d.Warnings {
 		found = found || strings.Contains(w, "go clean -cache")
 	}
-	if !found || !exists(cache) {
-		t.Fatalf("warnings %v; want the go clean -cache hint and the cache untouched", d.Warnings)
+	if !found || d.GoCache == nil || d.GoCache.Path != cache || exists(cache) != existed {
+		t.Fatalf("warnings %v cache %+v; want the go clean -cache hint and the cache untouched", d.Warnings, d.GoCache)
+	}
+}
+
+// TestDoctorCleanListsAndRemovesStaleLabTmpEntries: doctor --clean lists entries under
+// <lab>/tmp older than 24h, removes them only once confirmed, and keeps recent ones and
+// the directory itself.
+func TestDoctorCleanListsAndRemovesStaleLabTmpEntries(t *testing.T) {
+	f := newCleanFixture(t)
+	t.Setenv("FORGECELL_HOME", f.home)
+	tmp, err := resources.LabTempDir(f.lab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(tmp, "TestLeak123")
+	recent := filepath.Join(tmp, "TestRunning456")
+	for _, dir := range []string{filepath.Join(stale, "001"), recent} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--lab", f.lab}, strings.NewReader("n\n"), &out, &stderr, "dev"); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(out.String(), "remove "+stale) || strings.Contains(out.String(), recent) || !exists(stale) {
+		t.Fatalf("dry run listing:\n%s", out.String())
+	}
+	out.Reset()
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", f.lab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr.String(), out.String())
+	}
+	if exists(stale) || !exists(recent) || !exists(tmp) || !strings.Contains(out.String(), "removed "+stale) {
+		t.Fatalf("stale %t recent %t tmp %t:\n%s", exists(stale), exists(recent), exists(tmp), out.String())
+	}
+}
+
+// TestDoctorCleanLeavesForeignTmpAlone: doctor --clean --yes --lab touches <lab>/tmp only
+// in a directory that looks like a Lab and only when Forgecell's marker is there; a
+// symbolic link in place of <lab>/tmp is refused and its target untouched.
+func TestDoctorCleanLeavesForeignTmpAlone(t *testing.T) {
+	old := time.Now().Add(-48 * time.Hour)
+	oldEntry := func(path string) string {
+		t.Helper()
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	f := newCleanFixture(t)
+	t.Setenv("FORGECELL_HOME", f.home)
+	// The Lab's own tmp/, without the marker: nothing there is removed.
+	own := oldEntry(filepath.Join(f.lab, "tmp", "my-work"))
+	var out, stderr bytes.Buffer
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", f.lab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr.String(), out.String())
+	}
+	if !exists(own) || strings.Contains(out.String(), own) {
+		t.Fatalf("unmarked <lab>/tmp entry touched:\n%s", out.String())
+	}
+
+	// A directory that is not a Lab (no ledgers/) keeps even a marked tmp/.
+	notLab := t.TempDir()
+	tmp, err := resources.LabTempDir(notLab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := oldEntry(filepath.Join(tmp, "TestLeak"))
+	out.Reset()
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", notLab}, strings.NewReader(""), &out, &stderr, "dev"); code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr.String(), out.String())
+	}
+	if !exists(marked) {
+		t.Fatalf("tmp of a non-Lab directory pruned:\n%s", out.String())
+	}
+
+	// A symbolic link at <lab>/tmp is refused.
+	linkLab := newCleanFixture(t)
+	if err := os.Symlink(tmp, filepath.Join(linkLab.lab, "tmp")); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := Run(context.Background(), []string{"doctor", "--clean", "--yes", "--lab", linkLab.lab}, strings.NewReader(""), &out, &stderr, "dev"); code == 0 || !strings.Contains(stderr.String(), "symbolic link") {
+		t.Fatalf("symlinked <lab>/tmp not refused: exit %d %s\n%s", code, stderr.String(), out.String())
+	}
+	if !exists(marked) {
+		t.Fatal("symlink target entry removed")
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
+	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 )
 
 type Command struct {
@@ -51,6 +52,11 @@ type Plan struct {
 type Observation struct {
 	Command Command        `json:"command"`
 	Result  process.Result `json:"result"`
+	// Cache states whether the command could be served from the shared Go cache
+	// ("enabled") or always runs ("disabled (fresh)", hidden acceptance included).
+	Cache string `json:"cache,omitempty"`
+	// Note explains a failure that Forgecell's own cache settings caused.
+	Note string `json:"note,omitempty"`
 }
 type Attempt struct {
 	Verification  Verification    `json:"verification"`
@@ -203,17 +209,53 @@ func observe(ctx context.Context, c Command, workspace, acceptance string) Obser
 	for i, v := range c.Argv {
 		argv[i] = strings.ReplaceAll(strings.ReplaceAll(v, "{acceptance}", acceptance), "{workspace}", workspace)
 	}
-	env := []string{}
-	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "FORGECELL_EVAL_WORKSPACE=") {
-			env = append(env, v)
+	// The private HOME can gain a read-only Go tree; resources.Remove makes it writable
+	// first, and a failed removal stays registered for exit cleanup.
+	home, err := resources.MkdirTemp("", "forgecell-eval-home-")
+	if err != nil {
+		return Observation{Command: c, Result: process.Result{Code: -1, Error: "cannot create private HOME: " + err.Error()}}
+	}
+	defer resources.Remove(home)
+	dir := filepath.Join(workspace, c.Dir)
+	// Hidden acceptance is the plan's independent acceptance check and is fresh by
+	// construction, whatever its argv runs.
+	env, cache := observeEnv(ctx, home, workspace, c.Name == "acceptance")
+	r := process.Run(ctx, process.Options{Argv: argv, Dir: dir, Env: env, Stdin: []byte{}, Timeout: time.Duration(c.TimeoutMS) * time.Millisecond, MaxOutputBytes: 2_000_000})
+	o := Observation{Command: c, Result: r, Cache: verification.CacheStatus(argv, env, cache, false)}
+	if c.Name == "acceptance" {
+		o.Cache = verification.AcceptanceCacheStatus(cache)
+	}
+	if cache && !r.OK {
+		o.Note = resources.CacheSettingsNote(r.Stdout+"\n"+r.Stderr, nil)
+	}
+	return o
+}
+
+// observeEnv is the scrubbed environment of an evaluation command in workspace, as in the
+// Molecule's views: a private HOME, the caller's PATH and LANG, a stable TMPDIR (the one
+// ctx carries, else the caller's), the shared Go cache with GOPROXY=off and GOFLAGS with
+// -trimpath (no -mod, so a vendored module keeps vendor mode; -count=1 when fresh), then
+// the cohort's -p. It never inherits os.Environ() wholesale. cache is false when go env
+// could not resolve the shared cache.
+func observeEnv(ctx context.Context, home, workspace string, fresh bool) (env []string, cache bool) {
+	env = []string{"HOME=" + home}
+	for _, k := range []string{"PATH", "LANG"} {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
 		}
 	}
+	if tmp, ok := resources.CheckTempDirFrom(ctx); ok {
+		env = append(env, "TMPDIR="+tmp)
+	} else if v, ok := os.LookupEnv("TMPDIR"); ok {
+		env = append(env, "TMPDIR="+v)
+	}
 	env = append(env, "FORGECELL_EVAL_WORKSPACE="+workspace)
+	if gomodcache, gocache, ok := resolveGoCache(ctx); ok {
+		env, _ = resources.ApplyGoCache(env, resources.GoCache{ModCache: gomodcache, BuildCache: gocache}, resources.GoEnvOptions{Fresh: fresh})
+		cache = true
+	}
 	// A cohort attempt bounds each go command's build parallelism through GOFLAGS.
-	env = resources.ApplyGoParallelism(ctx, env)
-	r := process.Run(ctx, process.Options{Argv: argv, Dir: filepath.Join(workspace, c.Dir), Env: env, Stdin: []byte{}, Timeout: time.Duration(c.TimeoutMS) * time.Millisecond, MaxOutputBytes: 2_000_000})
-	return Observation{c, r}
+	return resources.ApplyGoParallelism(ctx, env), cache
 }
 func gitResult(ctx context.Context, dir string, args ...string) process.Result {
 	return process.Run(ctx, process.Options{Argv: append([]string{"git"}, args...), Dir: dir, Stdin: []byte{}, Timeout: 30 * time.Second})

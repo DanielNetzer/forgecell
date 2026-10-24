@@ -719,7 +719,8 @@ func buildAcceptanceScript(testFiles []string, contents map[string][]byte, pkgs 
 		b.WriteString(delim + "\n")
 	}
 	b.WriteString("cd " + shQuote(replayModuleSubdir) + "\n")
-	args := []string{"go", "test", "-buildvcs=false", "-run", runPattern}
+	// -count=1: hidden acceptance always runs fresh, never served from the shared cache.
+	args := []string{"go", "test", "-count=1", "-buildvcs=false", "-run", runPattern}
 	args = append(args, pkgs...)
 	quoted := make([]string, len(args))
 	for i, a := range args {
@@ -924,60 +925,22 @@ func decodeGoTestOutput(stdout, stderr string) string {
 	return b.String()
 }
 
-// resolveGoCache resolves the effective GOMODCACHE and GOCACHE by running `go env` under the
-// caller's (unscrubbed) environment, so they are known absolute paths before scrubbing clears
-// HOME. It is a function value so tests can inject a fake instead of shelling out. ok is false
-// when the go toolchain is unavailable or the values cannot be determined, which callers map to
-// the existing "go toolchain unavailable" skip.
-//
-// Resolution must not depend on the process working directory or the caller's toolchain
-// selection: it runs from os.TempDir() with GOTOOLCHAIN forced to "local", so a go.mod
-// `toolchain` line in the current directory can never trigger a toolchain download here.
+// resolveGoCache returns the process-wide shared GOMODCACHE and GOCACHE that every Lab and
+// evaluation go invocation uses (resources.ResolveGoCache: `go env` once under the caller's
+// unscrubbed environment, from os.TempDir() with GOTOOLCHAIN=local). It is a function value so
+// tests can inject a fake instead of shelling out. ok is false when the go toolchain is
+// unavailable or the values cannot be determined, which callers map to the existing
+// "go toolchain unavailable" skip.
 var resolveGoCache = func(ctx context.Context) (gomodcache, gocache string, ok bool) {
-	r := process.Run(ctx, process.Options{
-		Argv:           []string{"go", "env", "GOMODCACHE", "GOCACHE"},
-		Dir:            os.TempDir(),
-		Env:            envWithGotoolchainLocal(os.Environ()),
-		Stdin:          []byte{},
-		Timeout:        60 * time.Second,
-		MaxOutputBytes: 1_000_000,
-	})
-	if !r.OK {
-		return "", "", false
-	}
-	return parseGoEnvCache(r.Stdout)
+	c, ok := resources.ResolveGoCache(ctx)
+	return c.ModCache, c.BuildCache, ok
 }
 
-// envWithGotoolchainLocal returns env with GOTOOLCHAIN forced to "local" (replacing any existing
-// entry), so a go.mod `toolchain` line can never trigger a toolchain download.
-func envWithGotoolchainLocal(env []string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, e := range env {
-		if strings.HasPrefix(e, "GOTOOLCHAIN=") {
-			continue
-		}
-		out = append(out, e)
-	}
-	return append(out, "GOTOOLCHAIN=local")
-}
-
-// parseGoEnvCache parses the stdout of `go env GOMODCACHE GOCACHE` into the two cache paths.
-// ok is false unless the output has at least two lines whose first two values are both non-empty
-// absolute paths; trailing blank lines and CRLF endings are tolerated.
+// parseGoEnvCache parses the stdout of `go env GOMODCACHE GOCACHE` into the two cache paths
+// (resources.ParseGoEnvCache).
 func parseGoEnvCache(stdout string) (gomodcache, gocache string, ok bool) {
-	lines := strings.Split(stdout, "\n")
-	if len(lines) < 2 {
-		return "", "", false
-	}
-	gomodcache = strings.TrimSpace(lines[0])
-	gocache = strings.TrimSpace(lines[1])
-	if gomodcache == "" || gocache == "" {
-		return "", "", false
-	}
-	if !filepath.IsAbs(gomodcache) || !filepath.IsAbs(gocache) {
-		return "", "", false
-	}
-	return gomodcache, gocache, true
+	c, ok := resources.ParseGoEnvCache(stdout)
+	return c.ModCache, c.BuildCache, ok
 }
 
 // scrubbedGoEnv is the explicit environment allowlist for build-time execution of repository
@@ -985,20 +948,16 @@ func parseGoEnvCache(stdout string) (gomodcache, gocache string, ok bool) {
 // absolute paths resolved by resolveGoCache under the caller's environment, because with an
 // empty private HOME and GOPROXY=off Go could otherwise locate neither the module cache nor the
 // build cache; the module cache is read-only input and nothing downloads under GOPROXY=off.
+// GOFLAGS carries -trimpath, so results cached in one checkout serve another; no -mod is
+// added, so Go keeps its default readonly (or vendor) mode.
 func scrubbedGoEnv(home, gomodcache, gocache string) []string {
-	env := []string{
-		"HOME=" + home,
-		"GOFLAGS=-mod=readonly",
-		"GOTOOLCHAIN=local",
-		"GOPROXY=off",
-		"GOMODCACHE=" + gomodcache,
-		"GOCACHE=" + gocache,
-	}
+	env := []string{"HOME=" + home}
 	for _, k := range []string{"PATH", "TMPDIR", "LANG"} {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
 	}
+	env, _ = resources.ApplyGoCache(env, resources.GoCache{ModCache: gomodcache, BuildCache: gocache}, resources.GoEnvOptions{})
 	return env
 }
 

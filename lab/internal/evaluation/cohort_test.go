@@ -1897,7 +1897,11 @@ func failedChecks(observations []Observation, names ...string) bool {
 func runFlakyCohort(t *testing.T, marker string, harnesses [2]string) (CohortReport, CohortOptions, map[string]Attempt, map[string]int) {
 	t.Helper()
 	f, _, def := newFixture(t)
-	f.write("lab/flaky/flaky_test.go", fmt.Sprintf("package flaky\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMarkerFlaky(t *testing.T) {\n\tif _, err := os.Stat(%q); err == nil {\n\t\tt.Fatal(\"flaked\")\n\t}\n}\n", marker))
+	// Go keys the shared test cache on the env vars a test reads but not on files outside the
+	// module, such as the marker. The test therefore also reads PATH, which every scrubbed
+	// check environment forwards, and setMarker gives PATH a new entry on every toggle, so no
+	// stale result is served across the toggles. The shared cache is never cleared.
+	f.write("lab/flaky/flaky_test.go", fmt.Sprintf("package flaky\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMarkerFlaky(t *testing.T) {\n\tt.Log(os.Getenv(\"PATH\"))\n\tif _, err := os.Stat(%q); err == nil {\n\t\tt.Fatal(\"flaked\")\n\t}\n}\n", marker))
 	f.git("add", ".")
 	f.git("commit", "-qm", "base with a flaky test")
 	base := f.head()
@@ -1924,7 +1928,16 @@ func runFlakyCohort(t *testing.T, marker string, harnesses [2]string) (CohortRep
 		t.Fatalf("replay did not build the PR: built=%+v skipped=%+v", report.Built, report.Skipped)
 	}
 
+	path := os.Getenv("PATH")
+	t.Setenv("PATH", path)
+	epochs := t.TempDir()
+	var epochMu sync.Mutex
+	epoch := 0
 	setMarker := func(present bool) {
+		epochMu.Lock()
+		epoch++
+		os.Setenv("PATH", path+string(os.PathListSeparator)+filepath.Join(epochs, strconv.Itoa(epoch)))
+		epochMu.Unlock()
 		if present {
 			if err := os.WriteFile(marker, nil, 0o600); err != nil {
 				t.Error(err)

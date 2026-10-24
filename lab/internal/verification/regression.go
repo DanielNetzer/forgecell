@@ -11,6 +11,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,6 +103,15 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 				persistenceFailed = true
 			}
 			return err
+		}
+	}
+	// The candidate tree decides once whether the change leaves every Go module root, so
+	// both views run fresh for it; on a git error each view decides, and fails, itself.
+	// Only validated object ids reach git here; runViewDeltas refuses anything else.
+	objectID := regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
+	if objectID.MatchString(c.Tree) && objectID.MatchString(p.Inputs.BaseCommit) {
+		if nonModule, err := treeChangesOutsideModules(ctx, source, p.Inputs.BaseCommit, c.Tree); err == nil {
+			ctx = context.WithValue(ctx, nonModuleKey{}, nonModule)
 		}
 	}
 	// Always retain the candidate result separately, even when old tests fail.

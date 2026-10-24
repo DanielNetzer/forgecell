@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // fixtureRepo is a tiny git fixture: a base commit whose calc.Value returns 1, plus whatever
@@ -762,7 +763,8 @@ func TestReplaySkipsOversizedAcceptanceScript(t *testing.T) {
 }
 
 // TestAcceptanceScriptRunsOnlyHiddenTests: the generated script runs go test with a -run
-// pattern naming exactly the hidden test functions, sorted and regex-quoted.
+// pattern naming exactly the hidden test functions, sorted and regex-quoted, and with
+// -count=1 so hidden acceptance is never served from the shared Go cache.
 func TestAcceptanceScriptRunsOnlyHiddenTests(t *testing.T) {
 	testFiles := []string{"lab/calc/a_test.go", "lab/calc/b_test.go"}
 	contents := map[string][]byte{
@@ -773,7 +775,7 @@ func TestAcceptanceScriptRunsOnlyHiddenTests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "'go' 'test' '-buildvcs=false' '-run' '^(ExampleValue|FuzzValue|TestAlpha|TestZeta)$' './calc'\n"; !strings.HasSuffix(string(script), want) {
+	if want := "'go' 'test' '-count=1' '-buildvcs=false' '-run' '^(ExampleValue|FuzzValue|TestAlpha|TestZeta)$' './calc'\n"; !strings.HasSuffix(string(script), want) {
 		t.Fatalf("acceptance script does not end with %q:\n%s", want, script)
 	}
 	if got, err := hiddenRunPattern([]string{"TestB", "TestA.x"}); err != nil || got != `^(TestA\.x|TestB)$` {
@@ -1062,45 +1064,55 @@ func TestScrubbedGoEnvResolvesCache(t *testing.T) {
 	if !contains(env, "GOCACHE="+wantCache) {
 		t.Fatalf("GOCACHE missing or wrong in scrubbed env: %v", env)
 	}
-	// The rest of the allowlist stays as before.
-	for _, want := range []string{"HOME=/private/home", "GOFLAGS=-mod=readonly", "GOPROXY=off"} {
+	// The rest of the allowlist stays as before, with -trimpath so cached results serve
+	// other checkouts.
+	for _, want := range []string{"HOME=/private/home", "GOFLAGS=-trimpath", "GOPROXY=off", "GOTOOLCHAIN=local"} {
 		if !contains(env, want) {
 			t.Fatalf("scrubbed env missing %q: %v", want, env)
 		}
 	}
+	// Base-flake re-runs merge the cohort's -p into the same GOFLAGS.
+	env = resources.ApplyGoParallelism(resources.WithGoParallelism(context.Background(), 2), env)
+	if !contains(env, "GOFLAGS=-trimpath -p=2") {
+		t.Fatalf("-p dropped the cache flags: %v", env)
+	}
 }
 
-// TestParseGoEnvCache covers the pure parser used by resolveGoCache: two absolute lines parse,
-// CRLF endings and a trailing blank line are tolerated, and anything short of two non-empty
-// absolute paths is rejected.
-func TestParseGoEnvCache(t *testing.T) {
-	cases := []struct {
-		name    string
-		stdout  string
-		wantMod string
-		wantCac string
-		wantOK  bool
-	}{
-		{name: "two absolute lines", stdout: "/go/pkg/mod\n/go-build\n", wantMod: "/go/pkg/mod", wantCac: "/go-build", wantOK: true},
-		{name: "crlf endings", stdout: "/go/pkg/mod\r\n/go-build\r\n", wantMod: "/go/pkg/mod", wantCac: "/go-build", wantOK: true},
-		{name: "trailing blank line", stdout: "/go/pkg/mod\n/go-build\n\n", wantMod: "/go/pkg/mod", wantCac: "/go-build", wantOK: true},
-		{name: "one line only", stdout: "/go/pkg/mod\n", wantOK: false},
-		{name: "empty value", stdout: "/go/pkg/mod\n\n", wantOK: false},
-		{name: "relative path", stdout: "go/pkg/mod\n/go-build\n", wantOK: false},
+// TestObserveEnvIsScrubbedWithSharedCache: evaluation commands no longer inherit the
+// caller's environment; they get a private HOME, PATH, LANG, the stable TMPDIR ctx carries,
+// the workspace, the shared cache with -trimpath and the cohort's -p. Hidden acceptance is
+// recorded as fresh.
+func TestObserveEnvIsScrubbedWithSharedCache(t *testing.T) {
+	orig := resolveGoCache
+	resolveGoCache = func(context.Context) (string, string, bool) { return "/shared/mod", "/shared/build", true }
+	t.Cleanup(func() { resolveGoCache = orig })
+	t.Setenv("FORGECELL_UNRELATED_CALLER_VAR", "leak")
+	t.Setenv("GOCACHE", "")
+	os.Unsetenv("GOCACHE")
+	ctx := resources.WithGoParallelism(resources.WithCheckTempDir(context.Background(), "/stable/tmp"), 3)
+	env, cache := observeEnv(ctx, "/private/home", "/work", false)
+	if !cache {
+		t.Fatal("cache not applied")
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			mod, cac, ok := parseGoEnvCache(c.stdout)
-			if ok != c.wantOK {
-				t.Fatalf("ok = %v, want %v (mod=%q cache=%q)", ok, c.wantOK, mod, cac)
-			}
-			if !c.wantOK {
-				return
-			}
-			if mod != c.wantMod || cac != c.wantCac {
-				t.Fatalf("got mod=%q cache=%q, want mod=%q cache=%q", mod, cac, c.wantMod, c.wantCac)
-			}
-		})
+	for _, want := range []string{"HOME=/private/home", "TMPDIR=/stable/tmp", "FORGECELL_EVAL_WORKSPACE=/work", "GOCACHE=/shared/build", "GOMODCACHE=/shared/mod", "GOPROXY=off", "GOFLAGS=-trimpath -p=3"} {
+		if !contains(env, want) {
+			t.Fatalf("observe env missing %q: %v", want, env)
+		}
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "FORGECELL_UNRELATED_CALLER_VAR=") {
+			t.Fatalf("caller variable inherited: %v", env)
+		}
+	}
+	dir := t.TempDir()
+	// Hidden acceptance is fresh by construction: its GOFLAGS carries -count=1 whatever
+	// its argv runs, and it records "disabled (fresh)" regardless of argv. Any other non-go
+	// argv records no cache state.
+	if o := observe(ctx, Command{Name: "acceptance", Dir: ".", Argv: []string{"/bin/sh", "-c", "test \"$GOFLAGS\" = '-trimpath -count=1 -p=3'"}, TimeoutMS: 10000}, dir, ""); o.Cache != resources.CacheFresh || !o.Result.OK {
+		t.Fatalf("acceptance: %+v", o)
+	}
+	if o := observe(ctx, Command{Name: "test", Dir: ".", Argv: []string{"/bin/sh", "-c", "test \"$GOCACHE\" = /shared/build"}, TimeoutMS: 10000}, dir, ""); o.Cache != "" || !o.Result.OK {
+		t.Fatalf("regression: %+v", o)
 	}
 }
 
