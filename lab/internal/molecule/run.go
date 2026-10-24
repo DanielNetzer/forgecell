@@ -295,7 +295,14 @@ func allocateWorkspace(ctx context.Context, w Workspace) error {
 	if err := os.MkdirAll(filepath.Dir(w.Path), 0700); err != nil {
 		return err
 	}
-	_, err := git(ctx, w.SourceRoot, "worktree", "add", "-b", w.Branch, w.Path, w.BaseCommit)
+	// Concurrent Molecules share one source repository; git worktree add is not safe
+	// concurrently there.
+	release, err := resources.LockWorktrees(ctx, w.SourceRoot)
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = git(ctx, w.SourceRoot, "worktree", "add", "-b", w.Branch, w.Path, w.BaseCommit)
 	return err
 }
 func readIssue(ctx context.Context, repo string, number int64, cwd string) (Issue, error) {

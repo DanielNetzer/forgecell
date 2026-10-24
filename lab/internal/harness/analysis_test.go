@@ -173,13 +173,16 @@ func TestCodexAnalysisRejectsWrongHelpEvidence(t *testing.T) {
 }
 
 func TestCodexAnalysisUsesBoundedHelpSurfaces(t *testing.T) {
+	if productionAnalysisProbeTimeout <= 0 || productionAnalysisProbeTimeout > 10*time.Second {
+		t.Fatalf("production analysis probe budget %v is unbounded", productionAnalysisProbeTimeout)
+	}
 	for _, failed := range []string{"", "--help", "exec --help"} {
 		t.Run("failed="+failed, func(t *testing.T) {
 			var calls []string
 			run := func(_ context.Context, o process.Options) process.Result {
 				args := strings.Join(o.Argv[1:], " ")
 				calls = append(calls, args)
-				if o.Timeout <= 0 || o.Timeout > 10*time.Second || o.MaxOutputBytes <= 0 || o.MaxOutputBytes > 1_000_000 || len(o.Stdin) != 0 {
+				if o.Timeout != AnalysisProbeTimeout || o.MaxOutputBytes <= 0 || o.MaxOutputBytes > 1_000_000 || len(o.Stdin) != 0 {
 					t.Fatalf("unbounded probe: %+v", o)
 				}
 				if args == failed {

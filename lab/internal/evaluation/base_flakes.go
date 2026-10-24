@@ -262,13 +262,24 @@ func classifyBaseFlakes(ctx context.Context, source, base string, setup []Comman
 	// first; a failed removal stays registered for exit cleanup.
 	defer resources.Remove(parent)
 	worktree := filepath.Join(parent, "wt")
-	if r := gitHookless(ctx, source, "worktree", "add", "--detach", worktree, base); !r.OK {
+	release, err := resources.LockWorktrees(ctx, source)
+	if err != nil {
+		return unclassified()
+	}
+	added := gitHookless(ctx, source, "worktree", "add", "--detach", worktree, base)
+	release()
+	if !added.OK {
 		return unclassified()
 	}
 	// Cleanup runs even after a cancellation, so the per-attempt source never keeps a
 	// registered base worktree.
 	defer func() {
 		cleanup := context.WithoutCancel(ctx)
+		release, err := resources.LockWorktrees(cleanup, source)
+		if err != nil {
+			return
+		}
+		defer release()
 		gitHookless(cleanup, source, "worktree", "remove", "--force", worktree)
 		gitHookless(cleanup, source, "worktree", "prune")
 	}()

@@ -253,7 +253,7 @@ func goBuild(ctx context.Context, root, version, output string) error {
 // builtProtocol asks the built executable for its own adapter protocol; the running
 // binary's constant says nothing about a different checkout.
 func builtProtocol(ctx context.Context, exe string) (string, error) {
-	r := process.Run(ctx, process.Options{Argv: []string{exe, "--protocol"}, Env: []string{}, Stdin: []byte{}, Timeout: 15 * time.Second, MaxOutputBytes: 1000})
+	r := process.Run(ctx, process.Options{Argv: []string{exe, "--protocol"}, Env: []string{}, Stdin: []byte{}, Timeout: probeTimeout, MaxOutputBytes: 1000})
 	protocol := strings.TrimSpace(r.Stdout)
 	if !r.OK || !protocolPattern.MatchString(protocol) {
 		return "", fmt.Errorf("built executable does not report its adapter protocol (forgecell --protocol); the checkout may predate dev install support")

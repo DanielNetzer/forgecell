@@ -481,7 +481,13 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	}
 	// --no-checkout avoids smudge filters. Materialize blobs ourselves, after mode
 	// and path validation, rather than running candidate-controlled Git filters.
-	if _, err := git(ctx, source, "", nil, "worktree", "add", "--no-checkout", "--detach", destination, p.Inputs.BaseCommit); err != nil {
+	release, err := resources.LockWorktrees(ctx, source)
+	if err != nil {
+		return fail(err)
+	}
+	_, err = git(ctx, source, "", nil, "worktree", "add", "--no-checkout", "--detach", destination, p.Inputs.BaseCommit)
+	release()
+	if err != nil {
 		return fail(err)
 	}
 	entries, err := git(ctx, source, "", nil, "ls-tree", "-r", "-z", c.Tree)

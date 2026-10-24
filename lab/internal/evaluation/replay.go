@@ -775,12 +775,25 @@ func runHiddenTests(ctx context.Context, source, commit string, testFiles []stri
 	// the tree writable before removing it.
 	defer func() { _ = resources.Remove(parent) }()
 	worktree := filepath.Join(parent, "wt")
-	if r := gitHookless(ctx, source, "worktree", "add", "--detach", worktree, commit); !r.OK {
-		return res, "setup error: cannot create verification worktree: " + strings.TrimSpace(r.Stderr)
+	release, err := resources.LockWorktrees(ctx, source)
+	if err != nil {
+		return res, "setup error: " + err.Error()
+	}
+	added := gitHookless(ctx, source, "worktree", "add", "--detach", worktree, commit)
+	release()
+	if !added.OK {
+		return res, "setup error: cannot create verification worktree: " + strings.TrimSpace(added.Stderr)
 	}
 	defer func() {
-		gitHookless(ctx, source, "worktree", "remove", "--force", worktree)
-		gitHookless(ctx, source, "worktree", "prune")
+		// Deregistration still runs after a cancellation, under the same lock.
+		cleanup := context.WithoutCancel(ctx)
+		release, err := resources.LockWorktrees(cleanup, source)
+		if err != nil {
+			return
+		}
+		defer release()
+		gitHookless(cleanup, source, "worktree", "remove", "--force", worktree)
+		gitHookless(cleanup, source, "worktree", "prune")
 	}()
 	for _, f := range renamedOld {
 		_ = os.Remove(filepath.Join(worktree, filepath.FromSlash(f)))

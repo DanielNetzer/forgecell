@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // Verification is separate from coding: no ignored files or installed dependencies are reused.
@@ -56,7 +57,13 @@ func verify(ctx context.Context, source, destination, acceptance string, p Plan,
 	if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
 		return fail(err)
 	}
-	if r := gitResult(ctx, source, "worktree", "add", "--detach", destination, p.BaseCommit); !r.OK {
+	release, err := resources.LockWorktrees(ctx, source)
+	if err != nil {
+		return fail(err)
+	}
+	r := gitResult(ctx, source, "worktree", "add", "--detach", destination, p.BaseCommit)
+	release()
+	if !r.OK {
 		return fail(fmt.Errorf("cannot create independent verification checkout: %s", r.Stderr))
 	}
 	// Original check files keep their base version, except the plan's candidate test

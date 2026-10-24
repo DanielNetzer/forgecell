@@ -6,6 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 )
 
 // baseRepo is the committed fixture repository, built once per test binary.
@@ -21,6 +24,11 @@ func runMain(m *testing.M) int {
 	// TMPDIR and GOTMPDIR are left as the environment spelled them, so the
 	// package still runs Molecules under a symlinked temp root (macOS's
 	// /var/folders); a test that needs resolved paths uses resolvedTempDir.
+	//
+	// Fake providers answer the analysis control probe at once; only a loaded
+	// machine makes them slow, so the probe budget is widened before any test
+	// runs instead of depending on the production 10 s budget.
+	harness.AnalysisProbeTimeout = 2 * time.Minute
 	dir, err := os.MkdirTemp("", "molecule-base-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
