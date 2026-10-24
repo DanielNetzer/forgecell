@@ -488,8 +488,11 @@ func TestSupplementalAnalysisExhaustedNeverCodes(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if r.Status != "blocked" || len(r.AnalysisAttempts) != 2 || r.Readiness != nil {
+	if r.Status != "blocked" || len(r.AnalysisAttempts) != 3 || r.Readiness != nil {
 		t.Fatalf("%+v", r)
+	}
+	if !strings.Contains(strings.Join(r.Notes, "\n"), "Supplemental evidence passes exhausted; unmet requests: missing/checker.sh (absent from frozen commit). No coding harness was invoked.") {
+		t.Fatalf("exhaustion reason: %v", r.Notes)
 	}
 	if _, e = os.Stat(filepath.Join(r.Workspace.Path, "request.json")); !os.IsNotExist(e) {
 		t.Fatal("coding invoked")

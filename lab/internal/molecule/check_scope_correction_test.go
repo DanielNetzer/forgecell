@@ -168,7 +168,8 @@ func TestInScopeDefinitionSharesTheSingleRetry(t *testing.T) {
 		{"cap then definition", []string{"cap", "def", "valid"}, false, []string{"failed", "failed", "completed"}},
 		{"evidence then definition twice", []string{"evidence", "def", "def"}, true, []string{"completed", "failed", "failed"}},
 		{"definition then evidence then definition", []string{"def", "evidence", "def"}, true, []string{"failed", "completed", "failed"}},
-		{"definition then evidence twice is exhausted", []string{"def", "evidence", "evidence"}, true, []string{"failed", "completed", "completed"}},
+		{"definition then evidence three times is exhausted", []string{"def", "evidence", "evidence", "evidence"}, true, []string{"failed", "completed", "completed", "completed"}},
+		{"definition then evidence twice then valid", []string{"def", "evidence", "evidence", "valid"}, false, []string{"failed", "completed", "completed", "completed"}},
 		{"evidence then definition then valid", []string{"evidence", "def", "valid"}, false, []string{"completed", "failed", "completed"}},
 		{"definition then evidence then valid", []string{"def", "evidence", "valid"}, false, []string{"failed", "completed", "completed"}},
 	} {
@@ -179,7 +180,7 @@ func TestInScopeDefinitionSharesTheSingleRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if *calls != len(tc.steps) || *calls > 3 {
+			if *calls != len(tc.steps) || *calls > 4 {
 				t.Fatalf("calls=%d want %d", *calls, len(tc.steps))
 			}
 			if tc.blocked != (r.Status == "blocked") || tc.blocked != (r.Readiness == nil) {

@@ -57,7 +57,7 @@ func TestAnalysisEvidenceRequestContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phrase := range []string{"evidenceRequests", "one read-only supplemental pass", "Tree entries alone", "never grants scope approval", "Do not execute commands"} {
+	for _, phrase := range []string{"evidenceRequests", "up to two read-only supplemental passes", "Tree entries alone", "never grant scope approval", "Do not execute commands"} {
 		if !strings.Contains(invocation.Input, phrase) {
 			t.Fatalf("missing contract %s", phrase)
 		}
@@ -69,6 +69,26 @@ func TestAnalysisEvidenceRequestContract(t *testing.T) {
 	props := schema["properties"].(map[string]any)
 	if props["evidenceRequests"] == nil {
 		t.Fatal("request schema absent")
+	}
+}
+
+func TestSliceBAnalysisInstructionNamesLineRanges(t *testing.T) {
+	const sentence = "For files over 64000 bytes, request line ranges as path#Lstart-end; an oversized whole-file request returns an outline."
+	if !strings.Contains(analysisInstruction, sentence) {
+		t.Fatal("analysis instruction lacks the line-range sentence")
+	}
+	if AdapterProtocolVersion != "5" {
+		t.Fatalf("the line-range instruction is adapter protocol 5, not %q", AdapterProtocolVersion)
+	}
+	// Cursor ticket analysis is unavailable, so only the analysis-capable adapters carry it.
+	for _, id := range []string{"codex", "claude-code"} {
+		invocation, err := BuildInvocation(id, map[string]any{"kind": "ticket-analysis"}, "output")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(invocation.Input, sentence) {
+			t.Fatalf("%s invocation lacks the line-range sentence", id)
+		}
 	}
 }
 

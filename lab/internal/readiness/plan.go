@@ -202,6 +202,9 @@ const (
 	PolicyClassDefinitionRef      = "definition-reference"
 	PolicyClassBaselineID         = "baseline-id"
 	PolicyClassPlanValidation     = "plan-validation"
+	PolicyClassEvidenceRange      = "evidence-range"
+	PolicyClassWholeFileDef       = "whole-file-definition"
+	PolicyClassDuplicateRequest   = "duplicate-evidence-request"
 	PolicyClassOther              = "other"
 )
 
@@ -222,6 +225,12 @@ func PolicyClass(v *PolicyViolation) string {
 		return PolicyClassBaselineID
 	case strings.HasPrefix(v.Reason, PlanValidationMessage):
 		return PolicyClassPlanValidation
+	case strings.HasPrefix(v.Reason, EvidenceRangeMessage):
+		return PolicyClassEvidenceRange
+	case strings.HasPrefix(v.Reason, WholeFileDefinitionMessage):
+		return PolicyClassWholeFileDef
+	case strings.HasPrefix(v.Reason, DuplicateEvidenceRequestMessage):
+		return PolicyClassDuplicateRequest
 	}
 	return PolicyClassOther
 }
@@ -459,6 +468,9 @@ func (p Plan) Validate() error {
 		if err := validateCommand(c, cited, newFiles); err != nil {
 			return err
 		}
+	}
+	if found := excerptDefinitions(append(append([]Check{}, a.Checks...), p.Setup...), p.Evidence); len(found) > 0 {
+		return fmt.Errorf("%s: %s", WholeFileDefinitionMessage, strings.Join(found, "; "))
 	}
 	if err := p.validateDefinitionRepairs(); err != nil {
 		return err
@@ -1247,6 +1259,89 @@ func ValidateEvidenceRequestCap(requests []EvidenceRequest) error {
 	return nil
 }
 
+var evidenceRange = regexp.MustCompile(`#L([0-9]+)(?:-([0-9]+))?$`)
+var excerptSuffix = regexp.MustCompile(`#(?:L[0-9]+(?:-[0-9]+)?|outline)$`)
+var lineNumber = regexp.MustCompile(`^[1-9][0-9]{0,8}$`)
+
+// EvidenceRangeMessage prefixes the rejection of a request whose line-range suffix
+// is malformed; a corrective pass can restate it.
+const EvidenceRangeMessage = "malformed evidence line range"
+
+// ParseEvidenceRange splits an evidence request path. Only a path ending in exactly
+// #L<n> or #L<start>-<end> names a line range (1-based, inclusive; #L<n> is
+// L<n>-<n>), and a malformed one is a PolicyViolation. Any other path, including
+// one with another '#' suffix, is a whole file.
+func ParseEvidenceRange(request string) (base string, start, end int, ranged bool, err error) {
+	m := evidenceRange.FindStringSubmatchIndex(request)
+	if m == nil {
+		return request, 0, 0, false, nil
+	}
+	first, last := request[m[2]:m[3]], request[m[2]:m[3]]
+	if m[4] >= 0 {
+		last = request[m[4]:m[5]]
+	}
+	if m[0] == 0 || !lineNumber.MatchString(first) || !lineNumber.MatchString(last) {
+		return "", 0, 0, false, &PolicyViolation{Reason: fmt.Sprintf("%s %q: expected path#L<start>-<end> or path#L<line>, 1-based and inclusive", EvidenceRangeMessage, request)}
+	}
+	fmt.Sscan(first, &start)
+	fmt.Sscan(last, &end)
+	if end < start {
+		return "", 0, 0, false, &PolicyViolation{Reason: fmt.Sprintf("%s %q: end precedes start", EvidenceRangeMessage, request)}
+	}
+	return request[:m[0]], start, end, true, nil
+}
+
+// NormalizeEvidenceRequest returns the canonical form of a request path: a line
+// range as path#L<start>-<end>, any other path unchanged. A malformed range is
+// returned unchanged; ParseEvidenceRange rejects it.
+func NormalizeEvidenceRequest(request string) string {
+	base, start, end, ranged, err := ParseEvidenceRange(request)
+	if err != nil || !ranged {
+		return request
+	}
+	return fmt.Sprintf("%s#L%d-%d", base, start, end)
+}
+
+// DuplicateEvidenceRequestMessage prefixes the rejection of a response that asks
+// for the same line range under two spellings; a corrective pass can drop one.
+const DuplicateEvidenceRequestMessage = "duplicate evidence request"
+
+// IsExcerptPath reports whether an evidence path names a line-range excerpt or an
+// outline rather than a whole committed file.
+func IsExcerptPath(p string) bool {
+	return excerptSuffix.MatchString(p)
+}
+
+// WholeFileDefinitionMessage prefixes the rejection of a check whose definition
+// cites a line-range excerpt or an outline. Definitions name real repository files
+// for scope, overlap and protected-regression gates, so they need whole-file evidence.
+const WholeFileDefinitionMessage = "check definitions must cite whole-file evidence; request the whole file"
+
+func excerptDefinitions(checks []Check, evidence []Evidence) []string {
+	paths := map[string]string{}
+	for _, e := range evidence {
+		paths[e.ID] = e.Path
+	}
+	var found []string
+	for _, c := range checks {
+		for _, id := range c.Definitions {
+			if file, ok := paths[id]; ok && IsExcerptPath(file) {
+				found = append(found, fmt.Sprintf("%s cites %s (%s)", c.ID, id, file))
+			}
+		}
+	}
+	return found
+}
+
+// ValidateWholeFileDefinitions rejects, as a PolicyViolation, an analysis whose
+// check definitions cite excerpt or outline evidence.
+func ValidateWholeFileDefinitions(a Analysis, evidence []Evidence) error {
+	if found := excerptDefinitions(a.Checks, evidence); len(found) > 0 {
+		return &PolicyViolation{Reason: WholeFileDefinitionMessage + ": " + strings.Join(found, "; ")}
+	}
+	return nil
+}
+
 func ValidateEvidenceRequests(requests []EvidenceRequest, evidence []Evidence) error {
 	if err := ValidateEvidenceRequestCap(requests); err != nil {
 		return err
@@ -1255,16 +1350,29 @@ func ValidateEvidenceRequests(requests []EvidenceRequest, evidence []Evidence) e
 	for _, e := range evidence {
 		refs[e.ID] = true
 	}
-	seen := map[string]bool{}
+	seen, seenRaw := map[string]bool{}, map[string]bool{}
 	for _, r := range requests {
 		if err := ValidatePath(r.Path); err != nil {
 			return err
 		}
-		key := strings.ToLower(r.Path)
+		base, _, _, _, err := ParseEvidenceRange(r.Path)
+		if err != nil {
+			return err
+		}
+		if err := ValidatePath(base); err != nil {
+			return err
+		}
+		// An exact repeat stays a plain error. A repeat that only normalization
+		// reveals, such as a.go#L5 and a.go#L5-5, is a retryable PolicyViolation:
+		// the response is well-formed, and a corrective pass can drop one spelling.
+		key, raw := strings.ToLower(NormalizeEvidenceRequest(r.Path)), strings.ToLower(r.Path)
+		if seen[key] && !seenRaw[raw] {
+			return &PolicyViolation{Reason: fmt.Sprintf("%s: %s names the same lines as an earlier request (#L<n> is #L<n>-<n>); drop the repeat", DuplicateEvidenceRequestMessage, r.Path)}
+		}
 		if seen[key] || !textOK(r.Reason) || len(r.Evidence) == 0 || len(r.Evidence) > 256 {
 			return fmt.Errorf("invalid or duplicate evidence request: %s", r.Path)
 		}
-		seen[key] = true
+		seen[key], seenRaw[raw] = true, true
 		cited := map[string]bool{}
 		for _, id := range r.Evidence {
 			if !identifier.MatchString(id) || cited[id] || (evidence != nil && !refs[id]) {

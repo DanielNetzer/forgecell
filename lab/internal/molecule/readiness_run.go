@@ -145,8 +145,8 @@ const (
 	// policy violation class. The same class twice stops intake.
 	maxCorrectiveAnalyses = 3
 	// maxAnalysisInvocations is the initial analysis, every corrective retry and the
-	// single analysis that follows the supplemental evidence pass.
-	maxAnalysisInvocations = 1 + maxCorrectiveAnalyses + 1
+	// analysis that follows each supplemental evidence pass.
+	maxAnalysisInvocations = 1 + maxCorrectiveAnalyses + readiness.MaxSupplementalPasses
 )
 
 // analysisRequest is the ticket-analysis payload. A corrective pass adds the exact
@@ -595,13 +595,13 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		return stopIntake(r, err.Error())
 	}
 
-	// At most one supplemental evidence pass and one corrective retry per policy
-	// class, up to maxCorrectiveAnalyses in all, so maxAnalysisInvocations is the
-	// hard bound. Every invocation has its own ordinal and therefore its own
-	// provenance action id.
+	// At most readiness.MaxSupplementalPasses supplemental evidence passes and one
+	// corrective retry per policy class, up to maxCorrectiveAnalyses in all, so
+	// maxAnalysisInvocations is the hard bound. Every invocation has its own ordinal
+	// and therefore its own provenance action id.
 	var a readiness.Analysis
 	var correction *analysisCorrection
-	retried, supplemented := map[string]bool{}, false
+	retried, supplemented := map[string]bool{}, 0
 	for ordinal := 1; ordinal <= maxAnalysisInvocations; ordinal++ {
 		if err = formula.Revalidate(o.LabDir, loaded); err != nil {
 			return stopIntake(r, err.Error())
@@ -642,6 +642,10 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			// A scope entry absent from the frozen tree may define a check; the Lab, not
 			// the model, decides which entries are new.
 			if err = readiness.ValidateDefinitionReferences(a); err == nil {
+				// Plan.Validate repeats the whole-file rule as the approval-time backstop.
+				err = readiness.ValidateWholeFileDefinitions(a, snapshot.References())
+			}
+			if err == nil {
 				err = readiness.ValidateInScopeDefinitionsForNewFiles(a, snapshot.References(), readiness.NewScopeFiles(a.Scope, snapshot.Files))
 			}
 			if err == nil {
@@ -720,10 +724,10 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if len(a.EvidenceRequests) == 0 {
 			break
 		}
-		if supplemented {
-			return stopIntake(r, "Supplemental evidence pass exhausted; unresolved evidence requests remain. No coding harness was invoked.")
+		if supplemented >= readiness.MaxSupplementalPasses {
+			return stopIntake(r, "Supplemental evidence passes exhausted; unmet requests: "+snapshot.UnmetRequests(a.EvidenceRequests)+". No coding harness was invoked.")
 		}
-		supplemented = true
+		supplemented++
 		snapshot, err = readiness.CollectSupplemental(ctx, w.SourceRoot, snapshot, a.EvidenceRequests)
 		if err != nil {
 			return stopIntake(r, err.Error())
