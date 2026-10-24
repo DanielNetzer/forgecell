@@ -169,6 +169,21 @@ parent revision's paused state stops at the review gate with outcome reason
 the next step is a further amendment with new work or a checks-only amendment that
 verifies the retained tree.
 
+Intake also allows up to two supplemental evidence passes, so the analysis invocation
+bound is the initial analysis, three corrective retries and two post-supplement analyses.
+An evidence request may name `path#Lstart-end` (1-based, inclusive). The excerpt holds
+exactly those lines of the base-commit blob, at most 64000 bytes and 1500 lines; its
+evidence path names the lines actually returned and its SHA-256 covers the excerpt bytes.
+A range past the end of the file or past either bound is clamped, and the clamp is
+recorded in the collection outcome reason. Ranges get the same sensitive, generated and
+binary refusals as whole files, and count toward the 16 named-file and 1000000-byte
+bounds by excerpt size. A whole-file request for a `.go` file over 64000 bytes returns an
+outline of its top-level `func`, `type`, `const` and `var` declarations with line ranges,
+recorded as `path#outline` with the reason `outline collected; file is N bytes; request
+line ranges (path#Lstart-end) for content`. An oversized non-Go file is refused with the
+same hint. A request after the second pass stops intake with `Supplemental evidence
+passes exhausted; unmet requests:` followed by each request and its latest outcome reason.
+
 The streak is the newest run of finished Molecules of the current Formula snapshot,
 ordered by finish time and then Molecule id, among the 128 most recently modified
 ledgers. Every Molecule in it exhibits the class and is one that `learn` itself would

@@ -233,8 +233,9 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapSharesTheSingleRetry(t *testin
 		{"violation then cap", []string{"policy", "cap", "valid"}, false, []string{"failed", "failed", "completed"}},
 		{"evidence then cap then cap", []string{"evidence", "cap", "cap"}, true, []string{"completed", "failed", "failed"}},
 		{"cap then evidence then cap", []string{"cap", "evidence", "cap"}, true, []string{"failed", "completed", "failed"}},
-		{"cap then evidence twice is exhausted", []string{"cap", "evidence", "evidence"}, true, []string{"failed", "completed", "completed"}},
-		{"evidence then cap then evidence is exhausted", []string{"evidence", "cap", "evidence"}, true, []string{"completed", "failed", "completed"}},
+		{"cap then evidence twice then valid", []string{"cap", "evidence", "evidence", "valid"}, false, []string{"failed", "completed", "completed", "completed"}},
+		{"cap then evidence three times is exhausted", []string{"cap", "evidence", "evidence", "evidence"}, true, []string{"failed", "completed", "completed", "completed"}},
+		{"evidence then cap then evidence twice is exhausted", []string{"evidence", "cap", "evidence", "evidence"}, true, []string{"completed", "failed", "completed", "completed"}},
 		{"cap then evidence then valid", []string{"cap", "evidence", "valid"}, false, []string{"failed", "completed", "completed"}},
 		{"evidence then cap then valid", []string{"evidence", "cap", "valid"}, false, []string{"completed", "failed", "completed"}},
 		{"violation then evidence then valid", []string{"policy", "evidence", "valid"}, false, []string{"failed", "completed", "completed"}},
@@ -246,7 +247,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapSharesTheSingleRetry(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if *calls != len(tc.steps) || *calls > 3 {
+			if *calls != len(tc.steps) || *calls > 4 {
 				t.Fatalf("calls=%d want %d", *calls, len(tc.steps))
 			}
 			if tc.blocked != (r.Status == "blocked") || tc.blocked != (r.Readiness == nil) {
@@ -469,10 +470,11 @@ func TestAnalysisCorrectiveRetryBoundedSequences(t *testing.T) {
 		{"violation twice blocks", []string{"policy", "policy"}, true, []string{"failed", "failed"}},
 		{"violation then evidence then valid", []string{"policy", "evidence", "valid"}, false, []string{"failed", "completed", "completed"}},
 		{"violation then evidence then violation", []string{"policy", "evidence", "policy"}, true, []string{"failed", "completed", "failed"}},
-		{"violation then evidence twice is exhausted", []string{"policy", "evidence", "evidence"}, true, []string{"failed", "completed", "completed"}},
+		{"violation then evidence three times is exhausted", []string{"policy", "evidence", "evidence", "evidence"}, true, []string{"failed", "completed", "completed", "completed"}},
 		{"evidence then violation then valid", []string{"evidence", "policy", "valid"}, false, []string{"completed", "failed", "completed"}},
 		{"evidence then violation twice blocks", []string{"evidence", "policy", "policy"}, true, []string{"completed", "failed", "failed"}},
-		{"evidence twice is exhausted", []string{"evidence", "evidence"}, true, []string{"completed", "completed"}},
+		{"evidence twice then valid", []string{"evidence", "evidence", "valid"}, false, []string{"completed", "completed", "completed"}},
+		{"evidence three times is exhausted", []string{"evidence", "evidence", "evidence"}, true, []string{"completed", "completed", "completed"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o, _ := fixture(t)

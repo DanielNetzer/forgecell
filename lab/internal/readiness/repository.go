@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path"
 	"regexp"
 	"sort"
@@ -253,15 +256,72 @@ func deniedText(file string) string {
 	return ""
 }
 
-// CollectSupplemental performs one bounded pass against the original commit.
-func CollectSupplemental(ctx context.Context, dir string, s RepositorySnapshot, requests []EvidenceRequest) (RepositorySnapshot, error) {
+// MaxSupplementalPasses bounds the read-only supplemental evidence passes of one intake.
+const MaxSupplementalPasses = 2
+
+// Excerpt and outline bounds. A range or outline reads at most
+// maxRangeSourceBytes of the committed blob.
+const (
+	maxExcerptBytes     = 64000
+	maxExcerptLines     = 1500
+	maxRangeSourceBytes = 4_000_000
+)
+
+// LineRangeHint is the reason suffix of an oversized whole-file request.
+func LineRangeHint(size int) string {
+	return fmt.Sprintf("file is %d bytes; request line ranges (path#Lstart-end) for content", size)
+}
+
+// SupplementalPasses counts the supplemental passes already collected.
+func (s RepositorySnapshot) SupplementalPasses() int {
+	n := 0
 	for _, pass := range s.Collection {
 		if pass.Supplemental {
-			return s, fmt.Errorf("supplemental evidence pass exhausted")
+			n++
 		}
 	}
-	if len(requests) == 0 {
-		return s, fmt.Errorf("supplemental evidence pass exhausted")
+	return n
+}
+
+// UnmetRequests describes each request with the latest collection outcome for its
+// path, for the message that stops intake once the supplemental passes are spent.
+// A request whose path an earlier pass already collected is not unmet; it is named
+// separately as already collected. Paths compare in normalized form, so a.go#L5
+// and a.go#L5-5 are the same request.
+func (s RepositorySnapshot) UnmetRequests(requests []EvidenceRequest) string {
+	latest := map[string]string{}
+	for _, pass := range s.Collection {
+		for _, o := range pass.Outcomes {
+			latest[NormalizeEvidenceRequest(o.Path)] = o.Reason
+		}
+	}
+	unmet, collected := []string{}, []string{}
+	for _, r := range requests {
+		reason, ok := latest[NormalizeEvidenceRequest(r.Path)]
+		if ok && (collectedOutcome(reason) || reason == "already collected") {
+			collected = append(collected, r.Path)
+			continue
+		}
+		if !ok {
+			reason = "not collected: no supplemental pass remains"
+		}
+		unmet = append(unmet, fmt.Sprintf("%s (%s)", r.Path, reason))
+	}
+	out := "none"
+	if len(unmet) > 0 {
+		out = strings.Join(unmet, "; ")
+	}
+	if len(collected) > 0 {
+		out += "; already collected: " + strings.Join(collected, ", ")
+	}
+	return out
+}
+
+// CollectSupplemental performs one bounded pass against the original commit, at
+// most MaxSupplementalPasses times per snapshot.
+func CollectSupplemental(ctx context.Context, dir string, s RepositorySnapshot, requests []EvidenceRequest) (RepositorySnapshot, error) {
+	if s.SupplementalPasses() >= MaxSupplementalPasses || len(requests) == 0 {
+		return s, fmt.Errorf("supplemental evidence passes exhausted")
 	}
 	if err := ValidateEvidenceRequests(requests, s.References()); err != nil {
 		return s, err
@@ -270,6 +330,13 @@ func CollectSupplemental(ctx context.Context, dir string, s RepositorySnapshot, 
 	s.Collection[len(s.Collection)-1].Supplemental = true
 	return s, nil
 }
+
+// collectedOutcome reports whether an outcome added evidence content, which counts
+// toward the 16 named-file bound.
+func collectedOutcome(reason string) bool {
+	return reason == "collected" || strings.HasPrefix(reason, "collected;") || strings.HasPrefix(reason, "outline collected;")
+}
+
 func collectRequests(ctx context.Context, dir string, s RepositorySnapshot, requests []EvidenceRequest) RepositorySnapshot {
 	pass := CollectionPass{Requests: requests, Outcomes: []CollectionOutcome{}}
 	files := map[string]TreeFile{}
@@ -285,21 +352,26 @@ func collectRequests(ctx context.Context, dir string, s RepositorySnapshot, requ
 	}
 	for _, p := range s.Collection {
 		for _, o := range p.Outcomes {
-			if o.Reason == "collected" {
+			if collectedOutcome(o.Reason) {
 				named++
 			}
 		}
 	}
 	for _, r := range requests {
 		reason := ""
-		f, exists := files[r.Path]
+		file, start, end, ranged, rangeErr := ParseEvidenceRange(r.Path)
+		f, exists := files[file]
 		if e := ValidatePath(r.Path); e != nil {
 			reason = e.Error()
-		} else if d := deniedText(r.Path); d != "" {
+		} else if rangeErr != nil {
+			reason = rangeErr.Error()
+		} else if e := ValidatePath(file); e != nil {
+			reason = e.Error()
+		} else if d := deniedText(file); d != "" {
 			reason = d
 		} else if !exists {
 			reason = "absent from frozen commit"
-			for ancestor := path.Dir(r.Path); ancestor != "."; ancestor = path.Dir(ancestor) {
+			for ancestor := path.Dir(file); ancestor != "."; ancestor = path.Dir(ancestor) {
 				if entry, ok := files[ancestor]; ok {
 					if entry.Mode == "120000" || entry.Mode == "160000" {
 						reason = "path traverses a symlink or submodule"
@@ -323,22 +395,43 @@ func collectRequests(ctx context.Context, dir string, s RepositorySnapshot, requ
 			var n int
 			if e != nil {
 				reason = "committed blob size unavailable"
-			} else if _, e = fmt.Sscan(size, &n); e != nil || n > 64000 {
-				reason = "64000-byte per-file bound exceeded"
-			} else if total+n > 1000000 {
+			} else if _, e = fmt.Sscan(size, &n); e != nil {
+				reason = "committed blob size unavailable"
+			} else if !ranged && n <= maxExcerptBytes && total+n > 1000000 {
 				reason = "1000000-byte total bound exceeded"
+			} else if !ranged && n > maxExcerptBytes && path.Ext(file) != ".go" {
+				reason = "64000-byte per-file bound exceeded; " + LineRangeHint(n)
+			} else if (ranged || n > maxExcerptBytes) && n > maxRangeSourceBytes {
+				reason = fmt.Sprintf("%d-byte range and outline source bound exceeded; %s", maxRangeSourceBytes, LineRangeHint(n))
 			} else {
-				content, e := repositoryGit(ctx, dir, 64000, "cat-file", "blob", f.Object)
+				limit := maxExcerptBytes
+				if ranged || n > maxExcerptBytes {
+					limit = maxRangeSourceBytes
+				}
+				blob, e := repositoryGit(ctx, dir, limit, "cat-file", "blob", f.Object)
+				evidencePath, content := r.Path, blob
 				if e != nil {
 					reason = "committed blob read failed"
-				} else if !textContent(content) {
+				} else if !textContent(blob) {
 					reason = "binary or invalid UTF-8 content"
+				} else if ranged {
+					evidencePath, content, reason = lineExcerpt(file, blob, start, end)
+				} else if n > maxExcerptBytes {
+					evidencePath, content, reason = file+"#outline", goOutline(file, blob), "outline collected; "+LineRangeHint(n)
 				} else {
-					s.Evidence = append(s.Evidence, FileEvidence{Evidence: Evidence{ID: fmt.Sprintf("file-%d", len(s.Evidence)+1), Path: r.Path, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content})
-					seen[r.Path] = true
-					total += len(content)
-					named++
 					reason = "collected"
+				}
+				if collectedOutcome(reason) {
+					if seen[evidencePath] {
+						reason = "already collected"
+					} else if total+len(content) > 1000000 {
+						reason = "1000000-byte total bound exceeded"
+					} else {
+						s.Evidence = append(s.Evidence, FileEvidence{Evidence: Evidence{ID: fmt.Sprintf("file-%d", len(s.Evidence)+1), Path: evidencePath, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content})
+						seen[evidencePath] = true
+						total += len(content)
+						named++
+					}
 				}
 			}
 		}
@@ -348,6 +441,132 @@ func collectRequests(ctx context.Context, dir string, s RepositorySnapshot, requ
 		s.Collection = append(s.Collection, pass)
 	}
 	return s
+}
+
+// lineExcerpt returns the exact bytes of lines start..end (1-based, inclusive) of
+// blob, its evidence path and the outcome reason. The range is clamped to the end
+// of the file and to the per-excerpt line and byte bounds; each clamp is recorded
+// in the reason and in the evidence path, which names the lines actually returned.
+func lineExcerpt(file, blob string, start, end int) (string, string, string) {
+	lines := strings.SplitAfter(blob, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if start > len(lines) {
+		return "", "", fmt.Sprintf("line range starts past the end of the file (%d lines)", len(lines))
+	}
+	clamps := []string{}
+	if end > len(lines) {
+		end = len(lines)
+		clamps = append(clamps, fmt.Sprintf("range clamped to the end of the file at line %d", end))
+	}
+	if end-start+1 > maxExcerptLines {
+		end = start + maxExcerptLines - 1
+		clamps = append(clamps, fmt.Sprintf("range clamped to the %d-line excerpt bound at line %d", maxExcerptLines, end))
+	}
+	size := 0
+	for i := start; i <= end; i++ {
+		if size+len(lines[i-1]) > maxExcerptBytes {
+			if i == start {
+				return "", "", fmt.Sprintf("line %d exceeds the %d-byte excerpt bound", start, maxExcerptBytes)
+			}
+			end = i - 1
+			clamps = append(clamps, fmt.Sprintf("range clamped to the %d-byte excerpt bound at line %d", maxExcerptBytes, end))
+			break
+		}
+		size += len(lines[i-1])
+	}
+	reason := "collected"
+	if len(clamps) > 0 {
+		reason += "; " + strings.Join(clamps, "; ")
+	}
+	return fmt.Sprintf("%s#L%d-%d", file, start, end), strings.Join(lines[start-1:end], ""), reason
+}
+
+// goOutline lists the top-level func, type, const and var declarations of a Go
+// file with their line ranges, bounded to maxExcerptBytes: a func by its signature
+// alone, and a type, const or var by its names, never by its body or value. A file
+// that does not parse still lists the declarations parsed before the error; a
+// malformed func signature is listed by name alone.
+func goOutline(file, blob string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "// Outline of %s: %s.\n", file, LineRangeHint(len(blob)))
+	entries := []string{}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, file, blob, parser.SkipObjectResolution)
+	lineOf := func(p token.Pos) int { return fset.Position(p).Line }
+	// span prints the line range of from..to. A malformed declaration can end at
+	// NoPos or before it starts; its range then ends on its first line.
+	span := func(from, to token.Pos) string {
+		start, end := lineOf(from), lineOf(to)
+		if !to.IsValid() || end < start {
+			end = start
+		}
+		return fmt.Sprintf("L%d-%d", start, end)
+	}
+	// signature prints the source of a func from its keyword to the end of its
+	// type on one line, so an outline names it without carrying a body or literal.
+	// go/parser can return a malformed signature that ends at NoPos or before it
+	// starts; that func is named alone rather than sliced from the blob.
+	signature := func(decl *ast.FuncDecl) string {
+		from, to := decl.Pos(), decl.Type.End()
+		lo, hi := fset.Position(from).Offset, fset.Position(to).Offset
+		if !from.IsValid() || !to.IsValid() || hi <= lo || hi > len(blob) {
+			name := "_"
+			if decl.Name != nil {
+				name = decl.Name.Name
+			}
+			return "func " + name + " (signature did not parse)"
+		}
+		text := strings.Join(strings.Fields(blob[lo:hi]), " ")
+		if len(text) > 200 {
+			cut := 200
+			for !utf8.RuneStart(text[cut]) {
+				cut--
+			}
+			text = text[:cut] + "..."
+		}
+		return text
+	}
+	if parsed != nil {
+		for _, d := range parsed.Decls {
+			switch decl := d.(type) {
+			case *ast.FuncDecl:
+				entries = append(entries, span(decl.Pos(), decl.End())+" "+signature(decl))
+			case *ast.GenDecl:
+				if decl.Tok != token.TYPE && decl.Tok != token.CONST && decl.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range decl.Specs {
+					from, to := spec.Pos(), spec.End()
+					if !decl.Lparen.IsValid() {
+						from, to = decl.Pos(), decl.End()
+					}
+					names := []string{}
+					switch sp := spec.(type) {
+					case *ast.TypeSpec:
+						names = append(names, sp.Name.Name)
+					case *ast.ValueSpec:
+						for _, n := range sp.Names {
+							names = append(names, n.Name)
+						}
+					}
+					entries = append(entries, fmt.Sprintf("%s %s %s", span(from, to), decl.Tok, strings.Join(names, ", ")))
+				}
+			}
+		}
+	}
+	if err != nil {
+		entries = append(entries, "// The file did not parse completely; later declarations may be missing.")
+	}
+	for i, entry := range entries {
+		if b.Len()+len(entry)+1 > maxExcerptBytes-128 {
+			fmt.Fprintf(&b, "// Outline truncated at the %d-byte bound; %d further entries omitted.\n", maxExcerptBytes, len(entries)-i)
+			break
+		}
+		b.WriteString(entry + "\n")
+	}
+	return b.String()
 }
 
 // Reject binary control bytes as well as invalid UTF-8; ordinary text whitespace is allowed.

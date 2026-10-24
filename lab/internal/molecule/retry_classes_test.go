@@ -139,9 +139,9 @@ func TestHardening129CorrectiveRetriesAreBoundedByThree(t *testing.T) {
 
 func TestHardening129SupplementalPassStillFitsAfterAllThreeRetries(t *testing.T) {
 	t.Parallel()
-	r, calls, _ := runClasses(t, "policy", "def", "cap", "evidence", "valid")
-	if *calls != 5 || r.Status != "waiting" || r.Readiness == nil || len(r.AnalysisAttempts) != 5 {
-		t.Fatalf("three retries, one supplemental pass and the final analysis must fit: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
+	r, calls, _ := runClasses(t, "policy", "def", "cap", "evidence", "evidence", "valid")
+	if maxAnalysisInvocations != 6 || *calls != maxAnalysisInvocations || r.Status != "waiting" || r.Readiness == nil || len(r.AnalysisAttempts) != 6 {
+		t.Fatalf("three retries, two supplemental passes and the final analysis must fit: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
 	}
 }
 

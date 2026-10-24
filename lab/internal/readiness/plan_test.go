@@ -3,6 +3,7 @@ package readiness
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -464,5 +465,99 @@ func TestProtectedExemptPathsValidation(t *testing.T) {
 	p.ProtectedExemptPaths = []string{"lab/parser_test.go"}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("in-scope test exemption refused: %v", err)
+	}
+}
+
+func TestSliceBValidateEvidenceRequestsLineRanges(t *testing.T) {
+	request := func(paths ...string) []EvidenceRequest {
+		out := []EvidenceRequest{}
+		for _, p := range paths {
+			out = append(out, EvidenceRequest{Path: p, Reason: "Inspect", Evidence: []string{"issue"}})
+		}
+		return out
+	}
+	if err := ValidateEvidenceRequests(request("lab/internal/cli/cli.go#L100-200", "lab/internal/cli/cli.go#L7-7", "lab/internal/cli/cli.go", "docs/notes#todo.md"), nil); err != nil {
+		t.Fatalf("valid range requests refused: %v", err)
+	}
+	base, start, end, ranged, err := ParseEvidenceRange("lab/internal/cli/cli.go#L100-200")
+	if err != nil || !ranged || base != "lab/internal/cli/cli.go" || start != 100 || end != 200 {
+		t.Fatalf("parse: %q %d %d %t %v", base, start, end, ranged, err)
+	}
+	if base, start, end, ranged, err := ParseEvidenceRange("a.go#L42"); err != nil || !ranged || base != "a.go" || start != 42 || end != 42 {
+		t.Fatalf("single-line range: %q %d %d %t %v", base, start, end, ranged, err)
+	}
+	// Only an exact #L<n> or #L<start>-<end> suffix is a range; any other '#' is part
+	// of an ordinary whole-file path.
+	for _, whole := range []string{"docs/issue#12.md", "a.go#Lx-5", "a.go#L1-y", "a.go#100-200", "a.go#L1-2-3", "a.go#L", "a.go#", "a.go#outline"} {
+		if base, _, _, ranged, err := ParseEvidenceRange(whole); err != nil || ranged || base != whole {
+			t.Fatalf("%q must be a whole file: %q %t %v", whole, base, ranged, err)
+		}
+		if err := ValidateEvidenceRequests(request(whole), nil); err != nil {
+			t.Fatalf("whole-file request %q refused: %v", whole, err)
+		}
+	}
+	// Malformed range syntax is a retryable policy violation with its own class.
+	for _, bad := range []string{"a.go#L0-5", "a.go#L5-4", "a.go#L0", "a.go#L05-6", "#L1-2", "a.go#L1234567890-1234567891"} {
+		err := ValidateEvidenceRequests(request(bad), nil)
+		var violation *PolicyViolation
+		if !errors.As(err, &violation) || PolicyClass(violation) != PolicyClassEvidenceRange {
+			t.Fatalf("%q: want an evidence-range policy violation, got %v", bad, err)
+		}
+	}
+	for _, bad := range []string{"../a.go#L1-2", ".git/config#L1-2", "a/../b.go#L1-2"} {
+		if err := ValidateEvidenceRequests(request(bad), nil); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+	// Exact repeats stay plain errors (TestAnalysisCorrectiveRetryEvidenceRequestCapKeepsOtherRequestErrorsPlain).
+	for _, pair := range [][2]string{{"a.go#L1-2", "A.go#L1-2"}, {"a.go", "A.GO"}} {
+		if err := ValidateEvidenceRequests(request(pair[0], pair[1]), nil); err == nil || IsPolicyViolation(err) {
+			t.Fatalf("%v: exact repeat must be a plain error, got %v", pair, err)
+		}
+	}
+	for _, pair := range [][2]string{{"a.go#L5", "a.go#L5-5"}, {"a.go#L5-5", "A.go#L5"}} {
+		err := ValidateEvidenceRequests(request(pair[0], pair[1]), nil)
+		var violation *PolicyViolation
+		if !errors.As(err, &violation) || PolicyClass(violation) != PolicyClassDuplicateRequest || !strings.Contains(violation.Reason, pair[1]) {
+			t.Fatalf("%v: want a retryable duplicate-request violation, got %v", pair, err)
+		}
+	}
+	if NormalizeEvidenceRequest("a.go#L5") != "a.go#L5-5" || NormalizeEvidenceRequest("docs/issue#12.md") != "docs/issue#12.md" {
+		t.Fatal("request normalization")
+	}
+	if _, err := DecodeAnalysis([]byte(`{"summary":"Need content","evidenceRequests":[{"path":"a.go#L0-1","reason":"Inspect","evidence":["issue"]}]}`)); !IsPolicyViolation(err) {
+		t.Fatalf("malformed range must decode to a retryable policy violation: %v", err)
+	}
+}
+
+func TestSliceBCheckDefinitionsMustCiteWholeFileEvidence(t *testing.T) {
+	for p, want := range map[string]bool{"a.go#L1-40": true, "a.go#L7": true, "a.go#outline": true, "a.go": false, "docs/issue#12.md": false, "a.go#Lx-5": false, "a.go#outline.md": false} {
+		if IsExcerptPath(p) != want {
+			t.Fatalf("IsExcerptPath(%q) = %t", p, !want)
+		}
+	}
+	const want = WholeFileDefinitionMessage + ": regression cites excerpt (lab/go.mod#L1-40)"
+	for _, excerpt := range []string{"lab/go.mod#L1-40", "lab/go.mod#outline"} {
+		p := fixture()
+		p.Evidence = append(p.Evidence, Evidence{ID: "excerpt", Path: excerpt, SHA256: strings.Repeat("f", 64)})
+		p.Analysis.Checks[0].Definitions = []string{"manifest", "excerpt"}
+		wantErr := strings.Replace(want, "lab/go.mod#L1-40", excerpt, 1)
+		if err := p.Validate(); err == nil || err.Error() != wantErr {
+			t.Fatalf("%s: plan validation %v, want %q", excerpt, err, wantErr)
+		}
+		err := ValidateWholeFileDefinitions(p.Analysis, p.Evidence)
+		var violation *PolicyViolation
+		if !errors.As(err, &violation) || violation.Reason != wantErr || PolicyClass(violation) != PolicyClassWholeFileDef {
+			t.Fatalf("%s: intake rule %v", excerpt, err)
+		}
+		// Excerpt evidence remains citable as an ordinary reason.
+		p.Analysis.Checks[0].Definitions = []string{"manifest"}
+		p.Analysis.Checks[0].Evidence = []string{"manifest", "excerpt"}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("%s: excerpt cited as evidence refused: %v", excerpt, err)
+		}
+		if err := ValidateWholeFileDefinitions(p.Analysis, p.Evidence); err != nil {
+			t.Fatalf("%s: %v", excerpt, err)
+		}
 	}
 }

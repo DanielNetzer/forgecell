@@ -2,6 +2,7 @@ package readiness
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -285,8 +286,12 @@ func TestSupplementalEvidenceRefusalsAndDeterminism(t *testing.T) {
 	if before != after {
 		t.Fatal("snapshot changed from working edits")
 	}
-	if _, e = CollectSupplemental(context.Background(), dir, augmented, requests); e == nil {
-		t.Fatal("third pass allowed")
+	second, e := CollectSupplemental(context.Background(), dir, augmented, []EvidenceRequest{{Path: "docs/config.json", Reason: "Inspect configuration again", Evidence: []string{"issue"}}})
+	if e != nil {
+		t.Fatalf("second supplemental pass refused: %v", e)
+	}
+	if _, e = CollectSupplemental(context.Background(), dir, second, requests); e == nil {
+		t.Fatal("third supplemental pass allowed")
 	}
 }
 
@@ -333,5 +338,303 @@ func TestSupplementalTotalAndFileCountBounds(t *testing.T) {
 				t.Fatal("bound not enforced")
 			}
 		})
+	}
+}
+
+func sliceBFixture(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := repoFixture(t)
+	for p, c := range files {
+		os.MkdirAll(filepath.Dir(filepath.Join(dir, p)), 0700)
+		if err := os.WriteFile(filepath.Join(dir, p), []byte(c), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "slice b fixtures"}} {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if b, e := c.CombinedOutput(); e != nil {
+			t.Fatalf("%s %v", b, e)
+		}
+	}
+	return dir
+}
+
+func numberedLines(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	return b.String()
+}
+
+func sliceBRequests(paths ...string) []EvidenceRequest {
+	requests := []EvidenceRequest{}
+	for _, p := range paths {
+		requests = append(requests, EvidenceRequest{Path: p, Reason: "Inspect", Evidence: []string{"issue"}})
+	}
+	return requests
+}
+
+// sliceBSupplement runs one supplemental pass and returns its outcome reasons by path.
+func sliceBSupplement(t *testing.T, dir string, s RepositorySnapshot, paths ...string) (RepositorySnapshot, map[string]string) {
+	t.Helper()
+	s, err := CollectSupplemental(context.Background(), dir, s, sliceBRequests(paths...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]string{}
+	for _, o := range s.Collection[len(s.Collection)-1].Outcomes {
+		reasons[o.Path] = o.Reason
+	}
+	return s, reasons
+}
+
+func sliceBCollect(t *testing.T, dir string, paths ...string) (RepositorySnapshot, map[string]string) {
+	t.Helper()
+	s, err := Collect(context.Background(), dir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sliceBSupplement(t, dir, s, paths...)
+}
+
+func evidenceAt(s RepositorySnapshot, p string) (FileEvidence, bool) {
+	for _, e := range s.Evidence {
+		if e.Path == p {
+			return e, true
+		}
+	}
+	return FileEvidence{}, false
+}
+
+func TestSliceBRangeReturnsExactLinesWithMatchingHash(t *testing.T) {
+	dir := sliceBFixture(t, map[string]string{"docs/big.txt": numberedLines(3000), "docs/small.txt": "one\ntwo\nthree"})
+	s, reasons := sliceBCollect(t, dir, "docs/big.txt#L10-12", "docs/small.txt#L2-3")
+	if reasons["docs/big.txt#L10-12"] != "collected" {
+		t.Fatalf("range outcome %q", reasons["docs/big.txt#L10-12"])
+	}
+	e, ok := evidenceAt(s, "docs/big.txt#L10-12")
+	if !ok || e.Content != "line 10\nline 11\nline 12\n" {
+		t.Fatalf("excerpt %q (found %t)", e.Content, ok)
+	}
+	if e.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte(e.Content))) || !strings.HasPrefix(e.ID, "file-") {
+		t.Fatalf("excerpt identity %+v", e.Evidence)
+	}
+	if e, ok := evidenceAt(s, "docs/small.txt#L2-3"); !ok || e.Content != "two\nthree" {
+		t.Fatalf("final unterminated line excerpt %q", e.Content)
+	}
+	if _, again := sliceBSupplement(t, dir, s, "docs/big.txt#L10-12"); again["docs/big.txt#L10-12"] != "already collected" {
+		t.Fatalf("repeated range: %q", again["docs/big.txt#L10-12"])
+	}
+}
+
+func TestSliceBRangePastEOFIsClampedAndRecorded(t *testing.T) {
+	dir := sliceBFixture(t, map[string]string{"docs/five.txt": numberedLines(5), "docs/long.txt": numberedLines(4000)})
+	s, reasons := sliceBCollect(t, dir, "docs/five.txt#L4-90", "docs/five.txt#L9-10", "docs/long.txt#L1-4000")
+	if r := reasons["docs/five.txt#L4-90"]; r != "collected; range clamped to the end of the file at line 5" {
+		t.Fatalf("clamp not recorded: %q", r)
+	}
+	if e, ok := evidenceAt(s, "docs/five.txt#L4-5"); !ok || e.Content != "line 4\nline 5\n" {
+		t.Fatalf("clamped excerpt %q (found %t)", e.Content, ok)
+	}
+	if r := reasons["docs/five.txt#L9-10"]; collectedOutcome(r) || !strings.Contains(r, "past the end of the file") {
+		t.Fatalf("range wholly past EOF: %q", r)
+	}
+	if r := reasons["docs/long.txt#L1-4000"]; r != "collected; range clamped to the 1500-line excerpt bound at line 1500" {
+		t.Fatalf("line bound clamp: %q", r)
+	}
+	if e, ok := evidenceAt(s, "docs/long.txt#L1-1500"); !ok || strings.Count(e.Content, "\n") != 1500 {
+		t.Fatal("1500-line excerpt missing")
+	}
+}
+
+func TestSliceBRangeOnDeniedPathIsRefused(t *testing.T) {
+	const marker = "do-not-collect-range"
+	dir := sliceBFixture(t, map[string]string{"private/notes.md": marker + "\n", "docs/blob.png": marker + "\n", "dist/out.js": marker + "\n"})
+	s, reasons := sliceBCollect(t, dir, "private/notes.md#L1-1", "docs/blob.png#L1-1", "dist/out.js#L1-1", ".env#L1-1")
+	for _, file := range []string{"private/notes.md", "docs/blob.png", "dist/out.js", ".env"} {
+		want := deniedText(file)
+		if got := reasons[file+"#L1-1"]; want == "" || got != want {
+			t.Fatalf("%s: reason %q, want %q", file, got, want)
+		}
+	}
+	raw, _ := json.Marshal(s)
+	if strings.Contains(string(raw), marker) || strings.Contains(string(raw), "do-not-collect\\n") {
+		t.Fatal("denied range content collected")
+	}
+}
+
+func TestSliceBOversizedGoFileReturnsOutline(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package big\n\nimport \"fmt\"\n\nconst Limit = 3\n\nvar (\n\tA = 1\n\tB, C = 2, 3\n)\n\ntype Thing struct{ N int }\n\nfunc (t Thing) String() string {\n\treturn fmt.Sprint(t.N)\n}\n\n")
+	for i := 0; b.Len() <= 70000; i++ {
+		fmt.Fprintf(&b, "func Helper%d() int {\n\treturn %d\n}\n\n", i, i)
+	}
+	src := b.String()
+	dir := sliceBFixture(t, map[string]string{"lab/big.go": src, "docs/big.md": strings.Repeat("x\n", 40000)})
+	s, reasons := sliceBCollect(t, dir, "lab/big.go", "docs/big.md")
+	hint := fmt.Sprintf("file is %d bytes; request line ranges (path#Lstart-end) for content", len(src))
+	if reasons["lab/big.go"] != "outline collected; "+hint {
+		t.Fatalf("outline reason %q", reasons["lab/big.go"])
+	}
+	e, ok := evidenceAt(s, "lab/big.go#outline")
+	if !ok || len(e.Content) > 64000 || e.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte(e.Content))) {
+		t.Fatalf("outline evidence missing or unbounded: %d bytes", len(e.Content))
+	}
+	for _, want := range []string{hint, "\nL5-5 const Limit\n", "\nL8-8 var A\n", "\nL9-9 var B, C\n", "\nL12-12 type Thing\n", "\nL14-16 func (t Thing) String() string\n", "\nL18-20 func Helper0() int\n"} {
+		if !strings.Contains(e.Content, want) {
+			t.Fatalf("outline lacks %q:\n%s", want, e.Content[:500])
+		}
+	}
+	if strings.Contains(e.Content, "return 0") || strings.Contains(e.Content, "import") {
+		t.Fatal("outline carries bodies or imports")
+	}
+	if _, whole := evidenceAt(s, "lab/big.go"); whole {
+		t.Fatal("outline recorded under the whole-file path")
+	}
+	if r := reasons["docs/big.md"]; r != "64000-byte per-file bound exceeded; file is 80000 bytes; request line ranges (path#Lstart-end) for content" {
+		t.Fatalf("non-Go oversized reason %q", r)
+	}
+	if _, ok := evidenceAt(s, "docs/big.md"); ok {
+		t.Fatal("non-Go oversized file collected")
+	}
+	s, reasons = sliceBSupplement(t, dir, s, "lab/big.go#L14-16")
+	if e, ok := evidenceAt(s, "lab/big.go#L14-16"); !ok || reasons["lab/big.go#L14-16"] != "collected" || e.Content != "func (t Thing) String() string {\n\treturn fmt.Sprint(t.N)\n}\n" {
+		t.Fatalf("range from outline: %q %q", reasons["lab/big.go#L14-16"], e.Content)
+	}
+}
+
+func TestSliceBExcerptsCountTowardTotalAndNamedBounds(t *testing.T) {
+	dir := sliceBFixture(t, map[string]string{"docs/big.txt": numberedLines(3000)})
+	s, err := Collect(context.Background(), dir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	used := 0
+	for _, e := range s.Evidence {
+		used += len(e.Content)
+	}
+	// "line 1\n" fits in the remaining 10 bytes; three lines do not.
+	padded := s
+	padded.Evidence = append(append([]FileEvidence{}, s.Evidence...), FileEvidence{Content: strings.Repeat("x", 1000000-used-10)})
+	_, reasons := sliceBSupplement(t, dir, padded, "docs/big.txt#L1-1", "docs/big.txt#L1-3")
+	if reasons["docs/big.txt#L1-1"] != "collected" || reasons["docs/big.txt#L1-3"] != "1000000-byte total bound exceeded" {
+		t.Fatalf("total bound must count excerpt size: %v", reasons)
+	}
+	for i := 0; i < 15; i++ {
+		s.Collection = append(s.Collection, CollectionPass{Outcomes: []CollectionOutcome{{Path: fmt.Sprintf("old/%d.md", i), Reason: "collected"}}})
+	}
+	_, reasons = sliceBSupplement(t, dir, s, "docs/big.txt#L1-1", "docs/big.txt#L5-6")
+	if reasons["docs/big.txt#L1-1"] != "collected" || reasons["docs/big.txt#L5-6"] != "16 named-file bound reached" {
+		t.Fatalf("excerpts must count toward the 16 named-file bound: %v", reasons)
+	}
+}
+
+func TestSliceBTwoSupplementalPassesThenExhausted(t *testing.T) {
+	dir := sliceBFixture(t, map[string]string{"docs/a.md": "a\n", "docs/b.md": "b\n", "docs/c.md": "c\n"})
+	s, err := Collect(context.Background(), dir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ = sliceBSupplement(t, dir, s, "docs/a.md")
+	s, _ = sliceBSupplement(t, dir, s, "docs/b.md#L1-1")
+	if s.SupplementalPasses() != 2 || MaxSupplementalPasses != 2 {
+		t.Fatalf("passes %d", s.SupplementalPasses())
+	}
+	third := sliceBRequests("docs/c.md", "docs/b.md#L1-1")
+	if _, err = CollectSupplemental(context.Background(), dir, s, third); err == nil || err.Error() != "supplemental evidence passes exhausted" {
+		t.Fatalf("third pass: %v", err)
+	}
+	if got := s.UnmetRequests(third); got != "docs/c.md (not collected: no supplemental pass remains); already collected: docs/b.md#L1-1" {
+		t.Fatalf("unmet list %q", got)
+	}
+}
+
+func TestSliceBNonRangeHashSuffixIsAWholeFile(t *testing.T) {
+	dir := sliceBFixture(t, map[string]string{"docs/issue#12.md": "twelve\n", "docs/a.md#Lx-5": "odd\n"})
+	s, reasons := sliceBCollect(t, dir, "docs/issue#12.md", "docs/a.md#Lx-5")
+	for file, content := range map[string]string{"docs/issue#12.md": "twelve\n", "docs/a.md#Lx-5": "odd\n"} {
+		if e, ok := evidenceAt(s, file); reasons[file] != "collected" || !ok || e.Content != content {
+			t.Fatalf("%s: reason %q content %q", file, reasons[file], e.Content)
+		}
+	}
+	if got := s.UnmetRequests(sliceBRequests("docs/issue#12.md")); got != "none; already collected: docs/issue#12.md" {
+		t.Fatalf("unmet list %q", got)
+	}
+}
+
+func TestSliceBGoOutlinePrintsSignaturesWithoutBodies(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package big\n\nfunc key() string { return \"secret\" }\n\nvar token = \"hunter2\"\n\ntype pair struct{ A, B string }\n\nfunc join(\n\ta string,\n\tb string,\n) (string, error) { return a + b, nil }\n\n")
+	for b.Len() <= 70000 {
+		b.WriteString("// filler\n")
+	}
+	dir := sliceBFixture(t, map[string]string{"lab/big.go": b.String()})
+	s, _ := sliceBCollect(t, dir, "lab/big.go")
+	e, ok := evidenceAt(s, "lab/big.go#outline")
+	if !ok {
+		t.Fatal("outline missing")
+	}
+	for _, want := range []string{"\nL3-3 func key() string\n", "\nL5-5 var token\n", "\nL7-7 type pair\n", "\nL9-12 func join( a string, b string, ) (string, error)\n"} {
+		if !strings.Contains(e.Content, want) {
+			t.Fatalf("outline lacks %q:\n%s", want, e.Content)
+		}
+	}
+	for _, leaked := range []string{"secret", "hunter2", "return", "A, B"} {
+		if strings.Contains(e.Content, leaked) {
+			t.Fatalf("outline leaks %q:\n%s", leaked, e.Content)
+		}
+	}
+}
+
+func TestSliceBGoOutlineSurvivesMalformedSignatures(t *testing.T) {
+	const valid = "\nfunc Good() int {\n\treturn 1\n}\n"
+	for name, src := range map[string]string{
+		"unclosed params":    "package big\n\nfunc F(a int {\n\treturn\n}\n" + valid,
+		"unclosed results":   "package big\n\nfunc F(a int) ( {\n}\n" + valid,
+		"params then var":    "package big\n\nfunc F(\nvar x = 1\n" + valid,
+		"truncated at EOF":   "package big\n\nfunc F(",
+		"one-line body leak": "package big\n\nfunc F(a int { return \"secret\" }\n" + valid,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out string
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("outline panicked: %v", r)
+					}
+				}()
+				out = goOutline("lab/big.go", src)
+			}()
+			if !strings.HasPrefix(out, "// Outline of lab/big.go: ") || !strings.Contains(out, "// The file did not parse completely; later declarations may be missing.\n") {
+				t.Fatalf("outline lacks the header or the parse fallback:\n%s", out)
+			}
+			for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+				var start, end int
+				if _, err := fmt.Sscanf(line, "L%d-%d", &start, &end); err == nil && (start < 1 || end < start) {
+					t.Fatalf("invalid range in %q", line)
+				}
+			}
+			if strings.Contains(out, "secret") || strings.Contains(out, "return") {
+				t.Fatalf("outline leaks a body:\n%s", out)
+			}
+		})
+	}
+	// Each case also collects through the real path without failing intake.
+	dir := sliceBFixture(t, map[string]string{"lab/big.go": "package big\n\nfunc F(a int {\n" + strings.Repeat("// filler\n", 8000)})
+	if _, reasons := sliceBCollect(t, dir, "lab/big.go"); !strings.HasPrefix(reasons["lab/big.go"], "outline collected; ") {
+		t.Fatalf("malformed Go outline reason %q", reasons["lab/big.go"])
+	}
+}
+
+func TestSliceBUnmetRequestsNormalizeSingleLineRanges(t *testing.T) {
+	dir := sliceBFixture(t, map[string]string{"docs/a.txt": numberedLines(10)})
+	s, reasons := sliceBCollect(t, dir, "docs/a.txt#L5")
+	if reasons["docs/a.txt#L5"] != "collected" {
+		t.Fatalf("single-line range outcome %q", reasons["docs/a.txt#L5"])
+	}
+	if got := s.UnmetRequests(sliceBRequests("docs/a.txt#L5-5", "docs/a.txt#L6")); got != "docs/a.txt#L6 (not collected: no supplemental pass remains); already collected: docs/a.txt#L5-5" {
+		t.Fatalf("unmet list %q", got)
 	}
 }
