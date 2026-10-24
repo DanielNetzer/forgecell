@@ -132,6 +132,26 @@ then lost, although the approved readiness event remains. Do not run an older La
 ledger that has a policy decision. The ledger schema version is unchanged, so an older writer
 is not refused.
 
+### Ledger inventory scaling limits
+
+The loop's ledger inventory, clarification history and `forgecell labs` read only each
+ledger's header (identity, status, mode, start and finish times, Lab, Issue, workspace and
+readiness phase) with one shared streaming reader, so memory stays bounded however large
+the ledgers grow. The limits are 4096 directory entries, 4096 ledger JSON files, 5 MB per
+ledger and 1 GB read per scan; a Molecule's `.md` report, `.lock` approval lock and the
+loop's `.loop-lock` files do not count as entries, and 65536 raw directory entries of any
+kind are a further safety bound. There is no other cap on the total bytes of `ledgers/`. A
+ledger saved by this version writes its header fields first, ahead of the attempt arrays,
+so decoding stops after a few KB; the rest is then only checked to be valid JSON, so a
+truncated or corrupt ledger is still refused. The JSON field names are unchanged, so older
+binaries still decode it. A ledger saved by an earlier version keeps its order until its
+next save and is streamed to its header with constant memory, reading at most 5 MB. Within
+one process, such as a loop pass and its re-read under an Issue lock, a ledger whose
+device, inode, modification time and size are unchanged is not read again. A ledger that
+is oversized, unreadable, unsafe or malformed, or a scan that reaches a limit, makes the
+inventory incomplete with the file or limit named, and the loop then starts or advances
+nothing.
+
 The check Atom executes reviewed argv, working directories and timeouts after validating
 command definition hashes. It uses a temporary HOME and filtered environment, with
 unrestricted network access and no OS filesystem/network sandbox. Source mutations

@@ -238,6 +238,23 @@ It never delivers, merges or approves a human gate.
   request also cancels a running Issue listing. No pass delivers,
   merges or approves a human gate. Notices about recurrence and pending learning
   are printed after every pass, so they repeat each interval.
+- **Ledger inventory limits:** each pass reads only the header of every ledger
+  (identity, status, mode, start and finish times, Lab, Issue, workspace and
+  readiness phase), streaming it with bounded memory. The inventory, clarification
+  history and `forgecell labs` share this reader and its limits: 4096 directory
+  entries (a Molecule's `.md` report, `.lock` approval lock and the loop's
+  `.loop-lock` files are not counted, though 65536 raw entries of any kind are),
+  4096 ledger JSON files, 5 MB per ledger and 1 GB read per scan. There is no
+  other cap on the total bytes of `ledgers/`. A ledger saved by this version writes
+  its header first, so decoding stops after a few KB and the rest is only checked
+  to be valid JSON; a ledger saved by an earlier version is streamed to its header
+  (at most 5 MB of reading, constant memory) until its next save rewrites it in the
+  new order. Within a pass, the re-read under an Issue's start lock reuses the
+  headers of ledgers whose device, inode, modification time and size are
+  unchanged. The inventory never rewrites a ledger. Any limit reached, or any
+  ledger that is oversized, unreadable, unsafe, truncated or malformed, makes the
+  inventory incomplete with that file or limit named, and the pass then starts or
+  advances nothing.
 - **Learning:** `--learn` is off by default and works with or without `--watch`.
   After each pass (and after that pass's recurrence check) the loop runs the pending
   learn requests for the current approved Formula through the same path as
@@ -283,7 +300,7 @@ ledgers (ties go to the smaller id) and is shown as unknown when a start time is
 unusable or the scan was truncated; records that fail validation are counted as
 invalid. A Lab with an unreadable `lab.json` or Formula is listed with an error
 instead of stopping the list, symbolic links are listed but not followed, and
-ledger reads are bounded. The command is read-only and never prints harness
+ledger reads use the loop inventory's bounded header reader and limits. The command is read-only and never prints harness
 commands, credentials, ledger bodies or traces. Portable Lab export and import are
 tracked separately in #54.
 

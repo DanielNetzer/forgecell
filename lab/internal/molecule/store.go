@@ -2,12 +2,12 @@ package molecule
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -477,81 +477,45 @@ func UsageSummaryLines(r Record) []string {
 
 // History is advisory only. Bounds never broaden approval lookup or mutate predecessors.
 func clarificationHistory(lab, repo string, number int64) ([]string, bool, error) {
-	dir, err := os.Open(filepath.Join(lab, "ledgers"))
-	if os.IsNotExist(err) {
+	scan := scanLedgers(lab, nil)
+	if scan.Missing {
 		return nil, false, nil
 	}
-	if err != nil {
-		return nil, false, err
-	}
-	defer dir.Close()
-	names, err := dir.Readdirnames(4097)
-	if err != nil && err != io.EOF {
-		return nil, false, err
-	}
 	// No partial directory ordering: oversize inventories have no guessed links.
-	if len(names) > 4096 {
+	if scan.Problem != "" && scan.Truncated && len(scan.Files) == 0 {
 		return nil, true, nil
 	}
-	sort.Strings(names)
+	if scan.Problem != "" && !scan.Truncated {
+		return nil, false, errors.New(scan.Problem)
+	}
 	type predecessor struct {
 		id string
 		at time.Time
 	}
 	var matches []predecessor
-	total, files := int64(0), 0
-	truncated := false
-	for _, name := range names {
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		if files >= 256 {
-			truncated = true
-			break
-		}
-		files++
-		path := filepath.Join(lab, "ledgers", name)
-		info, e := os.Lstat(path)
-		if e != nil {
-			return nil, false, e
-		}
-		if !info.Mode().IsRegular() || info.Size() > 5_000_000 {
+	truncated := scan.Truncated
+	for _, f := range scan.Files {
+		switch f.Kind {
+		case ledger.ProblemNone:
+		case ledger.ProblemUnreadable:
+			return nil, false, errors.New(f.Problem)
+		case ledger.ProblemUnsafe, ledger.ProblemOversized:
 			truncated = true
 			continue
-		}
-		if total+info.Size() > 20_000_000 {
-			truncated = true
-			break
-		}
-		f, e := os.Open(path)
-		if e != nil {
-			return nil, false, e
-		}
-		raw, e := io.ReadAll(io.LimitReader(f, 5_000_001))
-		f.Close()
-		if e != nil {
-			return nil, false, e
-		}
-		total += int64(len(raw))
-		if len(raw) > 5_000_000 {
-			truncated = true
+		default:
 			continue
 		}
-		header, e := ledger.Decode(raw)
-		if e != nil || header.ID+".json" != name {
+		h := f.Header
+		if h.LabDir != lab || h.Mode != "ticket" ||
+			!strings.EqualFold(h.Issue.Repo, repo) || h.Issue.Number != number ||
+			h.Workspace == nil || !strings.EqualFold(h.Workspace.Repo, repo) {
 			continue
 		}
-		var r Record
-		if json.Unmarshal(raw, &r) != nil || r.LabDir != lab || r.Mode != "ticket" ||
-			!strings.EqualFold(r.Issue.Repo, repo) || r.Issue.Number != number ||
-			!strings.EqualFold(r.Workspace.Repo, repo) {
-			continue
-		}
-		at, e := time.Parse(time.RFC3339Nano, r.StartedAt)
+		at, e := time.Parse(time.RFC3339Nano, h.StartedAt)
 		if e != nil {
 			continue
 		}
-		matches = append(matches, predecessor{r.ID, at})
+		matches = append(matches, predecessor{h.ID, at})
 	}
 	sort.Slice(matches, func(i, j int) bool {
 		if matches[i].at.Equal(matches[j].at) {

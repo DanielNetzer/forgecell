@@ -70,8 +70,8 @@ func TestIssueQueueUnsafeAndBounds(t *testing.T) {
 			case "large":
 				err = os.WriteFile(path, bytes.Repeat([]byte(" "), 5_000_001), 0600)
 			case "files":
-				for i := 0; i < 257; i++ {
-					queueFixture(t, dir, fmt.Sprintf("m%03d", i), "o/r", "waiting", "2026-01-01T00:00:00Z")
+				for i := 0; i < 4097; i++ {
+					queueFixture(t, dir, fmt.Sprintf("m%04d", i), "o/r", "waiting", "2026-01-01T00:00:00Z")
 				}
 			case "entries":
 				for i := 0; i < 4097; i++ {
@@ -103,6 +103,9 @@ func TestIssueQueueUnsafeAndBounds(t *testing.T) {
 		})
 	}
 }
+
+// There is no total-byte cap: five ledgers at the 5 MB per-file bound still give
+// a complete inventory, and a sixth over the bound makes it incomplete.
 func TestIssueQueueTotalBytesAndOrdering(t *testing.T) {
 	t.Parallel()
 	lab := t.TempDir()
@@ -125,15 +128,15 @@ func TestIssueQueueTotalBytesAndOrdering(t *testing.T) {
 	}
 	q := ReadQueueInventory(lab)
 	s := q.Summarize("o/r", 1)
-	if !q.Truncated || !s.Partial || len(s.Attempts) != 4 || s.Latest != nil {
+	if !q.Complete || q.Truncated || len(s.Attempts) != 5 || s.Latest == nil || s.Latest.ID != "m0" {
 		t.Fatal(q, s)
 	}
-	if err := os.Remove(filepath.Join(dir, "m4.json")); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "m5.json"), bytes.Repeat([]byte(" "), 5_000_001), 0600); err != nil {
 		t.Fatal(err)
 	}
 	q = ReadQueueInventory(lab)
 	s = q.Summarize("o/r", 1)
-	if !q.Complete || s.Latest == nil || s.Latest.ID != "m0" {
+	if q.Complete || !q.Truncated || !s.Partial || len(s.Attempts) != 5 || s.Latest != nil {
 		t.Fatal(q, s)
 	}
 }
