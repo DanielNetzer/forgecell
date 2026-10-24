@@ -535,6 +535,150 @@ func Parse(data []byte) (Formula, error) {
 	return f, nil
 }
 
+// releaseLauncher matches an installed release launcher: an absolute path that ends
+// in /releases/<version>/forgecell. Its characters are limited so that the value
+// appears literally in its YAML line in plain, single- or double-quoted style.
+var releaseLauncher = regexp.MustCompile(`^(?:/[A-Za-z0-9._@+~ -]+)*/releases/[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?/forgecell$`)
+
+const maxLauncherPathBytes = 4096
+
+// IsReleaseLauncher reports whether p names a release launcher by a clean
+// absolute path, so a "." or ".." segment can never satisfy it.
+func IsReleaseLauncher(p string) bool {
+	return len(p) <= maxLauncherPathBytes && filepath.IsAbs(p) && filepath.Clean(p) == p && releaseLauncher.MatchString(p)
+}
+
+// errNotLauncherOnly is deliberately uninformative: a caller reports its own
+// refusal, and no Formula text is echoed.
+var errNotLauncherOnly = fmt.Errorf("Formula change is not launcher-only")
+
+// LauncherOnlyChange returns nil only when previous and next are both valid
+// Formulas that differ solely in the launcher (argv[0]) of native
+// [launcher, "__adapter", adapter, provider] commands, with the old and the new
+// value both release launchers. Every other byte, including line structure,
+// must be identical. Identical Formulas are refused: there is nothing to carry.
+// Input is bounded by Parse's 1 MB limit and anchors or aliases are refused, so
+// one line can never stand for several launcher positions.
+func LauncherOnlyChange(previous, next []byte) error {
+	before, err := Parse(previous)
+	if err != nil {
+		return errNotLauncherOnly
+	}
+	after, err := Parse(next)
+	if err != nil || before.ID != after.ID || before.SHA256 == after.SHA256 {
+		return errNotLauncherOnly
+	}
+	oldSites, err := launcherSites(previous)
+	if err != nil {
+		return err
+	}
+	newSites, err := launcherSites(next)
+	if err != nil || len(oldSites) != len(newSites) {
+		return errNotLauncherOnly
+	}
+	changed := map[int][2]string{}
+	for i := range oldSites {
+		o, n := oldSites[i], newSites[i]
+		if o.Line != n.Line || o.Column != n.Column || o.Style != n.Style {
+			return errNotLauncherOnly
+		}
+		if o.Value == n.Value {
+			continue
+		}
+		if _, twice := changed[o.Line]; twice || !IsReleaseLauncher(o.Value) || !IsReleaseLauncher(n.Value) {
+			return errNotLauncherOnly
+		}
+		changed[o.Line] = [2]string{o.Value, n.Value}
+	}
+	oldLines, newLines := bytes.Split(previous, []byte("\n")), bytes.Split(next, []byte("\n"))
+	if len(oldLines) != len(newLines) {
+		return errNotLauncherOnly
+	}
+	consumed := 0
+	for i := range oldLines {
+		if bytes.Equal(oldLines[i], newLines[i]) {
+			continue
+		}
+		pair, ok := changed[i+1]
+		if !ok || !sameExceptLauncher(string(oldLines[i]), string(newLines[i]), pair[0], pair[1]) {
+			return errNotLauncherOnly
+		}
+		consumed++
+	}
+	if consumed != len(changed) {
+		return errNotLauncherOnly
+	}
+	return nil
+}
+
+// sameExceptLauncher requires each launcher to occur exactly once in its line and
+// the bytes around it to be identical.
+func sameExceptLauncher(oldLine, newLine, oldValue, newValue string) bool {
+	if strings.Count(oldLine, oldValue) != 1 || strings.Count(newLine, newValue) != 1 {
+		return false
+	}
+	i, j := strings.Index(oldLine, oldValue), strings.Index(newLine, newValue)
+	return oldLine[:i] == newLine[:j] && oldLine[i+len(oldValue):] == newLine[j+len(newValue):]
+}
+
+// launcherSites returns, in document order, the argv[0] node of every native
+// command held by harness, harnesses.<role> or an Atom.
+func launcherSites(data []byte) ([]*yaml.Node, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
+		return nil, errNotLauncherOnly
+	}
+	if hasAnchors(&doc, 0) {
+		return nil, errNotLauncherOnly
+	}
+	root := doc.Content[0]
+	var sites []*yaml.Node
+	add := func(holder *yaml.Node) {
+		args := mappingValue(holder, "command")
+		if args != nil && args.Kind == yaml.SequenceNode && len(args.Content) == 4 && args.Content[0].Kind == yaml.ScalarNode && args.Content[1].Kind == yaml.ScalarNode && args.Content[1].Value == "__adapter" {
+			sites = append(sites, args.Content[0])
+		}
+	}
+	add(mappingValue(root, "harness"))
+	if roles := mappingValue(root, "harnesses"); roles != nil && roles.Kind == yaml.MappingNode {
+		for i := 1; i < len(roles.Content); i += 2 {
+			add(roles.Content[i])
+		}
+	}
+	if atoms := mappingValue(root, "atoms"); atoms != nil && atoms.Kind == yaml.SequenceNode {
+		for _, atom := range atoms.Content {
+			add(atom)
+		}
+	}
+	return sites, nil
+}
+
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Kind == yaml.ScalarNode && m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// hasAnchors reports an anchor, an alias or nesting deeper than any Formula needs;
+// each fails the comparison safe.
+func hasAnchors(n *yaml.Node, depth int) bool {
+	if depth > 64 || n.Anchor != "" || n.Kind == yaml.AliasNode {
+		return true
+	}
+	for _, c := range n.Content {
+		if hasAnchors(c, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
 var unsafeFilename = regexp.MustCompile(`[^a-z0-9._-]+`)
 
 func Inspect(labDir, id string) (Loaded, error) {

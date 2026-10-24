@@ -94,6 +94,52 @@ func TestExecutionIdentityRejectsWithoutMutation(t *testing.T) {
 	}
 }
 
+// Earlier plans may bind an earlier Formula only across a validated rebase event
+// at that exact revision boundary.
+func TestExecutionRolesAcceptOnlyRecordedFormulaRebase(t *testing.T) {
+	t.Parallel()
+	o, r, f1 := rebaseFixture(t)
+	writeFormula(t, o.LabDir, strings.Replace(f1, rebaseOldLauncher, rebaseNewLauncher, 1), rebaseDecision)
+	r, err := RebaseFormula(context.Background(), o.LabDir, r.ID, latestDigest(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = resolveExecutionRoles(r); err != nil {
+		t.Fatalf("rebased ledger refused: %v", err)
+	}
+	rebase := -1
+	for i, e := range r.Readiness.Events {
+		if e.Kind == "formula-rebased" {
+			rebase = i
+		}
+	}
+	for name, tamper := range map[string]func(*Record){
+		"no rebase event": func(r *Record) {
+			r.Readiness.Events = append(r.Readiness.Events[:rebase:rebase], r.Readiness.Events[rebase+1:]...)
+		},
+		"wrong boundary":   func(r *Record) { r.Readiness.Events[rebase].Digest = r.Readiness.Plans[1].Digest },
+		"wrong old SHA":    func(r *Record) { r.Readiness.Events[rebase].FormulaFrom = strings.Repeat("a", 64) },
+		"missing decision": func(r *Record) { r.Readiness.Events[rebase].Decision = "" },
+		"duplicate rebase": func(r *Record) { r.Readiness.Events = append(r.Readiness.Events, r.Readiness.Events[rebase]) },
+		"earlier plan SHA": func(r *Record) { r.Readiness.Plans[0].Plan.Inputs.FormulaSHA256 = strings.Repeat("b", 64) },
+		"stale latest plan": func(r *Record) {
+			r.FormulaSnapshot = Snapshot{YAML: f1, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(f1)))}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := json.Marshal(r)
+			var tampered Record
+			if err := json.Unmarshal(raw, &tampered); err != nil {
+				t.Fatal(err)
+			}
+			tamper(&tampered)
+			if _, err := resolveExecutionRoles(tampered); err == nil {
+				t.Fatal("unrecorded Formula change accepted")
+			}
+		})
+	}
+}
+
 func roleFixture(t *testing.T) Options {
 	t.Helper()
 	o, _ := fixture(t)

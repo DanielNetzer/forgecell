@@ -56,14 +56,8 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if err = confirmVerificationProcessesStopped(r); err != nil {
 		return r, err
 	}
-	if len(r.HarnessAttempts) > 0 {
-		a := r.HarnessAttempts[len(r.HarnessAttempts)-1]
-		if a.Evidence == nil || !a.Result.Reconciled || a.CaptureError != "" {
-			return r, fmt.Errorf("harness outcome or capture is uncertain; reconcile before amendment")
-		}
-	}
-	if len(r.HarnessAttempts) == 0 && statePhase(r) == "interrupted" && !completedCoding(r) {
-		return r, fmt.Errorf("legacy interrupted coding lacks durable process reconciliation evidence")
+	if err = retainedWorkCertain(r); err != nil {
+		return r, err
 	}
 	previous := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan
 	// Lifecycle fields are runtime-owned; the submitted payload defines the actual
@@ -216,6 +210,179 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	}
 	if allowlistNote != "" {
 		r.Notes = append(r.Notes, allowlistNote)
+	}
+	return r, save(r)
+}
+
+// retainedWorkCertain refuses an amendment while the latest harness outcome or
+// capture is unreconciled.
+func retainedWorkCertain(r Record) error {
+	if len(r.HarnessAttempts) > 0 {
+		a := r.HarnessAttempts[len(r.HarnessAttempts)-1]
+		if a.Evidence == nil || !a.Result.Reconciled || a.CaptureError != "" {
+			return fmt.Errorf("harness outcome or capture is uncertain; reconcile before amendment")
+		}
+	}
+	if len(r.HarnessAttempts) == 0 && statePhase(r) == "interrupted" && !completedCoding(r) {
+		return fmt.Errorf("legacy interrupted coding lacks durable process reconciliation evidence")
+	}
+	return nil
+}
+
+// errFormulaChanged is the refusal every Formula difference other than a
+// launcher-only rebind keeps.
+var errFormulaChanged = fmt.Errorf("issue or Formula changed; refresh intake")
+
+// RebaseFormula carries the pending or retained plan of a Molecule to the active
+// Formula when that Formula differs from the Molecule's snapshot only in release
+// launcher paths. The successor revision keeps scope, checks, acceptance,
+// artifacts and the retained tree; it rebinds only the Formula and binding
+// identities and the derived coding allowlist, and waits for exact approval.
+// Completed coding output continues as checks-only. Any other Formula difference
+// is refused with the refresh-intake message and leaves the ledger unchanged.
+func RebaseFormula(ctx context.Context, lab, id, parent string) (Record, error) {
+	var empty Record
+	lab, err := filepath.Abs(lab)
+	if err != nil {
+		return empty, err
+	}
+	r, err := findPending(lab, parent)
+	if err != nil {
+		return r, err
+	}
+	if _, err = resolveExecutionRoles(r); err != nil {
+		return r, err
+	}
+	if r.ID != id {
+		return r, fmt.Errorf("Molecule and parent plan mismatch")
+	}
+	unlockLoop, err := lockMolecule(lab, id)
+	if err != nil {
+		return r, lockedByLoop(err)
+	}
+	defer unlockLoop()
+	lock := filepath.Join(lab, "ledgers", id+".lock")
+	if err = os.Mkdir(lock, 0700); err != nil {
+		return r, fmt.Errorf("Molecule is locked: %w", err)
+	}
+	defer os.Remove(lock)
+	r, err = findPending(lab, parent)
+	if err != nil {
+		return r, err
+	}
+	roles, err := resolveExecutionRoles(r)
+	if err != nil {
+		return r, err
+	}
+	if err = ValidateVerificationHistory(r); err != nil {
+		return r, err
+	}
+	if err = confirmVerificationProcessesStopped(r); err != nil {
+		return r, err
+	}
+	if err = retainedWorkCertain(r); err != nil {
+		return r, err
+	}
+	// Load refuses a Formula write lock, an unfinished activation and any active
+	// Formula without a complete, current exact-byte approval.
+	loaded, err := formula.Load(lab, r.FormulaID)
+	if err != nil {
+		return r, err
+	}
+	if !loaded.Approved || loaded.Formula.ID != r.FormulaID {
+		return r, errFormulaChanged
+	}
+	if loaded.Formula.SHA256 == r.FormulaSnapshot.SHA256 {
+		return r, fmt.Errorf("active Formula equals the Molecule snapshot; nothing to rebase")
+	}
+	if formula.LauncherOnlyChange([]byte(r.FormulaSnapshot.YAML), []byte(loaded.Formula.YAML)) != nil {
+		return r, errFormulaChanged
+	}
+	previous := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan
+	raw, err := json.Marshal(previous)
+	if err != nil {
+		return r, err
+	}
+	var next readiness.Plan
+	if err = json.Unmarshal(raw, &next); err != nil {
+		return r, err
+	}
+	next.Revision = previous.Revision + 1
+	next.ParentDigest = parent
+	pending := statePhase(r) == "scope-waiting"
+	if pending {
+		// The adoption decision binds the old digest; it is not carried across.
+		if previous.Continuation == "adopt-failed-tree" {
+			return r, fmt.Errorf("Formula rebase cannot carry a pending failed-tree adoption; propose the adoption again after rebasing")
+		}
+	} else {
+		if !completedCoding(r) {
+			return r, fmt.Errorf("Formula rebase carries a pending plan or captured completed coding output only")
+		}
+		next.Continuation, next.AdoptAttempt = "checks-only", ""
+	}
+	codingBinding, _ := loaded.Formula.ExecutionBinding(formula.Coding)
+	if err = codingBinding.CheckTimeout(next.HarnessTimeoutMS); err != nil {
+		return r, err
+	}
+	next.Inputs.FormulaSHA256 = loaded.Formula.SHA256
+	if next.Inputs.BindingSHA256, err = bindingHash(codingBinding, r.Workspace.SourceRoot, r.Workspace.BaseCommit); err != nil {
+		return r, err
+	}
+	var allowlistNote string
+	if next.CodingAllowlist, allowlistNote, err = harness.DeriveCodingAllowlistNoted(loaded.Formula.YAML, next.Analysis.Checks, next.Analysis.Scope...); err != nil {
+		return r, err
+	}
+	allowed := []string{}
+	for _, s := range previous.Analysis.Scope {
+		allowed = append(allowed, s.Path)
+	}
+	capture, err := verification.Capture(ctx, r.Workspace.Path, previous.Inputs.BaseCommit, allowed, previous.Artifacts)
+	if err != nil {
+		return r, err
+	}
+	if len(capture.Violations) > 0 {
+		return r, fmt.Errorf("unrecorded workspace violation; do not convert it to approved scope")
+	}
+	if previous.Revision > 1 && (capture.Tree != previous.PausedTree || (previous.PausedArtifactsSHA256 != "" && artifactHash(capture) != previous.PausedArtifactsSHA256)) {
+		return r, fmt.Errorf("pending workspace changed; Formula rebase requires the retained tree and artifacts")
+	}
+	if previous.Revision == 1 && pending && len(capture.Changes) > 0 {
+		return r, fmt.Errorf("pending workspace changed; Formula rebase requires the retained tree and artifacts")
+	}
+	if next.Continuation == "checks-only" && (r.Capture == nil || r.Capture.Tree != capture.Tree || artifactHash(capture) != artifactHash(*r.Capture) || !completedCoding(r)) {
+		return r, fmt.Errorf("checks-only requires unchanged scope and captured completed coding output")
+	}
+	next.PausedTree = capture.Tree
+	next.PausedArtifactsSHA256 = artifactHash(capture)
+	state, err := r.Readiness.RebaseFormula(next, loaded.Approval.DecisionID, stamp())
+	if err != nil {
+		return r, err
+	}
+	if err = archiveLegacyVerification(&r); err != nil {
+		return r, err
+	}
+	r.Readiness = &state
+	r.FormulaSnapshot = Snapshot{YAML: loaded.Formula.YAML, SHA256: loaded.Formula.SHA256}
+	if _, err = resolveExecutionRoles(r); err != nil {
+		return r, err
+	}
+	r.Verification = nil
+	if r.Capture != nil && len(r.Captures) == 0 {
+		r.Captures = append(r.Captures, *r.Capture)
+	}
+	r.Capture = &capture
+	r.Captures = append(r.Captures, capture)
+	r.Status = "waiting"
+	r.FinishedAt = ""
+	atom(&r, roles.atoms[formula.ScopeApproval], "waiting", "Formula rebase requires exact approval; retained work has not been rerun.")
+	r.Notes = append(r.Notes, fmt.Sprintf("Formula rebase r%d retains tree %s under Formula SHA-256 %s (activating decision %s). Compare immutable plans in the ledger before approval.", next.Revision, capture.Tree, loaded.Formula.SHA256, loaded.Approval.DecisionID))
+	if allowlistNote != "" {
+		r.Notes = append(r.Notes, allowlistNote)
+	}
+	// Recheck the activation immediately before the ledger write.
+	if err = formula.Revalidate(lab, loaded); err != nil {
+		return r, err
 	}
 	return r, save(r)
 }
