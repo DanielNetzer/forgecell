@@ -15,6 +15,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
 type Binding struct {
@@ -127,8 +129,13 @@ type Formula struct {
 	// Learning holds optional learning settings. Absent keeps the Formula bytes,
 	// SHA and behaviour of earlier Formulas unchanged.
 	Learning *LearningSettings `yaml:"learning" json:"learning,omitempty"`
-	YAML     string            `yaml:"-"`
-	SHA256   string            `yaml:"-"`
+	// FullSuiteTriggers lists repository paths or globs whose change makes every check
+	// that declares select run its full suite, such as packages whose tests build or
+	// exec the CLI binary. Absent means DefaultFullSuiteTriggers and keeps the Formula
+	// bytes, SHA and behaviour of earlier Formulas unchanged.
+	FullSuiteTriggers []string `yaml:"fullSuiteTriggers" json:"fullSuiteTriggers,omitempty"`
+	YAML              string   `yaml:"-"`
+	SHA256            string   `yaml:"-"`
 }
 type Loaded struct {
 	Formula  Formula
@@ -495,6 +502,11 @@ func Parse(data []byte) (Formula, error) {
 			return f, err
 		}
 	}
+	if value, exists := raw["fullSuiteTriggers"]; exists {
+		if err := validateFullSuiteTriggers(value); err != nil {
+			return f, err
+		}
+	}
 	if err := yaml.Unmarshal(data, &f); err != nil {
 		return f, err
 	}
@@ -677,6 +689,34 @@ func hasAnchors(n *yaml.Node, depth int) bool {
 		}
 	}
 	return false
+}
+
+// DefaultFullSuiteTriggers applies when a Formula declares no fullSuiteTriggers: the
+// Lab CLI, whose tests build and exec its binary.
+var DefaultFullSuiteTriggers = []string{"lab/cmd/**"}
+
+// ResolvedFullSuiteTriggers returns a copy of the declared triggers, or of the default.
+func (f Formula) ResolvedFullSuiteTriggers() []string {
+	if len(f.FullSuiteTriggers) > 0 {
+		return append([]string(nil), f.FullSuiteTriggers...)
+	}
+	return append([]string(nil), DefaultFullSuiteTriggers...)
+}
+
+func validateFullSuiteTriggers(value any) error {
+	list, ok := value.([]any)
+	if !ok || len(list) == 0 {
+		return fmt.Errorf("fullSuiteTriggers must be a non-empty list of repository paths or globs")
+	}
+	patterns := make([]string, 0, len(list))
+	for _, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			return fmt.Errorf("fullSuiteTriggers must contain strings")
+		}
+		patterns = append(patterns, s)
+	}
+	return readiness.ValidateFullSuiteTriggers(patterns)
 }
 
 var unsafeFilename = regexp.MustCompile(`[^a-z0-9._-]+`)

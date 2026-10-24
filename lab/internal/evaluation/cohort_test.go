@@ -2039,8 +2039,9 @@ func runFlakyCohort(t *testing.T, marker string, harnesses [2]string) (CohortRep
 	// Go keys the shared test cache on the env vars a test reads but not on files outside the
 	// module, such as the marker. The test therefore also reads PATH, which every scrubbed
 	// check environment forwards, and setMarker gives PATH a new entry on every toggle, so no
-	// stale result is served across the toggles. The shared cache is never cleared.
-	f.write("lab/flaky/flaky_test.go", fmt.Sprintf("package flaky\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMarkerFlaky(t *testing.T) {\n\tt.Log(os.Getenv(\"PATH\"))\n\tif _, err := os.Stat(%q); err == nil {\n\t\tt.Fatal(\"flaked\")\n\t}\n}\n", marker))
+	// stale result is served across the toggles. The shared cache is never cleared. The test
+	// also imports calc, so an affected-packages selection over a calc change keeps it.
+	f.write("lab/flaky/flaky_test.go", fmt.Sprintf("package flaky\n\nimport (\n\t\"os\"\n\t\"testing\"\n\n\t_ \"forgecellreplayfixture/calc\"\n)\n\nfunc TestMarkerFlaky(t *testing.T) {\n\tt.Log(os.Getenv(\"PATH\"))\n\tif _, err := os.Stat(%q); err == nil {\n\t\tt.Fatal(\"flaked\")\n\t}\n}\n", marker))
 	f.git("add", ".")
 	f.git("commit", "-qm", "base with a flaky test")
 	base := f.head()

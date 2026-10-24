@@ -25,7 +25,24 @@ type Command struct {
 	Dir       string   `json:"dir"`
 	Argv      []string `json:"argv"`
 	TimeoutMS int      `json:"timeoutMs"`
+	// Select narrows a direct `go test ... ./...` check to the packages the attempt's
+	// captured change affects (readiness.SelectAffectedPackages). Hidden acceptance and
+	// setup never select. Empty keeps the plan bytes of earlier evaluations unchanged.
+	Select string `json:"select,omitempty"`
 }
+
+// validateCommandSelect refuses a selection on setup or hidden acceptance, and any
+// selection the readiness rule refuses for a regression check.
+func validateCommandSelect(c Command, setup bool) error {
+	if c.Select == "" {
+		return nil
+	}
+	if setup || c.Name == "acceptance" {
+		return fmt.Errorf("evaluation command %s cannot declare select; only go test regression checks may", c.Name)
+	}
+	return readiness.ValidateCheckSelect(readiness.Check{ID: c.Name, Category: "regression", Argv: c.Argv, Select: c.Select})
+}
+
 type Plan struct {
 	ReadinessVersion   int                      `json:"readinessVersion"`
 	TargetBranch       string                   `json:"targetBranch"`
@@ -370,6 +387,11 @@ func Run(ctx context.Context, o RunOptions) (report Report, err error) {
 		}
 		names[c.Name] = true
 	}
+	for i, c := range append(append([]Command{}, p.Setup...), p.Checks...) {
+		if err = validateCommandSelect(c, i < len(p.Setup)); err != nil {
+			return report, err
+		}
+	}
 	for _, c := range p.Checks {
 		if c.Name == "acceptance" {
 			acceptanceCount++
@@ -585,11 +607,14 @@ func configureReadiness(o *molecule.Options, p Plan, planBytes, acceptance []byt
 				argv[i] = "{input:acceptance-input}"
 			}
 		}
-		provenance := ""
+		provenance, selection := "", ""
 		if category == "independent-acceptance" {
 			provenance = "Reviewed frozen evaluation plan SHA-256 " + Hash(planBytes)
+		} else if category == "regression" {
+			// Hidden acceptance keeps its own -run filter and never selects.
+			selection = c.Select
 		}
-		return readiness.Check{ID: c.Name, Category: category, IndependentProvenance: provenance, Argv: argv, Dir: c.Dir, TimeoutMS: c.TimeoutMS, Required: true, Definitions: []string{"evaluation-plan", "acceptance-input"}, Reason: "Frozen evaluation command", Evidence: []string{"issue", "evaluation-plan"}}
+		return readiness.Check{ID: c.Name, Category: category, IndependentProvenance: provenance, Argv: argv, Dir: c.Dir, TimeoutMS: c.TimeoutMS, Required: true, Definitions: []string{"evaluation-plan", "acceptance-input"}, Reason: "Frozen evaluation command", Evidence: []string{"issue", "evaluation-plan"}, Select: selection}
 	}
 	for _, c := range p.Setup {
 		o.Setup = append(o.Setup, command(c, "setup"))
