@@ -119,6 +119,53 @@ func TestReportingUsesRuntimeProjectBlocker(t *testing.T) {
 	}
 }
 
+// Configuration above the repository root (for example a real home's
+// ~/.claude/settings.json while HOME points elsewhere) is not project-scoped;
+// configuration at or below the repository root still is.
+func TestAnalysisProjectScanStopsAtRepositoryRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	outer := t.TempDir()
+	write := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(outer, ".claude/settings.json"))
+	repo := filepath.Join(outer, "repo")
+	nested := filepath.Join(repo, "sub", "dir")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	help := func(context.Context, process.Options) process.Result {
+		return process.Result{OK: true, Stdout: "--safe-mode --tools --strict-mcp-config --json-schema --no-chrome --disable-slash-commands"}
+	}
+	for _, dir := range []string{repo, nested} {
+		if err := ProbeAnalysisControls(context.Background(), "claude-code", "/never-invoked", dir, help); err != nil {
+			t.Fatalf("%s: config above the repository root treated as project-scoped: %v", dir, err)
+		}
+	}
+	for _, at := range []string{repo, filepath.Join(repo, "sub")} {
+		write(filepath.Join(at, ".claude/settings.json"))
+		err := ProbeAnalysisControls(context.Background(), "claude-code", "/never-invoked", nested, func(context.Context, process.Options) process.Result {
+			t.Fatal("probed despite project blocker")
+			return process.Result{}
+		})
+		if err == nil || !strings.Contains(err.Error(), "project-scoped claude-code configuration") {
+			t.Fatalf("%s: %v", at, err)
+		}
+		if err := os.RemoveAll(filepath.Join(at, ".claude")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // Fixed help fixtures keep candidate regression assertions separate from the builder.
 const codexRootHelp = "Options: --config <KEY=VALUE> -c <KEY=VALUE> --disable <FEATURE>"
 const codexExecHelp = "Options: --sandbox <MODE> --ephemeral --color <WHEN> --output-last-message <FILE> --output-schema <FILE> --strict-config --skip-git-repo-check --ignore-rules"

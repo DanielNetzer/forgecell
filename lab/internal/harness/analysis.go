@@ -59,6 +59,13 @@ func analysisControls(ctx context.Context, o ExecuteOptions, args []string, run 
 				return nil, err
 			}
 		}
+		// Project settings are scoped to the repository, as Claude Code and Codex
+		// scope them; configuration above the repository root is never project-scoped.
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
 	}
 	help := run(ctx, process.Options{Argv: []string{o.Executable, "--help"}, Dir: o.Dir, Env: o.Env, Stdin: []byte{}, Timeout: AnalysisProbeTimeout, MaxOutputBytes: 64000})
 	if !help.OK {

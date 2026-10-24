@@ -5,22 +5,15 @@ import (
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
 	"io"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
-// Ledger reads are bounded like the issue-queue inventory.
-var maxLabLedgerFiles = 256
-
-const (
-	maxLabLedgerEntries = 4096
-	maxLabLedgerBytes   = 20_000_000
-)
+// Ledger reads share the issue-queue inventory's bounded header reader.
+var maxLabLedgerFiles = ledger.MaxScanFiles
 
 type labMolecule struct {
 	ID        string `json:"id"`
@@ -101,71 +94,22 @@ func (s *labSummary) truncate(message string) {
 // latest start time among valid records, ties broken by the smaller id; it is
 // withheld whenever any start time is unusable or the scan was truncated.
 func summarizeLedgers(lab string, s *labSummary) {
-	path := filepath.Join(lab, "ledgers")
-	before, err := os.Lstat(path)
-	if os.IsNotExist(err) {
+	scan := ledger.ScanDir(filepath.Join(lab, "ledgers"), ledger.ScanOptions{MaxFiles: maxLabLedgerFiles})
+	if scan.Missing {
 		return
 	}
-	if err != nil {
-		s.problem("ledger directory unreadable")
-		return
-	}
-	if !before.IsDir() {
-		s.problem("ledger directory is not a regular directory")
-		return
-	}
-	dir, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		s.problem("ledger directory unreadable")
-		return
-	}
-	defer dir.Close()
-	if opened, err := dir.Stat(); err != nil || !opened.IsDir() || !os.SameFile(before, opened) {
-		s.problem("ledger directory identity changed")
-		return
-	}
-	names, err := dir.Readdirnames(maxLabLedgerEntries + 1)
-	if err != nil && err != io.EOF {
-		s.problem("ledger directory unreadable")
-		return
-	}
-	if len(names) > maxLabLedgerEntries {
-		s.truncate(fmt.Sprintf("ledger directory scan truncated at %d entries", maxLabLedgerEntries))
-		s.OrderingUncertain = true
-		return
-	}
-	sort.Strings(names)
 	var last *labMolecule
 	var lastTime time.Time
-	files, total := 0, 0
-	for _, name := range names {
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		if files >= maxLabLedgerFiles {
-			s.truncate(fmt.Sprintf("ledger scan truncated at %d JSON files", maxLabLedgerFiles))
-			break
-		}
-		files++
-		raw, err := readLedgerForInspection(filepath.Join(path, name))
-		if err != nil {
+	for _, f := range scan.Files {
+		if f.Kind != ledger.ProblemNone && f.Kind != ledger.ProblemProjection {
 			s.InvalidRecords++
 			continue
 		}
-		total += len(raw)
-		if total > maxLabLedgerBytes {
-			s.truncate(fmt.Sprintf("ledger byte scan truncated at %d bytes", maxLabLedgerBytes))
-			break
-		}
-		record, err := ledger.Decode(raw)
-		if err != nil || record.ID+".json" != name {
-			s.InvalidRecords++
-			continue
-		}
+		record := f.Header
 		s.StatusCounts[record.Status]++
 		var started time.Time
-		if projection, err := record.QueueProjection(); err == nil {
-			started, err = time.Parse(time.RFC3339Nano, projection.StartedAt)
+		if f.Kind == ledger.ProblemNone {
+			started, _ = time.Parse(time.RFC3339Nano, record.StartedAt)
 		}
 		if started.IsZero() {
 			s.OrderingUncertain = true
@@ -174,6 +118,13 @@ func summarizeLedgers(lab string, s *labSummary) {
 		if last == nil || started.After(lastTime) || (started.Equal(lastTime) && record.ID < last.ID) {
 			last, lastTime = &labMolecule{ID: record.ID, Status: record.Status, StartedAt: started.Format(time.RFC3339Nano)}, started
 		}
+	}
+	switch {
+	case scan.Problem == "":
+	case scan.Truncated:
+		s.truncate(scan.Problem)
+	default:
+		s.problem(scan.Problem)
 	}
 	if s.Truncated {
 		s.OrderingUncertain = true

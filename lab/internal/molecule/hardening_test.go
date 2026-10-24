@@ -650,8 +650,8 @@ func TestClarificationHistoryValidatesIdentityAndOrdersTies(t *testing.T) {
 	if err != nil || truncated || !reflect.DeepEqual(ids, []string{"mol-a", "mol-b"}) {
 		t.Fatalf("ids=%v truncated=%t err=%v", ids, truncated, err)
 	}
-	for j := 0; j < 257; j++ {
-		os.WriteFile(filepath.Join(o.LabDir, "ledgers", fmt.Sprintf("a-%03d.json", j)), []byte("{}"), 0600)
+	for j := 0; j < 4097; j++ {
+		os.WriteFile(filepath.Join(o.LabDir, "ledgers", fmt.Sprintf("a-%04d.json", j)), []byte("{}"), 0600)
 	}
 	_, truncated, err = clarificationHistory(o.LabDir, "acme/widgets", 12)
 	if err != nil || !truncated {

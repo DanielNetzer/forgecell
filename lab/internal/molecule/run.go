@@ -162,7 +162,28 @@ type PolicyDecision struct {
 	At            string           `json:"at"`
 	Evidence      []PolicyEvidence `json:"evidence"`
 }
+
+// Record marshals its header fields first, ending with readiness (whose phase
+// leads its own fields), so ledger.ReadHeader stops before the large attempt
+// arrays. Only the order matters: JSON tags are the wire names and stay fixed.
 type Record struct {
+	SchemaVersion   string           `json:"schemaVersion"`
+	Kind            string           `json:"kind"`
+	ID              string           `json:"id"`
+	Status          string           `json:"status"`
+	FormulaID       string           `json:"formulaId"`
+	Mode            string           `json:"mode"`
+	StartedAt       string           `json:"startedAt"`
+	FinishedAt      string           `json:"finishedAt"`
+	LabDir          string           `json:"labDir"`
+	Issue           Issue            `json:"issue"`
+	Workspace       Workspace        `json:"workspace"`
+	Readiness       *readiness.State `json:"readiness,omitempty"`
+	FormulaApproved bool             `json:"formulaApproved"`
+	FormulaSnapshot Snapshot         `json:"formulaSnapshot"`
+	Atoms           []Atom           `json:"atoms"`
+	Notes           []string         `json:"notes"`
+
 	PolicyDecisions               []PolicyDecision  `json:"policyDecisions,omitempty"`
 	ClarificationPredecessors     []string          `json:"clarificationPredecessors,omitempty"`
 	ClarificationHistoryTruncated bool              `json:"clarificationHistoryTruncated,omitempty"`
@@ -179,7 +200,6 @@ type Record struct {
 	ReviewAttempts []ReviewAttempt `json:"reviewAttempts,omitempty"`
 
 	VerificationAttempts []VerificationAttempt         `json:"verificationAttempts,omitempty"`
-	Readiness            *readiness.State              `json:"readiness,omitempty"`
 	Analysis             *readiness.Analysis           `json:"analysis,omitempty"`
 	RemotePolicy         *readiness.RemotePolicy       `json:"remotePolicy,omitempty"`
 	RepositoryEvidence   *readiness.RepositorySnapshot `json:"repositoryEvidence,omitempty"`
@@ -187,22 +207,6 @@ type Record struct {
 	Capture              *verification.CaptureResult   `json:"capture,omitempty"`
 	Recovery             *verification.CaptureResult   `json:"recovery,omitempty"`
 	Verification         *verification.Result          `json:"verification,omitempty"`
-
-	SchemaVersion   string    `json:"schemaVersion"`
-	Kind            string    `json:"kind"`
-	ID              string    `json:"id"`
-	Mode            string    `json:"mode"`
-	Status          string    `json:"status"`
-	FormulaID       string    `json:"formulaId"`
-	FormulaApproved bool      `json:"formulaApproved"`
-	FormulaSnapshot Snapshot  `json:"formulaSnapshot"`
-	StartedAt       string    `json:"startedAt"`
-	FinishedAt      string    `json:"finishedAt"`
-	LabDir          string    `json:"labDir"`
-	Workspace       Workspace `json:"workspace"`
-	Issue           Issue     `json:"issue"`
-	Atoms           []Atom    `json:"atoms"`
-	Notes           []string  `json:"notes"`
 }
 type Options struct {
 	MandatoryConstraints []string

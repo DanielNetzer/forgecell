@@ -50,18 +50,21 @@ func (l Ledger) Encode() ([]byte, error) {
 
 // QueueProjection is optional historical evidence; all extension fields remain intact.
 type QueueProjection struct {
-	Issue struct {
-		URL    string `json:"url"`
-		Repo   string `json:"repo"`
-		Number int64  `json:"number"`
-	} `json:"issue"`
-	Workspace *struct {
-		Repo string `json:"repo"`
-	} `json:"workspace"`
-	StartedAt string `json:"startedAt"`
-	Readiness *struct {
-		Phase string `json:"phase"`
-	} `json:"readiness"`
+	Issue     IssueProjection      `json:"issue"`
+	Workspace *WorkspaceProjection `json:"workspace"`
+	StartedAt string               `json:"startedAt"`
+	Readiness *ReadinessProjection `json:"readiness"`
+}
+type IssueProjection struct {
+	URL    string `json:"url"`
+	Repo   string `json:"repo"`
+	Number int64  `json:"number"`
+}
+type WorkspaceProjection struct {
+	Repo string `json:"repo"`
+}
+type ReadinessProjection struct {
+	Phase string `json:"phase"`
 }
 
 func (l Ledger) QueueProjection() (QueueProjection, error) {

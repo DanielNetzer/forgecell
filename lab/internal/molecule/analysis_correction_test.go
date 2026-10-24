@@ -327,6 +327,18 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapDoesNotRetryOtherRequestErrors
 	}
 }
 
+// analysisRepoDir returns an empty repository root, so the analysis
+// project-config scan stops inside the test tree instead of walking up to
+// whatever lies above the temp directory.
+func analysisRepoDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // The fake provider drives the real Execute path for an over-cap response: the
 // rejected text must survive the harness boundary and the correction, with its
 // cap-specific instruction, must reach the provider prompt.
@@ -353,7 +365,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapReachesProviderPrompt(t *testi
 	}
 	ctx := withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: capMessage, PreviousResponse: "PREVIOUS-RESPONSE-MARKER"})
 	request := analysisRequest(ctx, Issue{Number: 1, Title: "t"}, readiness.RepositorySnapshot{}, readiness.VerificationInputs{})
-	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: t.TempDir(), Request: request, Timeout: 30 * time.Second})
+	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: analysisRepoDir(t), Request: request, Timeout: 30 * time.Second})
 	a, err := decodeAnalysisResult(result.Process)
 	if !readiness.IsPolicyViolation(err) || len(a.EvidenceRequests) != 20 || !strings.Contains(err.Error(), capMessage) {
 		t.Fatalf("the rejected response did not survive the harness boundary: %v %+v", err, result.Process)
@@ -630,7 +642,7 @@ func TestAnalysisCorrectiveRetryReachesProviderPrompt(t *testing.T) {
 	}
 	ctx := withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: policyMessage, PreviousResponse: "PREVIOUS-RESPONSE-MARKER"})
 	request := analysisRequest(ctx, Issue{Number: 1, Title: "t"}, readiness.RepositorySnapshot{}, readiness.VerificationInputs{})
-	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: t.TempDir(), Request: request, Timeout: 30 * time.Second})
+	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: analysisRepoDir(t), Request: request, Timeout: 30 * time.Second})
 	_, err = decodeAnalysisResult(result.Process)
 	if !readiness.IsPolicyViolation(err) {
 		t.Fatalf("the rejected response did not survive the harness boundary: %v %+v", err, result.Process)

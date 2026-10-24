@@ -1,7 +1,6 @@
 package molecule
 
 import (
-	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
 	"io"
@@ -9,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -55,7 +53,7 @@ func readLedgerNames(dir *os.File) (names []string, locks int, err error) {
 	for {
 		batch, e := dir.Readdirnames(512)
 		for _, name := range batch {
-			if strings.HasSuffix(name, loopLockSuffix) {
+			if isLoopLock(name) {
 				locks++
 				continue
 			}
@@ -73,123 +71,39 @@ func readLedgerNames(dir *os.File) (names []string, locks int, err error) {
 	}
 }
 
+func isLoopLock(name string) bool { return strings.HasSuffix(name, loopLockSuffix) }
+
+// queueHeaders lets every scan in this process, such as a loop pass and its
+// re-read under an Issue lock, reuse the headers of unchanged ledgers.
+var queueHeaders = ledger.NewHeaderCache()
+
+// scanLedgers reads every ledger header in lab with the shared bounded reader.
+// Companion files (.md, .lock and the loop's never-removed .loop-lock files) do
+// not count toward the entry cap.
+func scanLedgers(lab string, wrap func(string, io.Reader) io.Reader) ledger.Scan {
+	return ledger.ScanDir(filepath.Join(lab, "ledgers"), ledger.ScanOptions{Cache: queueHeaders, Wrap: wrap})
+}
+
 // ReadQueueInventory never recovers or rewrites evidence. Counts report ledgers,
-// not process liveness. Directory entries, files and bytes are bounded.
-func ReadQueueInventory(lab string) QueueInventory {
+// not process liveness. Directory entries, files and bytes are bounded, and each
+// ledger is streamed for its header and only validated after it, so memory stays
+// bounded however large it is.
+func ReadQueueInventory(lab string) QueueInventory { return readQueueInventory(lab, nil) }
+
+func readQueueInventory(lab string, wrap func(string, io.Reader) io.Reader) QueueInventory {
 	q := QueueInventory{Complete: true, Diagnostics: []string{}, Attempts: []QueueAttempt{}}
-	path := filepath.Join(lab, "ledgers")
-	before, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return q
-	}
-	if err != nil {
-		q.problem(fmt.Sprintf("local evidence unavailable: %v", err))
-		return q
-	}
-	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
-		q.problem("ledger directory is not a regular directory")
-		return q
-	}
-	dir, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		q.problem(fmt.Sprintf("local evidence unavailable: %v", err))
-		return q
-	}
-	defer dir.Close()
-	opened, err := dir.Stat()
-	if err != nil || !opened.IsDir() || !os.SameFile(before, opened) {
-		q.problem("ledger directory identity changed")
-		return q
-	}
-	names, locks, err := readLedgerNames(dir)
-	if err != nil {
-		q.problem(fmt.Sprintf("ledger directory unreadable: %v", err))
-		return q
-	}
-	if len(names) > 4096 {
-		q.truncate("directory scan truncated at 4096 entries")
-		return q
-	}
-	if locks > maxLoopLockFiles {
-		q.truncate(fmt.Sprintf("lock file scan truncated at %d entries", maxLoopLockFiles))
-		return q
-	}
-	sort.Strings(names)
-	files := 0
-	total := int64(0)
-	for _, name := range names {
-		if !strings.HasSuffix(name, ".json") {
+	scan := scanLedgers(lab, wrap)
+	for _, f := range scan.Files {
+		switch f.Kind {
+		case ledger.ProblemNone:
+		case ledger.ProblemOversized:
+			q.truncate(f.Problem)
+			continue
+		default:
+			q.problem(f.Problem)
 			continue
 		}
-		if files >= 256 {
-			q.truncate("ledger scan truncated at 256 JSON files")
-			break
-		}
-		files++
-		current, e := os.Lstat(path)
-		if e != nil || !os.SameFile(opened, current) {
-			q.problem("ledger directory identity changed during scan")
-			break
-		}
-		file := filepath.Join(path, name)
-		info, e := os.Lstat(file)
-		if e != nil {
-			q.problem(fmt.Sprintf("%s: unreadable: %v", name, e))
-			continue
-		}
-		if !info.Mode().IsRegular() {
-			q.problem(name + ": refused nonregular file or symlink")
-			continue
-		}
-		if info.Size() > 5_000_000 {
-			q.truncate(name + ": file exceeds 5000000 bytes")
-			continue
-		}
-		f, e := os.OpenFile(file, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-		if e != nil {
-			q.problem(fmt.Sprintf("%s: unreadable: %v", name, e))
-			continue
-		}
-		stat, e := f.Stat()
-		if e != nil || !stat.Mode().IsRegular() || !os.SameFile(info, stat) {
-			f.Close()
-			q.problem(name + ": opened file identity mismatch")
-			continue
-		}
-		remaining := int64(20_000_000) - total
-		limit := int64(5_000_000)
-		if remaining < limit {
-			limit = remaining
-		}
-		raw, e := io.ReadAll(io.LimitReader(f, limit+1))
-		f.Close()
-		total += int64(len(raw))
-		if int64(len(raw)) > limit {
-			if limit == remaining {
-				q.truncate("ledger byte scan truncated at 20000000 bytes")
-				break
-			}
-			q.truncate(name + ": file grew beyond 5000000 bytes")
-			continue
-		}
-		if e != nil {
-			q.problem(fmt.Sprintf("%s: unreadable: %v", name, e))
-			continue
-		}
-		header, e := ledger.Decode(raw)
-		if e != nil {
-			q.problem(fmt.Sprintf("%s: malformed or unsupported ledger: %v", name, e))
-			continue
-		}
-		if header.ID+".json" != name {
-			q.problem(name + ": ledger identity mismatch")
-			continue
-		}
-		p, e := header.QueueProjection()
-		if e != nil {
-			q.problem(fmt.Sprintf("%s: malformed historical projection: %v", name, e))
-			continue
-		}
+		name, header, p := f.Name, f.Header, f.Header.QueueProjection
 		ref, e := intake.BindRepository(intake.IssueRef{Number: p.Issue.Number}, p.Issue.Repo)
 		if e != nil {
 			q.problem(name + ": missing or invalid historical Issue identity; unjoinable")
@@ -214,6 +128,13 @@ func ReadQueueInventory(lab string) QueueInventory {
 			a.Phase = p.Readiness.Phase
 		}
 		q.Attempts = append(q.Attempts, a)
+	}
+	switch {
+	case scan.Problem == "":
+	case scan.Truncated:
+		q.truncate(scan.Problem)
+	default:
+		q.problem(scan.Problem)
 	}
 	return q
 }
