@@ -49,10 +49,23 @@ func TestFreshVerificationDoesNotReuseIgnoredFilesOrSecrets(t *testing.T) {
 	}
 }
 
-// envCheck runs one verification whose check prints the Go-related environment it got.
-// files are added to the base commit (go.mod for a module root, vendor/modules.txt for a
-// vendored module), and the change edits code.txt. The views use a private cache.
-func envCheck(t *testing.T, files map[string]string, forward []string) (map[string]string, Observation) {
+// within reports whether path is parent or lies inside it, comparing resolved paths when
+// they resolve.
+func within(parent, path string) bool {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	rel, err := filepath.Rel(resolve(parent), resolve(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// envFixture commits a check that prints the Go-related environment it got, plus files
+// (go.mod for a module root, vendor/modules.txt for a vendored module), and captures a
+// change to code.txt. It returns the source, the plan and the capture.
+func envFixture(t *testing.T, files map[string]string, forward []string) (string, readiness.Plan, CaptureResult) {
 	t.Helper()
 	dir, _ := sourceFixture(t)
 	files["check.sh"] = "#!/bin/sh\nfor k in HOME TMPDIR GOTMPDIR GOCACHE GOMODCACHE GOPROXY GOFLAGS GOTOOLCHAIN; do eval \"echo $k=\\$$k\"; done\n"
@@ -74,28 +87,74 @@ func envCheck(t *testing.T, files map[string]string, forward []string) (map[stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The stable TMPDIR is spelled through a symbolic link, as it is when <lab> sits
-	// behind one (or under macOS's /var), so the view must resolve it.
-	resolvedTmp, err := filepath.EvalSymlinks(t.TempDir())
+	return dir, p, capture
+}
+
+// envView runs one verification of an envFixture under ctx, with a private cache, and
+// returns the environment its check printed, the observation and the result.
+func envView(t *testing.T, ctx context.Context, dir string, p readiness.Plan, capture CaptureResult) (map[string]string, Observation, Result) {
+	t.Helper()
+	ctx = resources.WithGoCache(ctx, resources.GoCache{ModCache: "/private/mod", BuildCache: "/private/build"})
+	result := Run(resources.WithGoParallelism(ctx, 3), dir, filepath.Join(t.TempDir(), "verification"), p, capture)
+	if !result.RequiredChecksPassed || len(result.Checks) != 1 {
+		t.Fatalf("%+v", result)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(result.Checks[0].Result.Stdout), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		got[k] = v
+	}
+	return got, result.Checks[0], result
+}
+
+// envCheck runs one verification whose check prints the Go-related environment it got.
+// files are added to the base commit (go.mod for a module root, vendor/modules.txt for a
+// vendored module), and the change edits code.txt. The views use a private cache.
+func envCheck(t *testing.T, files map[string]string, forward []string) (map[string]string, Observation) {
+	t.Helper()
+	dir, p, capture := envFixture(t, files, forward)
+	// The Lab lives under the user's real home, as ~/.forgecell/labs/<lab> does, while the
+	// Lab temp root ($FORGECELL_LAB_TMP_ROOT) lies elsewhere; its stable TMPDIR comes from
+	// resources.LabTempDir. Both the user's home and the test's own are checked. The caller's
+	// TMPDIR is put inside the home: the stable TMPDIR must not follow it there.
+	realHomes := []string{}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		realHomes = append(realHomes, home)
+	}
+	realHome, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realHomes = append(realHomes, realHome)
+	t.Setenv("HOME", realHome)
+	callerTmp := filepath.Join(realHome, "tmp")
+	if err := os.Mkdir(callerTmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", callerTmp)
+	t.Setenv(resources.LabTempRootEnv, root)
+	resolvedTmp, err := resources.LabTempDir(filepath.Join(realHome, ".forgecell", "labs", "lab"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(resolvedTmp) != root {
+		t.Fatalf("stable TMPDIR %s is not under $%s %s", resolvedTmp, resources.LabTempRootEnv, root)
+	}
+	t.Cleanup(func() { _ = resources.RemoveTree(resolvedTmp) })
+	// The stable TMPDIR is spelled through a symbolic link, as it is when the system temp
+	// dir sits behind one (macOS's /var), so the view must resolve it.
 	tmp := filepath.Join(t.TempDir(), "lab-tmp")
 	if err := os.Symlink(resolvedTmp, tmp); err != nil {
 		t.Fatal(err)
 	}
-	ctx := resources.WithGoCache(resources.WithCheckTempDir(context.Background(), tmp), resources.GoCache{ModCache: "/private/mod", BuildCache: "/private/build"})
+	ctx := resources.WithCheckTempDir(context.Background(), tmp)
 	view := func() (map[string]string, Observation) {
-		result := Run(resources.WithGoParallelism(ctx, 3), dir, filepath.Join(t.TempDir(), "verification"), p, capture)
-		if !result.RequiredChecksPassed || len(result.Checks) != 1 {
-			t.Fatalf("%+v", result)
-		}
-		got := map[string]string{}
-		for _, line := range strings.Split(strings.TrimSpace(result.Checks[0].Result.Stdout), "\n") {
-			k, v, _ := strings.Cut(line, "=")
-			got[k] = v
-		}
-		return got, result.Checks[0]
+		got, o, _ := envView(t, ctx, dir, p, capture)
+		return got, o
 	}
 	got, o := view()
 	if got["TMPDIR"] != resolvedTmp || got["HOME"] == resolvedTmp || !strings.Contains(got["HOME"], "forgecell-check-home-") {
@@ -107,6 +166,15 @@ func envCheck(t *testing.T, files map[string]string, forward []string) (map[stri
 	for _, name := range []string{"TMPDIR", "GOTMPDIR"} {
 		if resolved, err := filepath.EvalSymlinks(got[name]); err != nil || resolved != got[name] {
 			t.Fatalf("%s %s has a symlinked component (%s, %v)", name, got[name], resolved, err)
+		}
+	}
+	// With HOME private, no temp root may lie inside the real home: code that walks up from
+	// a test temp dir and stops at $HOME would otherwise walk into the user's own config.
+	for _, name := range []string{"TMPDIR", "GOTMPDIR"} {
+		for _, home := range realHomes {
+			if within(home, got[name]) {
+				t.Fatalf("%s %s lies inside the real home %s while HOME is private (%s)", name, got[name], home, got["HOME"])
+			}
 		}
 	}
 	if info, err := os.Lstat(got["GOTMPDIR"]); err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
@@ -142,6 +210,91 @@ func TestCheckEnvironmentCarriesSharedGoCache(t *testing.T) {
 	}
 	if o.Cache != "" || len(o.GoEnvForwarded) != 0 {
 		t.Fatalf("a /bin/sh check records cache %q forwarded %v", o.Cache, o.GoEnvForwarded)
+	}
+}
+
+// TestCheckTempRootInsideHomeFallsBackToPrivateTmp: when every Lab temp root lies inside
+// the home ($FORGECELL_LAB_TMP_ROOT, $TMPDIR and the per-user default), LabTempDir fails, so
+// the caller gives the views no stable TMPDIR, and each view's private HOME doubles as
+// TMPDIR with no stable GOTMPDIR; nothing lands in a stable root under the home.
+func TestCheckTempRootInsideHomeFallsBackToPrivateTmp(t *testing.T) {
+	t.Setenv("GOFLAGS", "")
+	dir, p, capture := envFixture(t, map[string]string{"go.mod": "module example.test/env\n\ngo 1.22\n"}, nil)
+	lab, privateHome := t.TempDir(), t.TempDir()
+	def, _ := resources.DefaultLabTempRoot()
+	home, err := filepath.EvalSymlinks(def)
+	if err != nil {
+		t.Skipf("no per-user default temp root: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", home)
+	t.Setenv(resources.LabTempRootEnv, home)
+	if _, err := resources.LabTempDir(lab); err == nil || !strings.Contains(err.Error(), "inside the home") {
+		t.Fatalf("a temp root inside the home was accepted: %v", err)
+	}
+	if note := resources.LabTempRootNote(); !strings.Contains(note, "$"+resources.LabTempRootEnv) || !strings.Contains(note, "$TMPDIR") {
+		t.Fatalf("the passed-over roots are not noted: %q", note)
+	}
+	t.Setenv("HOME", privateHome)
+	got, _, result := envView(t, context.Background(), dir, p, capture)
+	if got["TMPDIR"] != got["HOME"] || !strings.Contains(got["HOME"], "forgecell-check-home-") || strings.Contains(got["GOTMPDIR"], resources.LabGoTempName) {
+		t.Fatalf("the fallback view must use its private HOME as TMPDIR: %v", got)
+	}
+	if len(result.Notes) != 0 {
+		t.Fatalf("a view without a stable TMPDIR noted %v", result.Notes)
+	}
+}
+
+// TestVanishedCheckTempFallsBackWithNote: a stable TMPDIR removed after the run began (an
+// OS temp cleaner) does not fail the verification; the view uses its private HOME as
+// TMPDIR and records a note.
+func TestVanishedCheckTempFallsBackWithNote(t *testing.T) {
+	t.Setenv("GOFLAGS", "")
+	dir, p, capture := envFixture(t, map[string]string{"go.mod": "module example.test/env\n\ngo 1.22\n"}, nil)
+	gone := filepath.Join(t.TempDir(), "forgecell-lab-gone")
+	got, _, result := envView(t, resources.WithCheckTempDir(context.Background(), gone), dir, p, capture)
+	if got["TMPDIR"] != got["HOME"] || strings.Contains(got["GOTMPDIR"], gone) {
+		t.Fatalf("a vanished TMPDIR must leave the view with its private HOME: %v", got)
+	}
+	if len(result.Notes) != 1 || !strings.Contains(result.Notes[0], "vanished") || !strings.Contains(result.Notes[0], gone) {
+		t.Fatalf("notes %v", result.Notes)
+	}
+	if _, err := os.Lstat(gone); !os.IsNotExist(err) {
+		t.Fatalf("the vanished TMPDIR was recreated outside LabTempDir: %v", err)
+	}
+}
+
+// TestLabGoTempDirRefusesWhatIsNotItsOwn: a symbolic link or a file at <tmp>/gotmp is
+// refused, as resources.LabTempDir refuses them, and the link's target is untouched.
+func TestLabGoTempDirRefusesWhatIsNotItsOwn(t *testing.T) {
+	tmp, target := t.TempDir(), t.TempDir()
+	if err := os.Chmod(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gotmp := filepath.Join(tmp, resources.LabGoTempName)
+	if err := os.Symlink(target, gotmp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := labGoTempDir(tmp); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("a symbolic link was accepted: %v", err)
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0755 {
+		t.Fatalf("link target changed: %v %v", info, err)
+	}
+	if err := os.Remove(gotmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gotmp, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := labGoTempDir(tmp); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("a file was accepted: %v", err)
+	}
+	if err := os.Remove(gotmp); err != nil {
+		t.Fatal(err)
+	}
+	if dir, err := labGoTempDir(tmp); err != nil || dir != gotmp {
+		t.Fatalf("own gotmp: %s %v", dir, err)
 	}
 }
 

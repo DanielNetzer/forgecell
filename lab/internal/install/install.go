@@ -114,13 +114,13 @@ func target(home, name string) (string, error) {
 	return value, nil
 }
 
-// probeTimeout bounds each run of a release executable to ask its version or
+// ProbeTimeout bounds each run of a release executable to ask its version or
 // protocol. Production never changes it; tests widen it so a loaded machine
 // cannot fail a fixture that answers at once.
-var probeTimeout = 15 * time.Second
+var ProbeTimeout = 15 * time.Second
 
 func smoke(ctx context.Context, file, version string) error {
-	r := process.Run(ctx, process.Options{Argv: []string{file, "--version"}, Stdin: []byte{}, Timeout: probeTimeout, MaxOutputBytes: 100000})
+	r := process.Run(ctx, process.Options{Argv: []string{file, "--version"}, Stdin: []byte{}, Timeout: ProbeTimeout, MaxOutputBytes: 100000})
 	if !r.OK || strings.TrimSpace(r.Stdout) != version {
 		return fmt.Errorf("release smoke check failed; current CLI unchanged")
 	}

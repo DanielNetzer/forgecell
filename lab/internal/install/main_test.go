@@ -7,13 +7,13 @@ import (
 )
 
 // productionProbeTimeout keeps the shipped value for the bound test.
-var productionProbeTimeout = probeTimeout
+var productionProbeTimeout = ProbeTimeout
 
 func TestMain(m *testing.M) {
 	// Fixture releases answer --version and --protocol at once; only a loaded
 	// machine makes them slow, so the probe budget is widened before any test
 	// runs instead of depending on the production 15 s budget.
-	probeTimeout = 2 * time.Minute
+	ProbeTimeout = 2 * time.Minute
 	os.Exit(m.Run())
 }
 

@@ -1378,13 +1378,22 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	if o.Resources != nil {
 		checkCtx, stopMonitor = o.Resources.Monitor(ctx)
 	}
-	// Both views share the Lab's stable <lab>/tmp as TMPDIR, so tests that read it can
-	// still be served from the shared Go cache. Without it each view keeps a private one.
+	// Both views share the Lab's stable check TMPDIR, under the temp root and so outside
+	// the user's home, so tests that read it can still be served from the shared Go cache.
+	// Without it (no usable temp root) each view keeps a private one.
+	if note := resources.LabTempRootNote(); note != "" {
+		r.Notes = append(r.Notes, note)
+	}
 	if tmp, err := resources.LabTempDir(o.LabDir); err == nil {
 		checkCtx = resources.WithCheckTempDir(checkCtx, tmp)
-		// What tests leaked there more than 24h ago goes first, so <lab>/tmp stays bounded.
+		// What tests leaked there more than 24h ago goes first, so the directory stays
+		// bounded, and so do other Labs' check TMPDIRs whose Lab is gone. A legacy
+		// <lab>/tmp is left for doctor --clean.
 		if _, err := resources.PruneLabTemp(tmp, time.Now()); err != nil {
 			r.Notes = append(r.Notes, "Stale entries under the Lab's check TMPDIR could not all be removed: "+err.Error())
+		}
+		if _, err := resources.SweepOrphanLabTemps(filepath.Dir(tmp), time.Now()); err != nil {
+			r.Notes = append(r.Notes, "Check TMPDIRs of removed Labs could not all be removed: "+err.Error())
 		}
 	} else {
 		r.Notes = append(r.Notes, "Stable check TMPDIR unavailable ("+err.Error()+"); views used a private TMPDIR, so tests that read it were not cacheable.")
@@ -1400,6 +1409,11 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 		observeAtomAction(&r, checkID, attemptID, "observe-verification", "partial-observations", refs...)
 		return save(r)
 	})
+	// A view whose check TMPDIR vanished mid-run says so in its notes.
+	r.Notes = append(r.Notes, verified.Notes...)
+	if verified.Protected != nil {
+		r.Notes = append(r.Notes, verified.Protected.Notes...)
+	}
 	// A monitor that fired after every required check had already passed cancelled
 	// nothing that mattered, so the note is only added when the checks did not pass.
 	if reason, exhausted := resources.Exhausted(checkCtx); exhausted && !verified.RequiredChecksPassed {

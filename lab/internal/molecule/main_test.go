@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 )
 
 // baseRepo is the committed fixture repository, built once per test binary.
@@ -29,6 +30,14 @@ func runMain(m *testing.M) int {
 	// machine makes them slow, so the probe budget is widened before any test
 	// runs instead of depending on the production 10 s budget.
 	harness.AnalysisProbeTimeout = 2 * time.Minute
+	// Fixture Labs keep their Lab temp directories under a private root that is
+	// removed afterwards, never in the user's real temp root.
+	cleanup, err := resources.IsolateLabTempRoot("molecule-labtmp-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer cleanup()
 	dir, err := os.MkdirTemp("", "molecule-base-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
