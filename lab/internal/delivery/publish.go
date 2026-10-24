@@ -110,6 +110,10 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 		return r, err
 	}
 	o.LabDir = absolute
+	// A demo Lab's origin is never contacted: refuse before any lock, git or gh.
+	if err = RefuseDemoLab(o.LabDir); err != nil {
+		return r, err
+	}
 	if !safeID.MatchString(o.MoleculeID) || len(o.Approve) != 64 || strings.TrimSpace(o.Title) != o.Title || o.Title == "" || strings.ContainsAny(o.Title, "\r\n\x00") {
 		return r, fmt.Errorf("provide an exact preview digest and one-line title")
 	}

@@ -1,0 +1,7 @@
+// Package greeting is the built-in sample module of forgecell demo.
+package greeting
+
+// Hello returns the greeting for the whole world.
+func Hello() string {
+	return "Hello, world!"
+}

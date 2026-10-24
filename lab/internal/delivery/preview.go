@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -172,13 +174,102 @@ func validateBase(ctx context.Context, path, base, branch string) error {
 	}
 	return nil
 }
+
+// DemoFormulaID and DemoSourceKind identify the Lab forgecell demo creates. Its
+// intake and origin name a GitHub repository that is never contacted, and that
+// nobody may own, so commands that reach GitHub refuse such a Lab.
+const (
+	DemoFormulaID  = "forgecell-demo"
+	DemoSourceKind = "demo"
+)
+
+// ErrDemoLab is the refusal for a command that would contact GitHub in a demo Lab.
+var ErrDemoLab = errors.New("this is a forgecell demo Lab; it never contacts GitHub. Inspect it with forgecell ledger ID --lab DIR, or run forgecell init in a Lab of your own repository")
+
+// maxLabConfigBytes bounds the lab.json read to identify a demo Lab.
+const maxLabConfigBytes = 1 << 20
+
+// IsDemoLab reports whether lab's active Formula activation is the demo's. It
+// reads what formula.Load reads, following a symbolic link the same way. An
+// absent lab.json, or one that is not JSON, is not a demo Lab: formula.Load
+// refuses that configuration itself, so the command reports its own error. A
+// lab.json that is present but cannot be read as a bounded regular file is an
+// error, so callers fail closed.
+func IsDemoLab(lab string) (bool, error) {
+	f, err := os.Open(filepath.Join(lab, "lab.json"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("the Lab configuration could not be checked for a demo Lab")
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxLabConfigBytes {
+		return false, fmt.Errorf("the Lab configuration is not a bounded regular file, so it could not be checked for a demo Lab")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxLabConfigBytes+1))
+	if err != nil || len(raw) > maxLabConfigBytes {
+		return false, fmt.Errorf("the Lab configuration could not be read within %d bytes to check for a demo Lab", maxLabConfigBytes)
+	}
+	var cfg struct {
+		Active   string `json:"activeFormulaId"`
+		Approval struct {
+			FormulaID  string `json:"formulaId"`
+			SourceKind string `json:"sourceKind"`
+		} `json:"currentApproval"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil {
+		return false, nil
+	}
+	return cfg.Active == DemoFormulaID || cfg.Approval.FormulaID == DemoFormulaID || cfg.Approval.SourceKind == DemoSourceKind, nil
+}
+
+// RefuseDemoLab returns ErrDemoLab for a demo Lab, and an error when lab cannot
+// be checked. It starts no process.
+func RefuseDemoLab(lab string) error {
+	demo, err := IsDemoLab(lab)
+	if err != nil {
+		return err
+	}
+	if demo {
+		return ErrDemoLab
+	}
+	return nil
+}
+
+// Preview binds the diff of a finished Molecule to its exact file scope. It
+// refuses a demo Lab before any git process starts.
 func Preview(ctx context.Context, o Options) (PreviewResult, error) {
-	var p PreviewResult
 	absolute, err := filepath.Abs(o.LabDir)
 	if err != nil {
-		return p, err
+		return PreviewResult{}, err
+	}
+	if err = RefuseDemoLab(absolute); err != nil {
+		return PreviewResult{}, err
 	}
 	o.LabDir = absolute
+	return preview(ctx, o)
+}
+
+// PreviewDemo is Preview for forgecell demo's own Lab, and only for it: it
+// refuses any other Lab. The preview is local; Publish still refuses a demo Lab.
+func PreviewDemo(ctx context.Context, o Options) (PreviewResult, error) {
+	absolute, err := filepath.Abs(o.LabDir)
+	if err != nil {
+		return PreviewResult{}, err
+	}
+	if demo, err := IsDemoLab(absolute); err != nil {
+		return PreviewResult{}, err
+	} else if !demo {
+		return PreviewResult{}, fmt.Errorf("the demo preview runs only in a forgecell demo Lab")
+	}
+	o.LabDir = absolute
+	return preview(ctx, o)
+}
+
+func preview(ctx context.Context, o Options) (PreviewResult, error) {
+	var p PreviewResult
 	r, err := validated(ctx, o)
 	if err != nil {
 		return p, err
