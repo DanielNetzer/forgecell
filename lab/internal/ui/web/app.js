@@ -368,9 +368,13 @@
   // ---- Grid, filters and search -------------------------------------------
   function molecules() { return (state.list && state.list.molecules) || []; }
   function laneOf(m) { return LANES[m.lane] || LANES.other; }
+  // A running Molecule waiting for the Lab's verification slot reads as queued,
+  // not running. Only the one known activity is shown; any other value is ignored.
+  const QUEUED = 'queued for checks';
+  function queued(m) { return m.lane === 'running' && m.activity === QUEUED; }
+  function laneLabel(m) { return queued(m) ? 'Queued for checks' : laneOf(m).label; }
   function statusLabel(m) {
-    const lane = laneOf(m);
-    return lane.label + ' · ' + notRecorded(m.status) + (m.phase ? ' · ' + m.phase : '');
+    return laneLabel(m) + ' · ' + notRecorded(m.status) + (m.phase ? ' · ' + m.phase : '');
   }
 
   function matches(m) {
@@ -571,10 +575,9 @@
 
   function renderDetail() {
     const d = state.detail;
-    const lane = LANES[d.lane] || LANES.other;
     $('#run-id').textContent = d.id;
     const pill = $('#run-state');
-    pill.textContent = lane.label + ' · ' + notRecorded(d.status) + (d.phase ? ' · ' + d.phase : '');
+    pill.textContent = statusLabel(d);
     pill.className = 'pill' + (d.lane === 'decision' ? ' current' : '');
     $('#run-title').textContent = (d.sample ? '[Sample] ' : '') + (d.issue.title || 'Untitled');
     const issueLink = externalLink(d.issue.url, ISSUE_URL, 'Issue #' + d.issue.number + ' ↗');
@@ -623,7 +626,9 @@
     const current = d.currentAtom ? ' · ' + d.currentAtom : '';
     const copy = {
       decision: ['Needs your decision' + current, 'This Molecule waits at a human gate (phase ' + notRecorded(d.phase) + '). Review it and decide under Gates and decisions, or with the forgecell CLI. The engine checks every decision again.'],
-      running: ['Running' + current, 'The Lab is working within the approved scope. This view updates from the ledger.'],
+      running: queued(d)
+        ? ['Queued for checks' + current, 'Another Molecule in this Lab holds the verification slot. Checks start, and their time budgets begin, when the slot is free. This view updates from the ledger.']
+        : ['Running' + current, 'The Lab is working within the approved scope. This view updates from the ledger.'],
       blocked: ['Blocked' + current, 'Status ' + notRecorded(d.status) + '. Failure evidence stays in the ledger; a failed or blocked run is not a delivery.' + (d.delivery ? ' ' + d.delivery.label + '.' : '')],
       finished: ['Draft published', 'A publication receipt is recorded. Merge and production outcomes are not verified here.'],
       other: ['Recorded · ' + notRecorded(d.status), d.delivery ? d.delivery.label + '.' : 'No published delivery receipt. This Molecule is in no lane; it appears under All and Other.'],

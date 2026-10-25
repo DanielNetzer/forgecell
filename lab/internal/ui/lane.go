@@ -25,6 +25,20 @@ var Lanes = []string{LaneRunning, LaneDecision, LaneBlocked, LaneFinished, LaneO
 // approved and coding or checks have started or are about to.
 var activePhases = map[string]bool{"approved": true, "coding": true, "check-pending": true}
 
+// ActivityQueued is the activity of a running-lane Molecule that waits for the
+// Lab's verification slot: it stays in the running lane but runs no checks yet.
+const ActivityQueued = "queued for checks"
+
+// Activity labels what a Molecule in lane is doing when that is not plain
+// running: ActivityQueued for one queued for checks, and "" otherwise, so an
+// unknown phase or event never produces a label.
+func Activity(lane string, queued bool) string {
+	if lane == LaneRunning && queued {
+		return ActivityQueued
+	}
+	return ""
+}
+
 // DeliveryState is the part of a delivery receipt that the lane depends on.
 type DeliveryState struct {
 	State     string

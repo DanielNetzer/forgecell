@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -1426,6 +1427,24 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	if roleErr != nil {
 		return r, roleErr
 	}
+	// One verification runs in a Lab at a time. A Molecule that finds the slot held
+	// records verification-queued and waits without a deadline of its own; it holds
+	// the slot from verification-started through both views, so every check budget
+	// starts only once the slot is taken. The review runs after the slot is released.
+	slot, slotErr := acquireVerificationSlot(ctx, o.LabDir, func() error {
+		return recordSlotEvent(&r, readiness.VerificationQueued)
+	})
+	if slotErr != nil {
+		if ctx.Err() != nil {
+			return interruptQueuedVerification(r, ctx.Err())
+		}
+		return stopVerification(r, "Verification was not started: the Lab's verification slot could not be taken: "+slotErr.Error())
+	}
+	releaseSlot := sync.OnceFunc(slot)
+	defer releaseSlot()
+	if err := recordSlotEvent(&r, readiness.VerificationStarted); err != nil {
+		return stopVerification(r, "Verification was not started: "+err.Error())
+	}
 	// The check-running stage does not start below a soft floor. The guard re-checks
 	// until readings recover or its wait ends; then the Molecule stops with the reason.
 	if o.Resources != nil {
@@ -1479,7 +1498,7 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	} else {
 		r.Notes = append(r.Notes, "Stable check TMPDIR unavailable ("+err.Error()+"); views used a private TMPDIR, so tests that read it were not cacheable.")
 	}
-	verified := verification.RunObserved(checkCtx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error {
+	verified := runVerification(checkCtx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error {
 		if err := recordObservation(&r, obs); err != nil {
 			return err
 		}
@@ -1504,6 +1523,9 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	if err := completeVerification(&r, verified); err != nil {
 		return stopVerification(r, "Verification result could not be recorded: "+err.Error())
 	}
+	// The checks are done, so the next queued Molecule may run its own while this
+	// one is reviewed.
+	releaseSlot()
 	attempt := r.VerificationAttempts[len(r.VerificationAttempts)-1]
 	refs := []ProvenanceEvidence{}
 	for _, ref := range attempt.Observations {
@@ -1569,6 +1591,28 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 
 // startVerification is beginVerification; tests replace it to inject a refusal.
 var startVerification = beginVerification
+
+// runVerification is verification.RunObserved; tests replace it to observe when
+// checks start and end.
+var runVerification = verification.RunObserved
+
+// interruptQueuedVerification closes a Molecule whose context ended while it was
+// queued for the verification slot: no attempt was appended and no check ran, so
+// the readiness outcome is interrupted and the Molecule stays amendable.
+func interruptQueuedVerification(r Record, cause error) (Record, error) {
+	roles, err := resolveExecutionRoles(r)
+	if err != nil {
+		return r, err
+	}
+	detail := "Verification was not started: the run was stopped while queued for checks (" + cause.Error() + "); no check ran. Amend the Molecule to verify the retained tree."
+	state, err := r.Readiness.Interrupt(r.Readiness.Plans[len(r.Readiness.Plans)-1].Digest, detail, stamp())
+	if err != nil {
+		return stopVerification(r, detail)
+	}
+	r.Readiness = &state
+	atom(&r, roles.atoms[formula.Verification], "blocked", detail)
+	return finishStopped(r, detail)
+}
 
 // stopVerification closes a verification stage that a Lab error ended, so the
 // readiness phase never stays at coding or check-pending: the ledger records a
