@@ -30,7 +30,8 @@ const analysisInstruction = "You are assessing ticket readiness during the intak
 // `launcher __adapter ID PROVIDER` argv and the provider invocation BuildInvocation
 // builds. Change it when either changes incompatibly. A saved binding whose launcher
 // reports another or no version needs a reviewed rebind; nothing else gates approval.
-const AdapterProtocolVersion = "5"
+// Version 6 adds the read-only review invocation to the pinned contract.
+const AdapterProtocolVersion = "6"
 
 // modelRequestKey carries the Formula-pinned model in a request. Like mcpServers it
 // is private to the Lab: it never reaches the model-visible prompt.

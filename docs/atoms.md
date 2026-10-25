@@ -334,6 +334,12 @@ verification. A blocking or failed review records the verification as not passed
 not offered. A Formula without a `review` Atom resolves and runs exactly as before. A checks-only
 or failed-tree continuation is its own attempt, so it gets its own single pass.
 
+**Adapter protocol.** The read-only review invocation is part of adapter protocol 6: the pinned
+contract digest covers the review request (plain, with extensions refused, and with a pinned
+model) for every native adapter. A saved binding whose launcher reports protocol 5 is
+launcher-incompatible until a reviewed `init --rebind`, run between waves; that rebind is not
+part of the review change itself.
+
 Deferred, each a separate reviewed change: the Formula review-policy grammar (`block` and
 `issue`), returning a blocked Molecule to coding with findings as acceptance criteria, the gate
 policy readiness condition "no high findings", learn integration, and rebind of the review role.
