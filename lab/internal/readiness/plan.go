@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const MaxAnalysisBytes = 256_000
@@ -298,6 +299,28 @@ type Plan struct {
 	// a check declares Select. They join the plan digest; empty keeps the digest of
 	// every earlier plan unchanged.
 	FullSuiteTriggers []string `json:"fullSuiteTriggers,omitempty"`
+	// OperatorNote is the single operator status note of this revision. It is shown
+	// to the coding harness as context and is never an acceptance criterion. Each
+	// revision carries at most one, which replaces any earlier note. It joins the
+	// plan digest; empty keeps the digest of every earlier plan unchanged.
+	OperatorNote string `json:"operatorNote,omitempty"`
+}
+
+// MaxOperatorNoteBytes bounds an operator note so it stays reviewable.
+const MaxOperatorNoteBytes = 4000
+
+// ValidateOperatorText accepts bounded, non-blank operator text with no control
+// characters, so it renders as one line and cannot carry terminal escapes.
+func ValidateOperatorText(s string, max int) error {
+	if strings.TrimSpace(s) == "" || len(s) > max || !utf8.ValidString(s) {
+		return fmt.Errorf("operator text must be non-blank valid UTF-8 of at most %d bytes", max)
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("control character in operator text")
+		}
+	}
+	return nil
 }
 
 // ProtectedDelta names one test, matched by exact Go package import path and
@@ -635,6 +658,11 @@ func (p Plan) Validate() error {
 	}
 	if err := validateCodingAllowlist(p.CodingAllowlist); err != nil {
 		return err
+	}
+	if p.OperatorNote != "" {
+		if err := ValidateOperatorText(p.OperatorNote, MaxOperatorNoteBytes); err != nil {
+			return fmt.Errorf("operatorNote: %w", err)
+		}
 	}
 	if p.HarnessTimeoutMS < 0 || p.HarnessTimeoutMS > MaxHarnessTimeoutMS {
 		return fmt.Errorf("harnessTimeoutMs must be an integer from 1 to %d", MaxHarnessTimeoutMS)

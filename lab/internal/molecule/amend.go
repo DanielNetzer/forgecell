@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
+	"strings"
 )
 
 // Amend records a human-authored successor proposal. Approval remains a separate
@@ -46,6 +49,13 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	if err != nil {
 		return r, err
 	}
+	return amendLocked(ctx, r, parent, next, acceptTree)
+}
+
+// amendLocked validates and records next as the successor of parent, the latest
+// plan of r. The caller holds the Molecule flock and the approval lock directory.
+func amendLocked(ctx context.Context, r Record, parent string, next readiness.Plan, acceptTree string) (Record, error) {
+	id := r.ID
 	roles, err := resolveExecutionRoles(r)
 	if err != nil {
 		return r, err
@@ -212,6 +222,281 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 		r.Notes = append(r.Notes, allowlistNote)
 	}
 	return r, save(r)
+}
+
+// ScopeAddition is one --add-scope PATH --reason TEXT pair.
+type ScopeAddition struct {
+	Path   string
+	Reason string
+}
+
+// AmendRequest describes a successor revision built from the latest plan instead
+// of a hand-written plan file. Everything not named here is carried over.
+type AmendRequest struct {
+	AddScope      []ScopeAddition
+	AddAcceptance []string
+	// Note is the operator status note of the new revision. Empty means the new
+	// revision has no note: notes never accumulate across revisions.
+	Note string
+	// Continuation is "" (code again) or "checks-only".
+	Continuation string
+	AcceptTree   string
+}
+
+// Bounds of one flag-driven amendment. Plan.Validate bounds the totals.
+const (
+	maxAmendAdditions  = 64
+	maxAmendTextBytes  = 4000
+	checksOnlyContinue = "checks-only"
+)
+
+func (q AmendRequest) validate() error {
+	if len(q.AddScope) > maxAmendAdditions || len(q.AddAcceptance) > maxAmendAdditions {
+		return fmt.Errorf("at most %d scope and %d acceptance additions per amendment", maxAmendAdditions, maxAmendAdditions)
+	}
+	for _, s := range q.AddScope {
+		if err := readiness.ValidatePath(s.Path); err != nil {
+			return err
+		}
+		if err := readiness.ValidateOperatorText(s.Reason, maxAmendTextBytes); err != nil {
+			return fmt.Errorf("--reason for %s: %w", s.Path, err)
+		}
+	}
+	for _, a := range q.AddAcceptance {
+		if err := readiness.ValidateOperatorText(a, maxAmendTextBytes); err != nil {
+			return fmt.Errorf("--add-acceptance: %w", err)
+		}
+	}
+	if q.Note != "" {
+		if err := readiness.ValidateOperatorText(q.Note, readiness.MaxOperatorNoteBytes); err != nil {
+			return fmt.Errorf("--note: %w", err)
+		}
+	}
+	if q.Continuation != "" && q.Continuation != checksOnlyContinue {
+		return fmt.Errorf("--continuation accepts only checks-only")
+	}
+	return nil
+}
+
+// AmendFromLatest records the successor of the Molecule's latest plan built from
+// req. The parent is the latest plan digest, read under the Molecule flock and the
+// approval lock directory, so a concurrent amend either fails as locked or has
+// already been recorded and becomes the parent: the history never forks. Every
+// check of Amend applies; a refusal writes nothing.
+func AmendFromLatest(ctx context.Context, lab, id string, req AmendRequest) (Record, error) {
+	var empty Record
+	if err := req.validate(); err != nil {
+		return empty, err
+	}
+	lab, err := filepath.Abs(lab)
+	if err != nil {
+		return empty, err
+	}
+	unlockLoop, err := lockMolecule(lab, id)
+	if err != nil {
+		return empty, lockedByLoop(err)
+	}
+	defer unlockLoop()
+	lock := filepath.Join(lab, "ledgers", id+".lock")
+	if err = os.Mkdir(lock, 0700); err != nil {
+		return empty, fmt.Errorf("Molecule is locked: another approval, amend or recover holds ledgers/%s.lock", id)
+	}
+	defer os.Remove(lock)
+	r, err := readMolecule(lab, id)
+	if err != nil {
+		// A path error would name the local Lab directory; report only its cause.
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			err = pathErr.Err
+		}
+		return empty, fmt.Errorf("Molecule %s ledger cannot be read: %v", id, err)
+	}
+	if r.Readiness == nil || len(r.Readiness.Plans) == 0 {
+		return r, fmt.Errorf("Molecule has no readiness plan to amend")
+	}
+	if r.Workspace.Path == "" || (r.CheckoutStatus != "" && r.CheckoutStatus != "available") {
+		return r, fmt.Errorf("coding checkout unavailable; refresh intake")
+	}
+	latest := r.Readiness.Plans[len(r.Readiness.Plans)-1]
+	next, err := buildRevision(r, latest.Plan, req)
+	if err != nil {
+		return r, err
+	}
+	return amendLocked(ctx, r, latest.Digest, next, req.AcceptTree)
+}
+
+// buildRevision deep-copies previous and applies req. Lifecycle fields are set
+// later by amendLocked.
+func buildRevision(r Record, previous readiness.Plan, req AmendRequest) (readiness.Plan, error) {
+	var next readiness.Plan
+	raw, err := json.Marshal(previous)
+	if err != nil {
+		return next, err
+	}
+	if err = json.Unmarshal(raw, &next); err != nil {
+		return next, err
+	}
+	if r.RepositoryEvidence == nil {
+		return next, fmt.Errorf("missing frozen repository evidence")
+	}
+	snapshot := *r.RepositoryEvidence
+	next.Continuation, next.AdoptAttempt = req.Continuation, ""
+	next.OperatorNote = req.Note
+	inScope := map[string]bool{}
+	for _, s := range next.Analysis.Scope {
+		inScope[s.Path] = true
+	}
+	var added []readiness.ScopedPath
+	for _, s := range req.AddScope {
+		if inScope[s.Path] {
+			return next, fmt.Errorf("%s is already in scope", s.Path)
+		}
+		inScope[s.Path] = true
+		evidence, err := scopeEvidence(s.Path, previous.Evidence, snapshot)
+		if err != nil {
+			return next, err
+		}
+		added = append(added, readiness.ScopedPath{Path: s.Path, Reason: s.Reason, Evidence: []string{evidence}})
+	}
+	if len(added) > 0 {
+		// The intake rule, applied to the added paths only: an added path may not be
+		// a frozen check definition or an exact non-test path a check's argv names.
+		probe := readiness.Analysis{Scope: added, Checks: previous.Analysis.Checks}
+		if err = readiness.ValidateInScopeDefinitionsForNewFiles(probe, snapshot.References(), readiness.NewScopeFiles(added, snapshot.Files)); err != nil {
+			return next, err
+		}
+	}
+	next.Analysis.Scope = append(next.Analysis.Scope, added...)
+	known := map[string]bool{}
+	for _, c := range next.Analysis.Acceptance {
+		known[c.Description] = true
+	}
+	for _, a := range req.AddAcceptance {
+		if known[a] {
+			return next, fmt.Errorf("acceptance item already present: %s", oneLine(a))
+		}
+		known[a] = true
+		next.Analysis.Acceptance = append(next.Analysis.Acceptance, readiness.Criterion{Description: a, Evidence: []string{"issue"}})
+	}
+	return next, nil
+}
+
+// manifestRank orders manifests in one directory; go.mod is the module fallback.
+var manifestRank = map[string]int{"go.mod": 0, "package.json": 1, "pyproject.toml": 2}
+
+// scopeEvidence picks the evidence a scope path cites. An existing path cites its
+// own frozen evidence when there is one. Otherwise the path cites the nearest
+// frozen go.mod, package.json or pyproject.toml whose directory is an ancestor,
+// the rule RepositorySnapshot.ValidateScope accepts for a new path; go.mod wins a
+// tie. An existing path without either cites the issue; a new one is refused.
+func scopeEvidence(file string, planEvidence []readiness.Evidence, snapshot readiness.RepositorySnapshot) (string, error) {
+	cited := map[string]string{}
+	for _, e := range planEvidence {
+		cited[e.ID] = e.Path
+	}
+	exists := false
+	for _, f := range snapshot.Files {
+		if f.Path == file {
+			exists = true
+			break
+		}
+	}
+	if exists {
+		for _, e := range snapshot.Evidence {
+			if e.Path == file && cited[e.ID] == file {
+				return e.ID, nil
+			}
+		}
+	}
+	best, bestDepth, bestRank := "", 0, 0
+	for _, e := range snapshot.Evidence {
+		rank, ok := manifestRank[path.Base(e.Path)]
+		if !ok || cited[e.ID] != e.Path {
+			continue
+		}
+		dir := path.Dir(e.Path)
+		if dir != "." && !strings.HasPrefix(file, dir+"/") {
+			continue
+		}
+		// Every covering directory is an ancestor of file, so the longest is nearest.
+		depth := 0
+		if dir != "." {
+			depth = len(dir)
+		}
+		if best == "" || depth > bestDepth || (depth == bestDepth && rank < bestRank) {
+			best, bestDepth, bestRank = e.ID, depth, rank
+		}
+	}
+	if best != "" {
+		return best, nil
+	}
+	if exists {
+		return "issue", nil
+	}
+	return "", fmt.Errorf("new path %s needs evidence for its parent component: no frozen go.mod, package.json or pyproject.toml covers it", file)
+}
+
+// AmendDiffSummary is the one-line difference of a successor plan from its
+// parent, for example "+2 scope, +1 acceptance, note set".
+func AmendDiffSummary(previous, next readiness.Plan) string {
+	count := func(a, b []string) (int, int) {
+		in := map[string]bool{}
+		for _, s := range a {
+			in[s] = true
+		}
+		added := 0
+		for _, s := range b {
+			if !in[s] {
+				added++
+			} else {
+				delete(in, s)
+			}
+		}
+		return added, len(in)
+	}
+	paths := func(p readiness.Plan) []string {
+		var out []string
+		for _, s := range p.Analysis.Scope {
+			out = append(out, s.Path)
+		}
+		return out
+	}
+	criteria := func(p readiness.Plan) []string {
+		var out []string
+		for _, c := range p.Analysis.Acceptance {
+			out = append(out, c.Description)
+		}
+		return out
+	}
+	var parts []string
+	addedScope, removedScope := count(paths(previous), paths(next))
+	addedAcceptance, removedAcceptance := count(criteria(previous), criteria(next))
+	for _, d := range []struct {
+		n    int
+		sign string
+		name string
+	}{{addedScope, "+", "scope"}, {removedScope, "-", "scope"}, {addedAcceptance, "+", "acceptance"}, {removedAcceptance, "-", "acceptance"}} {
+		if d.n > 0 {
+			parts = append(parts, fmt.Sprintf("%s%d %s", d.sign, d.n, d.name))
+		}
+	}
+	switch {
+	case next.OperatorNote != "" && next.OperatorNote != previous.OperatorNote:
+		parts = append(parts, "note set")
+	case next.OperatorNote == "" && previous.OperatorNote != "":
+		parts = append(parts, "note cleared")
+	}
+	if next.Continuation != previous.Continuation {
+		if next.Continuation == "" {
+			parts = append(parts, "continuation: coding")
+		} else {
+			parts = append(parts, "continuation: "+next.Continuation)
+		}
+	}
+	if len(parts) == 0 {
+		return "no scope, acceptance, note or continuation changes"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // retainedWorkCertain refuses an amendment while the latest harness outcome or

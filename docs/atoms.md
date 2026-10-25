@@ -218,6 +218,50 @@ scripts keep their scope. Replay-generated evaluation plans select on their `go-
 check; hidden acceptance keeps its own `-run` filter. GitHub CI still runs the full suite
 before merge, so a narrowed Lab run never replaces that gate.
 
+### Amending a plan from flags
+
+`forgecell amend MOL` without `--plan` builds the next revision from the latest plan
+(`--from-latest`, the default), so no plan JSON is hand-edited:
+
+```
+forgecell amend MOL [--add-scope PATH --reason TEXT]... [--add-acceptance TEXT]...
+  [--note TEXT] [--continuation checks-only] [--accept-existing-tree TREE] [--run]
+```
+
+- The parent is the latest plan's digest, read under the Molecule lock (the loop's
+  flock, then the `ledgers/MOL.lock` approval directory). A second amend that runs at
+  the same time fails with a "locked" message; one that runs after the first builds on
+  the first's revision. The history never forks, and a stale `--parent` cannot occur.
+  `--parent` is accepted only with `--plan`.
+- `--add-scope PATH --reason TEXT` (repeatable; each path needs the `--reason` that
+  follows it) adds an exact scope path. Forgecell picks its evidence: an existing path
+  cites its own frozen evidence when there is one. Otherwise it cites the nearest frozen
+  `go.mod`, `package.json` or `pyproject.toml` whose directory is an ancestor of the
+  path, with `go.mod` preferred in the same directory. This is the rule approval
+  applies to a new path. A new path that no manifest covers is refused. A path a check
+  definition cites, or that a check's argv names as an exact non-test path, is refused
+  with the intake message `drop or replace checks defined by in-scope files: …`.
+- `--add-acceptance TEXT` (repeatable) adds an acceptance item with evidence `[issue]`.
+  The coding harness receives it in `newAcceptance`.
+- `--note TEXT` sets the revision's single operator status note (`operatorNote`, at
+  most 4,000 bytes, no control characters). It is bound by the digest and shown in the
+  plan summary. The coding harness receives it inside `approvedPlan` as context, never
+  as an acceptance item. A note belongs to the revision that sets it: a later `--note`
+  replaces it, and an amend without `--note` clears it.
+- `--continuation checks-only` re-verifies the retained tree without coding. The usual
+  checks-only conditions apply: unchanged scope and captured, completed coding output.
+  Without it the new revision codes again, whatever the parent's continuation was.
+- Each amend adds at most 64 scope paths and 64 acceptance items, and each reason or
+  item is at most 4,000 bytes. The plan's own bounds still apply, and a refusal writes
+  nothing.
+- `--run` approves and runs the new plan right after the amend, with its digest and
+  recorded base commit, and prints the same summary as `forgecell run`.
+
+Each amend prints the exact `--approve` digest and a one-line diff summary such as
+`+2 scope, +1 acceptance, note set`. `--plan FILE --parent DIGEST` still records a
+hand-written successor exactly as before, and the plan-building flags cannot be
+combined with it.
+
 ## Review Atom (adversarial review)
 
 A `review` Atom runs a separately bound review harness once per coding attempt, after

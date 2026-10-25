@@ -1117,6 +1117,10 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 				codingRequest["instruction"] = codingRequest["instruction"].(string) + amendedPlanInstruction
 			}
 		}
+		if p.OperatorNote != "" {
+			// The note travels inside approvedPlan, bound by the approved digest.
+			codingRequest["instruction"] = codingRequest["instruction"].(string) + operatorNoteInstruction
+		}
 		if len(codingServers) > 0 {
 			codingRequest["mcpServers"] = codingServers
 		}
@@ -1335,6 +1339,9 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 
 // amendedPlanInstruction ends the coding instruction of an amended plan.
 const amendedPlanInstruction = " This is an amended plan: implement every item in newAcceptance; an unchanged tree does not satisfy them."
+
+// operatorNoteInstruction ends the coding instruction of a plan with an operator note.
+const operatorNoteInstruction = " approvedPlan.operatorNote is the operator's status note for this revision: read it as context. It is not an acceptance item and never widens the approved scope."
 
 // noChangeAfterAmendment is the outcome reason of an amended coding attempt whose
 // captured tree equals the parent revision's paused tree.
