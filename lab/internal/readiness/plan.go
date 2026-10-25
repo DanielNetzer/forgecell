@@ -509,7 +509,36 @@ func uniqueJSON(raw []byte) error {
 	}
 	return nil
 }
+
+// MaxPlanCommands bounds the setup commands plus verification checks of one plan,
+// the Formula baseline checks included. Verification refuses to start above it, so
+// Validate refuses such a plan before approval or coding instead.
+const MaxPlanCommands = 16
+
+// PlanCommandLimitMessage is the rejection of a plan above MaxPlanCommands.
+const PlanCommandLimitMessage = "at most 16 checks including the Formula baseline; combine targeted package tests"
+
+// ValidateCommandCount refuses more than MaxPlanCommands setup plus check commands.
+func (p Plan) ValidateCommandCount() error {
+	if n := len(p.Setup) + len(p.Analysis.Checks); n > MaxPlanCommands {
+		return fmt.Errorf("plan has %d setup and check commands; %s", n, PlanCommandLimitMessage)
+	}
+	return nil
+}
+
+// Validate is the approval rule for a plan: validateDigestible plus the command
+// limit that verification enforces.
 func (p Plan) Validate() error {
+	if err := p.validateDigestible(); err != nil {
+		return err
+	}
+	return p.ValidateCommandCount()
+}
+
+// validateDigestible is every structural rule of Validate except the command
+// limit, so a retained historical plan above the limit keeps its digest and its
+// ledger stays readable, while Validate refuses it for approval and coding.
+func (p Plan) validateDigestible() error {
 	if p.Continuation != "" && p.Continuation != "checks-only" && p.Continuation != "adopt-failed-tree" {
 		return fmt.Errorf("unsupported continuation")
 	}
@@ -722,7 +751,7 @@ func (p Plan) ValidateConfiguration() error {
 			return err
 		}
 	}
-	return nil
+	return p.ValidateCommandCount()
 }
 
 func validateMandatoryConstraints(constraints []string) error {
@@ -868,7 +897,7 @@ func validateArtifactRoot(r ArtifactRoot) error {
 // Digest intentionally excludes the issue's update timestamp: identity/content
 // changes invalidate approval, a metadata-only timestamp observation does not.
 func (p Plan) Digest() (string, error) {
-	if err := p.Validate(); err != nil {
+	if err := p.validateDigestible(); err != nil {
 		return "", err
 	}
 	p.Inputs.Issue.UpdatedAt = ""

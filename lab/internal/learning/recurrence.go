@@ -404,12 +404,18 @@ func EvaluateRecurrence(lab string) (Recurrence, error) {
 	}
 	f := loaded.Formula
 	threshold := f.RecurrenceThreshold()
-	records, skipped, err := molecule.ReadRecentFinished(lab)
+	recent, err := molecule.ScanRecentFinished(lab)
 	if err != nil {
 		return out, err
 	}
+	skipped := recent.Skipped
+	if recent.Incomplete != "" {
+		// First, so boundSkipped never hides it behind per-ledger entries. Only the
+		// oldest ledgers are missing, so a streak can be shortened, never invented.
+		skipped = append([]string{recent.Incomplete}, skipped...)
+	}
 	var sequence []molecule.Record
-	for _, r := range records {
+	for _, r := range recent.Records {
 		if r.FormulaID == f.ID && r.FormulaSnapshot.SHA256 == f.SHA256 {
 			sequence = append(sequence, r)
 		}

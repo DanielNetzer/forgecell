@@ -13,6 +13,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
 
 const (
@@ -161,6 +162,57 @@ func TestRecurrenceConcurrentEvaluationWritesOneRequest(t *testing.T) {
 	}
 	if files := requestFiles(t, lab); len(files) != 1 {
 		t.Fatalf("%v", files)
+	}
+}
+
+// writeLargeTimeouts writes n timed-out Molecules of about 4.5 MB each, with the
+// bulk in a field set by bulk, and orders their modification times by index.
+func writeLargeTimeouts(t *testing.T, lab string, n int, bulk func(*molecule.Record, string)) []string {
+	t.Helper()
+	text := strings.Repeat("x", 4_500_000)
+	var ids []string
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("big-%02d", i+1)
+		writeMolecule(t, lab, boundYAML, id, finishedAt(oldFinish, i), timedOut, func(r *molecule.Record) { bulk(r, text) })
+		at := time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC)
+		if err := os.Chtimes(filepath.Join(lab, "ledgers", id+".json"), at, at); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func TestHardening209RecurrenceScansMoreThan40MBOfLedgers(t *testing.T) {
+	lab := recurrenceLab(t, boundYAML)
+	// 45 MB of ledgers whose bulk lies in a field the recurrence check never reads.
+	ids := writeLargeTimeouts(t, lab, 10, func(r *molecule.Record, text string) { r.Analysis = &readiness.Analysis{Summary: text} })
+	got, err := EvaluateRecurrence(lab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skipped) != 0 {
+		t.Fatalf("a Lab with more than 40 MB of recent ledgers must get a complete scan: %v", got.Skipped)
+	}
+	if len(got.Created) != 1 || strings.Join(got.Created[0].MoleculeIDs, ",") != strings.Join(ids[len(ids)-3:], ",") {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestHardening209RecurrenceReportsAnIncompleteScan(t *testing.T) {
+	lab := recurrenceLab(t, boundYAML)
+	// The issue body is read, so 45 MB of it exceeds the 40 MB budget of kept fields.
+	ids := writeLargeTimeouts(t, lab, 10, func(r *molecule.Record, text string) { r.Issue.Body = text })
+	got, err := EvaluateRecurrence(lab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skipped) == 0 || !strings.HasPrefix(got.Skipped[0], "recurrence scan incomplete: ") || !strings.Contains(got.Skipped[0], "older ones were not evaluated") {
+		t.Fatalf("an exhausted budget must be reported first and clearly: %v", got.Skipped)
+	}
+	// Only the oldest ledgers are left out, so the newest streak is still judged.
+	if len(got.Created) != 1 || strings.Join(got.Created[0].MoleculeIDs, ",") != strings.Join(ids[len(ids)-3:], ",") {
+		t.Fatalf("%+v", got)
 	}
 }
 

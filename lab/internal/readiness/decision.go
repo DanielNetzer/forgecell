@@ -53,6 +53,9 @@ func cloneState(s State) State {
 	return out
 }
 func NewState(p Plan, at string) (State, error) {
+	if err := p.Validate(); err != nil {
+		return State{}, err
+	}
 	digest, err := p.Digest()
 	if err != nil {
 		return State{}, err
@@ -137,6 +140,24 @@ func (s State) ValidateFormulaLineage() error {
 	}
 	return nil
 }
+
+// FormulaRebases returns the FormulaRebased events in ledger order, after the
+// lineage they mark has been validated, so a caller holding the replaced Formula
+// bytes can re-check each boundary offline: launcher-only, from FormulaFrom to
+// FormulaTo, activated by Decision.
+func (s State) FormulaRebases() ([]Event, error) {
+	if err := s.ValidateFormulaLineage(); err != nil {
+		return nil, err
+	}
+	var out []Event
+	for _, e := range s.Events {
+		if e.Kind == FormulaRebased {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
 func (s State) transition(kind, phase, detail, at string) (State, error) {
 	p, err := s.current()
 	if err != nil {
@@ -157,6 +178,10 @@ func (s State) Approve(digest string, current Inputs, at string) (State, error) 
 	}
 	if !sameInputs(p.Plan.Inputs, current) {
 		return s, fmt.Errorf("readiness inputs changed; refresh intake before approval")
+	}
+	// A retained plan stays digestible above the command limit; approval is refused.
+	if err := p.Plan.Validate(); err != nil {
+		return s, err
 	}
 	return s.transition("approved", "approved", "Scope approved; no publication authorized.", at)
 }
@@ -229,6 +254,9 @@ func (s State) Amend(p Plan, at string) (State, error) {
 	if p.Revision != previous.Plan.Revision+1 || p.ParentDigest != previous.Digest || p.MoleculeID != previous.Plan.MoleculeID || !sameInputs(p.Inputs, previous.Plan.Inputs) {
 		return s, fmt.Errorf("amendment must retain intake identity and bind the previous plan")
 	}
+	if err = p.Validate(); err != nil {
+		return s, err
+	}
 	digest, err := p.Digest()
 	if err != nil {
 		return s, err
@@ -257,6 +285,9 @@ func (s State) RebaseFormula(p Plan, decision, at string) (State, error) {
 	if p.Revision != previous.Plan.Revision+1 || p.ParentDigest != previous.Digest || p.MoleculeID != previous.Plan.MoleculeID ||
 		!sameInputsExceptFormula(p.Inputs, previous.Plan.Inputs) || from == to || !hex256.MatchString(to) || !decisionID.MatchString(decision) {
 		return s, fmt.Errorf("Formula rebase must retain intake identity, bind the previous plan and name its activating decision")
+	}
+	if err = p.Validate(); err != nil {
+		return s, err
 	}
 	digest, err := p.Digest()
 	if err != nil {
