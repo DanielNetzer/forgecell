@@ -38,7 +38,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	harness.SetRunningVersion(version)
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\n"+demoUsage+"\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\ndoctor --clean [--yes] [--lab DIR]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--lab DIR]\namend <molecule> --parent DIGEST --rebase-formula [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\nui [--lab DIR] [--port N] [--no-open] [--demo]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nui serves a read-only Lab UI on 127.0.0.1 behind a per-launch token and opens it in the browser unless --no-open is given; --demo shows synthetic sample data. It stops on SIGINT or SIGTERM.\n\n"+demoHelp+"\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\n"+demoUsage+"\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\ndoctor --clean [--yes] [--lab DIR]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> [--add-scope PATH --reason TEXT]... [--add-acceptance TEXT]... [--note TEXT] [--continuation checks-only] [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --parent DIGEST --rebase-formula [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\nui [--lab DIR] [--port N] [--no-open] [--demo]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nui serves a read-only Lab UI on 127.0.0.1 behind a per-launch token and opens it in the browser unless --no-open is given; --demo shows synthetic sample data. It stops on SIGINT or SIGTERM.\n\n"+demoHelp+"\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -745,15 +745,60 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		file := flags.String("plan", "", "Full successor readiness plan JSON")
 		accepted := flags.String("accept-existing-tree", "", "Exact existing violating tree separately reviewed")
 		rebase := flags.Bool("rebase-formula", false, "Carry the plan to a launcher-only rebind of the active Formula")
+		var req molecule.AmendRequest
+		builder := false
+		reasonPending := false
+		flags.Func("add-scope", "Add an exact scope path to the latest plan (repeatable; each needs a following --reason)", func(value string) error {
+			if reasonPending {
+				return fmt.Errorf("--add-scope %s needs its --reason before the next --add-scope", req.AddScope[len(req.AddScope)-1].Path)
+			}
+			req.AddScope = append(req.AddScope, molecule.ScopeAddition{Path: value})
+			builder, reasonPending = true, true
+			return nil
+		})
+		flags.Func("reason", "Reason for the preceding --add-scope", func(value string) error {
+			if !reasonPending {
+				return fmt.Errorf("--reason must follow an --add-scope that has no reason yet")
+			}
+			req.AddScope[len(req.AddScope)-1].Reason = value
+			reasonPending = false
+			return nil
+		})
+		flags.Func("add-acceptance", "Add an acceptance item citing the issue (repeatable)", func(value string) error {
+			req.AddAcceptance = append(req.AddAcceptance, value)
+			builder = true
+			return nil
+		})
+		noteSet := false
+		flags.Func("note", "Operator status note for the new revision; replaces any earlier note", func(value string) error {
+			if noteSet {
+				return fmt.Errorf("--note may be given once")
+			}
+			req.Note, noteSet, builder = value, true, true
+			return nil
+		})
+		flags.Func("continuation", "checks-only: re-verify the retained tree without coding", func(value string) error {
+			if value != "checks-only" {
+				return fmt.Errorf("only checks-only is supported")
+			}
+			req.Continuation, builder = value, true
+			return nil
+		})
+		fromLatest := flags.Bool("from-latest", false, "Build the revision from the latest plan (the default without --plan)")
+		runAfter := flags.Bool("run", false, "After the amend, approve and run the new plan with its recorded base")
 		if err := flags.Parse(args[2:]); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 {
 			return fail(fmt.Errorf("unexpected arguments"))
 		}
+		if reasonPending {
+			return fail(fmt.Errorf("--add-scope %s needs a --reason", req.AddScope[len(req.AddScope)-1].Path))
+		}
+		builder = builder || *fromLatest
 		if *rebase {
-			if *file != "" || *accepted != "" {
-				return fail(fmt.Errorf("--rebase-formula takes no --plan or --accept-existing-tree"))
+			if *file != "" || *accepted != "" || builder || *runAfter {
+				return fail(fmt.Errorf("--rebase-formula takes no --plan, --accept-existing-tree, --run or plan-building flags"))
 			}
 			r, err := molecule.RebaseFormula(ctx, *lab, args[1], *parent)
 			if err != nil {
@@ -761,6 +806,20 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			}
 			presentRun(out, r)
 			return 0
+		}
+		if *file != "" && builder {
+			return fail(fmt.Errorf("--plan takes no --from-latest, --add-scope, --add-acceptance, --note or --continuation; edit the plan file instead"))
+		}
+		if *file == "" {
+			if *parent != "" {
+				return fail(fmt.Errorf("--parent requires --plan; without --plan the parent is the latest plan, read under the Molecule lock"))
+			}
+			req.AcceptTree = *accepted
+			r, err := molecule.AmendFromLatest(ctx, *lab, args[1], req)
+			if err != nil {
+				return fail(err)
+			}
+			return presentAmend(ctx, out, stderr, *lab, r, *runAfter)
 		}
 		f, err := os.Open(*file)
 		if err != nil {
@@ -788,8 +847,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if err != nil {
 			return fail(err)
 		}
-		presentRun(out, r)
-		return 0
+		return presentAmend(ctx, out, stderr, *lab, r, *runAfter)
 	}
 	if args[0] == "recover" {
 		if len(args) < 2 {
@@ -904,6 +962,41 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	return 0
 }
 
+// presentAmend prints the one-line diff summary and the exact --approve digest of
+// the amendment. With run it then approves and runs that exact plan from its
+// recorded base, as `forgecell run --approve` does, and prints the run summary.
+func presentAmend(ctx context.Context, out, stderr io.Writer, lab string, r molecule.Record, run bool) int {
+	plans := r.Readiness.Plans
+	latest := plans[len(plans)-1]
+	p := latest.Plan
+	fmt.Fprintf(out, "Amended %s to revision %d: %s\n--approve %s\n", r.ID, p.Revision, molecule.AmendDiffSummary(plans[len(plans)-2].Plan, p), latest.Digest)
+	if !run {
+		presentRun(out, r)
+		return 0
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(stderr, "forgecell:", err)
+		return 1
+	}
+	guard, err := newResourceGuard(lab, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, "forgecell:", err)
+		return 1
+	}
+	done, err := molecule.Run(ctx, molecule.Options{LabDir: lab, SourceRoot: cwd, Issue: fmt.Sprint(r.Issue.Number), FormulaID: r.FormulaID, Base: p.Inputs.BaseCommit, Approve: latest.Digest, TargetBranch: p.Inputs.TargetBranch, Resources: guard})
+	if err != nil {
+		fmt.Fprintln(stderr, "forgecell: the amendment is recorded, but its run did not start:", err)
+		return 1
+	}
+	presentRun(out, done)
+	renderLearnNotices(out, stderr, lab)
+	if done.Status == "failed" || done.Status == "blocked" {
+		return 2
+	}
+	return 0
+}
+
 func encode(out, stderr io.Writer, value any) int {
 	if err := json.NewEncoder(out).Encode(value); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -943,6 +1036,10 @@ func presentRun(out io.Writer, r molecule.Record) {
 		fmt.Fprintf(out, "\nFormula: %s · base %s · target %s\n", r.FormulaID, p.Inputs.BaseCommit, p.Inputs.TargetBranch)
 		if p.Continuation == "checks-only" {
 			fmt.Fprintln(out, "Continuation: checks only — retained source, no coding harness invocation.")
+		}
+		if p.OperatorNote != "" {
+			// A ledger is untrusted, so the note is rendered bounded and control-free.
+			fmt.Fprintf(out, "Operator note (shown to the coding harness; not acceptance): %s\n", harness.ReviewDisplayText(p.OperatorNote, readiness.MaxOperatorNoteBytes))
 		}
 		fmt.Fprintln(out, "Scope:")
 		for _, s := range p.Analysis.Scope {
