@@ -708,6 +708,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		note := "Read-only checks; no model invoked. Repository policy and model access are not verified by authentication."
 		learnItems, learnErr := listPendingLearn(labDir)
 		proposals, proposalErr := molecule.ReadRecoveryProposals(labDir, molecule.AnalysisTimeout(active.Formula))
+		queued, queuedTruncated := molecule.QueuedMolecules(labDir)
 		// Resources are informational: a low reading or a large cache never changes
 		// doctor's readiness verdict.
 		machine := inspectResources(labDir, home)
@@ -736,11 +737,14 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if proposalErr != nil {
 				report["recoveryProposalsError"] = flatten(proposalErr.Error())
 			}
+			if len(queued) > 0 || queuedTruncated {
+				report["queuedForChecks"] = map[string]any{"molecules": queued, "truncated": queuedTruncated}
+			}
 			if err = json.NewEncoder(out).Encode(report); err != nil {
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr, Queued: queued, QueuedTruncated: queuedTruncated})
 			renderResources(out, machine)
 		}
 		if !ready {
@@ -928,6 +932,12 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			return fail(fmt.Errorf("ledger id mismatch"))
 		}
 		fmt.Fprintln(out, string(raw))
+		// stdout stays the exact ledger; a Molecule waiting for the Lab's
+		// verification slot is named on stderr so it never reads as running checks.
+		var view molecule.Record
+		if json.Unmarshal(raw, &view) == nil && molecule.QueuedForChecks(view) {
+			fmt.Fprintf(stderr, "Molecule %s is %s: another Molecule in this Lab holds the verification slot.\n", flatten(record.ID), molecule.QueuedForChecksLabel)
+		}
 		return 0
 	}
 	if !*isolated {
@@ -1503,6 +1513,8 @@ type doctorView struct {
 	LearnError                 error
 	RecoveryProposals          []molecule.RecoveryProposal
 	RecoveryError              error
+	Queued                     []string
+	QueuedTruncated            bool
 }
 
 // doctorCommands chooses the one next command for a non-ready state, using only
@@ -1715,6 +1727,15 @@ func renderDoctor(out io.Writer, v doctorView) {
 		}
 		if v.RecoveryError != nil {
 			fmt.Fprintf(out, "  Recovery proposals unavailable: %s\n", flatten(v.RecoveryError.Error()))
+		}
+	}
+	if len(v.Queued) > 0 || v.QueuedTruncated {
+		fmt.Fprintln(out, "\nVerification queue (one Molecule runs checks at a time in this Lab):")
+		for _, id := range v.Queued {
+			fmt.Fprintf(out, "  Molecule %s · %s\n", flatten(id), molecule.QueuedForChecksLabel)
+		}
+		if v.QueuedTruncated {
+			fmt.Fprintln(out, "  More running Molecules were not inspected; the list is incomplete.")
 		}
 	}
 	if v.Next != "" {

@@ -31,6 +31,7 @@ type Summary struct {
 	StartedAt   string `json:"startedAt"`
 	FinishedAt  string `json:"finishedAt"`
 	Lane        string `json:"lane"`
+	Activity    string `json:"activity,omitempty"`
 	Delivery    string `json:"delivery,omitempty"`
 }
 
@@ -56,6 +57,7 @@ type Detail struct {
 	Status      string         `json:"status"`
 	Phase       string         `json:"phase"`
 	Lane        string         `json:"lane"`
+	Activity    string         `json:"activity,omitempty"`
 	Mode        string         `json:"mode"`
 	FormulaID   string         `json:"formulaId"`
 	StartedAt   string         `json:"startedAt"`
@@ -449,6 +451,7 @@ func summarize(lab string, r molecule.Record, read receiptReader) Summary {
 	x := newRedactor(lab, r)
 	d, view := loadDelivery(read, lab, r)
 	s := Summary{ID: r.ID, Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), FormulaID: r.FormulaID, Status: r.Status, Phase: phase(r), CurrentAtom: currentAtom(r), StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Lane: Lane(r.Status, phase(r), d)}
+	s.Activity = Activity(s.Lane, molecule.QueuedForChecks(r))
 	if view != nil {
 		s.Delivery = view.Label
 	}
@@ -460,6 +463,7 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 	allowed := evidenceAllowlist(lab, r)
 	d, view := loadDelivery(read, lab, r)
 	out := Detail{ID: r.ID, Status: r.Status, Phase: phase(r), Lane: Lane(r.Status, phase(r), d), Mode: r.Mode, FormulaID: r.FormulaID, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, CurrentAtom: currentAtom(r), Delivery: view, Diagnostics: []string{}, Atoms: []AtomView{}, Attempts: []AttemptView{}}
+	out.Activity = Activity(out.Lane, molecule.QueuedForChecks(r))
 	out.Issue = IssueView{Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), Body: x.text(r.Issue.Body), State: r.Issue.State, UpdatedAt: r.Issue.UpdatedAt, URL: issueURL(r.Issue)}
 	if r.Issue.URL != "" && out.Issue.URL == "" {
 		out.Diagnostics = append(out.Diagnostics, "recorded Issue URL does not name this Issue on GitHub; no link is shown")

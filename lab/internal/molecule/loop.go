@@ -291,6 +291,11 @@ func (l *loopRun) existing(ctx context.Context, item LoopItem, summary QueueSumm
 			if a.Status == "running" || a.Status == "allocating" {
 				item.MoleculeID, item.Status = a.ID, a.Status
 				item.Reason = activeReason(a.Status, a.ID)
+				if a.Phase == "check-pending" {
+					if r, err := readMolecule(l.lab, a.ID); err == nil && QueuedForChecks(r) {
+						item.Reason = queuedReason(a.Status, a.ID)
+					}
+				}
 				if reason, stuck := l.interruptedLedger(a, item); stuck {
 					item.State, item.Reason = LoopStalled, reason
 					if a.Phase != "" {
@@ -560,6 +565,9 @@ func classify(r Record) (state, reason string, stopped bool) {
 	phase := statePhase(r)
 	switch r.Status {
 	case "running", "allocating":
+		if QueuedForChecks(r) {
+			return LoopActive, queuedReason(r.Status, r.ID), false
+		}
 		return LoopActive, activeReason(r.Status, r.ID), false
 	case "waiting":
 		switch phase {
@@ -580,6 +588,13 @@ func classify(r Record) (state, reason string, stopped bool) {
 
 func activeReason(status, id string) string {
 	return fmt.Sprintf("the ledger reports status %s and process liveness is unverified, so the loop did not start, approve or invoke anything; if every Lab process has stopped, inspect it with forgecell ledger %s and recover it with forgecell recover %s", status, id, id)
+}
+
+// queuedReason is the loop report's reason for a Molecule waiting for the slot.
+// The ledger alone cannot show that the waiting process is alive, so it keeps
+// activeReason's recovery hint.
+func queuedReason(status, id string) string {
+	return QueuedForChecksLabel + ": another Molecule in this Lab holds the verification slot, so " + id + " runs its checks when the slot is free; " + activeReason(status, id)
 }
 
 func stoppedReason(r Record) string {

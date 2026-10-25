@@ -315,6 +315,39 @@ func (s State) RecordVerification(passed bool, detail, at string) (State, error)
 	return s.transition("verification-"+phase, phase, detail, at)
 }
 
+// VerificationQueued and VerificationStarted are the event kinds of the Lab's
+// verification slot: a Molecule waiting for another Molecule's checks to finish,
+// and the moment it took the slot. Both are recorded in check-pending and leave
+// the phase unchanged, so delivery and lineage validation are unaffected.
+const (
+	VerificationQueued  = "verification-queued"
+	VerificationStarted = "verification-started"
+)
+
+// RecordVerificationSlot appends a VerificationQueued or VerificationStarted
+// event without changing the phase.
+func (s State) RecordVerificationSlot(kind, at string) (State, error) {
+	if s.Phase != "check-pending" {
+		return s, fmt.Errorf("the verification slot requires a completed coding attempt")
+	}
+	detail := ""
+	switch kind {
+	case VerificationQueued:
+		detail = "Queued for checks: another Molecule in this Lab holds the verification slot."
+	case VerificationStarted:
+		detail = "Verification slot acquired; check budgets start now."
+	default:
+		return s, fmt.Errorf("unsupported verification slot event")
+	}
+	return s.transition(kind, "check-pending", detail, at)
+}
+
+// QueuedForChecks reports a Molecule whose latest event is VerificationQueued in
+// check-pending: it waits for the Lab's verification slot and runs no checks.
+func (s State) QueuedForChecks() bool {
+	return s.Phase == "check-pending" && len(s.Events) > 0 && s.Events[len(s.Events)-1].Kind == VerificationQueued
+}
+
 // NoChangeAfterAmendment is the event kind of an amended coding attempt whose
 // captured tree equals the parent revision's paused tree.
 const NoChangeAfterAmendment = "no-change-after-amendment"

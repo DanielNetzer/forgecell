@@ -320,3 +320,56 @@ func TestRecordNoChangeRequiresAnAmendedCodingAttempt(t *testing.T) {
 		t.Fatal("no change recorded after coding finished")
 	}
 }
+
+// TestVerificationSlotEventsKeepPhaseAndDelivery: the queue events are additive.
+// They need check-pending, leave the phase there, and delivery and lineage
+// validation read the history exactly as without them.
+func TestVerificationSlotEventsKeepPhaseAndDelivery(t *testing.T) {
+	p := fixture()
+	s, _ := NewState(p, "now")
+	d, _ := p.Digest()
+	s, _ = s.Approve(d, p.Inputs, "approved")
+	if _, err := s.RecordVerificationSlot(VerificationQueued, "early"); err == nil {
+		t.Fatal("a queue event was recorded before coding finished")
+	}
+	s, _ = s.StartAttempt("start")
+	s, err := s.FinishAttempt("check-pending", "captured", "captured")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.RecordVerificationSlot("verification-review-waiting", "forged"); err == nil {
+		t.Fatal("a verdict kind was accepted as a slot event")
+	}
+	queued, err := s.RecordVerificationSlot(VerificationQueued, "queued")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.Phase != "check-pending" || !queued.QueuedForChecks() || s.QueuedForChecks() || len(s.Events) != len(queued.Events)-1 {
+		t.Fatalf("queued %+v", queued)
+	}
+	started, err := queued.RecordVerificationSlot(VerificationStarted, "started")
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := started.Events[len(started.Events)-1]
+	if started.Phase != "check-pending" || started.QueuedForChecks() || last.Kind != VerificationStarted || last.At != "started" || last.Digest != d {
+		t.Fatalf("started %+v", started)
+	}
+	if err = started.ValidateFormulaLineage(); err != nil {
+		t.Fatal(err)
+	}
+	passed, err := started.RecordVerification(true, "ok", "verified")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = passed.ValidateForDelivery(); err != nil {
+		t.Fatalf("slot events changed delivery validation: %v", err)
+	}
+	if _, err = passed.RecordVerificationSlot(VerificationStarted, "late"); err == nil {
+		t.Fatal("a slot event was recorded after the verdict")
+	}
+	interrupted, err := queued.Interrupt(d, "stopped while queued", "stop")
+	if err != nil || interrupted.Phase != "interrupted" || interrupted.QueuedForChecks() {
+		t.Fatalf("a queued Molecule must be interruptible: %+v %v", interrupted, err)
+	}
+}
