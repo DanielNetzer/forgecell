@@ -60,6 +60,9 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 		return r, err
 	}
 	previous := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan
+	if err = refuseSelectionInputChange(previous, next); err != nil {
+		return r, err
+	}
 	// Lifecycle fields are runtime-owned; the submitted payload defines the actual
 	// proposed scope/check changes, which remain visible under the new digest.
 	next.SchemaVersion = previous.SchemaVersion
@@ -214,6 +217,53 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 	return r, save(r)
 }
 
+// refuseSelectionInputChange keeps a hand-written amendment from approving a check
+// selection through a check input it supplied itself: only evaluation intake
+// freezes the evaluation-plan input that evaluationPlanDeclaresSelect trusts. An
+// amendment may neither add nor alter that input, and once the previous plan has a
+// non-baseline check declaring select, its check inputs and evidence are fixed.
+func refuseSelectionInputChange(previous, next readiness.Plan) error {
+	// Nil and empty lists are the same list, as they are after a JSON round trip.
+	same := func(a, b any) bool {
+		va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+		if va.Len() != vb.Len() {
+			return false
+		}
+		for i := 0; i < va.Len(); i++ {
+			if !reflect.DeepEqual(va.Index(i).Interface(), vb.Index(i).Interface()) {
+				return false
+			}
+		}
+		return true
+	}
+	evaluationPlan := func(p readiness.Plan) []readiness.FileEvidence {
+		var out []readiness.FileEvidence
+		for _, input := range p.CheckInputs {
+			if input.ID == evaluationPlanCheckInput {
+				out = append(out, input)
+			}
+		}
+		return out
+	}
+	if !same(evaluationPlan(previous), evaluationPlan(next)) {
+		return fmt.Errorf("an amendment cannot add, change or remove the frozen %s check input; only an evaluation run freezes it", evaluationPlanCheckInput)
+	}
+	baseline := map[string]bool{}
+	for _, id := range previous.FormulaBaseline {
+		baseline[id] = true
+	}
+	for _, c := range previous.Analysis.Checks {
+		if c.Select == "" || baseline[c.ID] {
+			continue
+		}
+		if !same(previous.CheckInputs, next.CheckInputs) || !same(previous.Evidence, next.Evidence) {
+			return fmt.Errorf("check %s declares select through the frozen evaluation plan, so an amendment must keep the check inputs and evidence unchanged", c.ID)
+		}
+		break
+	}
+	return nil
+}
+
 // retainedWorkCertain refuses an amendment while the latest harness outcome or
 // capture is unreconciled.
 func retainedWorkCertain(r Record) error {
@@ -363,7 +413,12 @@ func RebaseFormula(ctx context.Context, lab, id, parent string) (Record, error) 
 		return r, err
 	}
 	r.Readiness = &state
+	// The replaced snapshot stays in the ledger, so the chain can be audited offline.
+	r.PriorFormulaSnapshots = append(append([]PriorFormulaSnapshot(nil), r.PriorFormulaSnapshots...), PriorFormulaSnapshot{Snapshot: r.FormulaSnapshot, PlanDigest: latestPlanDigest(state), Decision: loaded.Approval.DecisionID})
 	r.FormulaSnapshot = Snapshot{YAML: loaded.Formula.YAML, SHA256: loaded.Formula.SHA256}
+	if err = ValidateFormulaRebases(r); err != nil {
+		return r, err
+	}
 	if _, err = resolveExecutionRoles(r); err != nil {
 		return r, err
 	}
@@ -385,6 +440,58 @@ func RebaseFormula(ctx context.Context, lab, id, parent string) (Record, error) 
 		return r, err
 	}
 	return r, save(r)
+}
+
+func latestPlanDigest(s readiness.State) string {
+	if len(s.Plans) == 0 {
+		return ""
+	}
+	return s.Plans[len(s.Plans)-1].Digest
+}
+
+// maxFormulaRebases bounds the rebase chain a ledger may carry.
+const maxFormulaRebases = 64
+
+// ValidateFormulaRebases re-checks, from the ledger alone, every FormulaRebased
+// boundary: the retained prior snapshot is intact and is the boundary's FormulaFrom,
+// it names the rebased plan and the event's activating decision, the replacing
+// snapshot (the next prior one, or the current snapshot) is FormulaTo, and the
+// change between them is launcher-only. Rebases recorded before prior snapshots
+// were kept have none, so the snapshots match the latest rebase events; the
+// earlier boundaries keep only the event lineage, which current() checks.
+func ValidateFormulaRebases(r Record) error {
+	if r.Readiness == nil {
+		if len(r.PriorFormulaSnapshots) > 0 {
+			return fmt.Errorf("prior Formula snapshots without readiness history")
+		}
+		return nil
+	}
+	if len(r.PriorFormulaSnapshots) == 0 {
+		return nil
+	}
+	events, err := r.Readiness.FormulaRebases()
+	if err != nil {
+		return err
+	}
+	if len(events) > maxFormulaRebases || len(r.PriorFormulaSnapshots) > len(events) {
+		return fmt.Errorf("prior Formula snapshots do not match the rebase events")
+	}
+	events = events[len(events)-len(r.PriorFormulaSnapshots):]
+	for i, e := range events {
+		prior := r.PriorFormulaSnapshots[i]
+		next := r.FormulaSnapshot
+		if i+1 < len(events) {
+			next = r.PriorFormulaSnapshots[i+1].Snapshot
+		}
+		if prior.PlanDigest != e.Digest || prior.Decision != e.Decision || prior.Snapshot.SHA256 != e.FormulaFrom || next.SHA256 != e.FormulaTo ||
+			fmt.Sprintf("%x", sha256.Sum256([]byte(prior.Snapshot.YAML))) != prior.Snapshot.SHA256 || fmt.Sprintf("%x", sha256.Sum256([]byte(next.YAML))) != next.SHA256 {
+			return fmt.Errorf("Formula rebase %d does not match its retained snapshots", i+1)
+		}
+		if formula.LauncherOnlyChange([]byte(prior.Snapshot.YAML), []byte(next.YAML)) != nil {
+			return fmt.Errorf("Formula rebase %d is not a launcher-only change", i+1)
+		}
+	}
+	return nil
 }
 
 func artifactHash(c verification.CaptureResult) string {

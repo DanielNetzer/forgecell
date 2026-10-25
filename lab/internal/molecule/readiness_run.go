@@ -1425,14 +1425,14 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 		if err := o.Resources.WaitForCapacity(ctx); err != nil {
 			reason, low := resources.AsLow(err)
 			if !low {
-				return r, err
+				return stopVerification(r, "Verification was not started: "+err.Error())
 			}
 			atom(&r, roles.atoms[formula.Verification], "blocked", reason+"; verification was not started.")
 			return finishStopped(r, reason+"; verification was not started.")
 		}
 	}
-	if err := beginVerification(&r, p, capture.Tree); err != nil {
-		return r, err
+	if err := startVerification(&r, p, capture.Tree); err != nil {
+		return stopVerification(r, "Verification was not started: "+err.Error())
 	}
 	checkID := r.Atoms[roles.atoms[formula.Verification]].ID
 	attemptID := fmt.Sprintf("verification-%d", len(r.VerificationAttempts))
@@ -1440,7 +1440,10 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	startAtomAction(&r, checkID, attemptID, digest, "lab-independent-verification", "run-approved-checks")
 	atom(&r, roles.atoms[formula.Verification], "active", "Running approved checks in a fresh checkout")
 	if err := save(r); err != nil {
-		return r, err
+		// No command has started, so the attempt holds no process evidence to keep.
+		r.VerificationAttempts = r.VerificationAttempts[:len(r.VerificationAttempts)-1]
+		observeAtomAction(&r, checkID, attemptID, "run-approved-checks", "not-started")
+		return stopVerification(r, "Verification was not started: "+err.Error())
 	}
 	destination := filepath.Join(o.LabDir, "verification", fmt.Sprintf("%s-r%d", r.ID, p.Revision))
 	// Below a hard floor the monitor cancels checkCtx, which kills the running check's
@@ -1492,7 +1495,7 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	}
 	stopMonitor()
 	if err := completeVerification(&r, verified); err != nil {
-		return r, err
+		return stopVerification(r, "Verification result could not be recorded: "+err.Error())
 	}
 	attempt := r.VerificationAttempts[len(r.VerificationAttempts)-1]
 	refs := []ProvenanceEvidence{}
@@ -1556,6 +1559,29 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	err = save(r)
 	return r, err
 }
+
+// startVerification is beginVerification; tests replace it to inject a refusal.
+var startVerification = beginVerification
+
+// stopVerification closes a verification stage that a Lab error ended, so the
+// readiness phase never stays at coding or check-pending: the ledger records a
+// failed verification outcome with detail, and the Molecule stays amendable.
+func stopVerification(r Record, detail string) (Record, error) {
+	roles, err := resolveExecutionRoles(r)
+	if err != nil {
+		return r, err
+	}
+	if r.Readiness != nil && r.Readiness.Phase == "check-pending" {
+		state, err := r.Readiness.RecordVerification(false, detail, stamp())
+		if err != nil {
+			return r, err
+		}
+		r.Readiness = &state
+	}
+	atom(&r, roles.atoms[formula.Verification], "failed", detail)
+	return finishStopped(r, detail)
+}
+
 func finishStopped(r Record, detail string) (Record, error) {
 	roles, roleErr := resolveExecutionRoles(r)
 	if roleErr != nil {

@@ -43,6 +43,15 @@ type Snapshot struct {
 	SHA256 string `json:"sha256"`
 }
 
+// PriorFormulaSnapshot is a Formula snapshot that a rebase replaced: the rebased
+// plan digest names its FormulaRebased event, and Decision is the decision that
+// activated the replacing Formula.
+type PriorFormulaSnapshot struct {
+	Snapshot   Snapshot `json:"snapshot"`
+	PlanDigest string   `json:"planDigest"`
+	Decision   string   `json:"decision"`
+}
+
 // AtomProvenance keeps declarations separate from observations. Empty fields
 // mean unknown; a successful process does not establish an external outcome.
 type AtomProvenance struct {
@@ -257,8 +266,13 @@ type Record struct {
 	Readiness       *readiness.State `json:"readiness,omitempty"`
 	FormulaApproved bool             `json:"formulaApproved"`
 	FormulaSnapshot Snapshot         `json:"formulaSnapshot"`
-	Atoms           []Atom           `json:"atoms"`
-	Notes           []string         `json:"notes"`
+	// PriorFormulaSnapshots keeps, in rebase order, the Formula snapshot each
+	// FormulaRebased event replaced, so the launcher-only chain to FormulaSnapshot
+	// can be checked offline (ValidateFormulaRebases). Additive and omitempty; a
+	// ledger rebased before it was recorded has none.
+	PriorFormulaSnapshots []PriorFormulaSnapshot `json:"priorFormulaSnapshots,omitempty"`
+	Atoms                 []Atom                 `json:"atoms"`
+	Notes                 []string               `json:"notes"`
 
 	PolicyDecisions               []PolicyDecision  `json:"policyDecisions,omitempty"`
 	ClarificationPredecessors     []string          `json:"clarificationPredecessors,omitempty"`

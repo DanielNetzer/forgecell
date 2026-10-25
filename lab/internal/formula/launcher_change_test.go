@@ -91,6 +91,58 @@ func TestLauncherOnlyChangeRefuses(t *testing.T) {
 	}
 }
 
+// rebindTo replaces the coding launcher (line 6) with launcher.
+func rebindTo(launcher string) string {
+	return strings.Replace(launcherRecipe, oldLauncher+", __adapter, claude", launcher+", __adapter, claude", 1)
+}
+
+func TestHardening209LauncherOnlyChangeRequiresSameRootUpgrade(t *testing.T) {
+	for _, accepted := range []string{
+		"/home/op/.forgecell/releases/0.9.2/forgecell",
+		"/home/op/.forgecell/releases/0.10.0/forgecell",
+		"/home/op/.forgecell/releases/1.0.0-rc.1/forgecell",
+		"/home/op/.forgecell/releases/0.9.10/forgecell",
+	} {
+		if err := LauncherOnlyChange([]byte(launcherRecipe), []byte(rebindTo(accepted))); err != nil {
+			t.Errorf("same-root upgrade to %s refused: %v", accepted, err)
+		}
+	}
+	for name, refused := range map[string]string{
+		"other releases root":    "/home/other/.forgecell/releases/0.9.2/forgecell",
+		"nested releases root":   "/home/op/.forgecell/releases/x/releases/0.9.2/forgecell",
+		"root releases dir":      "/releases/0.9.2/forgecell",
+		"downgrade":              "/home/op/.forgecell/releases/0.9.0/forgecell",
+		"major downgrade":        "/home/op/.forgecell/releases/0.1.99/forgecell",
+		"pre-release of current": "/home/op/.forgecell/releases/0.9.1-rc.1/forgecell",
+		"leading zero is equal":  "/home/op/.forgecell/releases/0.9.01/forgecell",
+	} {
+		if err := LauncherOnlyChange([]byte(launcherRecipe), []byte(rebindTo(refused))); err == nil {
+			t.Errorf("%s: accepted %s", name, refused)
+		}
+	}
+}
+
+func TestHardening209CompareReleaseVersions(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want int
+	}{
+		{"1.0.0", "1.0.0", 0},
+		{"1.0.1", "1.0.0", 1},
+		{"1.10.0", "1.9.0", 1},
+		{"1.0.0", "1.0.0-rc.1", 1},
+		{"1.0.0-rc.2", "1.0.0-rc.10", -1},
+		{"1.0.0-alpha", "1.0.0-1", 1},
+		{"1.0.0-rc.1.x", "1.0.0-rc.1", 1},
+		{"99999999999999999999.0.0", "9.0.0", 1},
+	} {
+		got := compareReleaseVersions(c.a, c.b)
+		if (got > 0) != (c.want > 0) || (got < 0) != (c.want < 0) {
+			t.Errorf("compare(%s, %s) = %d, want sign of %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
 func TestLauncherOnlyChangeRefusesAnchors(t *testing.T) {
 	anchored := strings.Replace(launcherRecipe, "  command: [/home/op/.forgecell/releases/0.9.1/forgecell, __adapter, claude-code, /bin/claude]", "  command: &cmd [/home/op/.forgecell/releases/0.9.1/forgecell, __adapter, claude-code, /bin/claude]", 1)
 	anchored = strings.Replace(anchored, "  analysis: {binding: codex, command: [\"/home/op/.forgecell/releases/0.9.1/forgecell\", \"__adapter\", \"codex\", \"/bin/codex\"]}", "  analysis: {binding: codex, command: *cmd}", 1)

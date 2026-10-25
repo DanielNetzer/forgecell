@@ -1,8 +1,11 @@
 package molecule
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,6 +222,77 @@ func TestFormulaBaselineRequireRefusesOmittedAlteredOrUnlabelled(t *testing.T) {
 	noBaseline.RequiredChecks = nil
 	if err = requireFormulaBaseline(noBaseline, plan); err == nil {
 		t.Fatal("a plan labelling a check the Formula does not declare was accepted")
+	}
+}
+
+// forgedEvaluationPlan is a correctly hashed evaluation-plan check input that
+// declares select for the check go-test, as a hand-written amendment could supply.
+func forgedEvaluationPlan() readiness.FileEvidence {
+	content := `{"checks":[{"name":"go-test","dir":".","argv":["go","test","./..."],"select":"affected-packages"}]}`
+	return readiness.FileEvidence{Evidence: readiness.Evidence{ID: evaluationPlanCheckInput, Path: "evaluation-plan.json", SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content}
+}
+
+func TestHardening209AmendRefusesForgedEvaluationPlanInput(t *testing.T) {
+	t.Parallel()
+	o, _ := fixture(t)
+	r, err := Run(context.Background(), o)
+	if err != nil || r.Readiness == nil {
+		t.Fatalf("intake: %v %+v", err, r.Notes)
+	}
+	parent := r.Readiness.Plans[0]
+	forged := copyPlan(t, parent.Plan)
+	input := forgedEvaluationPlan()
+	forged.CheckInputs = append(forged.CheckInputs, input)
+	forged.Evidence = append(forged.Evidence, input.Evidence)
+	forged.Analysis.Checks = append(forged.Analysis.Checks, readiness.Check{ID: "go-test", Category: "regression", Argv: []string{"go", "test", "./..."}, Dir: ".", TimeoutMS: 5000, Required: true, Definitions: []string{evaluationPlanCheckInput}, Reason: "Selected tests", Evidence: []string{"issue"}, Select: readiness.SelectAffectedPackages})
+	if !evaluationPlanDeclaresSelect(forged, forged.Analysis.Checks[len(forged.Analysis.Checks)-1]) {
+		t.Fatal("the forgery must be one evaluationPlanDeclaresSelect would trust")
+	}
+	before := ledgerBytes(t, r)
+	if _, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, forged, ""); err == nil || !strings.Contains(err.Error(), "cannot add, change or remove the frozen evaluation-plan check input") {
+		t.Fatalf("a forged evaluation-plan input was amended: %v", err)
+	}
+	if !bytes.Equal(before, ledgerBytes(t, r)) {
+		t.Fatal("a refused amendment changed the ledger")
+	}
+	// An amendment that leaves the check inputs alone is still accepted.
+	amended, err := Amend(context.Background(), o.LabDir, r.ID, parent.Digest, copyPlan(t, parent.Plan), "")
+	if err != nil || len(amended.Readiness.Plans) != 2 {
+		t.Fatalf("an unchanged amendment was refused: %v", err)
+	}
+}
+
+func TestHardening209SelectingPlanFreezesCheckInputsAndEvidence(t *testing.T) {
+	t.Parallel()
+	input := forgedEvaluationPlan()
+	selecting := readiness.Check{ID: "go-test", Select: readiness.SelectAffectedPackages, Definitions: []string{evaluationPlanCheckInput}}
+	previous := readiness.Plan{CheckInputs: []readiness.FileEvidence{input}, Evidence: []readiness.Evidence{{ID: "file-1", Path: "a.go", SHA256: strings.Repeat("a", 64)}, input.Evidence}}
+	previous.Analysis.Checks = []readiness.Check{selecting}
+	if err := refuseSelectionInputChange(previous, previous); err != nil {
+		t.Fatalf("unchanged inputs refused: %v", err)
+	}
+	moreEvidence := previous
+	moreEvidence.Evidence = append(append([]readiness.Evidence(nil), previous.Evidence...), readiness.Evidence{ID: "file-2", Path: "b.go", SHA256: strings.Repeat("b", 64)})
+	otherInput := previous
+	otherInput.CheckInputs = append([]readiness.FileEvidence{input}, readiness.FileEvidence{Evidence: readiness.Evidence{ID: "extra", Path: "extra.json"}, Content: "{}"})
+	for name, next := range map[string]readiness.Plan{"evidence": moreEvidence, "check input": otherInput} {
+		if err := refuseSelectionInputChange(previous, next); err == nil || !strings.Contains(err.Error(), "must keep the check inputs and evidence unchanged") {
+			t.Errorf("%s change after a selecting plan: %v", name, err)
+		}
+	}
+	// A selection on a Formula baseline check is bound by the Formula, not the input.
+	baselineOnly := previous
+	baselineOnly.CheckInputs = nil
+	baselineOnly.FormulaBaseline = []string{"go-test"}
+	next := baselineOnly
+	next.Evidence = moreEvidence.Evidence
+	if err := refuseSelectionInputChange(baselineOnly, next); err != nil {
+		t.Fatalf("a baseline selection must not freeze evidence: %v", err)
+	}
+	removed := previous
+	removed.CheckInputs = nil
+	if err := refuseSelectionInputChange(previous, removed); err == nil {
+		t.Fatal("removing the evaluation-plan input was accepted")
 	}
 }
 
