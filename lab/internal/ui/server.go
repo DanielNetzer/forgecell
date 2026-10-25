@@ -176,7 +176,7 @@ var contentTypes = map[string]string{".html": "text/html; charset=utf-8", ".js":
 var moleculeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
 
 // unavailable lists capabilities the UI shows as Unavailable in this slice.
-var unavailable = []string{"analytics", "cost per merged PR", "suggestions", "evaluation", "pause"}
+var unavailable = []string{"cost per merged PR", "suggestions", "evaluation", "pause"}
 
 // NewHandler serves the UI for host (127.0.0.1:PORT) with the given launch token.
 func NewHandler(o Options, token, host string) (http.Handler, error) {
@@ -269,6 +269,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.lab(w)
 	case path == "/api/molecules":
 		h.molecules(w, r)
+	case path == "/api/analytics":
+		h.analytics(w, r)
 	case strings.HasPrefix(path, "/api/molecules/"):
 		h.molecule(w, r, strings.TrimPrefix(path, "/api/molecules/"))
 	case staticFiles[path] != "":

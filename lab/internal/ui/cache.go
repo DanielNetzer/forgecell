@@ -42,9 +42,12 @@ func stamp(path string) (s fileStamp, ok bool) {
 // nothing else in the Lab.
 type summaryKey struct{ ledger, receipt fileStamp }
 
+// cachedSummary keeps a Molecule's analytics facts with its Summary: both come from
+// the same ledger read, so they share its stamp.
 type cachedSummary struct {
 	key     summaryKey
 	summary Summary
+	facts   *moleculeFacts
 }
 
 // listCache keeps each Molecule's Summary while its ledger and receipt are
@@ -60,16 +63,24 @@ type listFlight struct {
 	etag    string
 	done    chan struct{}
 	waiters int
-	out     MoleculeList
+	out     inventory
+}
+
+// inventory is one bounded pass over the Lab: the Molecule list and, keyed by
+// Molecule id, the analytics facts read with each listed Summary. /api/molecules
+// and /api/analytics both answer from it, so their counts reconcile.
+type inventory struct {
+	list  MoleculeList
+	facts map[string]*moleculeFacts
 }
 
 func newListCache() *listCache { return &listCache{entries: map[string]cachedSummary{}} }
 
-func (c *listCache) get(id string, key summaryKey) (Summary, bool) {
+func (c *listCache) get(id string, key summaryKey) (cachedSummary, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[id]
-	return e.summary, ok && e.key == key
+	return e, ok && e.key == key
 }
 
 // replace keeps only the Molecules the latest build saw.
@@ -79,9 +90,12 @@ func (c *listCache) replace(entries map[string]cachedSummary) {
 	c.entries = entries
 }
 
-// list returns the Molecule list for etag. A request arriving while a build for
+// list returns the Molecule list for etag.
+func (h *handler) list(etag string) MoleculeList { return h.inventory(etag).list }
+
+// inventory returns the inventory for etag. A request arriving while a build for
 // the same ETag runs waits for that build instead of reading the Lab again.
-func (h *handler) list(etag string) MoleculeList {
+func (h *handler) inventory(etag string) inventory {
 	c := h.cache
 	c.mu.Lock()
 	if f := c.flight; f != nil && f.etag == etag {
@@ -106,18 +120,20 @@ func (h *handler) list(etag string) MoleculeList {
 // build reads the Lab once, reusing the cached Summary of every Molecule whose
 // ledger and receipt stamps are unchanged. Stamps are taken before reading, so a
 // write during the read is cached under the older stamp and re-read next time.
-func (h *handler) build(etag string) MoleculeList {
+func (h *handler) build(etag string) inventory {
 	lab := h.opts.LabDir
 	out := MoleculeList{ETag: etag, Molecules: []Summary{}}
+	facts := map[string]*moleculeFacts{}
 	seen := map[string]cachedSummary{}
 	inv := molecule.ListLedgers(lab, func(id string) error {
 		ledger, ledgerOK := stamp(filepath.Join(lab, "ledgers", id+".json"))
 		receipt, receiptOK := stamp(filepath.Join(lab, "deliveries", id+".json"))
 		key, cacheable := summaryKey{ledger, receipt}, ledgerOK && receiptOK && ledger.present
 		if cacheable {
-			if s, ok := h.cache.get(id, key); ok {
-				out.Molecules = append(out.Molecules, s)
-				seen[id] = cachedSummary{key, s}
+			if e, ok := h.cache.get(id, key); ok {
+				out.Molecules = append(out.Molecules, e.summary)
+				facts[id] = e.facts
+				seen[id] = e
 				return nil
 			}
 		}
@@ -126,9 +142,11 @@ func (h *handler) build(etag string) MoleculeList {
 			return err
 		}
 		s := summarize(lab, r, h.receipts)
+		f := analyzeRecord(lab, r)
 		out.Molecules = append(out.Molecules, s)
+		facts[id] = f
 		if cacheable {
-			seen[id] = cachedSummary{key, s}
+			seen[id] = cachedSummary{key, s, f}
 		}
 		return nil
 	})
@@ -143,5 +161,5 @@ func (h *handler) build(etag string) MoleculeList {
 		return a.ID < b.ID
 	})
 	out.Counts = counts(out.Molecules)
-	return out
+	return inventory{list: out, facts: facts}
 }
