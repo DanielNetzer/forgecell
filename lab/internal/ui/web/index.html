@@ -77,7 +77,11 @@
       <p class="scope-note">Approvals, pause and retries are not wired into this read-only UI. Use the forgecell CLI; this page updates from the ledger.</p>
     </div>
     <div class="action-card card">
-      <span class="label">LOGS · SUGGESTIONS · EVALUATION</span>
+      <span class="label">LEDGER AND EVIDENCE · BOUNDED TEXT</span>
+      <p class="scope-note">Open the ledger record, or an evidence file from an Atom, as bounded text with secrets and local paths redacted. Only files the ledger lists with a matching SHA-256 are served; a longer file shows its first part and says so.</p>
+    </div>
+    <div class="action-card card">
+      <span class="label">SUGGESTIONS · EVALUATION</span>
       <p class="unavailable">Unavailable</p>
       <p class="scope-note">Not connected in this slice. Nothing is inferred in their place.</p>
     </div>
@@ -109,6 +113,7 @@
 <div id="cube-tooltip" role="tooltip" hidden></div>
 <dialog id="detail" aria-labelledby="dialog-title">
   <div class="dialog-head"><h2 id="dialog-title"></h2><button type="button" class="text-button" id="close-dialog">Close ×</button></div>
+  <p id="dialog-note" class="scope-note" role="status" hidden></p>
   <pre id="dialog-body"></pre>
 </dialog>
 <script src="/app.js"></script>

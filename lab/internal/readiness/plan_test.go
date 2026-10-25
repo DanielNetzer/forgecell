@@ -20,6 +20,69 @@ func fixture() Plan {
 			Checks:     []Check{{ID: "regression", Category: "regression", Argv: []string{"go", "test", "./..."}, Dir: "lab", TimeoutMS: 60000, Required: true, Definitions: []string{"manifest"}, Reason: "Parser regression suite", Evidence: []string{"manifest"}}},
 			Impacts:    []Assessment{{Description: "Callers receive explicit errors", Evidence: []string{"issue"}}}}}
 }
+
+// withCommands gives a fixture plan checks plus setup commands in all.
+func withCommands(checks, setup int) Plan {
+	p := fixture()
+	base := p.Analysis.Checks[0]
+	p.Analysis.Checks = nil
+	for i := 0; i < checks; i++ {
+		c := base
+		c.ID = fmt.Sprintf("check-%d", i)
+		p.Analysis.Checks = append(p.Analysis.Checks, c)
+	}
+	for i := 0; i < setup; i++ {
+		c := base
+		c.ID, c.Category, c.Required = fmt.Sprintf("setup-%d", i), "setup", false
+		p.Setup = append(p.Setup, c)
+	}
+	return p
+}
+
+func TestHardening209PlanCommandLimit(t *testing.T) {
+	for _, c := range []struct {
+		checks, setup int
+		ok            bool
+	}{{16, 0, true}, {12, 4, true}, {17, 0, false}, {12, 5, false}, {16, 1, false}} {
+		p := withCommands(c.checks, c.setup)
+		for name, err := range map[string]error{"Validate": p.Validate(), "ValidateConfiguration": p.ValidateConfiguration(), "ValidateForCoding": p.ValidateForCoding()} {
+			if c.ok && err != nil {
+				t.Errorf("%d checks + %d setup: %s refused: %v", c.checks, c.setup, name, err)
+			}
+			if !c.ok && (err == nil || !strings.Contains(err.Error(), PlanCommandLimitMessage)) {
+				t.Errorf("%d checks + %d setup: %s = %v, want the command limit", c.checks, c.setup, name, err)
+			}
+		}
+	}
+	if PlanCommandLimitMessage != "at most 16 checks including the Formula baseline; combine targeted package tests" || MaxPlanCommands != 16 {
+		t.Fatal("the limit message must name the limit exactly")
+	}
+	// A retained historical plan above the limit keeps its digest so its ledger stays
+	// readable, but no transition accepts it: not intake, approval or amendment.
+	over := withCommands(17, 0)
+	digest, err := over.Digest()
+	if err != nil || digest == "" {
+		t.Fatalf("a retained plan above the limit lost its digest: %v", err)
+	}
+	if _, err = NewState(over, "now"); err == nil || !strings.Contains(err.Error(), PlanCommandLimitMessage) {
+		t.Fatalf("intake accepted a plan above the limit: %v", err)
+	}
+	legacy := State{SchemaVersion: "v1", Phase: "scope-waiting", Plans: []Proposal{{Plan: over, Digest: digest}}, Events: []Event{{Kind: "proposed", Digest: digest, At: "now"}}}
+	if _, err = legacy.Approve(digest, over.Inputs, "now"); err == nil || !strings.Contains(err.Error(), PlanCommandLimitMessage) {
+		t.Fatalf("approval accepted a plan above the limit: %v", err)
+	}
+	within := withCommands(16, 0)
+	s, err := NewState(within, "now")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := withCommands(17, 0)
+	next.Revision, next.ParentDigest, next.PausedTree = 2, s.Plans[0].Digest, strings.Repeat("f", 40)
+	if _, err = s.Amend(next, "now"); err == nil || !strings.Contains(err.Error(), PlanCommandLimitMessage) {
+		t.Fatalf("an amendment above the limit was accepted: %v", err)
+	}
+}
+
 func TestPlanReviewAndDigest(t *testing.T) {
 	p := fixture()
 	if err := p.Validate(); err != nil {

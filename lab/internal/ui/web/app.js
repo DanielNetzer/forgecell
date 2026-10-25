@@ -144,7 +144,7 @@
   // ---- Focus across re-renders ----------------------------------------------
   // Re-rendered controls are found again by these data attributes, or else by
   // their id, so keyboard focus survives a poll that rebuilds them.
-  const FOCUS_KEYS = ['id', 'filter', 'atom', 'origin', 'review'];
+  const FOCUS_KEYS = ['id', 'filter', 'atom', 'origin', 'review', 'evidence'];
   function keepFocus(render) {
     const active = document.activeElement;
     const key = active && active.dataset ? FOCUS_KEYS.find((k) => active.dataset[k] !== undefined) : undefined;
@@ -410,6 +410,7 @@
       issueLink || el('span', { class: 'muted' }, 'Issue link unavailable'),
       pullLink || el('span', { class: 'muted' }, d.delivery ? 'PR link unavailable' : 'PR · not created'),
       el('button', { type: 'button', class: 'text-button', dataset: { origin: 'issue-text' }, onclick: () => show('Issue text · ' + d.id, d.issue.body || 'No Issue text recorded.') }, 'Issue text ↗'),
+      d.sample ? null : el('button', { type: 'button', class: 'text-button', dataset: { origin: 'ledger' }, onclick: () => showLedger(d.id) }, 'Ledger record ↗'),
       el('button', { type: 'button', class: 'text-button', id: 'clear-selection', dataset: { origin: 'clear' }, onclick: overview }, 'Clear selection'));
     if (issueLink) issueLink.dataset.origin = 'issue';
     if (pullLink) pullLink.dataset.origin = 'pull';
@@ -529,27 +530,71 @@
         el('div', null, el('dt', null, 'Model'), el('dd', null, attempt && attempt.model ? attempt.model : 'Not recorded')),
         el('div', null, el('dt', null, 'Duration'), el('dd', null, ms ? durationLabel(ms) : 'Not recorded')),
         el('div', null, el('dt', null, 'Cost'), el('dd', null, costText(attempt && attempt.usage)))),
+      // Planned capabilities: what the Formula and plan declared. Nothing here
+      // says the Atom used them.
       el('div', { class: 'atom-access' },
-        el('span', { class: 'label' }, 'DECLARED · PLANNED, NOT OBSERVED'),
-        el('div', null, tags([p.declaredSource && 'source ' + p.declaredSource]), tags(p.declaredWorkflows, 'source-tag'), (!p.declaredSource && !(p.declaredWorkflows || []).length) ? el('span', { class: 'muted' }, 'None declared') : null)),
+        el('span', { class: 'label' }, 'PLANNED CAPABILITIES · DECLARED, NOT OBSERVED'),
+        el('div', null, tags([p.declaredSource && 'source ' + p.declaredSource, p.declaredBinding && 'binding ' + p.declaredBinding]), tags(p.declaredWorkflows, 'source-tag'), (!p.declaredSource && !p.declaredBinding && !(p.declaredWorkflows || []).length) ? el('span', { class: 'muted' }, 'None declared') : null)),
       el('dl', { class: 'atom-behavior' },
         el('dt', null, 'Purpose'), el('dd', null, notRecorded(p.declaredPurpose)),
-        el('dt', null, 'Planned'), el('dd', null, notRecorded(p.plannedAction)),
+        el('dt', null, 'Planned action'), el('dd', null, notRecorded(p.plannedAction)),
         el('dt', null, 'Detail'), el('dd', null, notRecorded(a.detail)),
         el('dt', null, 'Execution'), el('dd', null, notRecorded(p.execution), p.skipReason ? el('small', null, 'Skip reason: ' + p.skipReason) : null),
         typeof a.exitCode === 'number' ? [el('dt', null, 'Exit code'), el('dd', null, String(a.exitCode))] : null),
+      // Actions taken: only what an observation recorded, with its evidence.
       el('div', { class: 'atom-actions' },
-        el('span', { class: 'label' }, 'OBSERVED ACTIONS AND EVIDENCE'),
+        el('span', { class: 'label' }, 'ACTIONS TAKEN · OBSERVED'),
         observed.length ? observed.map((x) => el('div', { class: 'atom-action' },
           el('p', null, el('strong', null, notRecorded(x.observed.action) + ' → ' + notRecorded(x.observed.result)), el('small', null, 'Attempt ' + notRecorded(x.attemptId) + ' · ' + notRecorded(x.startedAt) + ' → ' + notRecorded(x.observed.finishedAt))),
           x.observed.externalAction ? el('p', { class: 'scope-note' }, 'External: ' + x.observed.externalAction + ' → ' + notRecorded(x.observed.externalResult)) : null,
           (x.observed.evidence || []).length
-            ? el('ul', { class: 'evidence-list' }, x.observed.evidence.map((e) => el('li', null, el('code', null, e.path || e.pointer || 'reference'), e.sha256 ? el('small', { title: e.sha256 }, 'sha256 ' + short(e.sha256)) : null, e.note ? el('small', null, e.note) : null)))
+            ? el('ul', { class: 'evidence-list' }, x.observed.evidence.map((e) => evidenceItem(d, e)))
             : el('p', { class: 'scope-note' }, 'No evidence references recorded.')))
           : el('p', { class: 'scope-note' }, actions.length ? 'Actions started; no observation recorded yet.' : 'No observed actions recorded.')),
+      // Context sources: what each started action resolved and ran under, as
+      // recorded, kept apart from the declarations above.
+      el('div', { class: 'atom-actions' },
+        el('span', { class: 'label' }, 'CONTEXT SOURCES · AS RECORDED PER ACTION'),
+        actions.length
+          ? el('ul', { class: 'record-list' }, actions.map((x) => el('li', null,
+            el('strong', null, 'Attempt ' + notRecorded(x.attemptId)),
+            el('span', null, 'resolved source ' + notRecorded(x.resolvedSource)),
+            el('span', null, 'binding ' + notRecorded(x.executedBinding)),
+            el('span', null, 'planned ' + notRecorded(x.plannedAction)),
+            el('code', { title: x.planDigest || '' }, 'plan ' + short(x.planDigest)))))
+          : el('p', { class: 'scope-note' }, 'No actions started; no context source recorded.')),
       el('div', { class: 'atom-buttons' },
         el('button', { type: 'button', class: 'text-button', dataset: { origin: 'atom-record' }, onclick: () => show('Atom record · ' + a.id + ' · ' + d.id, JSON.stringify(a, null, 2)) }, 'Atom record ↗'),
-        el('span', { class: 'unavailable-tag', title: 'Bounded log views are not connected in this slice' }, 'Logs · Unavailable')));
+        el('button', { type: 'button', class: 'text-button', dataset: { origin: 'atom-ledger' }, onclick: () => showLedger(d.id) }, 'Ledger record ↗')));
+  }
+
+  // One evidence reference. A file the ledger lists with a SHA-256 opens as
+  // bounded, redacted text; the server checks the digest and the file again.
+  function evidenceItem(d, e) {
+    return el('li', null,
+      el('code', null, e.path || e.pointer || 'reference'),
+      e.sha256 ? el('small', { title: e.sha256 }, 'sha256 ' + short(e.sha256)) : null,
+      e.note ? el('small', null, e.note) : null,
+      e.viewable && e.path
+        ? el('button', { type: 'button', class: 'text-button', dataset: { evidence: e.path }, onclick: () => showText('Evidence · ' + e.path + ' · ' + d.id, '/api/molecules/' + encodeURIComponent(d.id) + '/evidence?path=' + encodeURIComponent(e.path)) }, 'View ↗')
+        : null);
+  }
+
+  function showLedger(id) { showText('Ledger record · ' + id, '/api/molecules/' + encodeURIComponent(id) + '/ledger'); }
+
+  // showText fetches a bounded file view and shows it as text, with its size and
+  // whether it was cut; a refusal shows the server's category message.
+  async function showText(title, path) {
+    try {
+      const res = await api(path);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { show(title, 'Not served: ' + notRecorded(body && body.error), ''); return; }
+      const size = typeof body.size === 'number' ? body.size : null;
+      const note = body.truncated
+        ? 'Truncated · showing the first part of ' + (size === null ? 'an unknown number of' : size) + ' bytes. Secrets and local paths are redacted.'
+        : (size === null ? 'Size not recorded' : size + ' bytes') + ' · complete. Secrets and local paths are redacted.';
+      show(title + (body.sha256 ? ' · sha256 ' + short(body.sha256) : ''), typeof body.text === 'string' ? body.text : '', note);
+    } catch (error) { failed(error); }
   }
 
   function renderReadiness(d) {
@@ -607,9 +652,12 @@
 
   // ---- Dialog, motion and visibility -------------------------------------------
   let dialogReturn = null;
-  function show(title, body) {
+  function show(title, body, note) {
     dialogReturn = document.activeElement;
     $('#dialog-title').textContent = title;
+    const noteBox = $('#dialog-note');
+    noteBox.textContent = note || '';
+    noteBox.hidden = !note;
     $('#dialog-body').textContent = body;
     $('#detail').showModal();
   }

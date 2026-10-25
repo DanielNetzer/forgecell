@@ -164,7 +164,7 @@ var contentTypes = map[string]string{".html": "text/html; charset=utf-8", ".js":
 var moleculeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
 
 // unavailable lists capabilities the UI shows as Unavailable in this slice.
-var unavailable = []string{"analytics", "cost per merged PR", "logs", "gates", "suggestions", "evaluation", "pause"}
+var unavailable = []string{"analytics", "cost per merged PR", "gates", "suggestions", "evaluation", "pause"}
 
 // NewHandler serves the UI for host (127.0.0.1:PORT) with the given launch token.
 func NewHandler(o Options, token, host string) (http.Handler, error) {
@@ -362,10 +362,21 @@ func counts(ms []Summary) map[string]int {
 	return c
 }
 
-func (h *handler) molecule(w http.ResponseWriter, r *http.Request, id string) {
+// molecule serves GET /api/molecules/{id} and its read-only file views,
+// /evidence?path=… and /ledger.
+func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) {
+	id, view, _ := strings.Cut(rest, "/")
 	withYAML := r.URL.Query().Get("yaml") == "1"
 	if !moleculeID.MatchString(id) {
 		h.refuse(w, http.StatusBadRequest, "invalid Molecule id")
+		return
+	}
+	if view != "" && view != "evidence" && view != "ledger" {
+		h.refuse(w, http.StatusNotFound, "not found")
+		return
+	}
+	if h.opts.Demo && view != "" {
+		h.refuse(w, http.StatusNotFound, "sample data has no ledger files")
 		return
 	}
 	if h.opts.Demo {
@@ -388,5 +399,53 @@ func (h *handler) molecule(w http.ResponseWriter, r *http.Request, id string) {
 		h.refuse(w, http.StatusUnprocessableEntity, "the ledger was refused: it is invalid, unsafe, oversized or not this Lab's")
 		return
 	}
-	h.json(w, http.StatusOK, project(h.opts.LabDir, record, h.receipts, withYAML))
+	switch view {
+	case "evidence":
+		h.evidence(w, r, record)
+	case "ledger":
+		text, err := readLedgerText(h.opts.LabDir, record.ID, newRedactor(h.opts.LabDir, record))
+		if err != nil {
+			h.fileRefusal(w, err)
+			return
+		}
+		h.json(w, http.StatusOK, text)
+	default:
+		h.json(w, http.StatusOK, project(h.opts.LabDir, record, h.receipts, withYAML))
+	}
+}
+
+// evidence serves one file only when the ledger lists its exact Lab-relative
+// path with a SHA-256; nothing is read from disk for any other path.
+func (h *handler) evidence(w http.ResponseWriter, r *http.Request, record molecule.Record) {
+	paths := r.URL.Query()["path"]
+	if len(paths) != 1 || !validEvidencePath(paths[0]) {
+		h.refuse(w, http.StatusBadRequest, "invalid evidence path: give one clean Lab-relative path")
+		return
+	}
+	sums := evidenceAllowlist(h.opts.LabDir, record)[paths[0]]
+	if len(sums) == 0 {
+		h.refuse(w, http.StatusNotFound, "this path is not listed as evidence with a SHA-256 in the ledger")
+		return
+	}
+	text, err := readEvidence(h.opts.LabDir, paths[0], sums, newRedactor(h.opts.LabDir, record))
+	if err != nil {
+		h.fileRefusal(w, err)
+		return
+	}
+	h.json(w, http.StatusOK, text)
+}
+
+// fileRefusal reports a refused file read by category only; error text could
+// name local paths.
+func (h *handler) fileRefusal(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		h.refuse(w, http.StatusNotFound, "the file is not in the Lab")
+	case errors.Is(err, errSHAMismatch):
+		h.refuse(w, http.StatusConflict, "the file does not match its recorded SHA-256; nothing is served")
+	case errors.Is(err, errEvidenceLarge):
+		h.refuse(w, http.StatusRequestEntityTooLarge, "the file is larger than the UI hashes; nothing is served")
+	default:
+		h.refuse(w, http.StatusUnprocessableEntity, "the file was refused: it is a symlink, not a regular file, not yours, or changed while it was read")
+	}
 }

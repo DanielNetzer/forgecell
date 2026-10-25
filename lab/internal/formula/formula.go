@@ -567,7 +567,8 @@ var errNotLauncherOnly = fmt.Errorf("Formula change is not launcher-only")
 // LauncherOnlyChange returns nil only when previous and next are both valid
 // Formulas that differ solely in the launcher (argv[0]) of native
 // [launcher, "__adapter", adapter, provider] commands, with the old and the new
-// value both release launchers. Every other byte, including line structure,
+// value both release launchers under the same releases root and the new version
+// strictly newer (launcherUpgrade). Every other byte, including line structure,
 // must be identical. Identical Formulas are refused: there is nothing to carry.
 // Input is bounded by Parse's 1 MB limit and anchors or aliases are refused, so
 // one line can never stand for several launcher positions.
@@ -597,7 +598,7 @@ func LauncherOnlyChange(previous, next []byte) error {
 		if o.Value == n.Value {
 			continue
 		}
-		if _, twice := changed[o.Line]; twice || !IsReleaseLauncher(o.Value) || !IsReleaseLauncher(n.Value) {
+		if _, twice := changed[o.Line]; twice || !IsReleaseLauncher(o.Value) || !IsReleaseLauncher(n.Value) || !launcherUpgrade(o.Value, n.Value) {
 			return errNotLauncherOnly
 		}
 		changed[o.Line] = [2]string{o.Value, n.Value}
@@ -621,6 +622,77 @@ func LauncherOnlyChange(previous, next []byte) error {
 		return errNotLauncherOnly
 	}
 	return nil
+}
+
+// splitReleaseLauncher returns the releases root (everything before the final
+// /releases/ segment) and the version of a release launcher path.
+func splitReleaseLauncher(p string) (root, version string) {
+	dir := strings.TrimSuffix(p, "/forgecell")
+	i := strings.LastIndex(dir, "/releases/")
+	return dir[:i], dir[i+len("/releases/"):]
+}
+
+// launcherUpgrade reports whether next is a release launcher under the same
+// releases root as previous with a strictly greater version, so a rebind can
+// neither move to another installation nor go back to an older release.
+func launcherUpgrade(previous, next string) bool {
+	oldRoot, oldVersion := splitReleaseLauncher(previous)
+	newRoot, newVersion := splitReleaseLauncher(next)
+	return oldRoot == newRoot && compareReleaseVersions(newVersion, oldVersion) > 0
+}
+
+// compareReleaseVersions orders X.Y.Z[-pre] versions by semantic-version
+// precedence: numeric core fields, then a release above its pre-releases, then
+// pre-release identifiers field by field (numeric below alphanumeric).
+func compareReleaseVersions(a, b string) int {
+	aCore, aPre, _ := strings.Cut(a, "-")
+	bCore, bPre, _ := strings.Cut(b, "-")
+	aFields, bFields := strings.Split(aCore, "."), strings.Split(bCore, ".")
+	for i := range aFields {
+		if c := compareNumeric(aFields[i], bFields[i]); c != 0 {
+			return c
+		}
+	}
+	switch {
+	case aPre == bPre:
+		return 0
+	case aPre == "":
+		return 1
+	case bPre == "":
+		return -1
+	}
+	aIDs, bIDs := strings.Split(aPre, "."), strings.Split(bPre, ".")
+	for i := 0; i < len(aIDs) && i < len(bIDs); i++ {
+		aNum, bNum := isDigits(aIDs[i]), isDigits(bIDs[i])
+		var c int
+		switch {
+		case aNum && bNum:
+			c = compareNumeric(aIDs[i], bIDs[i])
+		case aNum:
+			c = -1
+		case bNum:
+			c = 1
+		default:
+			c = strings.Compare(aIDs[i], bIDs[i])
+		}
+		if c != 0 {
+			return c
+		}
+	}
+	return len(aIDs) - len(bIDs)
+}
+
+// compareNumeric orders unbounded decimal strings without converting them.
+func compareNumeric(a, b string) int {
+	a, b = strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0")
+	if len(a) != len(b) {
+		return len(a) - len(b)
+	}
+	return strings.Compare(a, b)
+}
+
+func isDigits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
 // sameExceptLauncher requires each launcher to occur exactly once in its line and

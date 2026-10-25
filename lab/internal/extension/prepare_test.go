@@ -427,21 +427,37 @@ func TestPrepareCacheTimeoutLeavesNoPartialEntry(t *testing.T) {
 func TestPrepareCacheInterruptedContextIsUnavailable(t *testing.T) {
 	e := newCacheEnv(t)
 	commit := e.commitFile("a.txt", "committed")
-	m := e.scripted("sleep 30")
+	// The process sleeps far longer than any start-up delay and stays within its own
+	// timeout, so only the cancellation below can end it, and it ends interrupted.
+	m := e.manifestWith(maxPrepareTimeMS, "echo run >> "+e.rec("runs")+"\nsleep 300", "{{SOURCE}}", "{{CACHE}}")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Cancel once the prepare process has recorded its start, not after a fixed
-	// delay that start-up under load can outlast.
+	// Cancel once the prepare process has recorded its start. There is no deadline:
+	// the watcher stops only when the marker appears or the prepare has returned.
+	// The shell creates the file before it writes the line, so wait for the line
+	// itself rather than for the file to exist.
+	done, started := make(chan struct{}), make(chan bool, 1)
 	go func() {
-		defer cancel()
-		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline) && ctx.Err() == nil; time.Sleep(10 * time.Millisecond) {
-			if _, err := os.Stat(e.rec("runs")); err == nil {
+		for {
+			if raw, err := os.ReadFile(filepath.Join(e.records, "runs")); err == nil && strings.Contains(string(raw), "run\n") {
+				started <- true
+				cancel()
 				return
+			}
+			select {
+			case <-done:
+				started <- false
+				return
+			case <-time.After(10 * time.Millisecond):
 			}
 		}
 	}()
 
 	res := e.prepareCtx(ctx, m, commit)
+	close(done)
+	if !<-started {
+		t.Fatalf("the prepare process never recorded its start: %+v", res)
+	}
 	e.requireUnavailable(res, "interrupted")
 	if res.TimedOut {
 		t.Fatalf("a cancelled context is not a prepare timeout: %+v", res)

@@ -3,6 +3,7 @@ package molecule
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -157,6 +158,86 @@ func TestAmendRebaseFormulaCarriesPlanToLauncherRebind(t *testing.T) {
 	}
 }
 
+func TestHardening209RebaseKeepsPriorSnapshotAndRevalidatesChain(t *testing.T) {
+	t.Parallel()
+	o, r, f1 := rebaseFixture(t)
+	parent := latestDigest(r)
+	f2 := strings.Replace(f1, rebaseOldLauncher, rebaseNewLauncher, 1)
+	writeFormula(t, o.LabDir, f2, rebaseDecision)
+	r, err := RebaseFormula(context.Background(), o.LabDir, r.ID, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _ := formula.Parse([]byte(f1))
+	saved, err := ReadRecord(o.LabDir, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.PriorFormulaSnapshots) != 1 {
+		t.Fatalf("prior snapshots: %+v", saved.PriorFormulaSnapshots)
+	}
+	prior := saved.PriorFormulaSnapshots[0]
+	if prior.Snapshot.YAML != f1 || prior.Snapshot.SHA256 != old.SHA256 || prior.PlanDigest != latestDigest(saved) || prior.Decision != rebaseDecision || saved.FormulaSnapshot.YAML != f2 {
+		t.Fatalf("the replaced snapshot and its activating decision must be kept: %+v", prior)
+	}
+	if err = ValidateFormulaRebases(saved); err != nil {
+		t.Fatalf("an intact chain must validate offline: %v", err)
+	}
+	if err = ValidateVerificationHistory(saved); err != nil {
+		t.Fatal(err)
+	}
+
+	// A hand-edited ledger whose prior snapshot is not launcher-only (it differs in
+	// an Atom), correctly hashed and with its event rewritten to match, is refused.
+	forged := strings.Replace(f1, "{id: ship, type: ship}", "{id: shipped, type: ship}", 1)
+	forgedSHA, _ := formula.Parse([]byte(forged))
+	tampered := func(mutate func(*Record)) Record {
+		raw, err := json.Marshal(saved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c Record
+		if err = json.Unmarshal(raw, &c); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&c)
+		return c
+	}
+	for name, c := range map[string]Record{
+		"not launcher-only": tampered(func(c *Record) {
+			c.PriorFormulaSnapshots[0].Snapshot = Snapshot{YAML: forged, SHA256: forgedSHA.SHA256}
+			for i := range c.Readiness.Events {
+				if c.Readiness.Events[i].Kind == readiness.FormulaRebased {
+					c.Readiness.Events[i].FormulaFrom = forgedSHA.SHA256
+				}
+			}
+			for i := 0; i < len(c.Readiness.Plans)-1; i++ {
+				c.Readiness.Plans[i].Plan.Inputs.FormulaSHA256 = forgedSHA.SHA256
+			}
+			if err := c.Readiness.ValidateFormulaLineage(); err != nil {
+				t.Fatalf("the forgery must keep a consistent event lineage: %v", err)
+			}
+		}),
+		"other decision":   tampered(func(c *Record) { c.PriorFormulaSnapshots[0].Decision = "other-decision" }),
+		"edited bytes":     tampered(func(c *Record) { c.PriorFormulaSnapshots[0].Snapshot.YAML += "# edited\n" }),
+		"other plan":       tampered(func(c *Record) { c.PriorFormulaSnapshots[0].PlanDigest = parent }),
+		"extra snapshot":   tampered(func(c *Record) { c.PriorFormulaSnapshots = append(c.PriorFormulaSnapshots, c.PriorFormulaSnapshots[0]) }),
+		"without a rebase": tampered(func(c *Record) { c.Readiness = nil }),
+	} {
+		if err := ValidateFormulaRebases(c); err == nil {
+			t.Errorf("%s: a forged rebase chain validated", name)
+		}
+		if err := ValidateVerificationHistory(c); err == nil {
+			t.Errorf("%s: ledger validation accepted a forged rebase chain", name)
+		}
+	}
+	// A ledger rebased before prior snapshots were kept still validates on its lineage.
+	legacy := tampered(func(c *Record) { c.PriorFormulaSnapshots = nil })
+	if err = ValidateFormulaRebases(legacy); err != nil {
+		t.Fatalf("legacy rebase: %v", err)
+	}
+}
+
 func TestAmendRebaseFormulaRefusesNonLauncherChanges(t *testing.T) {
 	t.Parallel()
 	cases := map[string]func(string) string{
@@ -169,6 +250,12 @@ func TestAmendRebaseFormulaRefusesNonLauncherChanges(t *testing.T) {
 		"not a release": func(s string) string { return strings.Replace(s, rebaseOldLauncher, "/opt/fc/bin/forgecell", 1) },
 		"traversal": func(s string) string {
 			return strings.Replace(s, rebaseOldLauncher, "/opt/fc/releases/../releases/1.0.1/forgecell", 1)
+		},
+		"other releases root": func(s string) string {
+			return strings.Replace(s, rebaseOldLauncher, "/opt/other/releases/1.0.1/forgecell", 1)
+		},
+		"downgrade": func(s string) string {
+			return strings.Replace(s, rebaseOldLauncher, "/opt/fc/releases/0.9.9/forgecell", 1)
 		},
 	}
 	for name, change := range cases {

@@ -173,8 +173,12 @@ func historyFile(r Record, name string, value any) (VerificationFile, error) {
 }
 func beginVerification(r *Record, p readiness.Plan, tree string) error {
 	// Bound storage before starting commands (each process captures at most 256 KB).
-	if len(r.VerificationAttempts) >= 100 || len(p.Setup)+len(p.Analysis.Checks) > 16 {
+	if len(r.VerificationAttempts) >= 100 {
 		return fmt.Errorf("verification history capacity reached; no commands started")
+	}
+	// Plan.Validate enforces the same limit at intake, approval and amendment.
+	if err := p.ValidateCommandCount(); err != nil {
+		return fmt.Errorf("%w; no commands started", err)
 	}
 	digest, err := p.Digest()
 	if err != nil {
@@ -292,6 +296,9 @@ func compactVerification(v verification.Result) verification.Result {
 func ValidateVerificationHistory(r Record) error {
 	if len(r.VerificationAttempts) > 100 || len(r.HarnessAttempts) > 100 {
 		return fmt.Errorf("verification history limit exceeded")
+	}
+	if err := ValidateFormulaRebases(r); err != nil {
+		return err
 	}
 	outcomes := map[string]HarnessAttempt{}
 	captures := map[string]HarnessAttempt{}
