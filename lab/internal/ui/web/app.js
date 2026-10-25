@@ -1,6 +1,7 @@
-// Forgecell local Lab UI (read-only). Every value from the API is untrusted and
-// reaches the page only as a text node or a validated attribute: this file never
-// parses data as markup.
+// Forgecell local Lab UI. It reads the Lab, and writes only through the engine's
+// two human gates: exact scope approval and draft PR publication. Every value
+// from the API is untrusted and reaches the page only as a text node or a
+// validated attribute: this file never parses data as markup.
 'use strict';
 (() => {
   const $ = (selector) => document.querySelector(selector);
@@ -46,7 +47,11 @@
     ['blocked', 'Blocked'], ['finished', 'Finished · Draft published'], ['other', 'Other'],
   ];
 
-  const state = { lab: null, list: null, etag: null, filter: 'all', query: '', selectedId: null, detail: null, detailText: null, atomIndex: null, detailToken: 0, labToken: 0, pollToken: 0, polling: false, noteKey: null, sessionLost: false };
+  const state = { lab: null, list: null, etag: null, filter: 'all', query: '', selectedId: null, detail: null, detailText: null, atomIndex: null, detailToken: 0, labToken: 0, pollToken: 0, polling: false, noteKey: null, sessionLost: false, gate: newGate(null) };
+
+  // gate is the selected Molecule's gate state: one request in flight at most,
+  // the last preview shown, and the last job read back from the server.
+  function newGate(id) { return { id: id, pending: false, preview: null, job: null, message: '', title: '', accept: false, timer: null }; }
 
   function notRecorded(value) { return value === undefined || value === null || value === '' ? 'Not recorded' : String(value); }
   function short(digest) { return typeof digest === 'string' && digest.length > 12 ? digest.slice(0, 12) + '…' : notRecorded(digest); }
@@ -144,7 +149,7 @@
   // ---- Focus across re-renders ----------------------------------------------
   // Re-rendered controls are found again by these data attributes, or else by
   // their id, so keyboard focus survives a poll that rebuilds them.
-  const FOCUS_KEYS = ['id', 'filter', 'atom', 'origin', 'review', 'evidence'];
+  const FOCUS_KEYS = ['id', 'filter', 'atom', 'origin', 'review', 'evidence', 'gate'];
   function keepFocus(render) {
     const active = document.activeElement;
     const key = active && active.dataset ? FOCUS_KEYS.find((k) => active.dataset[k] !== undefined) : undefined;
@@ -367,6 +372,8 @@
     state.selectedId = null;
     state.detail = null;
     state.detailToken++;
+    clearTimeout(state.gate.timer);
+    state.gate = newGate(null);
     $('#selected').hidden = true;
     $('#aggregate').hidden = false;
     cells().forEach((b) => b.setAttribute('aria-pressed', 'false'));
@@ -448,7 +455,7 @@
   function renderAction(d) {
     const current = d.currentAtom ? ' · ' + d.currentAtom : '';
     const copy = {
-      decision: ['Needs your decision' + current, 'This Molecule waits at a human gate (phase ' + notRecorded(d.phase) + '). Review and decide with the forgecell CLI; approvals are not available in this UI.'],
+      decision: ['Needs your decision' + current, 'This Molecule waits at a human gate (phase ' + notRecorded(d.phase) + '). Review it and decide under Gates and decisions, or with the forgecell CLI. The engine checks every decision again.'],
       running: ['Running' + current, 'The Lab is working within the approved scope. This view updates from the ledger.'],
       blocked: ['Blocked' + current, 'Status ' + notRecorded(d.status) + '. Failure evidence stays in the ledger; a failed or blocked run is not a delivery.' + (d.delivery ? ' ' + d.delivery.label + '.' : '')],
       finished: ['Draft published', 'A publication receipt is recorded. Merge and production outcomes are not verified here.'],
@@ -456,6 +463,170 @@
     }[d.lane] || ['Recorded', ''];
     $('#action-title').textContent = copy[0];
     $('#action-copy').textContent = copy[1];
+    renderGate(d);
+  }
+
+  // ---- Human gates ---------------------------------------------------------------
+  // Each gate posts the exact digest this page showed. One request is in flight
+  // at a time and the controls are disabled meanwhile. After an ambiguous
+  // response (no response, or a 5xx) the page reads the canonical state back
+  // and never resubmits. A decision shows as committed only when the server's
+  // read-back of the ledger or the receipt says so, never because a job ended.
+  const GATE_COPY = {
+    scope: 'Approving runs coding and verification for exactly this plan. It never publishes, merges or deploys.',
+    delivery: 'Publication creates a draft pull request only. It never merges, deploys or changes permissions.',
+  };
+
+  async function gatePost(id, action, body) {
+    const session = tabSession();
+    if (!session || state.sessionLost) throw new SessionError('no session');
+    const res = await fetch('/api/molecules/' + encodeURIComponent(id) + action, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Forgecell-Session': session, 'Content-Type': 'application/json' }, body: body });
+    if (res.status === 403) throw new SessionError('forbidden');
+    return res;
+  }
+
+  function refusalText(body) {
+    const category = body && typeof body.category === 'string' ? body.category : 'refused';
+    return 'Refused (' + category + '): ' + notRecorded(body && body.error) + '. Nothing was resubmitted.';
+  }
+
+  function rerenderGate(gate) {
+    if (state.gate === gate && state.detail && state.detail.id === gate.id) keepFocus(() => renderGate(state.detail));
+  }
+
+  // submitGate posts once. It returns the accepted body, or null after a refusal
+  // or an ambiguous response, which is read back instead of retried.
+  async function submitGate(action, payload) {
+    if (state.gate.pending) return null;
+    const gate = state.gate;
+    gate.pending = true;
+    gate.message = '';
+    rerenderGate(gate);
+    let res = null, body = {};
+    try {
+      res = await gatePost(gate.id, action, payload);
+      body = await res.json().catch(() => ({}));
+    } catch (error) {
+      if (error instanceof SessionError) { gate.pending = false; failed(error); rerenderGate(gate); return null; }
+      res = null;
+    }
+    gate.pending = false;
+    if (state.gate !== gate) return null;
+    if (!res || res.status >= 500) {
+      gate.message = 'The response was lost or ambiguous. The canonical state is read back; nothing is resubmitted.';
+      readBack(gate);
+      return null;
+    }
+    if (!res.ok) { gate.message = refusalText(body); rerenderGate(gate); return null; }
+    return body;
+  }
+
+  // fetchJob reads the job and its canonical read-back; while the job runs it
+  // reads again, one timer at a time.
+  async function fetchJob(gate) {
+    clearTimeout(gate.timer);
+    try {
+      const res = await api('/api/molecules/' + encodeURIComponent(gate.id) + '/job');
+      const job = res.ok ? await res.json() : null;
+      if (state.gate !== gate) return;
+      gate.job = job;
+      if (job && job.state === 'running') gate.timer = setTimeout(() => readBack(gate), 2000);
+    } catch (error) { failed(error); }
+    rerenderGate(gate);
+  }
+
+  function readBack(gate) {
+    if (state.gate !== gate) return;
+    fetchJob(gate);
+    loadDetail(gate.id, false);
+  }
+
+  async function approveScope(digest) {
+    const job = await submitGate('/scope', JSON.stringify({ digest: digest }));
+    if (job) { state.gate.job = job; readBack(state.gate); }
+  }
+
+  async function previewDelivery() {
+    const gate = state.gate;
+    const preview = await submitGate('/delivery/preview', '{}');
+    if (preview && state.gate === gate) { gate.preview = preview; rerenderGate(gate); }
+  }
+
+  async function publishDelivery() {
+    const gate = state.gate;
+    const preview = gate.preview, title = gate.title.trim(), accept = gate.accept;
+    if (!preview || !title) { gate.message = 'Enter a one-line title for the draft PR.'; rerenderGate(gate); return; }
+    if (preview.acceptanceUnverified && !accept) { gate.message = 'Independent acceptance is unverified: confirm your own acceptance review first.'; rerenderGate(gate); return; }
+    const job = await submitGate('/delivery/publish', JSON.stringify({ digest: preview.digest, title: title, acceptUnverified: accept }));
+    if (job && state.gate === gate) { gate.job = job; readBack(gate); }
+  }
+
+  function latestDigest(d) {
+    const plans = (d.readiness && d.readiness.plans) || [];
+    const last = plans[plans.length - 1];
+    return last && typeof last.digest === 'string' && /^[0-9a-f]{64}$/.test(last.digest) ? last.digest : '';
+  }
+
+  function jobText(job) {
+    if (!job) return null;
+    const c = job.canonical || {};
+    const kind = job.kind === 'scope' ? 'Scope approval' : 'Draft publication';
+    let status;
+    if (c.unreadable) status = 'The ' + (c.source || 'record') + ' could not be read back; nothing is shown as committed.';
+    else if (job.committed && job.kind === 'scope') status = 'Committed: the ledger records approval of plan ' + short(job.digest) + '.';
+    else if (job.committed) status = 'Committed: receipt ' + notRecorded(c.receipt) + ', lifecycle ' + notRecorded(c.lifecycle) + (c.published ? '. Draft published; merge and production are not verified.' : '. Not published as a draft yet.');
+    else if (job.state === 'running') status = 'Running. Not committed until the ' + (job.kind === 'scope' ? 'ledger records the approval.' : 'receipt records it.');
+    else status = 'Not committed: the ' + (job.kind === 'scope' ? 'ledger does not record this approval' : 'receipt does not record a committed delivery') + (c.receipt ? ' (receipt ' + c.receipt + (c.lifecycle ? ', lifecycle ' + c.lifecycle : '') + ')' : '') + '.';
+    return el('div', { class: 'gate-job', role: 'status' },
+      el('strong', null, kind + ' · ' + notRecorded(job.state)),
+      el('p', { class: 'scope-note' }, status),
+      job.error ? el('p', { class: 'scope-note' }, (job.category ? job.category + ': ' : '') + job.error + '.') : null);
+  }
+
+  function renderGate(d) {
+    const card = document.querySelector('.decision-panel .action-card');
+    if (!card) return;
+    if (state.gate.id !== d.id) {
+      clearTimeout(state.gate.timer);
+      state.gate = newGate(d.id);
+      if (!d.sample) fetchJob(state.gate);
+    }
+    const gate = state.gate;
+    const label = el('span', { class: 'label' }, 'GATES AND DECISIONS');
+    if (d.sample || (state.lab && state.lab.readOnly)) {
+      card.replaceChildren(label, el('p', { class: 'unavailable' }, 'Unavailable'), el('p', { class: 'scope-note' }, 'Sample data has no gates. Nothing here writes.'));
+      return;
+    }
+    const running = Boolean(gate.job && gate.job.state === 'running');
+    const parts = [label];
+    const digest = latestDigest(d);
+    if (d.phase === 'scope-waiting' && digest) {
+      parts.push(el('div', { class: 'gate' },
+        el('strong', null, 'Approve exact scope'),
+        el('code', { title: digest }, 'plan ' + digest),
+        el('p', { class: 'scope-note' }, GATE_COPY.scope),
+        el('button', { type: 'button', class: 'text-button', dataset: { gate: 'scope' }, disabled: state.gate.pending || running, onclick: () => approveScope(digest) }, gate.pending ? 'Submitting…' : 'Approve this plan')));
+    }
+    const deliverable = d.finishedAt && (d.status === 'waiting' || d.status === 'recorded') && !(d.delivery && d.delivery.published);
+    if (deliverable) {
+      const preview = gate.preview;
+      parts.push(el('div', { class: 'gate' },
+        el('strong', null, 'Publish a draft PR'),
+        el('p', { class: 'scope-note' }, GATE_COPY.delivery),
+        el('button', { type: 'button', class: 'text-button', dataset: { gate: 'preview' }, disabled: state.gate.pending || running, onclick: previewDelivery }, preview ? 'Preview again' : 'Preview delivery'),
+        preview ? [
+          el('code', { title: notRecorded(preview.digest) }, 'preview ' + notRecorded(preview.digest)),
+          el('p', { class: 'scope-note' }, 'Base ' + notRecorded(preview.baseBranch) + ' · branch ' + notRecorded(preview.branch) + ' · ' + (preview.files || []).length + ' files: ' + (preview.files || []).join(', ')),
+          el('button', { type: 'button', class: 'text-button', dataset: { gate: 'diff' }, onclick: () => show('Delivery diff · ' + d.id, typeof preview.diff === 'string' ? preview.diff : '', (preview.diffTruncated ? 'Truncated · showing the first part of ' + preview.diffBytes + ' bytes.' : 'Complete · ' + preview.diffBytes + ' bytes.') + ' Secrets and local paths are redacted; the CLI shows the full diff.') }, 'View diff ↗'),
+          el('label', null, 'Title ', el('input', { type: 'text', maxlength: '256', value: gate.title, dataset: { gate: 'title' }, oninput: (e) => { gate.title = e.target.value; } })),
+          preview.acceptanceUnverified ? el('label', null, el('input', { type: 'checkbox', checked: gate.accept, dataset: { gate: 'accept' }, onchange: (e) => { gate.accept = e.target.checked; } }), ' Independent acceptance is unverified; I reviewed acceptance myself') : null,
+          el('button', { type: 'button', class: 'text-button', dataset: { gate: 'publish' }, disabled: state.gate.pending || running, onclick: publishDelivery }, gate.pending ? 'Submitting…' : 'Publish draft PR'),
+        ] : null));
+    }
+    if (parts.length === 1) parts.push(el('p', { class: 'scope-note' }, 'No human gate is open for this Molecule. This page updates from the ledger.'));
+    if (gate.message) parts.push(el('p', { class: 'scope-note', role: 'alert' }, gate.message));
+    parts.push(jobText(gate.job));
+    card.replaceChildren(...parts.filter(Boolean));
   }
 
   // Atom statuses the engine writes (done, failed, active, waiting, skipped,

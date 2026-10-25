@@ -1,6 +1,9 @@
-// Package ui serves the local, read-only Lab UI on the loopback interface. It
-// reads the Lab only through engine Go functions, never a shell, and serves GET
-// requests only: it never writes, recovers, approves or locks anything.
+// Package ui serves the local Lab UI on the loopback interface. It reads the Lab
+// only through engine Go functions, never a shell. Every read is a GET; the only
+// writes are the human gates in gates.go (scope approval and draft publication),
+// each a POST that needs the session cookie, the exact Origin and the per-tab
+// session header, and each performed by the engine, which validates digests,
+// locks and receipts. It never merges, deploys, recovers or changes permissions.
 package ui
 
 import (
@@ -97,6 +100,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	go func() { done <- s.server.Serve(s.listener) }()
 	select {
 	case <-ctx.Done():
+		// Gate jobs and previews are cancelled first, and no new one starts; the
+		// engine records an interrupted run in the ledger.
+		s.handler.jobs.stop(jobStopGrace)
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		// A connection still open after the grace period (for example one a browser
@@ -145,6 +151,12 @@ type handler struct {
 	records  func(lab, id string) (molecule.Record, error)
 	receipts receiptReader
 	cache    *listCache
+	// runScope, preview and publish are the engine calls behind the gates; tests
+	// replace them so no git, gh or harness process starts.
+	runScope func(context.Context, molecule.Options) (molecule.Record, error)
+	preview  func(context.Context, delivery.Options) (delivery.PreviewResult, error)
+	publish  func(context.Context, delivery.PublishOptions) (delivery.Receipt, error)
+	jobs     *gateJobs
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -164,7 +176,7 @@ var contentTypes = map[string]string{".html": "text/html; charset=utf-8", ".js":
 var moleculeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
 
 // unavailable lists capabilities the UI shows as Unavailable in this slice.
-var unavailable = []string{"analytics", "cost per merged PR", "gates", "suggestions", "evaluation", "pause"}
+var unavailable = []string{"analytics", "cost per merged PR", "suggestions", "evaluation", "pause"}
 
 // NewHandler serves the UI for host (127.0.0.1:PORT) with the given launch token.
 func NewHandler(o Options, token, host string) (http.Handler, error) {
@@ -187,7 +199,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache()}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs()}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -217,9 +229,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusForbidden, "cross-site request refused")
 		return
 	}
-	if r.Method != http.MethodGet {
-		header.Set("Allow", http.MethodGet)
-		h.refuse(w, http.StatusMethodNotAllowed, "the Lab UI is read-only; only GET is served")
+	// GET serves every read; POST is served only on the gate routes.
+	gateID, gateAction, gate := gateRoute(r.URL.Path)
+	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !gate) {
+		if gate {
+			header.Set("Allow", http.MethodPost)
+		} else {
+			header.Set("Allow", http.MethodGet)
+		}
+		h.refuse(w, http.StatusMethodNotAllowed, "only GET is served here; the only writes are the gate POST routes")
 		return
 	}
 	if launch {
@@ -236,6 +254,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") && subtle.ConstantTimeCompare([]byte(r.Header.Get(sessionHeader)), []byte(h.tab)) != 1 {
 		h.refuse(w, http.StatusForbidden, "this tab has no Lab UI session; open a new launch link from forgecell ui")
+		return
+	}
+	if r.Method == http.MethodPost {
+		if !h.writeAllowed(r) {
+			h.refuse(w, http.StatusForbidden, "a gate write needs this server's exact Origin from the same site; nothing was written")
+			return
+		}
+		h.gate(w, r, gateID, gateAction)
 		return
 	}
 	switch path := r.URL.Path; {
@@ -313,10 +339,12 @@ func (h *handler) file(w http.ResponseWriter, name string) {
 	_, _ = w.Write(data)
 }
 
-// LabView is GET /api/lab.
+// LabView is GET /api/lab. ReadOnly is true only for sample data; a real Lab
+// lists the human gates it performs through the engine in Gates.
 type LabView struct {
 	Sample      bool             `json:"sample"`
 	ReadOnly    bool             `json:"readOnly"`
+	Gates       []string         `json:"gates"`
 	Name        string           `json:"name"`
 	Version     string           `json:"version"`
 	Repository  string           `json:"repository"`
@@ -332,7 +360,7 @@ func (h *handler) lab(w http.ResponseWriter) {
 		return
 	}
 	id := formula.ActiveIdentity(h.opts.LabDir)
-	h.json(w, http.StatusOK, LabView{ReadOnly: true, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable})
+	h.json(w, http.StatusOK, LabView{Gates: Gates, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable})
 }
 
 func (h *handler) molecules(w http.ResponseWriter, r *http.Request) {
@@ -362,8 +390,8 @@ func counts(ms []Summary) map[string]int {
 	return c
 }
 
-// molecule serves GET /api/molecules/{id} and its read-only file views,
-// /evidence?path=… and /ledger.
+// molecule serves GET /api/molecules/{id}, its read-only file views,
+// /evidence?path=… and /ledger, and its gate job status, /job.
 func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) {
 	id, view, _ := strings.Cut(rest, "/")
 	withYAML := r.URL.Query().Get("yaml") == "1"
@@ -371,12 +399,16 @@ func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) 
 		h.refuse(w, http.StatusBadRequest, "invalid Molecule id")
 		return
 	}
-	if view != "" && view != "evidence" && view != "ledger" {
+	if view != "" && view != "evidence" && view != "ledger" && view != "job" {
 		h.refuse(w, http.StatusNotFound, "not found")
 		return
 	}
 	if h.opts.Demo && view != "" {
 		h.refuse(w, http.StatusNotFound, "sample data has no ledger files")
+		return
+	}
+	if view == "job" {
+		h.job(w, id)
 		return
 	}
 	if h.opts.Demo {
