@@ -159,12 +159,14 @@ type ObservationView struct {
 }
 
 // EvidenceView names evidence by a Lab-relative path. A path outside the Lab is
-// withheld and says so.
+// withheld and says so. Viewable says the evidence endpoint may serve the path,
+// subject to its SHA-256 and file checks when it is read.
 type EvidenceView struct {
-	Pointer string `json:"pointer,omitempty"`
-	Path    string `json:"path,omitempty"`
-	SHA256  string `json:"sha256,omitempty"`
-	Note    string `json:"note,omitempty"`
+	Pointer  string `json:"pointer,omitempty"`
+	Path     string `json:"path,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+	Note     string `json:"note,omitempty"`
+	Viewable bool   `json:"viewable,omitempty"`
 }
 
 // AttemptView is one analysis, coding or review harness attempt with its model
@@ -371,6 +373,61 @@ func evidence(lab string, r molecule.Record, e molecule.ProvenanceEvidence) Evid
 	return v
 }
 
+var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// evidenceAllowlist maps each Lab-relative file the record lists as evidence
+// with a SHA-256 to its recorded digests: Atom observation evidence, harness
+// result and capture files, and verification observations and results. Paths
+// outside the Lab, pointer-only references and malformed digests are left out,
+// so the evidence endpoint serves nothing else.
+func evidenceAllowlist(lab string, r molecule.Record) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	add := func(path, sum string) {
+		if !sha256Hex.MatchString(sum) {
+			return
+		}
+		v := evidence(lab, r, molecule.ProvenanceEvidence{Path: path, SHA256: sum})
+		if v.Path == "" {
+			return
+		}
+		if out[v.Path] == nil {
+			out[v.Path] = map[string]bool{}
+		}
+		out[v.Path][sum] = true
+	}
+	files := func(refs ...molecule.VerificationFile) {
+		for _, f := range refs {
+			add(f.Path, f.SHA256)
+		}
+	}
+	for _, a := range r.Atoms {
+		if a.Provenance == nil {
+			continue
+		}
+		for _, act := range a.Provenance.Actions {
+			if act.Observed == nil {
+				continue
+			}
+			for _, e := range act.Observed.Evidence {
+				add(e.Path, e.SHA256)
+			}
+		}
+	}
+	for _, a := range r.HarnessAttempts {
+		if a.Evidence != nil {
+			files(*a.Evidence)
+		}
+		files(a.CaptureEvidence...)
+	}
+	for _, a := range r.VerificationAttempts {
+		files(a.Observations...)
+		if a.Result != nil {
+			files(*a.Result)
+		}
+	}
+	return out
+}
+
 // currentAtom is the first Atom still active or waiting, or "" when none is.
 func currentAtom(r molecule.Record) string {
 	for _, a := range r.Atoms {
@@ -400,6 +457,7 @@ func summarize(lab string, r molecule.Record, read receiptReader) Summary {
 
 func project(lab string, r molecule.Record, read receiptReader, withYAML bool) Detail {
 	x := newRedactor(lab, r)
+	allowed := evidenceAllowlist(lab, r)
 	d, view := loadDelivery(read, lab, r)
 	out := Detail{ID: r.ID, Status: r.Status, Phase: phase(r), Lane: Lane(r.Status, phase(r), d), Mode: r.Mode, FormulaID: r.FormulaID, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, CurrentAtom: currentAtom(r), Delivery: view, Diagnostics: []string{}, Atoms: []AtomView{}, Attempts: []AttemptView{}}
 	out.Issue = IssueView{Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), Body: x.text(r.Issue.Body), State: r.Issue.State, UpdatedAt: r.Issue.UpdatedAt, URL: issueURL(r.Issue)}
@@ -433,7 +491,9 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 				if o := act.Observed; o != nil {
 					ov := &ObservationView{Action: x.text(o.Action), Result: x.text(o.Result), FinishedAt: o.FinishedAt, ExternalAction: x.text(o.ExternalAction), ExternalResult: x.text(o.ExternalResult), Evidence: []EvidenceView{}}
 					for _, e := range o.Evidence {
-						ov.Evidence = append(ov.Evidence, evidence(lab, r, e))
+						ev := evidence(lab, r, e)
+						ev.Viewable = ev.Path != "" && allowed[ev.Path][ev.SHA256]
+						ov.Evidence = append(ov.Evidence, ev)
 					}
 					ac.Observed = ov
 				}
