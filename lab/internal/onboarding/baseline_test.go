@@ -158,6 +158,90 @@ func TestBaselineSkipsUnrecognizedAndUnsafeSteps(t *testing.T) {
 	}
 }
 
+func TestBaselineRecognizesGoTestTimeoutForm(t *testing.T) {
+	accepted := []struct {
+		line      string
+		argv      []string
+		timeoutMS int
+	}{
+		{"go test ./...", []string{"go", "test", "./..."}, 900000},
+		{"go test -timeout 20m ./...", []string{"go", "test", "-timeout", "20m", "./..."}, 1500000},
+		{"go test -timeout 1m ./...", []string{"go", "test", "-timeout", "1m", "./..."}, 360000},
+		{"go test -timeout 55m ./...", []string{"go", "test", "-timeout", "55m", "./..."}, 3600000},
+	}
+	for _, tt := range accepted {
+		t.Run(tt.line, func(t *testing.T) {
+			command, ok := recognizeBaselineLine(tt.line, nil)
+			if !ok || command.kind != "go-test" || !reflect.DeepEqual(command.argv, tt.argv) || command.timeoutMS != tt.timeoutMS {
+				t.Fatalf("recognizeBaselineLine(%q) = %+v, %v", tt.line, command, ok)
+			}
+			check := formula.RequiredCheck{ID: "baseline-" + command.kind, Argv: command.argv, Dir: ".", TimeoutMS: command.timeoutMS, Workflow: ".github/workflows/ci.yml", Reason: "test"}
+			if err := check.Validate(); err != nil {
+				t.Fatalf("derived check is invalid: %v", err)
+			}
+		})
+	}
+	rejected := []string{
+		"go test -timeout 0m ./...",
+		"go test -timeout 56m ./...",
+		"go test -timeout 99m ./...",
+		"go test -timeout 100m ./...",
+		"go test -timeout 020m ./...",
+		"go test -timeout 20s ./...",
+		"go test -timeout 1h ./...",
+		"go test -timeout 20 ./...",
+		"go test -timeout m ./...",
+		"go test -timeout -1m ./...",
+		"go test -timeout=20m ./...",
+		"go test  -timeout 20m ./...",
+		"go test -timeout  20m ./...",
+		"go test -timeout 20m  ./...",
+		"go  test -timeout 20m ./...",
+		"go test -timeout\t20m ./...",
+		"go test -timeout 20m -run X ./...",
+		"go test -timeout 20m ./... -v",
+		"go test -timeout 20m ./pkg/...",
+		"go test -timeout 20m",
+		"go test -v -timeout 20m ./...",
+	}
+	for _, line := range rejected {
+		t.Run(line, func(t *testing.T) {
+			if command, ok := recognizeBaselineLine(line, nil); ok {
+				t.Fatalf("recognizeBaselineLine(%q) accepted %+v", line, command)
+			}
+			// A skipped line leaves the workflow readable: a later recognized step is derived.
+			steps := fmt.Sprintf("      - run: %q\n      - run: go vet ./...\n", line)
+			r := baselineRepository(map[string]string{".github/workflows/ci.yml": baselineStepsWorkflow("pull_request", "", steps)})
+			checks, err := DeriveBaseline(r, baselineTracked)
+			if want := []string{`baseline-go-vet . ["go" "vet" "./..."]`}; err != nil || !reflect.DeepEqual(baselineSummary(checks), want) {
+				t.Fatalf("derived %v: %v", baselineSummary(checks), err)
+			}
+		})
+	}
+}
+
+func TestBaselineDerivesRepositoryLabWorkflow(t *testing.T) {
+	const file = ".github/workflows/lab.yml"
+	content, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks, err := DeriveBaseline(baselineRepository(map[string]string{file: string(content)}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range checks {
+		if c.ID != "baseline-go-test-lab" {
+			continue
+		}
+		if c.Dir != "lab" || !reflect.DeepEqual(c.Argv, []string{"go", "test", "-timeout", "20m", "./..."}) || c.TimeoutMS != 1500000 || c.Workflow != file {
+			t.Fatalf("baseline-go-test-lab = %+v", c)
+		}
+		return
+	}
+	t.Fatalf("the repository workflow lacks baseline-go-test-lab: %v", baselineSummary(checks))
+}
+
 func TestBaselineRequiresPullRequestTrigger(t *testing.T) {
 	steps := "      - run: go test ./...\n"
 	cases := []struct {

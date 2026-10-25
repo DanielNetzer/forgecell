@@ -6,6 +6,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
@@ -17,10 +18,11 @@ import (
 // closed set of exact command lines is recognized; anything else is skipped, so a
 // workflow can never inject an argument into the reviewed Formula.
 var (
-	baselineGofmtLine  = regexp.MustCompile(`^test -z "\$\(gofmt -l ((?:\.(?:/[A-Za-z0-9_][A-Za-z0-9_./-]*)?|[A-Za-z0-9_][A-Za-z0-9_./-]*)(?: (?:\.(?:/[A-Za-z0-9_][A-Za-z0-9_./-]*)?|[A-Za-z0-9_][A-Za-z0-9_./-]*))*)\)"$`)
-	baselineScriptLine = regexp.MustCompile(`^(sh|bash) ([A-Za-z0-9_][A-Za-z0-9_./-]*\.sh)$`)
-	baselineJobName    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	baselineSlug       = regexp.MustCompile(`[^a-z0-9]+`)
+	baselineGoTestTimeoutLine = regexp.MustCompile(`^go test -timeout ([1-9][0-9]?)m \./\.\.\.$`)
+	baselineGofmtLine         = regexp.MustCompile(`^test -z "\$\(gofmt -l ((?:\.(?:/[A-Za-z0-9_][A-Za-z0-9_./-]*)?|[A-Za-z0-9_][A-Za-z0-9_./-]*)(?: (?:\.(?:/[A-Za-z0-9_][A-Za-z0-9_./-]*)?|[A-Za-z0-9_][A-Za-z0-9_./-]*))*)\)"$`)
+	baselineScriptLine        = regexp.MustCompile(`^(sh|bash) ([A-Za-z0-9_][A-Za-z0-9_./-]*\.sh)$`)
+	baselineJobName           = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	baselineSlug              = regexp.MustCompile(`[^a-z0-9]+`)
 )
 
 const (
@@ -28,6 +30,10 @@ const (
 	baselineGoTestMS     = 900000
 	baselineGoVetMS      = 600000
 	baselineQuickMS      = 120000
+	// A `go test -timeout <N>m` step outlives Go's own timeout by this margin, so Go's
+	// failure report is recorded rather than a bare kill.
+	baselineGoTestMaxMinutes    = 55
+	baselineGoTestMarginMinutes = 5
 )
 
 // baselineComplexWords start shell lines that make a multi-line block unsafe to read
@@ -106,6 +112,13 @@ func recognizeBaselineLine(line string, tracked map[string]bool) (baselineComman
 		return baselineCommand{kind: "go-test", argv: []string{"go", "test", "./..."}, timeoutMS: baselineGoTestMS, display: line}, true
 	case "go vet ./...":
 		return baselineCommand{kind: "go-vet", argv: []string{"go", "vet", "./..."}, timeoutMS: baselineGoVetMS, display: line}, true
+	}
+	if m := baselineGoTestTimeoutLine.FindStringSubmatch(line); m != nil {
+		minutes, err := strconv.Atoi(m[1])
+		if err != nil || minutes < 1 || minutes > baselineGoTestMaxMinutes {
+			return baselineCommand{}, false
+		}
+		return baselineCommand{kind: "go-test", argv: []string{"go", "test", "-timeout", m[1] + "m", "./..."}, timeoutMS: (minutes + baselineGoTestMarginMinutes) * 60000, display: line}, true
 	}
 	if m := baselineGofmtLine.FindStringSubmatch(line); m != nil {
 		if hasParentSegment(m[1]) {
