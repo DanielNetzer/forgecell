@@ -40,6 +40,9 @@ func TestHelperProcess(t *testing.T) {
 			os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0600)
 		}
 		fmt.Fprint(os.Stdout, "child started")
+		if ready := os.Getenv("FORGECELL_TEST_READY"); ready != "" {
+			os.WriteFile(ready, nil, 0600)
+		}
 		time.Sleep(60 * time.Second)
 	case "sentinel":
 		time.Sleep(20 * time.Second)
@@ -55,7 +58,7 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 func options(mode string) Options {
-	return Options{Argv: []string{os.Args[0], "-test.run=^TestHelperProcess$", "--", mode}, Env: append(os.Environ(), "FORGECELL_TEST_PROCESS=1"), Timeout: 30 * time.Second}
+	return Options{Argv: []string{os.Args[0], "-test.run=^TestHelperProcess$", "--", mode}, Env: append(os.Environ(), "FORGECELL_TEST_PROCESS=1"), Timeout: successBackstop}
 }
 func TestStructuredInputIsData(t *testing.T) {
 	o := options("echo")
@@ -130,10 +133,14 @@ func TestCancellationStopsDescendants(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "escaped")
 	pidFile := filepath.Join(dir, "child.pid")
+	ready := filepath.Join(dir, "ready")
+	// The run expires once the fixture has recorded its child and printed, not
+	// after a real deadline that start-up under load could race; the fixture
+	// and its child sleep past the marker backstop.
 	o := options("tree")
-	o.Timeout = stallTimeout
-	o.Env = append(o.Env, "FORGECELL_TEST_SENTINEL="+marker, "FORGECELL_TEST_CHILD_PID="+pidFile)
-	r := Run(context.Background(), o)
+	o.Timeout = time.Hour
+	o.Env = append(o.Env, "FORGECELL_TEST_SENTINEL="+marker, "FORGECELL_TEST_CHILD_PID="+pidFile, "FORGECELL_TEST_READY="+ready)
+	r := Run(expireOnMarker(t, ready, false), o)
 	if !r.TimedOut || !strings.Contains(r.Stdout, "child started") || !r.Reconciled {
 		t.Fatalf("fixture did not start its child: %+v", r)
 	}
@@ -152,7 +159,7 @@ func TestCancellationStopsDescendants(t *testing.T) {
 	// The descendant sleeps well past the timeout, so seeing it gone proves the
 	// group stop rather than a natural exit; a killed process may linger as a
 	// zombie until init reaps it, so poll instead of assuming it is already gone.
-	for deadline := time.Now().Add(10 * time.Second); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
+	for deadline := time.Now().Add(markerBackstop); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			proc.Kill()
 			t.Fatal("descendant survived cancellation")

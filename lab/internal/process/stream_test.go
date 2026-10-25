@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestStreamHelperProcess(t *testing.T) {
@@ -44,7 +43,7 @@ func TestStreamHelperProcess(t *testing.T) {
 }
 
 func streamOptions(mode string, count int) Options {
-	return Options{Argv: []string{os.Args[0], "-test.run=^TestStreamHelperProcess$"}, Env: append(os.Environ(), "FORGECELL_TEST_STREAM="+mode, "FORGECELL_TEST_COUNT="+strconv.Itoa(count)), Timeout: 20 * time.Second}
+	return Options{Argv: []string{os.Args[0], "-test.run=^TestStreamHelperProcess$"}, Env: append(os.Environ(), "FORGECELL_TEST_STREAM="+mode, "FORGECELL_TEST_COUNT="+strconv.Itoa(count)), Timeout: successBackstop}
 }
 
 func collect(into *[]string) *LineSink {
@@ -112,13 +111,12 @@ func TestLineSinkHardBoundStopsTheProcess(t *testing.T) {
 	var got []string
 	o.StdoutLines = collect(&got)
 	o.StdoutLines.MaxBytes = 100000
-	started := time.Now()
+	// The fixture never exits on its own, so an overflow that is not a timeout
+	// proves the byte bound, not the backstop, stopped it; no wall-clock
+	// measurement is needed.
 	r := Run(context.Background(), o)
-	if r.OK || !r.Overflow || r.TimedOut || !strings.Contains(r.Error, "stream") {
+	if r.OK || !r.Overflow || r.TimedOut || r.Interrupted || !strings.Contains(r.Error, "stream") {
 		t.Fatalf("an unbounded stream must be stopped and fail closed: %+v", r)
-	}
-	if time.Since(started) > 15*time.Second {
-		t.Fatal("the process was not stopped at the bound")
 	}
 	if r.Activity == nil || r.Activity.StdoutBytes < 100000 {
 		t.Fatalf("activity %+v", r.Activity)

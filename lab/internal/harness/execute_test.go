@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// executeBackstop bounds a provider run that is expected to finish, or to be
+// expired by a marker, on its own. It is not under test: it is far above any
+// start-up delay on a loaded machine and still ends a real hang.
+const executeBackstop = 2 * time.Minute
+
 func fake(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "fake provider")
@@ -48,7 +53,7 @@ func TestProviderExecution(t *testing.T) {
 	executable := fake(t, `cat > request.txt
 printf '{"structured_output":{"schemaVersion":"v1","outcome":"completed","reason":"implemented","paths":[]},"usage":{"input_tokens":10}}'
 `)
-	r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule"}, Timeout: 30 * time.Second})
+	r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule"}, Timeout: executeBackstop})
 	if !r.Process.OK || r.Coding == nil || r.Coding.Outcome != "completed" || !strings.Contains(r.Raw, "input_tokens") {
 		t.Fatalf("%+v", r)
 	}
@@ -72,7 +77,7 @@ func TestExecuteAllowlistReachesClaudeArgv(t *testing.T) {
 cat > /dev/null
 printf '{"structured_output":{"schemaVersion":"v1","outcome":"completed","reason":"implemented","paths":[]}}'
 `)
-			r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule", "codingAllowlist": list}, Timeout: 30 * time.Second})
+			r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule", "codingAllowlist": list}, Timeout: executeBackstop})
 			if !r.Process.OK || r.Coding == nil || r.Coding.Outcome != "completed" {
 				t.Fatalf("%+v", r)
 			}
@@ -95,7 +100,7 @@ func TestExecuteRefusesUnsafeAllowlistBeforeStartingProvider(t *testing.T) {
 	for _, entry := range []string{"Bash(git push)", "Bash(sh -c x)", "Bash(*)", "Bash"} {
 		dir := t.TempDir()
 		executable := fake(t, "touch started\ncat > /dev/null\n")
-		r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule", "codingAllowlist": []string{entry}}, Timeout: 30 * time.Second})
+		r := Execute(context.Background(), ExecuteOptions{ID: "claude-code", Executable: executable, Dir: dir, Request: map[string]any{"kind": "molecule", "codingAllowlist": []string{entry}}, Timeout: executeBackstop})
 		if r.Process.OK || r.Coding != nil || r.Process.Error == "" {
 			t.Fatalf("%s: %+v", entry, r)
 		}
@@ -113,14 +118,14 @@ done
 cat >/dev/null
 printf '{"schemaVersion":"v1","outcome":"completed","reason":"implemented","paths":[]}' > "$out"
 `)
-	r := Execute(context.Background(), ExecuteOptions{ID: "codex", Executable: executable, Dir: t.TempDir(), Request: map[string]any{"kind": "molecule"}, Timeout: 30 * time.Second})
+	r := Execute(context.Background(), ExecuteOptions{ID: "codex", Executable: executable, Dir: t.TempDir(), Request: map[string]any{"kind": "molecule"}, Timeout: executeBackstop})
 	if !r.Process.OK || r.Coding == nil || r.Coding.Outcome != "completed" {
 		t.Fatalf("%+v", r)
 	}
 }
 func TestProviderFailureCannotBecomeSuccess(t *testing.T) {
 	for _, body := range []string{"exit 7", `printf '{"result":"done","permission_denials":[{}]}'`, "printf 'invalid'"} {
-		r := Execute(context.Background(), ExecuteOptions{ID: "cursor", Executable: fake(t, body), Dir: t.TempDir(), Request: map[string]any{"kind": "molecule"}, Timeout: 30 * time.Second})
+		r := Execute(context.Background(), ExecuteOptions{ID: "cursor", Executable: fake(t, body), Dir: t.TempDir(), Request: map[string]any{"kind": "molecule"}, Timeout: executeBackstop})
 		if r.Process.OK && (r.Coding == nil || r.Coding.Outcome != "unknown") {
 			t.Fatalf("%+v", r)
 		}
@@ -138,7 +143,8 @@ func TestStuckProviderHelper(t *testing.T) {
 	if marker := os.Getenv("FORGECELL_STUCK_MARKER"); marker != "" {
 		os.WriteFile(marker, nil, 0600)
 	}
-	time.Sleep(30 * time.Second)
+	// Sleep past expireOnceExists' backstop so only the expiry can end the run.
+	time.Sleep(2 * time.Minute)
 	os.Exit(0)
 }
 
@@ -157,10 +163,11 @@ func TestProviderTimeoutFailsClosed(t *testing.T) {
 		// An already expired deadline deterministically exercises the short-timeout
 		// path without depending on process startup speed.
 		{"expired-deadline", time.Nanosecond, false},
-		// The helper prints its result, creates its marker and then sleeps 30 s.
-		// The deadline expires once the marker exists, so the run neither waits the
-		// timeout out nor depends on how fast the helper starts under load.
-		{"stuck-after-result", 10 * time.Second, true},
+		// The helper prints its result, creates its marker and then sleeps past
+		// every backstop. The deadline expires once the marker exists, so the run
+		// neither waits the timeout out nor depends on how fast the helper starts
+		// under load; the own timeout is only a backstop.
+		{"stuck-after-result", executeBackstop, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

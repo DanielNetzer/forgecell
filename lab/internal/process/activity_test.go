@@ -13,13 +13,69 @@ import (
 
 const secretSentinel = "sk-forgecell-test-secret-7f3a"
 
-// stallTimeout is the timeout under test for every fixture that stalls on purpose.
-// It is long enough that process start-up and output scheduling under a loaded
-// machine never race it; the fixtures sleep well past it.
+// stallTimeout is the real timeout under test for silent fixtures that stall on
+// purpose, where the deadline itself is the behavior. Fixtures that must write
+// output first expire on a readiness marker instead (expireOnMarker), so output
+// scheduling under a loaded machine never races a deadline. The fixtures sleep
+// well past it.
 const stallTimeout = 10 * time.Second
+
+// successBackstop bounds a run that is expected to finish, or to be stopped by
+// a marker, on its own. It is not under test: it is far above any start-up
+// delay on a loaded machine and still ends a real hang.
+const successBackstop = 2 * time.Minute
+
+// markerBackstop bounds how long a test waits for a fixture's readiness marker.
+// Fixtures that are meant to be stopped sleep longer than it.
+const markerBackstop = 50 * time.Second
 
 func shell(script string, timeout time.Duration) Options {
 	return Options{Argv: []string{"sh", "-c", script}, Timeout: timeout}
+}
+
+// markedShell is shell whose script finds the readiness marker path in
+// $FORGECELL_TEST_MARKER, under the test's own temporary directory.
+func markedShell(t *testing.T, script string, timeout time.Duration) (Options, string) {
+	t.Helper()
+	marker := filepath.Join(t.TempDir(), "ready")
+	o := shell(script, timeout)
+	o.Env = append(os.Environ(), "FORGECELL_TEST_MARKER="+marker)
+	return o, marker
+}
+
+// expireOnMarker returns a context that is cancelled with
+// context.DeadlineExceeded as soon as marker exists, so a test reaches a
+// deadline once the fixture has provably produced what the test needs instead
+// of racing a real one. Without a parent deadline Run reports that cause as its
+// own timeout; with parentDeadline the context also carries a deadline, beyond
+// the marker backstop and earlier than the run's own Timeout, so Run reports a
+// caller deadline. A fixture that never writes the marker is cancelled as an
+// interruption once markerBackstop passes, which no deadline assertion accepts.
+func expireOnMarker(t *testing.T, marker string, parentDeadline bool) context.Context {
+	t.Helper()
+	base, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(context.Canceled) })
+	ctx := base
+	if parentDeadline {
+		var stop context.CancelFunc
+		ctx, stop = context.WithDeadline(base, time.Now().Add(2*markerBackstop))
+		t.Cleanup(stop)
+	}
+	go func() {
+		deadline := time.Now().Add(markerBackstop)
+		for base.Err() == nil {
+			if _, err := os.Stat(marker); err == nil {
+				cancel(context.DeadlineExceeded)
+				return
+			}
+			if time.Now().After(deadline) {
+				cancel(context.Canceled)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	return ctx
 }
 
 func requireActivity(t *testing.T, r Result, stdout, stderr int64) *Activity {
@@ -69,7 +125,10 @@ func TestSilentStallTimesOutWithRecordedSilence(t *testing.T) {
 
 func TestPartialOutputThenStallRecordsLastOutput(t *testing.T) {
 	t.Parallel()
-	r := Run(context.Background(), shell("printf partial; printf err >&2; exec sleep 60", stallTimeout))
+	// The marker follows the output, so the expiry cannot race it; the stall
+	// sleeps past the marker backstop.
+	o, marker := markedShell(t, `printf partial; printf err >&2; : > "$FORGECELL_TEST_MARKER"; exec sleep 60`, time.Hour)
+	r := Run(expireOnMarker(t, marker, false), o)
 	if r.OK || !r.TimedOut || r.TerminalState() != StateTimeout {
 		t.Fatalf("not a timeout: %+v", r)
 	}
@@ -81,14 +140,12 @@ func TestPartialOutputThenStallRecordsLastOutput(t *testing.T) {
 }
 
 func TestCancellationAfterPartialOutputIsInterruptedNotTimeout(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "started")
-	o := shell(`printf partial; : > "$FORGECELL_TEST_MARKER"; exec sleep 30`, time.Minute)
-	o.Env = append(os.Environ(), "FORGECELL_TEST_MARKER="+marker)
+	o, marker := markedShell(t, `printf partial; : > "$FORGECELL_TEST_MARKER"; exec sleep 120`, successBackstop)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan Result, 1)
 	go func() { done <- Run(ctx, o) }()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(markerBackstop)
 	for {
 		if _, err := os.Stat(marker); err == nil {
 			break
@@ -102,7 +159,7 @@ func TestCancellationAfterPartialOutputIsInterruptedNotTimeout(t *testing.T) {
 	var r Result
 	select {
 	case r = <-done:
-	case <-time.After(15 * time.Second):
+	case <-time.After(markerBackstop):
 		t.Fatal("cancellation did not stop the run")
 	}
 	if r.OK || !r.Interrupted || r.TimedOut || r.Overflow || r.TerminalState() != StateInterrupted {
@@ -110,14 +167,14 @@ func TestCancellationAfterPartialOutputIsInterruptedNotTimeout(t *testing.T) {
 	}
 	requireActivity(t, r, 7, 0)
 	requireLastOutputWithinRun(t, r)
-	if r.ElapsedMS >= int64(time.Minute/time.Millisecond) {
+	if r.ElapsedMS >= successBackstop.Milliseconds() {
 		t.Fatalf("elapsed %d ms reached the timeout", r.ElapsedMS)
 	}
 }
 
 func TestOutputLimitCountsDroppedBytesAndIsNotATimeout(t *testing.T) {
 	script := "i=0; while [ $i -lt 5000 ]; do printf 0123456789012345678901234567890123456789; i=$((i+1)); done"
-	o := shell(script, 20*time.Second)
+	o := shell(script, successBackstop)
 	o.MaxOutputBytes = 1024
 	r := Run(context.Background(), o)
 	if r.OK || !r.Overflow || r.TimedOut || r.Interrupted || r.TerminalState() != StateOutputLimit {
@@ -133,16 +190,16 @@ func TestOutputLimitCountsDroppedBytesAndIsNotATimeout(t *testing.T) {
 }
 
 func TestSuccessfulRunRecordsActivityAndSucceeds(t *testing.T) {
-	r := Run(context.Background(), shell("printf ok", 10*time.Second))
+	r := Run(context.Background(), shell("printf ok", successBackstop))
 	if !r.OK || r.TerminalState() != StateSucceeded {
 		t.Fatalf("%+v", r)
 	}
 	requireActivity(t, r, 2, 0)
 	requireLastOutputWithinRun(t, r)
-	if r.ElapsedMS >= 10_000 {
+	if r.ElapsedMS >= successBackstop.Milliseconds() {
 		t.Fatalf("elapsed %d ms reached the timeout", r.ElapsedMS)
 	}
-	silent := Run(context.Background(), shell("exit 0", 10*time.Second))
+	silent := Run(context.Background(), shell("exit 0", successBackstop))
 	if !silent.OK || silent.TerminalState() != StateSucceeded {
 		t.Fatalf("%+v", silent)
 	}
@@ -152,7 +209,7 @@ func TestSuccessfulRunRecordsActivityAndSucceeds(t *testing.T) {
 }
 
 func TestNonzeroExitAndStartFailureAreFailedNotTimeouts(t *testing.T) {
-	r := Run(context.Background(), shell("printf boom >&2; exit 7", 10*time.Second))
+	r := Run(context.Background(), shell("printf boom >&2; exit 7", successBackstop))
 	if r.OK || r.Code != 7 || r.TerminalState() != StateFailed {
 		t.Fatalf("%+v", r)
 	}
@@ -231,8 +288,9 @@ func TestRecordedSilenceIsDistinguishableFromNoRecord(t *testing.T) {
 
 func TestDiagnosticsNeverContainOutputText(t *testing.T) {
 	t.Parallel()
-	script := fmt.Sprintf("printf %s; printf %s >&2; exec sleep 60", secretSentinel, secretSentinel)
-	r := Run(context.Background(), shell(script, stallTimeout))
+	script := fmt.Sprintf(`printf %s; printf %s >&2; : > "$FORGECELL_TEST_MARKER"; exec sleep 60`, secretSentinel, secretSentinel)
+	o, marker := markedShell(t, script, time.Hour)
+	r := Run(expireOnMarker(t, marker, false), o)
 	if !r.TimedOut || !strings.Contains(r.Stdout, secretSentinel) || !strings.Contains(r.Stderr, secretSentinel) {
 		t.Fatalf("fixture did not observe the sentinel on both pipes: %+v", r)
 	}
@@ -262,7 +320,7 @@ func TestDiagnosticsNeverContainOutputText(t *testing.T) {
 
 func TestActivityTrackingIsRaceFreeAcrossBothPipes(t *testing.T) {
 	script := "i=0; while [ $i -lt 200 ]; do printf aaaaaaaaaa; printf bbbbb >&2; i=$((i+1)); done"
-	r := Run(context.Background(), shell(script, 20*time.Second))
+	r := Run(context.Background(), shell(script, successBackstop))
 	if !r.OK {
 		t.Fatalf("%+v", r)
 	}
@@ -306,9 +364,10 @@ func TestExpiredParentDeadlineIsNotTheProcessTimeout(t *testing.T) {
 
 func TestParentDeadlineWhileRunningStopsTheProcessGroup(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), stallTimeout)
-	defer cancel()
-	r := Run(ctx, shell("printf partial; exec sleep 60", time.Hour))
+	// The caller's deadline expires once the output has been written, and the
+	// context's own deadline stays earlier than the run's hour-long Timeout.
+	o, marker := markedShell(t, `printf partial; : > "$FORGECELL_TEST_MARKER"; exec sleep 120`, time.Hour)
+	r := Run(expireOnMarker(t, marker, true), o)
 	if r.OK || r.TimedOut || !r.ParentDeadline || r.Interrupted || r.Overflow || !r.Reconciled || r.Uncertainty != "" {
 		t.Fatalf("not a pure parent deadline: %+v", r)
 	}

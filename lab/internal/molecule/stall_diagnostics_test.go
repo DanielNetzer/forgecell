@@ -41,7 +41,7 @@ func processStarts(t *testing.T, marker string) int {
 
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(markerBackstop)
 	for {
 		if _, err := os.Stat(path); err == nil {
 			return

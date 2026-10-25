@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
@@ -832,7 +831,7 @@ func TestInterruptedHarnessRetainsProcessObservation(t *testing.T) {
 	o, _ := fixture(t)
 	signal := filepath.Join(t.TempDir(), "started")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	if err := writeStub(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nsleep 10\n", signal)), 0700); err != nil {
+	if err := writeStub(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nexec sleep 60\n", signal)), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := Run(context.Background(), o)
@@ -840,27 +839,13 @@ func TestInterruptedHarnessRetainsProcessObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	o.Approve = r.Readiness.Plans[0].Digest
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, err := os.Stat(signal); err == nil {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
+	// The context carries no deadline and the stub sleeps far past the watcher's
+	// backstop, so only the cancel after the started marker can end the run.
+	ctx, started := cancelWhenStarted(t, signal)
 	r, err = Run(ctx, o)
-	<-done
+	if !started() {
+		t.Fatal("harness never started before the readiness backstop")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

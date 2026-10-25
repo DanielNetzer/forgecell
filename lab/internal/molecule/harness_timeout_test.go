@@ -15,8 +15,9 @@ import (
 
 // The Formula timeouts in these tests are at least 10 s, so start-up scheduling on
 // a loaded machine cannot race them. slowCompletingHarness outlasts the 10 s
-// Formula timeout but finishes well inside the reviewed 20 s plan timeout, and
-// stuckHarness outlasts every timeout used here.
+// Formula timeout but finishes minutes inside the reviewed plan timeout
+// (honouredMaxTimeoutMS), and stuckHarness outlasts every Formula timeout a
+// test waits out.
 const (
 	slowCompletingHarness = "#!/bin/sh\ncat >/dev/null\nsleep 11\nprintf changed > code.txt\nprintf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"completed\",\"reason\":\"Implemented and tested\",\"paths\":[]}'\n"
 	stuckHarness          = "#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nsleep 60\n"
@@ -156,15 +157,25 @@ func TestHarnessTimeoutIntakeProposesFromScopeAndOmitsItOtherwise(t *testing.T) 
 	}
 }
 
-// The control run proves the harness needs more than the Formula timeout: the only
-// difference between the two runs is the reviewed plan value. Both runs wait
-// out real process deadlines, which is the behavior under test.
+// honouredTimeoutMS and honouredMaxTimeoutMS are the Formula timeouts of
+// TestHarnessTimeoutPlanValueIsHonouredAndRecorded. The maximum leaves the
+// plan-extended run minutes of headroom over slowCompletingHarness.
+const (
+	honouredTimeoutMS    = 10000
+	honouredMaxTimeoutMS = 300000
+)
+
+// The control run, whose harness sleeps far past the Formula timeout, proves
+// that timeout fires; the plan-extended run proves a harness that outlasts the
+// Formula timeout completes under the reviewed plan value. The control waits a
+// real Formula deadline out, which is the behavior under test, while the
+// extended run's deadline is minutes above its harness.
 func TestHarnessTimeoutPlanValueIsHonouredAndRecorded(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
-		t.Skip("waits out real 10 s and 11 s process deadlines")
+		t.Skip("waits out a real 10 s Formula deadline and an 11 s harness")
 	}
-	control := timeoutFixture(t, 10000, 20000, 0, slowCompletingHarness)
+	control := timeoutFixture(t, honouredTimeoutMS, honouredMaxTimeoutMS, 0, stuckHarness)
 	r, err := runApprovedFixture(t, control)
 	if err != nil {
 		t.Fatal(err)
@@ -172,26 +183,31 @@ func TestHarnessTimeoutPlanValueIsHonouredAndRecorded(t *testing.T) {
 	if r.Readiness.Plans[0].Plan.HarnessTimeoutMS != 0 || len(r.HarnessAttempts) != 1 || !r.HarnessAttempts[0].Result.TimedOut || r.Status != "failed" {
 		t.Fatalf("control did not time out at the Formula timeout: %s %+v", r.Status, r.HarnessAttempts)
 	}
-	o := timeoutFixture(t, 10000, 20000, 9, slowCompletingHarness)
+	// Each scope path past the free threshold adds an eighth of the Formula
+	// timeout, so 49 extra paths propose two minutes.
+	o := timeoutFixture(t, honouredTimeoutMS, honouredMaxTimeoutMS, 49, slowCompletingHarness)
 	r, err = runApprovedFixture(t, o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan := r.Readiness.Plans[0].Plan
-	if plan.HarnessTimeoutMS != 20000 {
-		t.Fatalf("proposal %d", plan.HarnessTimeoutMS)
+	want := proposeHarnessTimeoutMS(formula.Binding{TimeoutMS: honouredTimeoutMS, MaxTimeoutMS: honouredMaxTimeoutMS}, len(plan.Analysis.Scope))
+	// The proposal must leave minutes of headroom over the 11 s harness, or the
+	// run would again depend on how fast the machine is.
+	if want < 120000 || plan.HarnessTimeoutMS != want {
+		t.Fatalf("proposal %d, want %d with minutes of headroom", plan.HarnessTimeoutMS, want)
 	}
 	if len(r.HarnessAttempts) != 1 || r.HarnessAttempts[0].Result.TimedOut || !r.HarnessAttempts[0].Result.OK || r.Status != "waiting" || r.Verification == nil || !r.Verification.RequiredChecksPassed {
 		t.Fatalf("the plan timeout was not honoured: %s %+v", r.Status, r.HarnessAttempts)
 	}
-	if !strings.Contains(strings.Join(r.Notes, "\n"), "harnessTimeoutMs 20000") {
+	if !strings.Contains(strings.Join(r.Notes, "\n"), fmt.Sprintf("harnessTimeoutMs %d", want)) {
 		t.Fatalf("effective timeout not recorded: %v", r.Notes)
 	}
 	raw, err := os.ReadFile(filepath.Join(o.LabDir, "ledgers", r.ID+".json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"harnessTimeoutMs": 20000`) {
+	if !strings.Contains(string(raw), fmt.Sprintf(`"harnessTimeoutMs": %d`, want)) {
 		t.Fatal("reviewed timeout is not part of the immutable plan record")
 	}
 }

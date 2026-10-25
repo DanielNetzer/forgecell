@@ -23,6 +23,12 @@ func testGit(t *testing.T, cwd string, args ...string) string {
 	}
 	return strings.TrimSpace(string(b))
 }
+
+// fixtureCheckTimeoutMS bounds the fixture's acceptance check, which is
+// expected to finish on its own. It is plan data only, a backstop far above
+// any start-up delay on a loaded machine rather than a deadline under test.
+const fixtureCheckTimeoutMS = 120000
+
 func fixture(t *testing.T) (Options, string) {
 	return fixtureAt(t, resolvedTempDir(t))
 }
@@ -48,7 +54,7 @@ func fixtureAt(t *testing.T, root string) (Options, string) {
 				id = e.ID
 			}
 		}
-		return readiness.Analysis{Summary: "Change code", Scope: []readiness.ScopedPath{{Path: "code.txt", Reason: "Implementation", Evidence: []string{"issue"}}, {Path: "request.json", Reason: "Fixture harness trace", Evidence: []string{id}}}, Acceptance: []readiness.Criterion{{Description: "Code contains changed", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "check", Category: "candidate", Argv: []string{"/bin/sh", "-c", "test \"$(cat code.txt)\" = changed"}, Dir: ".", TimeoutMS: 5000, Required: true, Definitions: []string{id}, Reason: "Fixture acceptance", Evidence: []string{"issue", id}}}}, nil
+		return readiness.Analysis{Summary: "Change code", Scope: []readiness.ScopedPath{{Path: "code.txt", Reason: "Implementation", Evidence: []string{"issue"}}, {Path: "request.json", Reason: "Fixture harness trace", Evidence: []string{id}}}, Acceptance: []readiness.Criterion{{Description: "Code contains changed", Evidence: []string{"issue"}}}, Checks: []readiness.Check{{ID: "check", Category: "candidate", Argv: []string{"/bin/sh", "-c", "test \"$(cat code.txt)\" = changed"}, Dir: ".", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{id}, Reason: "Fixture acceptance", Evidence: []string{"issue", id}}}}, nil
 	}, ReadIssue: func(context.Context, string, int64, string) (Issue, error) {
 		return Issue{Number: 12, Repo: "acme/widgets", Title: "Change code", Body: "Write changed", URL: "https://github.com/acme/widgets/issues/12", State: "OPEN"}, nil
 	}}, repo

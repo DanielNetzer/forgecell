@@ -93,11 +93,17 @@ func TestNativeBindingRetainsBlockedContractAndTransport(t *testing.T) {
 	if err = writeStub(provider, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"structured_output\":"+report+"}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	result := invokeHarness(context.Background(), []string{exe, "__adapter", "claude-code", provider}, dir, 30*time.Second, map[string]any{"kind": "molecule"})
+	result := invokeHarness(context.Background(), []string{exe, "__adapter", "claude-code", provider}, dir, successBackstop, map[string]any{"kind": "molecule"})
 	if !result.OK || result.Code != 0 || !result.Reconciled || result.Stdout != report || result.RawStdout == "" {
 		t.Fatalf("native evidence lost: %+v", result)
 	}
 }
+
+// successBackstop bounds an adapter run that is expected to finish on its own.
+// These tests are about argv and transport, not a deadline, so the budget is
+// far above any start-up delay under a loaded parallel suite and still ends a
+// real hang.
+const successBackstop = 2 * time.Minute
 
 var codingBase = []string{"Read", "Glob", "Grep", "Edit", "Write", "Bash(git status)", "Bash(git diff)"}
 
@@ -131,7 +137,7 @@ func TestNativeBindingPassesAllowlistToClaudeArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	list := append(append([]string{}, codingBase...), "Bash(go -C lab test ./...)")
-	result := invokeHarness(context.Background(), []string{exe, "__adapter", "claude-code", provider}, dir, 10*time.Second, map[string]any{"kind": "molecule", "codingAllowlist": list})
+	result := invokeHarness(context.Background(), []string{exe, "__adapter", "claude-code", provider}, dir, successBackstop, map[string]any{"kind": "molecule", "codingAllowlist": list})
 	if !result.OK {
 		t.Fatalf("%+v", result)
 	}
