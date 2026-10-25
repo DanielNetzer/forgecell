@@ -99,6 +99,13 @@ func demoList() MoleculeList {
 	return out
 }
 
+// demoAnalytics is derived only from demoList. Sample Molecules record no times
+// and no harness attempts, so every time and cost measure reads Not recorded or
+// Unavailable with 0 of N coverage; nothing is invented.
+func demoAnalytics() AnalyticsView {
+	return buildAnalytics(inventory{list: demoList()})
+}
+
 func demoDetail(id string, withYAML bool) (Detail, bool) {
 	n, err := strconv.Atoi(strings.TrimPrefix(id, "demo-"))
 	if !strings.HasPrefix(id, "demo-") || err != nil || n < 101 || n >= 101+demoCount {

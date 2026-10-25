@@ -47,7 +47,7 @@
     ['blocked', 'Blocked'], ['finished', 'Finished · Draft published'], ['other', 'Other'],
   ];
 
-  const state = { lab: null, list: null, etag: null, filter: 'all', query: '', selectedId: null, detail: null, detailText: null, atomIndex: null, detailToken: 0, labToken: 0, pollToken: 0, polling: false, noteKey: null, sessionLost: false, gate: newGate(null) };
+  const state = { lab: null, list: null, etag: null, analytics: null, analyticsEtag: null, analyticsToken: 0, filter: 'all', query: '', selectedId: null, detail: null, detailText: null, atomIndex: null, detailToken: 0, labToken: 0, pollToken: 0, polling: false, noteKey: null, sessionLost: false, gate: newGate(null) };
 
   // gate is the selected Molecule's gate state: one request in flight at most,
   // the last preview shown, and the last job read back from the server.
@@ -119,8 +119,25 @@
       showError('');
       keepFocus(renderList);
       if (previous && previous !== state.etag) loadLab().catch(failed);
+      if (previous !== state.etag) loadAnalytics();
       if (state.selectedId) loadDetail(state.selectedId, false);
     } catch (error) { failed(error); } finally { state.polling = false; }
+  }
+
+  // Analytics share the list's ETag; a response older than the newest request is
+  // dropped, as for the list.
+  async function loadAnalytics() {
+    const token = ++state.analyticsToken;
+    try {
+      const res = await api('/api/analytics', state.analyticsEtag ? { 'If-None-Match': state.analyticsEtag } : undefined);
+      if (res.status === 304 || token !== state.analyticsToken) return;
+      if (!res.ok) throw new Error('analytics ' + res.status);
+      const analytics = await res.json();
+      if (token !== state.analyticsToken) return;
+      state.analytics = analytics;
+      state.analyticsEtag = res.headers.get('ETag') || analytics.etag;
+      renderAnalytics();
+    } catch (error) { failed(error); }
   }
 
   async function loadDetail(id, reset) {
@@ -819,6 +836,57 @@
       bar.style.width = (all.length ? (n / all.length) * 100 : 0) + '%';
       return el('div', { class: 'outcome-row' }, el('span', null, lane.label), el('div', { class: 'bar-track' }, bar), el('strong', null, String(n)));
     }), el('div', { class: 'outcome-row' }, el('span', null, 'Paused'), el('div', { class: 'bar-track' }), el('strong', { title: 'The engine has no pause semantics' }, 'n/a')));
+    renderAnalytics();
+  }
+
+  // ---- Analytics -----------------------------------------------------------------
+  // A null measure is shown as text (Not recorded, Unknown, Unavailable), never as
+  // 0, and every total carries its coverage.
+  // Six decimals, like the engine's formatUSD, so a small reported cost never reads as $0.
+  function usd(value) { return typeof value === 'number' && Number.isFinite(value) ? '$' + value.toFixed(6) : null; }
+  function countText(value) { return typeof value === 'number' ? String(value) : 'Not recorded'; }
+  function measureText(m) {
+    if (!m || typeof m.totalMs !== 'number') return m && m.overflow ? 'Unavailable (sum overflowed)' : 'Not recorded';
+    return durationLabel(m.totalMs);
+  }
+  function measureCoverage(m) {
+    return m ? 'recorded for ' + countText(m.recorded) + ' of ' + countText(m.molecules) + ' Molecules' : 'coverage not recorded';
+  }
+  function groupCost(g) {
+    const total = usd(g.costUsd);
+    const coverage = 'reported for ' + countText(g.costReported) + ' of ' + countText(g.attempts);
+    if (total) return total + ' (' + notRecorded(g.costBasis) + ') · ' + coverage;
+    return (g.costNotFinite ? 'Unavailable (sum not finite)' : 'Unknown') + ' · ' + coverage;
+  }
+
+  function renderAnalytics() {
+    const box = $('#analytics');
+    const a = state.analytics;
+    if (!a) { box.replaceChildren(el('span', { class: 'label' }, 'ANALYTICS'), el('strong', null, 'Loading…')); return; }
+    const t = a.time || {}, c = a.cost || {}, models = a.models || {}, counts = a.counts || {};
+    const groups = Array.isArray(models.groups) ? models.groups : [];
+    const total = usd(c.totalUsd);
+    const measure = (label, m) => el('div', null, el('dt', null, label), el('dd', null, measureText(m) + ' · ' + measureCoverage(m)));
+    box.replaceChildren(
+      el('span', { class: 'label' }, a.sample ? 'ANALYTICS · SAMPLE DATA' : 'ANALYTICS · REPORTED COST'),
+      el('strong', null, total || (c.notFinite ? 'Unavailable (sum not finite)' : 'Unknown')),
+      el('p', null, notRecorded(c.coverage) + (total ? ' · ' + notRecorded(c.basisLabel) : '') + '. Unknown is not zero.'),
+      a.complete ? null : el('p', { class: 'scope-note' }, (a.truncated ? 'Inventory truncated by safety bounds' : 'Inventory incomplete') + '; skipped ledgers are not counted.'),
+      el('dl', { class: 'atom-meta' },
+        el('div', null, el('dt', null, 'Outcomes by lane'), el('dd', null, Object.entries(LANES).map(([id, lane]) => lane.label + ' ' + countText(counts[id])).join(' · '))),
+        measure('Wall-clock', t.wallClock),
+        measure('Active Atom time', t.activeAtom),
+        measure('Waiting time', t.waiting),
+        el('div', null, el('dt', null, 'Lab elapsed'), el('dd', null, typeof t.elapsedMs === 'number' ? durationLabel(t.elapsedMs) : 'Not recorded'))),
+      t.note ? el('p', { class: 'scope-note' }, t.note) : null,
+      el('span', { class: 'label' }, 'HARNESS / MODEL · ' + countText(models.attempts) + ' ATTEMPTS'),
+      groups.length
+        ? el('ul', { class: 'record-list' }, groups.map((g) => el('li', null,
+          el('strong', null, notRecorded(g.harness) + ' · ' + notRecorded(g.model)),
+          el('span', null, countText(g.attempts) + (g.attempts === 1 ? ' attempt' : ' attempts')),
+          el('span', null, 'cost ' + groupCost(g)))))
+        : el('p', { class: 'scope-note' }, 'No harness attempts recorded.'),
+      models.truncated ? el('p', { class: 'scope-note' }, countText(models.ungrouped) + ' attempts beyond the group bound are not shown; the breakdown is truncated.') : null);
   }
 
   // ---- Dialog, motion and visibility -------------------------------------------
