@@ -15,8 +15,8 @@ func TestReturnedProcessHasReconciliationEvidence(t *testing.T) {
 		code       int
 		timeout    time.Duration
 	}{
-		{"success", "echo", 0, 30 * time.Second},
-		{"nonzero-exit", "unicode", 7, 30 * time.Second},
+		{"success", "echo", 0, successBackstop},
+		{"nonzero-exit", "unicode", 7, successBackstop},
 		{"timeout", "wait", -1, 50 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestFailedHarnessCapturesPartialWork(t *testing.T) {
@@ -220,33 +219,19 @@ func TestInterruptedHarnessCapturesUsingUncancelledContext(t *testing.T) {
 	o, _ := fixture(t)
 	signal := filepath.Join(t.TempDir(), "started")
 	script := filepath.Join(filepath.Dir(o.SourceRoot), "harness")
-	writeStub(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nsleep 10\n", signal)), 0700)
+	writeStub(script, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf changed > code.txt\nprintf started > %q\nexec sleep 60\n", signal)), 0700)
 	r, err := Run(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	o.Approve = r.Readiness.Plans[0].Digest
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(10 * time.Millisecond):
-				if _, e := os.Stat(signal); e == nil {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	watchdog := time.AfterFunc(10*time.Second, cancel)
-	defer watchdog.Stop()
+	// The context carries no deadline and the stub sleeps far past the watcher's
+	// backstop, so only the cancel after the started marker can end the run.
+	ctx, started := cancelWhenStarted(t, signal)
 	r, err = Run(ctx, o)
-	<-done
+	if !started() {
+		t.Fatal("harness never started before the readiness backstop")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

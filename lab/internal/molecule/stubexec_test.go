@@ -53,3 +53,48 @@ func expireWhenStarted(t *testing.T, marker string) (context.Context, func()) {
 	t.Cleanup(stop)
 	return ctx, stop
 }
+
+// markerBackstop bounds how long a readiness watcher waits for a stub's marker.
+// It is far above any start-up delay under a loaded parallel suite, and a stub
+// that is meant to be stopped sleeps longer than it.
+const markerBackstop = 50 * time.Second
+
+// cancelWhenStarted returns a context without a deadline that is cancelled as
+// an interruption as soon as marker exists, for tests about a caller cancel
+// rather than a timeout. The watcher also cancels once markerBackstop passes so
+// a stub that never starts cannot hang the test; started reports, after the
+// run returns, whether the cancel followed the marker, and the test must fail
+// explicitly when it did not instead of reading the backstop as interruption.
+func cancelWhenStarted(t *testing.T, marker string) (context.Context, func() bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	seen := make(chan bool, 1)
+	go func() {
+		deadline := time.Now().Add(markerBackstop)
+		for ctx.Err() == nil {
+			if _, err := os.Stat(marker); err == nil {
+				seen <- true
+				cancel()
+				return
+			}
+			if time.Now().After(deadline) {
+				seen <- false
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		seen <- false
+	}()
+	t.Cleanup(cancel)
+	var once bool
+	var result bool
+	started := func() bool {
+		if !once {
+			cancel()
+			result, once = <-seen, true
+		}
+		return result
+	}
+	return ctx, started
+}

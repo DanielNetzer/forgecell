@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
@@ -366,7 +365,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapReachesProviderPrompt(t *testi
 	}
 	ctx := withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: capMessage, PreviousResponse: "PREVIOUS-RESPONSE-MARKER"})
 	request := analysisRequest(ctx, Issue{Number: 1, Title: "t"}, readiness.RepositorySnapshot{}, readiness.VerificationInputs{})
-	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: analysisRepoDir(t), Request: request, Timeout: 30 * time.Second})
+	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: analysisRepoDir(t), Request: request, Timeout: successBackstop})
 	a, err := decodeAnalysisResult(result.Process)
 	if !readiness.IsPolicyViolation(err) || len(a.EvidenceRequests) != 20 || !strings.Contains(err.Error(), capMessage) {
 		t.Fatalf("the rejected response did not survive the harness boundary: %v %+v", err, result.Process)
@@ -644,7 +643,7 @@ func TestAnalysisCorrectiveRetryReachesProviderPrompt(t *testing.T) {
 	}
 	ctx := withAnalysisCorrection(context.Background(), analysisCorrection{ValidatorMessage: policyMessage, PreviousResponse: "PREVIOUS-RESPONSE-MARKER"})
 	request := analysisRequest(ctx, Issue{Number: 1, Title: "t"}, readiness.RepositorySnapshot{}, readiness.VerificationInputs{})
-	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: analysisRepoDir(t), Request: request, Timeout: 30 * time.Second})
+	result := harness.Execute(ctx, harness.ExecuteOptions{ID: "claude-code", Executable: provider, Dir: analysisRepoDir(t), Request: request, Timeout: successBackstop})
 	_, err = decodeAnalysisResult(result.Process)
 	if !readiness.IsPolicyViolation(err) {
 		t.Fatalf("the rejected response did not survive the harness boundary: %v %+v", err, result.Process)

@@ -21,14 +21,11 @@ import (
 
 const wrapperOKAnalysis = `{"summary":"Read-only wrapper analysis"}`
 
-const (
-	// wrapperRunTimeout bounds wrappers that are expected to finish on their own. It
-	// is only a backstop against a hang, far above any start-up delay under load.
-	wrapperRunTimeout = 30 * time.Second
-	// wrapperStallTimeout is the timeout under test for wrappers that stall on
-	// purpose; the fixtures sleep well past it.
-	wrapperStallTimeout = 10 * time.Second
-)
+// wrapperRunTimeout bounds wrappers that are expected to finish, or to be
+// stopped by a readiness marker, on their own. It is only a backstop against a
+// hang, far above any start-up delay under load; the timeout test expires on
+// its marker (expireOnceExists) rather than waiting a real deadline out.
+const wrapperRunTimeout = 2 * time.Minute
 
 type wrapperFixture struct {
 	t        *testing.T
@@ -361,13 +358,15 @@ func TestAnalysisWrapperTimeoutReconcilesDescendants(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	// The pid file appears atomically once the descendant runs, and the deadline
-	// expires then rather than after wrapperStallTimeout has been waited out.
-	fx := newWrapperFixture(t, fmt.Sprintf("cat >/dev/null\nsleep 60 &\necho $! > %q.tmp\nmv %q.tmp %q\nwait\n", pidFile, pidFile, pidFile))
+	// expires then; the wrapper's own timeout is only a backstop, so start-up
+	// under load cannot reach it before the descendant exists. The descendant
+	// sleeps past expireOnceExists' backstop.
+	fx := newWrapperFixture(t, fmt.Sprintf("cat >/dev/null\nsleep 120 &\necho $! > %q.tmp\nmv %q.tmp %q\nwait\n", pidFile, pidFile, pidFile))
 	d := fx.approve()
 	if err := d.Err(); err != nil {
 		t.Fatal(err)
 	}
-	result := InvokeAnalysisWrapper(expireOnceExists(t, pidFile), fx.lab, d, analysisRequestFixture(), wrapperStallTimeout)
+	result := InvokeAnalysisWrapper(expireOnceExists(t, pidFile), fx.lab, d, analysisRequestFixture(), wrapperRunTimeout)
 	if result.OK || !result.TimedOut {
 		t.Fatalf("a timed-out wrapper must fail intake: %+v", result)
 	}
@@ -388,7 +387,7 @@ func TestAnalysisWrapperTimeoutReconcilesDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(10 * time.Second); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
+	for deadline := time.Now().Add(time.Minute); proc.Signal(syscall.Signal(0)) == nil; time.Sleep(25 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			proc.Kill()
 			t.Fatalf("the timed-out descendant %d is still alive", pid)
