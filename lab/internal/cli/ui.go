@@ -37,9 +37,9 @@ var openBrowser = func(url string) error {
 }
 
 // runUI serves the Lab UI on 127.0.0.1 until ctx is cancelled (SIGINT or SIGTERM
-// in the binary). It reads the Lab, and writes only through the engine's human
-// gates: exact scope approval and draft PR publication. It never merges or
-// deploys.
+// in the binary). It reads the Lab, and writes only through the engine: the
+// human gates (exact scope approval and draft PR publication), starting intake
+// or the loop, and stopping work it started. It never merges or deploys.
 func runUI(ctx context.Context, args []string, defaultLab, version string, out, stderr io.Writer) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	flags := flag.NewFlagSet("ui", flag.ContinueOnError)
@@ -57,7 +57,21 @@ func runUI(ctx context.Context, args []string, defaultLab, version string, out, 
 	if !*demo && *lab == "" {
 		return fail(fmt.Errorf("no Lab selected; use --lab DIR"))
 	}
-	s, err := ui.Listen(ui.Options{LabDir: *lab, Version: version, Demo: *demo, Port: *port})
+	options := ui.Options{LabDir: *lab, Version: version, Demo: *demo, Port: *port}
+	if !*demo {
+		// Work started from the UI runs from this checkout under the Lab's resource
+		// guard, as forgecell run and loop do.
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fail(err)
+		}
+		guard, err := newResourceGuard(*lab, stderr)
+		if err != nil {
+			return fail(err)
+		}
+		options.SourceRoot, options.Resources = cwd, guard
+	}
+	s, err := ui.Listen(options)
 	if err != nil {
 		return fail(err)
 	}
@@ -65,7 +79,7 @@ func runUI(ctx context.Context, args []string, defaultLab, version string, out, 
 		fmt.Fprintln(out, "Forgecell Lab UI · Sample data (synthetic; no Lab is read)")
 	} else {
 		fmt.Fprintf(out, "Forgecell Lab UI · Lab %s\n", safeText(*lab))
-		fmt.Fprintln(out, "Writes only through the engine's human gates: exact scope approval and draft PR publication. It never merges or deploys.")
+		fmt.Fprintln(out, "Writes only through the engine: exact scope approval, draft PR publication, starting intake or the loop from this checkout, and stopping work it started. It never merges or deploys.")
 	}
 	// The URL is always printed, since a browser that cannot read the launch page
 	// (a snap-confined one cannot read the temp directory) needs it pasted.

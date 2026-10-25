@@ -226,11 +226,11 @@ func TestUIRefusesForeignOriginAndHost(t *testing.T) {
 	}
 }
 
-// Every route except the three gate routes serves GET only; the gate routes
-// serve POST only. A same-origin POST elsewhere is still refused.
+// Every route except the three gate routes and the four drive routes serves GET
+// only; those serve POST only. A same-origin POST elsewhere is still refused.
 func TestUIServesGetOnlyWithSecurityHeaders(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir()})
-	for _, path := range []string{"/", "/api/lab", "/api/molecules", "/api/molecules/m1", "/api/molecules/m1/job", "/api/molecules/m1/ledger", "/api/molecules/m1/delivery", "/api/molecules/m1/merge", "/api/molecules/m1/delivery/merge", "/api/molecules/m1/x/scope"} {
+	for _, path := range []string{"/", "/api/lab", "/api/loop", "/api/runs/1", "/api/molecules", "/api/molecules/m1", "/api/molecules/m1/job", "/api/molecules/m1/ledger", "/api/molecules/m1/delivery", "/api/molecules/m1/merge", "/api/molecules/m1/delivery/merge", "/api/molecules/m1/x/scope", "/api/molecules/m1/x/stop", "/api/loop/pause", "/api/runs/1/stop"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions} {
 			r := authed(path)
 			r.method, r.origin = method, "http://"+testHost
@@ -239,7 +239,7 @@ func TestUIServesGetOnlyWithSecurityHeaders(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{"/api/molecules/m1/scope", "/api/molecules/m1/delivery/preview", "/api/molecules/m1/delivery/publish"} {
+	for _, path := range []string{"/api/molecules/m1/scope", "/api/molecules/m1/delivery/preview", "/api/molecules/m1/delivery/publish", "/api/runs", "/api/loop/start", "/api/loop/stop", "/api/molecules/m1/stop"} {
 		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions} {
 			r := authed(path)
 			r.method = method
@@ -525,16 +525,17 @@ func snapshot(t *testing.T, dir string) string {
 	return b.String()
 }
 
-// Reads, writes to non-gate routes and unauthenticated or forged gate writes
-// never change the Lab and never reach the engine. Only gates_test.go covers
-// accepted gate writes, through engine seams.
+// Reads, writes to non-gate routes and unauthenticated or forged gate and drive
+// writes never change the Lab and never reach the engine. Only gates_test.go
+// and drive_test.go cover accepted writes, through engine seams.
 func TestUINeverWritesTheLab(t *testing.T) {
 	lab, r := labFixture(t)
 	writeReceipt(t, lab, r.ID, "published", "OPEN")
 	before := snapshot(t, lab)
-	h := testHandler(t, Options{LabDir: lab})
+	h := testHandler(t, Options{LabDir: lab, SourceRoot: "/src/checkout"})
 	engine := refuseEngine(t, h)
-	for _, path := range []string{"/", "/app.js", "/style.css", "/api/lab", "/api/molecules", "/api/molecules/" + r.ID, "/api/molecules/" + r.ID + "?yaml=1", "/api/molecules/" + r.ID + "/job"} {
+	drive := installDrive(h, &fakeDrive{})
+	for _, path := range []string{"/", "/app.js", "/style.css", "/api/lab", "/api/loop", "/api/runs/7", "/api/molecules", "/api/molecules/" + r.ID, "/api/molecules/" + r.ID + "?yaml=1", "/api/molecules/" + r.ID + "/job", "/api/runs", "/api/loop/start", "/api/loop/stop", "/api/molecules/" + r.ID + "/stop"} {
 		do(t, h, authed(path))
 		post := authed(path)
 		post.method, post.origin = http.MethodPost, "http://"+testHost
@@ -548,10 +549,17 @@ func TestUINeverWritesTheLab(t *testing.T) {
 			}
 		}
 	}
+	for path, body := range map[string]string{"/api/runs": `{"issue":7}`, "/api/loop/start": `{"select":"oldest","maxConcurrent":1}`, "/api/loop/stop": `{}`, "/api/molecules/" + r.ID + "/stop": `{}`} {
+		for name, forged := range forgedWrites(path, body) {
+			if w := do(t, h, forged); w.Code != http.StatusForbidden {
+				t.Errorf("%s %s: %d", name, path, w.Code)
+			}
+		}
+	}
 	if after := snapshot(t, lab); after != before {
 		t.Fatalf("the UI changed the Lab:\n%s\n---\n%s", before, after)
 	}
-	if n := engine.calls(); n != 0 {
+	if n := engine.calls() + drive.calls(); n != 0 {
 		t.Fatalf("refused writes reached the engine %d times", n)
 	}
 }
