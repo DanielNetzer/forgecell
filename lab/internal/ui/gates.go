@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,8 @@ import (
 	"unicode/utf8"
 )
 
-// The UI's only writes are three human gates, each a POST through the engine:
+// The UI's gate writes are three human gates, each a POST through the engine
+// (drive.go adds starting and stopping work, behind the same protection):
 //
 //	POST /api/molecules/{id}/scope              {"digest"}  → molecule.Run(Approve) as a job
 //	POST /api/molecules/{id}/delivery/preview   {}          → delivery.Preview
@@ -296,18 +298,26 @@ func (h *handler) publishDelivery(w http.ResponseWriter, r molecule.Record, req 
 
 func (h *handler) startJob(w http.ResponseWriter, id, kind, digest string, run func(context.Context) error) {
 	job, err := h.jobs.start(id, kind, digest, run)
-	switch {
-	case errors.Is(err, errGateBusy):
-		h.refuseGate(w, http.StatusConflict, "busy", "a gate job is already running for this Molecule; this submission was not started")
-		return
-	case errors.Is(err, errGateFull):
-		h.refuseGate(w, http.StatusServiceUnavailable, "busy", "too many gate jobs are running; nothing was started")
-		return
-	case err != nil:
-		h.refuseGate(w, http.StatusServiceUnavailable, "stopped", "the Lab UI is stopping; nothing was started")
+	if h.refuseJobStart(w, err, "a gate job is already running for this Molecule; this submission was not started") {
 		return
 	}
 	h.json(w, http.StatusAccepted, h.jobView(id, job.snapshot(&h.jobs.mu)))
+}
+
+// refuseJobStart answers a job registry refusal and reports whether there was
+// one; busy is the message for a job already running under the same key.
+func (h *handler) refuseJobStart(w http.ResponseWriter, err error, busy string) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, errGateBusy):
+		h.refuseGate(w, http.StatusConflict, "busy", busy)
+	case errors.Is(err, errGateFull):
+		h.refuseGate(w, http.StatusServiceUnavailable, "busy", "too many gate jobs are running; nothing was started")
+	default:
+		h.refuseGate(w, http.StatusServiceUnavailable, "stopped", "the Lab UI is stopping; nothing was started")
+	}
+	return true
 }
 
 // classify maps an engine error to a job state, a category and a fixed
@@ -443,17 +453,24 @@ type gateJobs struct {
 
 type gateJob struct {
 	kind, digest string
+	// started is taken before the engine call starts; cancel cancels only this
+	// job's context.
+	started time.Time
+	cancel  context.CancelFunc
 	// done is closed when the engine call has returned and the state is set.
 	done                     chan struct{}
 	state, category, message string
 }
 
-type jobSnapshot struct{ kind, digest, state, category, message string }
+type jobSnapshot struct {
+	kind, digest, state, category, message string
+	started                                time.Time
+}
 
 func (j *gateJob) snapshot(mu *sync.Mutex) jobSnapshot {
 	mu.Lock()
 	defer mu.Unlock()
-	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message}
+	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message, j.started}
 }
 
 func newGateJobs() *gateJobs {
@@ -474,14 +491,16 @@ func (g *gateJobs) start(id, kind, digest string, run func(context.Context) erro
 		return nil, errGateFull
 	}
 	g.forget(id)
-	j := &gateJob{kind: kind, digest: digest, done: make(chan struct{}), state: "running"}
+	ctx, cancel := context.WithCancel(g.ctx)
+	j := &gateJob{kind: kind, digest: digest, started: time.Now(), cancel: cancel, done: make(chan struct{}), state: "running"}
 	g.jobs[id] = j
 	g.order = append(g.order, id)
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
 		defer close(j.done)
-		state, category, message := classify(guarded(g.ctx, run))
+		defer cancel()
+		state, category, message := classify(guarded(ctx, run))
 		g.mu.Lock()
 		j.state, j.category, j.message = state, category, message
 		g.mu.Unlock()
@@ -530,7 +549,20 @@ func (g *gateJobs) get(id string) (jobSnapshot, bool) {
 	if j == nil {
 		return jobSnapshot{}, false
 	}
-	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message}, true
+	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message, j.started}, true
+}
+
+// cancelRunning cancels the running job under id when its kind is one of kinds
+// and owns(started) holds; it reports whether a job was cancelled.
+func (g *gateJobs) cancelRunning(id string, kinds []string, owns func(time.Time) bool) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	j := g.jobs[id]
+	if j == nil || j.state != "running" || !slices.Contains(kinds, j.kind) || !owns(j.started) {
+		return false
+	}
+	j.cancel()
+	return true
 }
 
 func (g *gateJobs) busy(id string) bool {

@@ -1,9 +1,11 @@
 // Package ui serves the local Lab UI on the loopback interface. It reads the Lab
 // only through engine Go functions, never a shell. Every read is a GET; the only
-// writes are the human gates in gates.go (scope approval and draft publication),
-// each a POST that needs the session cookie, the exact Origin and the per-tab
-// session header, and each performed by the engine, which validates digests,
-// locks and receipts. It never merges, deploys, recovers or changes permissions.
+// writes are the human gates in gates.go (scope approval and draft publication)
+// and the drive actions in drive.go (start intake, start or stop the loop, stop
+// a Molecule this UI runs), each a POST that needs the session cookie, the exact
+// Origin and the per-tab session header, and each performed by the engine, which
+// validates digests, locks and receipts. It never merges, deploys, recovers or
+// changes permissions.
 package ui
 
 import (
@@ -18,6 +20,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"io"
 	"io/fs"
 	"net"
@@ -44,6 +47,12 @@ type Options struct {
 	Demo bool
 	// Port is the loopback port; zero chooses a free one.
 	Port int
+	// SourceRoot is the source checkout work started from the UI runs in, as the
+	// CLI's working directory is for forgecell run and loop; without it the UI
+	// starts no work.
+	SourceRoot string
+	// Resources is the Lab's resource guard (#189) for work started from the UI.
+	Resources *resources.Guard
 }
 
 // Server is a UI listening on 127.0.0.1.
@@ -100,9 +109,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	go func() { done <- s.server.Serve(s.listener) }()
 	select {
 	case <-ctx.Done():
-		// Gate jobs and previews are cancelled first, and no new one starts; the
-		// engine records an interrupted run in the ledger.
-		s.handler.jobs.stop(jobStopGrace)
+		// Gate and run jobs and previews are cancelled first, and the loop drains, and
+		// no new one starts; the engine records an interrupted run in the ledger.
+		s.handler.stopWork(jobStopGrace)
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		// A connection still open after the grace period (for example one a browser
@@ -157,6 +166,11 @@ type handler struct {
 	preview  func(context.Context, delivery.Options) (delivery.PreviewResult, error)
 	publish  func(context.Context, delivery.PublishOptions) (delivery.Receipt, error)
 	jobs     *gateJobs
+	// runIssue and runLoop are the engine calls behind the drive routes; tests
+	// replace them. loop is this UI's single loop slot.
+	runIssue func(context.Context, molecule.Options) (molecule.Record, error)
+	runLoop  func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error)
+	loop     *driveLoop
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -199,7 +213,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs()}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.Run, runLoop: molecule.RunLoop, loop: &driveLoop{}}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -229,15 +243,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusForbidden, "cross-site request refused")
 		return
 	}
-	// GET serves every read; POST is served only on the gate routes.
+	// GET serves every read; POST is served only on the gate and drive routes.
 	gateID, gateAction, gate := gateRoute(r.URL.Path)
-	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !gate) {
-		if gate {
+	driveID, driveAction, drive := driveRoute(r.URL.Path)
+	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive)) {
+		if gate || drive {
 			header.Set("Allow", http.MethodPost)
 		} else {
 			header.Set("Allow", http.MethodGet)
 		}
-		h.refuse(w, http.StatusMethodNotAllowed, "only GET is served here; the only writes are the gate POST routes")
+		h.refuse(w, http.StatusMethodNotAllowed, "only GET is served here; the only writes are the gate and drive POST routes")
 		return
 	}
 	if launch {
@@ -258,7 +273,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost {
 		if !h.writeAllowed(r) {
-			h.refuse(w, http.StatusForbidden, "a gate write needs this server's exact Origin from the same site; nothing was written")
+			h.refuse(w, http.StatusForbidden, "a write needs this server's exact Origin from the same site; nothing was written")
+			return
+		}
+		if drive {
+			h.drive(w, r, driveID, driveAction)
 			return
 		}
 		h.gate(w, r, gateID, gateAction)
@@ -267,6 +286,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch path := r.URL.Path; {
 	case path == "/api/lab":
 		h.lab(w)
+	case path == "/api/loop":
+		h.loopStatus(w)
+	case strings.HasPrefix(path, "/api/runs/"):
+		h.runStatus(w, strings.TrimPrefix(path, "/api/runs/"))
 	case path == "/api/molecules":
 		h.molecules(w, r)
 	case path == "/api/analytics":
@@ -342,11 +365,13 @@ func (h *handler) file(w http.ResponseWriter, name string) {
 }
 
 // LabView is GET /api/lab. ReadOnly is true only for sample data; a real Lab
-// lists the human gates it performs through the engine in Gates.
+// lists the human gates it performs through the engine in Gates, and the work it
+// can start and stop through the engine in Actions.
 type LabView struct {
 	Sample      bool             `json:"sample"`
 	ReadOnly    bool             `json:"readOnly"`
 	Gates       []string         `json:"gates"`
+	Actions     []string         `json:"actions"`
 	Name        string           `json:"name"`
 	Version     string           `json:"version"`
 	Repository  string           `json:"repository"`
@@ -362,7 +387,11 @@ func (h *handler) lab(w http.ResponseWriter) {
 		return
 	}
 	id := formula.ActiveIdentity(h.opts.LabDir)
-	h.json(w, http.StatusOK, LabView{Gates: Gates, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable})
+	actions := []string{}
+	if h.opts.SourceRoot != "" {
+		actions = DriveActions
+	}
+	h.json(w, http.StatusOK, LabView{Gates: Gates, Actions: actions, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable})
 }
 
 func (h *handler) molecules(w http.ResponseWriter, r *http.Request) {

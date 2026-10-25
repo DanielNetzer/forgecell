@@ -1,5 +1,6 @@
-// Forgecell local Lab UI. It reads the Lab, and writes only through the engine's
-// two human gates: exact scope approval and draft PR publication. Every value
+// Forgecell local Lab UI. It reads the Lab, and writes only through the engine:
+// the two human gates (exact scope approval and draft PR publication), starting
+// intake or the loop, and stopping work this UI started. Every value
 // from the API is untrusted and reaches the page only as a text node or a
 // validated attribute: this file never parses data as markup.
 'use strict';
@@ -51,7 +52,7 @@
 
   // gate is the selected Molecule's gate state: one request in flight at most,
   // the last preview shown, and the last job read back from the server.
-  function newGate(id) { return { id: id, pending: false, preview: null, job: null, message: '', title: '', accept: false, timer: null }; }
+  function newGate(id) { return { id: id, pending: false, preview: null, job: null, stop: null, message: '', title: '', accept: false, timer: null }; }
 
   function notRecorded(value) { return value === undefined || value === null || value === '' ? 'Not recorded' : String(value); }
   function short(digest) { return typeof digest === 'string' && digest.length > 12 ? digest.slice(0, 12) + '…' : notRecorded(digest); }
@@ -166,7 +167,7 @@
   // ---- Focus across re-renders ----------------------------------------------
   // Re-rendered controls are found again by these data attributes, or else by
   // their id, so keyboard focus survives a poll that rebuilds them.
-  const FOCUS_KEYS = ['id', 'filter', 'atom', 'origin', 'review', 'evidence', 'gate'];
+  const FOCUS_KEYS = ['id', 'filter', 'atom', 'origin', 'review', 'evidence', 'gate', 'drive'];
   function keepFocus(render) {
     const active = document.activeElement;
     const key = active && active.dataset ? FOCUS_KEYS.find((k) => active.dataset[k] !== undefined) : undefined;
@@ -213,6 +214,155 @@
         el('strong', null, f.formulaId || 'None', f.sha256 ? el('span', { class: 'version-tag', title: f.sha256 }, 'sha256 ' + short(f.sha256)) : null),
         el('small', null, (states[f.state] || notRecorded(f.state)) + (f.decisionId ? ' · decision ' + f.decisionId : '') + '. Applies to future Molecules; existing Molecules keep their saved snapshot.')),
       el('div', { class: 'formula-actions' }, el('span', { class: 'unavailable-tag', title: 'Version history and rollback are not connected in this slice' }, 'Versions & history · Unavailable')));
+    const drives = !sample && Array.isArray(lab.actions) && lab.actions.length > 0;
+    $('.readonly-badge').hidden = drives;
+    if (drives) {
+      ensureDrive();
+      renderDrive();
+      if (!drive.loaded) { drive.loaded = true; readDrive(); }
+    }
+  }
+
+  // ---- Drive: start intake, start or stop the loop ---------------------------
+  // The same contract as the gates: one request in flight, the controls disabled
+  // meanwhile, and after an ambiguous response (none, or a 5xx) the state is read
+  // back and never resubmitted. A run shows as started only once the server's
+  // ledger read-back finds its Molecule; the loop's report comes from the engine.
+  const drive = { panel: null, controls: null, loaded: false, pending: false, message: '', runIssue: null, run: null, loop: null, timer: null, token: 0 };
+
+  async function drivePost(path, body) {
+    const session = tabSession();
+    if (!session || state.sessionLost) throw new SessionError('no session');
+    const res = await fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Forgecell-Session': session, 'Content-Type': 'application/json' }, body: body });
+    if (res.status === 403) throw new SessionError('forbidden');
+    return res;
+  }
+
+  async function submitDrive(path, payload) {
+    if (drive.pending) return null;
+    drive.pending = true;
+    drive.message = '';
+    renderDrive();
+    let res = null, body = {};
+    try {
+      res = await drivePost(path, payload);
+      body = await res.json().catch(() => ({}));
+    } catch (error) {
+      if (error instanceof SessionError) { drive.pending = false; failed(error); renderDrive(); return null; }
+      res = null;
+    }
+    drive.pending = false;
+    if (!res || res.status >= 500) {
+      drive.message = 'The response was lost or ambiguous. The state is read back; nothing is resubmitted.';
+      readDrive();
+      return null;
+    }
+    if (!res.ok) { drive.message = refusalText(body); renderDrive(); return null; }
+    return body;
+  }
+
+  // readDrive reads the loop and the tracked run back; while either runs it reads
+  // again, one timer at a time, and a response older than the newest is dropped.
+  async function readDrive() {
+    clearTimeout(drive.timer);
+    const token = ++drive.token;
+    let loop = drive.loop, run = drive.run;
+    try {
+      const loopRes = await api('/api/loop');
+      loop = loopRes.ok ? await loopRes.json() : null;
+      if (drive.runIssue) {
+        const runRes = await api('/api/runs/' + drive.runIssue);
+        run = runRes.ok ? await runRes.json() : null;
+      }
+    } catch (error) { failed(error); }
+    if (token !== drive.token) return;
+    drive.loop = loop;
+    drive.run = run;
+    const busy = (loop && (loop.state === 'running' || loop.state === 'draining')) || (run && run.state === 'running');
+    if (busy && !state.sessionLost) drive.timer = setTimeout(readDrive, 2000);
+    renderDrive();
+  }
+
+  async function startRun(text) {
+    const value = String(text).trim();
+    if (!/^[1-9][0-9]{0,9}$/.test(value)) { drive.message = 'Enter an Issue number.'; renderDrive(); return; }
+    drive.runIssue = Number(value);
+    drive.run = null;
+    const job = await submitDrive('/api/runs', JSON.stringify({ issue: drive.runIssue }));
+    if (job) { drive.run = job; readDrive(); }
+  }
+
+  async function startLoop(select, max) {
+    const n = Number(max);
+    if (!Number.isInteger(n) || n < 1) { drive.message = 'Enter how many Molecules to advance at once.'; renderDrive(); return; }
+    const loop = await submitDrive('/api/loop/start', JSON.stringify({ select: String(select).trim(), maxConcurrent: n }));
+    if (loop) { drive.loop = loop; readDrive(); }
+  }
+
+  async function stopLoop() {
+    const loop = await submitDrive('/api/loop/stop', '{}');
+    if (loop) { drive.loop = loop; readDrive(); }
+  }
+
+  function ensureDrive() {
+    if (drive.panel) return;
+    const issue = el('input', { type: 'text', inputmode: 'numeric', maxlength: '10', placeholder: 'Issue number', dataset: { drive: 'issue' } });
+    const select = el('input', { type: 'text', maxlength: '256', value: 'oldest', spellcheck: 'false', dataset: { drive: 'select' } });
+    const max = el('input', { type: 'number', min: '1', max: '8', step: '1', value: '1', dataset: { drive: 'max' } });
+    const run = el('button', { type: 'button', class: 'text-button', dataset: { drive: 'run' }, onclick: () => startRun(issue.value) }, 'Start intake');
+    const start = el('button', { type: 'button', class: 'text-button', dataset: { drive: 'start' }, onclick: () => startLoop(select.value, max.value) }, 'Start loop');
+    const stop = el('button', { type: 'button', class: 'text-button', dataset: { drive: 'stop' }, onclick: stopLoop }, 'Stop loop');
+    const status = el('div', { role: 'status' });
+    drive.controls = { run: run, start: start, stop: stop, max: max, status: status };
+    drive.panel = el('div', { class: 'active-formula', id: 'drive-panel' },
+      el('div', null,
+        el('span', { class: 'label' }, 'START WORK · THROUGH THE ENGINE'),
+        el('div', null, el('label', null, 'Issue # ', issue), ' ', run),
+        el('div', null, el('label', null, 'Select ', select), ' ', el('label', null, 'At once ', max), ' ', start, ' ', stop),
+        el('small', null, 'The engine runs the bound harness from this checkout. Intake stops at the scope gate; the loop approves only what the Formula policy approves. Stopping the loop dispatches no new Issue and lets Molecules in flight finish.'),
+        status));
+    $('#active-formula').after(drive.panel);
+  }
+
+  function runText(run) {
+    if (!run) return null;
+    const c = run.canonical || {};
+    let status;
+    if (c.unreadable) status = 'The ledger could not be read back; nothing is shown as started.';
+    else if (run.committed) status = 'The ledger shows Molecule ' + notRecorded(c.moleculeId) + ' · status ' + notRecorded(c.status) + (c.phase ? ' · phase ' + c.phase : '') + '.';
+    else if (run.state === 'running') status = 'Running. Not shown as started until a ledger for this Issue appears' + (c.incomplete ? '; the ledger inventory is incomplete' : '') + '.';
+    else status = 'No ledger from this run was found' + (c.incomplete ? '; the ledger inventory is incomplete' : '') + '.';
+    return el('div', { class: 'gate-job' },
+      el('strong', null, 'Intake · Issue #' + notRecorded(run.issue) + ' · ' + notRecorded(run.state)),
+      el('p', { class: 'scope-note' }, status),
+      run.error ? el('p', { class: 'scope-note' }, (run.category ? run.category + ': ' : '') + run.error + '.') : null,
+      run.committed && c.moleculeId ? el('button', { type: 'button', class: 'text-button', dataset: { drive: 'open' }, onclick: () => select(c.moleculeId) }, 'Open Molecule') : null);
+  }
+
+  function loopText(loop) {
+    if (!loop || loop.state === 'idle') return null;
+    const r = loop.report;
+    const items = r && Array.isArray(r.items) ? r.items : [];
+    let status = '';
+    if (loop.state === 'draining') status = 'Stopping: no new Issue is dispatched; Molecules in flight finish.';
+    else if (loop.state === 'running') status = 'Running. Molecules appear in the grid as their ledgers are written.';
+    else if (r) status = 'Final pass: ' + items.length + ' eligible Issue(s)' + (r.truncated ? ', list truncated' : '') + ' after ' + notRecorded(r.passes) + ' pass(es).';
+    return el('div', { class: 'gate-job' },
+      el('strong', null, 'Loop · ' + notRecorded(loop.state) + (loop.select ? ' · select ' + loop.select : '') + (loop.maxConcurrent ? ' · ' + loop.maxConcurrent + ' at once' : '')),
+      status ? el('p', { class: 'scope-note' }, status) : null,
+      loop.error ? el('p', { class: 'scope-note' }, (loop.category ? loop.category + ': ' : '') + loop.error + '.') : null,
+      items.length ? el('ul', { class: 'diagnostics' }, items.slice(0, 20).map((i) => el('li', null, '#' + notRecorded(i.issue) + ' · ' + notRecorded(i.state) + (i.moleculeId ? ' · ' + i.moleculeId : '') + (i.started ? ' · started intake' : '') + (i.approved ? ' · approved by policy' : '')))) : null);
+  }
+
+  function renderDrive() {
+    if (!drive.panel) return;
+    const c = drive.controls, loop = drive.loop;
+    const looping = Boolean(loop && (loop.state === 'running' || loop.state === 'draining'));
+    c.run.disabled = drive.pending || Boolean(drive.run && drive.run.state === 'running');
+    c.start.disabled = drive.pending || looping;
+    c.stop.disabled = drive.pending || !loop || loop.state !== 'running';
+    if (loop && Number.isInteger(loop.maxConcurrentLimit)) c.max.max = String(loop.maxConcurrentLimit);
+    c.status.replaceChildren(...[drive.pending ? el('p', { class: 'scope-note' }, 'Submitting…') : null, drive.message ? el('p', { class: 'scope-note', role: 'alert' }, drive.message) : null, runText(drive.run), loopText(loop)].filter(Boolean));
   }
 
   // ---- Grid, filters and search -------------------------------------------
@@ -578,6 +728,14 @@
     if (job && state.gate === gate) { gate.job = job; readBack(gate); }
   }
 
+  // stopMolecule posts once; the stop shows as done only when the ledger read back
+  // no longer reports the Molecule running.
+  async function stopMolecule() {
+    const gate = state.gate;
+    const stop = await submitGate('/stop', '{}');
+    if (stop && state.gate === gate) { gate.stop = stop; rerenderGate(gate); loadDetail(gate.id, false); }
+  }
+
   function latestDigest(d) {
     const plans = (d.readiness && d.readiness.plans) || [];
     const last = plans[plans.length - 1];
@@ -639,6 +797,15 @@
           preview.acceptanceUnverified ? el('label', null, el('input', { type: 'checkbox', checked: gate.accept, dataset: { gate: 'accept' }, onchange: (e) => { gate.accept = e.target.checked; } }), ' Independent acceptance is unverified; I reviewed acceptance myself') : null,
           el('button', { type: 'button', class: 'text-button', dataset: { gate: 'publish' }, disabled: state.gate.pending || running, onclick: publishDelivery }, gate.pending ? 'Submitting…' : 'Publish draft PR'),
         ] : null));
+    }
+    const live = d.status === 'running' || d.status === 'allocating';
+    if ((live || gate.stop) && state.lab && Array.isArray(state.lab.actions) && state.lab.actions.length) {
+      let note = 'Stops the engine call this Lab UI runs for this Molecule; its process group is killed and the ledger records the stop. Work run by a loop or the CLI is refused.';
+      if (gate.stop) note = live ? 'Stop requested. Not committed until the ledger no longer shows this Molecule running.' : 'Stopped: the ledger shows status ' + notRecorded(d.status) + (d.phase ? ' · phase ' + d.phase : '') + '. Inspect or re-run it with the forgecell CLI.';
+      parts.push(el('div', { class: 'gate' },
+        el('strong', null, 'Stop this Molecule'),
+        el('p', { class: 'scope-note', role: gate.stop ? 'status' : null }, note),
+        live ? el('button', { type: 'button', class: 'text-button', dataset: { gate: 'stop' }, disabled: gate.pending || Boolean(gate.stop), onclick: stopMolecule }, gate.pending ? 'Submitting…' : 'Stop Molecule') : null));
     }
     if (parts.length === 1) parts.push(el('p', { class: 'scope-note' }, 'No human gate is open for this Molecule. This page updates from the ledger.'));
     if (gate.message) parts.push(el('p', { class: 'scope-note', role: 'alert' }, gate.message));
