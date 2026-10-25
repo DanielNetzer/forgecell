@@ -29,6 +29,9 @@ type InitOptions struct {
 	// pin. Role limits the proposal to the named harnesses.<role> override.
 	Model, Role string
 	ModelSet    bool
+	// RefreshBaseline proposes a baseline-only change: requiredChecks re-derived
+	// from the current pull-request workflows of the approved Formula's repository.
+	RefreshBaseline bool
 }
 
 // Bootstrap budgets: a 15-minute default coding attempt that intake may raise,
@@ -420,6 +423,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			return out, err
 		}
 	}
+	if o.RefreshBaseline && (o.Preferred != "" || o.Rebind != "" || o.MetaHarness != "" || o.MetaCommand != nil || o.ModelSet || o.Role != "" || budgetRequested) {
+		return out, fmt.Errorf("--refresh-baseline changes only requiredChecks; do not combine it with --harness, --rebind, --meta-harness, --meta-command, --model or the timeout flags")
+	}
 	if o.Rebind != "" {
 		if o.Preferred != "" || o.MetaHarness != "" || o.MetaCommand != nil || budgetRequested {
 			return out, fmt.Errorf("--rebind changes only the binding; do not combine it with --harness, --meta-harness, --meta-command or the timeout flags")
@@ -462,6 +468,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if o.Rebind != "" {
 			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before --rebind", formula.ShellWord(o.LabDir), pending.ID)
 		}
+		if o.RefreshBaseline {
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before --refresh-baseline", formula.ShellWord(o.LabDir), pending.ID)
+		}
 		if budgetRequested {
 			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it before proposing a new harness timeout budget")
 		}
@@ -497,6 +506,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if o.Rebind != "" && active.Formula.ID == "" {
 		return out, fmt.Errorf("--rebind needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
 	}
+	if o.RefreshBaseline && active.Formula.ID == "" {
+		return out, fmt.Errorf("--refresh-baseline needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
+	}
 	if o.ModelSet && active.Formula.ID == "" {
 		return out, fmt.Errorf("--model needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
 	}
@@ -505,6 +517,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if e != nil || !approved.Approved {
 			if o.Rebind != "" {
 				return out, fmt.Errorf("--rebind needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
+			}
+			if o.RefreshBaseline {
+				return out, fmt.Errorf("--refresh-baseline needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
 			}
 			if o.ModelSet {
 				return out, fmt.Errorf("--model needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
@@ -522,6 +537,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			return out, nil
 		}
 		active = approved
+	}
+	if o.RefreshBaseline {
+		return proposeBaselineRefresh(ctx, o, out, active)
 	}
 	if o.ModelSet {
 		return proposeModelPin(ctx, o, out, active)
