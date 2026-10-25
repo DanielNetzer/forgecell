@@ -36,8 +36,10 @@ var openBrowser = func(url string) error {
 	return nil
 }
 
-// runUI serves the read-only Lab UI on 127.0.0.1 until ctx is cancelled (SIGINT
-// or SIGTERM in the binary). It only reads the Lab.
+// runUI serves the Lab UI on 127.0.0.1 until ctx is cancelled (SIGINT or SIGTERM
+// in the binary). It reads the Lab, and writes only through the engine's human
+// gates: exact scope approval and draft PR publication. It never merges or
+// deploys.
 func runUI(ctx context.Context, args []string, defaultLab, version string, out, stderr io.Writer) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	flags := flag.NewFlagSet("ui", flag.ContinueOnError)
@@ -62,7 +64,8 @@ func runUI(ctx context.Context, args []string, defaultLab, version string, out, 
 	if *demo {
 		fmt.Fprintln(out, "Forgecell Lab UI · Sample data (synthetic; no Lab is read)")
 	} else {
-		fmt.Fprintf(out, "Forgecell Lab UI · read-only · Lab %s\n", safeText(*lab))
+		fmt.Fprintf(out, "Forgecell Lab UI · Lab %s\n", safeText(*lab))
+		fmt.Fprintln(out, "Writes only through the engine's human gates: exact scope approval and draft PR publication. It never merges or deploys.")
 	}
 	// The URL is always printed, since a browser that cannot read the launch page
 	// (a snap-confined one cannot read the temp directory) needs it pasted.

@@ -1,0 +1,556 @@
+package ui
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"io"
+	"mime"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
+)
+
+// The UI's only writes are three human gates, each a POST through the engine:
+//
+//	POST /api/molecules/{id}/scope              {"digest"}  → molecule.Run(Approve) as a job
+//	POST /api/molecules/{id}/delivery/preview   {}          → delivery.Preview
+//	POST /api/molecules/{id}/delivery/publish   {"digest","title","acceptUnverified"}
+//	                                                        → delivery.Publish (draft PR) as a job
+//	GET  /api/molecules/{id}/job                            → the job and its canonical read-back
+//
+// The engine validates every digest, lock and receipt; the UI only refuses
+// early what the engine would refuse anyway. There is no merge, deployment or
+// permission route. A job's own outcome never shows a decision as committed:
+// the job view reads the ledger or the receipt back on every request.
+
+const (
+	// maxGateBody bounds a gate request body; every gate body is a small object.
+	maxGateBody = 4 << 10
+	// maxGateJobs bounds the job registry; finished jobs are evicted oldest first.
+	maxGateJobs = 64
+	// maxTitleBytes bounds the delivery commit and PR title.
+	maxTitleBytes = 256
+	// maxPreviewDiff bounds the diff text one preview response carries.
+	maxPreviewDiff = 1 << 20
+	// previewTimeout keeps a preview inside the server's write timeout.
+	previewTimeout = 45 * time.Second
+	// jobStopGrace bounds how long a stopping server waits for cancelled jobs.
+	jobStopGrace = 30 * time.Second
+)
+
+// Gates lists the human gates this UI performs through the engine.
+var Gates = []string{"scope approval", "draft publication"}
+
+// gateRoute reports a POST gate path and its Molecule id and action.
+func gateRoute(path string) (id, action string, ok bool) {
+	rest, found := strings.CutPrefix(path, "/api/molecules/")
+	if !found {
+		return "", "", false
+	}
+	id, action, _ = strings.Cut(rest, "/")
+	switch action {
+	case "scope", "delivery/preview", "delivery/publish":
+		return id, action, true
+	}
+	return "", "", false
+}
+
+// writeAllowed is the write protection every gate request needs on top of the
+// cookie and the tab header: the exact server Origin (never absent) and, when
+// the browser sends Fetch Metadata, a same-origin request.
+func (h *handler) writeAllowed(r *http.Request) bool {
+	if r.Header.Get("Origin") != h.origin {
+		return false
+	}
+	site := r.Header.Get("Sec-Fetch-Site")
+	return site == "" || site == "same-origin"
+}
+
+var errGateBody = errors.New("invalid gate request body")
+
+// decodeGate reads one bounded JSON object with no unknown fields and nothing
+// after it.
+func decodeGate(w http.ResponseWriter, r *http.Request, v any) error {
+	if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/json" {
+		return errGateBody
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxGateBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return errGateBody
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errGateBody
+	}
+	return nil
+}
+
+type scopeRequest struct {
+	Digest string `json:"digest"`
+}
+
+type previewRequest struct{}
+
+type publishRequest struct {
+	Digest           string `json:"digest"`
+	Title            string `json:"title"`
+	AcceptUnverified bool   `json:"acceptUnverified"`
+}
+
+// validTitle is the one-line title the engine accepts, bounded here.
+func validTitle(s string) bool {
+	if s == "" || len(s) > maxTitleBytes || strings.TrimSpace(s) != s || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// gateRefusal is a refused gate request: a category the UI keys on and a fixed
+// message. Engine error text, which can name local paths, is never served.
+type gateRefusal struct {
+	Error    string `json:"error"`
+	Category string `json:"category"`
+}
+
+func (h *handler) refuseGate(w http.ResponseWriter, code int, category, message string) {
+	h.json(w, code, gateRefusal{Error: message, Category: category})
+}
+
+// gate serves one POST gate after the write protection has passed.
+func (h *handler) gate(w http.ResponseWriter, r *http.Request, id, action string) {
+	if !moleculeID.MatchString(id) {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "invalid Molecule id")
+		return
+	}
+	if h.opts.Demo {
+		h.refuseGate(w, http.StatusNotFound, "sample", "sample data has no gates; nothing was written")
+		return
+	}
+	var scope scopeRequest
+	var publish publishRequest
+	var body any = &previewRequest{}
+	switch action {
+	case "scope":
+		body = &scope
+	case "delivery/publish":
+		body = &publish
+	}
+	if decodeGate(w, r, body) != nil {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "send one small JSON object with exactly the gate's fields")
+		return
+	}
+	record, err := h.records(h.opts.LabDir, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist):
+		h.refuseGate(w, http.StatusNotFound, "missing", "no such Molecule")
+		return
+	default:
+		h.refuseGate(w, http.StatusUnprocessableEntity, "refused", "the ledger was refused: it is invalid, unsafe, oversized or not this Lab's")
+		return
+	}
+	switch action {
+	case "scope":
+		h.approveScope(w, record, scope)
+	case "delivery/preview":
+		h.previewDelivery(w, record)
+	default:
+		h.publishDelivery(w, record, publish)
+	}
+}
+
+// pendingDigest is the latest plan digest while the Molecule waits for scope
+// approval.
+func pendingDigest(r molecule.Record) (string, bool) {
+	s := r.Readiness
+	if s == nil || s.Phase != "scope-waiting" || len(s.Plans) == 0 {
+		return "", false
+	}
+	return s.Plans[len(s.Plans)-1].Digest, true
+}
+
+// scopeOptions is the engine's human approval call for the recorded Issue, the
+// form forgecell amend --run uses.
+func scopeOptions(lab string, r molecule.Record, digest string) molecule.Options {
+	p := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan
+	return molecule.Options{LabDir: lab, Issue: fmt.Sprintf("%s#%d", r.Issue.Repo, r.Issue.Number), FormulaID: r.FormulaID, Base: p.Inputs.BaseCommit, TargetBranch: p.Inputs.TargetBranch, Approve: digest}
+}
+
+func (h *handler) approveScope(w http.ResponseWriter, r molecule.Record, req scopeRequest) {
+	if !sha256Hex.MatchString(req.Digest) {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "give the exact 64-character plan digest shown")
+		return
+	}
+	digest, pending := pendingDigest(r)
+	if !pending || req.Digest != digest {
+		h.refuseGate(w, http.StatusConflict, "stale", "this plan digest is not the one waiting for approval; reload the Molecule and review the current plan")
+		return
+	}
+	opts := scopeOptions(h.opts.LabDir, r, digest)
+	run := h.runScope
+	h.startJob(w, r.ID, "scope", digest, func(ctx context.Context) error {
+		_, err := run(ctx, opts)
+		return err
+	})
+}
+
+// deliveryOptions binds delivery to the approved plan: its target branch as the
+// PR base and its approved scope as the files.
+func deliveryOptions(lab string, r molecule.Record) (delivery.Options, bool) {
+	if r.Readiness == nil || len(r.Readiness.Plans) == 0 {
+		return delivery.Options{}, false
+	}
+	p := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan
+	o := delivery.Options{LabDir: lab, MoleculeID: r.ID, BaseBranch: p.Inputs.TargetBranch}
+	for _, s := range p.Analysis.Scope {
+		o.Files = append(o.Files, s.Path)
+	}
+	return o, o.BaseBranch != "" && len(o.Files) > 0
+}
+
+// PreviewView is POST …/delivery/preview: delivery.Preview with its diff
+// bounded and redacted. Digest is the value publication must send back.
+type PreviewView struct {
+	Digest               string   `json:"digest"`
+	MoleculeID           string   `json:"moleculeId"`
+	Repo                 string   `json:"repo"`
+	BaseBranch           string   `json:"baseBranch"`
+	BaseCommit           string   `json:"baseCommit"`
+	Branch               string   `json:"branch"`
+	Tree                 string   `json:"tree"`
+	Files                []string `json:"files"`
+	AcceptanceUnverified bool     `json:"acceptanceUnverified"`
+	Diff                 string   `json:"diff"`
+	DiffBytes            int      `json:"diffBytes"`
+	DiffTruncated        bool     `json:"diffTruncated"`
+}
+
+func previewView(lab string, r molecule.Record, p delivery.PreviewResult) PreviewView {
+	x := newRedactor(lab, r)
+	text := x.text(p.Diff)
+	diff := cutRedacted(text, maxPreviewDiff)
+	files := make([]string, 0, len(p.Files))
+	for _, f := range p.Files {
+		files = append(files, x.text(f))
+	}
+	return PreviewView{Digest: p.Digest, MoleculeID: p.MoleculeID, Repo: p.Repo, BaseBranch: p.BaseBranch, BaseCommit: p.BaseCommit, Branch: p.Branch, Tree: p.Tree, Files: files, AcceptanceUnverified: p.AcceptanceUnverified, Diff: diff, DiffBytes: len(p.Diff), DiffTruncated: len(text) > maxPreviewDiff}
+}
+
+func (h *handler) previewDelivery(w http.ResponseWriter, r molecule.Record) {
+	opts, ok := deliveryOptions(h.opts.LabDir, r)
+	if !ok {
+		h.refuseGate(w, http.StatusConflict, "not-ready", "this Molecule has no approved plan with a target branch and file scope to deliver")
+		return
+	}
+	if h.jobs.busy(r.ID) {
+		h.refuseGate(w, http.StatusConflict, "busy", "a gate job is still running for this Molecule; wait for it and read its result")
+		return
+	}
+	ctx, cancel := context.WithTimeout(h.jobs.ctx, previewTimeout)
+	defer cancel()
+	p, err := h.preview(ctx, opts)
+	if err != nil {
+		state, category, message := classify(err)
+		code := http.StatusConflict
+		if state == "interrupted" {
+			code = http.StatusServiceUnavailable
+		} else if category == "refused" || category == "demo" {
+			code = http.StatusUnprocessableEntity
+		}
+		h.refuseGate(w, code, category, message)
+		return
+	}
+	h.json(w, http.StatusOK, previewView(h.opts.LabDir, r, p))
+}
+
+func (h *handler) publishDelivery(w http.ResponseWriter, r molecule.Record, req publishRequest) {
+	if !sha256Hex.MatchString(req.Digest) || !validTitle(req.Title) {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "give the exact 64-character preview digest and a one-line title of at most 256 bytes")
+		return
+	}
+	opts, ok := deliveryOptions(h.opts.LabDir, r)
+	if !ok {
+		h.refuseGate(w, http.StatusConflict, "not-ready", "this Molecule has no approved plan with a target branch and file scope to deliver")
+		return
+	}
+	publish := delivery.PublishOptions{Options: opts, Approve: req.Digest, Title: req.Title, AcceptUnverified: req.AcceptUnverified}
+	run := h.publish
+	h.startJob(w, r.ID, "publish", req.Digest, func(ctx context.Context) error {
+		_, err := run(ctx, publish)
+		return err
+	})
+}
+
+func (h *handler) startJob(w http.ResponseWriter, id, kind, digest string, run func(context.Context) error) {
+	job, err := h.jobs.start(id, kind, digest, run)
+	switch {
+	case errors.Is(err, errGateBusy):
+		h.refuseGate(w, http.StatusConflict, "busy", "a gate job is already running for this Molecule; this submission was not started")
+		return
+	case errors.Is(err, errGateFull):
+		h.refuseGate(w, http.StatusServiceUnavailable, "busy", "too many gate jobs are running; nothing was started")
+		return
+	case err != nil:
+		h.refuseGate(w, http.StatusServiceUnavailable, "stopped", "the Lab UI is stopping; nothing was started")
+		return
+	}
+	h.json(w, http.StatusAccepted, h.jobView(id, job.snapshot(&h.jobs.mu)))
+}
+
+// classify maps an engine error to a job state, a category and a fixed
+// message. The error text itself is never served or logged.
+func classify(err error) (state, category, message string) {
+	if err == nil {
+		return "finished", "", ""
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "interrupted", "interrupted", "the request was interrupted before the engine finished; the canonical state was read back"
+	}
+	if errors.Is(err, delivery.ErrDemoLab) {
+		return "refused", "demo", "this is a forgecell demo Lab; it never contacts GitHub"
+	}
+	text := err.Error()
+	has := func(parts ...string) bool {
+		for _, p := range parts {
+			if strings.Contains(text, p) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("PR reconciliation required"):
+		return "reconciliation-required", "reconciliation", "the pull request outcome is uncertain; the receipt was read back and nothing is retried. Reconcile it with the forgecell CLI"
+	case has("is locked", "lock could not be taken", "delivery lock exists"):
+		return "refused", "locked", "the Molecule or its delivery is locked by another command or a loop; nothing is retried. Wait for it to finish"
+	case has("resume must match the recorded review content"):
+		return "refused", "receipt-mismatch", "the recorded delivery receipt was reviewed with a different digest, title or file scope; nothing was published"
+	case has("independent acceptance is unverified", "lacks explicit acceptance review"):
+		return "refused", "acceptance-unverified", "independent acceptance is unverified; explicit human acceptance review is required before publication"
+	case has("approval is stale", "approval requires the exact pending plan digest", "no Molecule matches this approval digest", "readiness inputs changed", "prepared content changed", "issue or Formula changed", "source base changed", "pending workspace changed", "review required", "differs from reviewed", "differs from verified"):
+		return "refused", "stale", "the reviewed content or plan changed; reload the Molecule and review it again"
+	}
+	return "refused", "refused", "the engine refused the request; run the matching forgecell command for details. Nothing else was attempted"
+}
+
+// GateJobView is GET /api/molecules/{id}/job and every accepted gate response.
+// Committed comes only from the canonical read-back, never from State.
+type GateJobView struct {
+	Kind      string        `json:"kind"`
+	Digest    string        `json:"digest"`
+	State     string        `json:"state"`
+	Category  string        `json:"category,omitempty"`
+	Error     string        `json:"error,omitempty"`
+	Committed bool          `json:"committed"`
+	Canonical CanonicalView `json:"canonical"`
+}
+
+// CanonicalView is the ledger (scope) or receipt (publish) state as read back.
+type CanonicalView struct {
+	Source     string `json:"source"`
+	Unreadable bool   `json:"unreadable,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	Approved   bool   `json:"approved,omitempty"`
+	Receipt    string `json:"receipt,omitempty"`
+	Lifecycle  string `json:"lifecycle,omitempty"`
+	Published  bool   `json:"published,omitempty"`
+	URL        string `json:"url,omitempty"`
+}
+
+// jobView reads the canonical state back. Scope is committed once the ledger
+// records the approval of exactly the submitted digest; publication once a
+// receipt is committed or published with a lifecycle observation.
+func (h *handler) jobView(id string, j jobSnapshot) GateJobView {
+	v := GateJobView{Kind: j.kind, Digest: j.digest, State: j.state, Category: j.category, Error: j.message}
+	record, err := h.records(h.opts.LabDir, id)
+	if j.kind == "scope" {
+		v.Canonical.Source = "ledger"
+		if err != nil {
+			v.Canonical.Unreadable = true
+			return v
+		}
+		v.Canonical.Phase = phase(record)
+		if record.Readiness != nil {
+			for _, e := range record.Readiness.Events {
+				if e.Kind == "approved" && e.Digest == j.digest {
+					v.Canonical.Approved = true
+				}
+			}
+		}
+		v.Committed = v.Canonical.Approved
+		return v
+	}
+	v.Canonical.Source = "receipt"
+	s, found, rerr := h.receipts(h.opts.LabDir, id)
+	if rerr != nil {
+		v.Canonical.Unreadable = true
+		return v
+	}
+	if !found {
+		return v
+	}
+	v.Canonical.Receipt, v.Canonical.Lifecycle = s.State, s.Lifecycle
+	v.Canonical.Published = s.State == "published"
+	if err == nil && pullURL(s.URL, record.Issue.Repo) {
+		v.Canonical.URL = s.URL
+	}
+	// A receipt left by an earlier attempt is not this decision's commit: a refused
+	// or failed publish never shows as committed, whatever the receipt says.
+	ownOutcome := j.state == "finished" || j.state == "reconciliation-required"
+	v.Committed = ownOutcome && (s.State == "committed" || s.State == "published") && s.Lifecycle != ""
+	return v
+}
+
+func (h *handler) job(w http.ResponseWriter, id string) {
+	j, ok := h.jobs.get(id)
+	if !ok {
+		h.refuseGate(w, http.StatusNotFound, "none", "no gate job was started for this Molecule by this Lab UI")
+		return
+	}
+	h.json(w, http.StatusOK, h.jobView(id, j))
+}
+
+var (
+	errGateBusy    = errors.New("a gate job is running for this Molecule")
+	errGateFull    = errors.New("the gate job registry is full")
+	errGateStopped = errors.New("the Lab UI is stopping")
+)
+
+// gateJobs is the in-memory registry: at most one running job per Molecule and
+// maxGateJobs jobs in all. Jobs run on a context detached from requests and
+// cancelled when the server stops.
+type gateJobs struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	jobs   map[string]*gateJob
+	order  []string
+}
+
+type gateJob struct {
+	kind, digest string
+	// done is closed when the engine call has returned and the state is set.
+	done                     chan struct{}
+	state, category, message string
+}
+
+type jobSnapshot struct{ kind, digest, state, category, message string }
+
+func (j *gateJob) snapshot(mu *sync.Mutex) jobSnapshot {
+	mu.Lock()
+	defer mu.Unlock()
+	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message}
+}
+
+func newGateJobs() *gateJobs {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &gateJobs{ctx: ctx, cancel: cancel, jobs: map[string]*gateJob{}}
+}
+
+func (g *gateJobs) start(id, kind, digest string, run func(context.Context) error) (*gateJob, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ctx.Err() != nil {
+		return nil, errGateStopped
+	}
+	if j := g.jobs[id]; j != nil && j.state == "running" {
+		return nil, errGateBusy
+	}
+	if g.jobs[id] == nil && len(g.jobs) >= maxGateJobs && !g.evict() {
+		return nil, errGateFull
+	}
+	g.forget(id)
+	j := &gateJob{kind: kind, digest: digest, done: make(chan struct{}), state: "running"}
+	g.jobs[id] = j
+	g.order = append(g.order, id)
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		defer close(j.done)
+		state, category, message := classify(guarded(g.ctx, run))
+		g.mu.Lock()
+		j.state, j.category, j.message = state, category, message
+		g.mu.Unlock()
+	}()
+	return j, nil
+}
+
+var errGatePanic = errors.New("the engine call failed unexpectedly")
+
+// guarded runs one engine call; a panic becomes a refusal instead of stopping
+// the server.
+func guarded(ctx context.Context, run func(context.Context) error) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errGatePanic
+		}
+	}()
+	return run(ctx)
+}
+
+// evict drops the oldest finished job; it reports false when every job runs.
+func (g *gateJobs) evict() bool {
+	for _, id := range g.order {
+		if g.jobs[id].state != "running" {
+			g.forget(id)
+			return true
+		}
+	}
+	return false
+}
+
+func (g *gateJobs) forget(id string) {
+	delete(g.jobs, id)
+	for i, v := range g.order {
+		if v == id {
+			g.order = append(g.order[:i], g.order[i+1:]...)
+			break
+		}
+	}
+}
+
+func (g *gateJobs) get(id string) (jobSnapshot, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	j := g.jobs[id]
+	if j == nil {
+		return jobSnapshot{}, false
+	}
+	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message}, true
+}
+
+func (g *gateJobs) busy(id string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	j := g.jobs[id]
+	return j != nil && j.state == "running"
+}
+
+// stop cancels every job and waits for them, at most grace.
+func (g *gateJobs) stop(grace time.Duration) {
+	g.mu.Lock()
+	g.cancel()
+	g.mu.Unlock()
+	done := make(chan struct{})
+	go func() { g.wg.Wait(); close(done) }()
+	t := time.NewTimer(grace)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
+}

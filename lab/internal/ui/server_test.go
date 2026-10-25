@@ -39,6 +39,7 @@ type request struct {
 	method, path, origin, host, site string
 	cookie                           *http.Cookie
 	header                           map[string]string
+	body                             string
 }
 
 // theSession stands for the handler's own session secret in a request cookie,
@@ -55,7 +56,7 @@ func do(t *testing.T, h http.Handler, r request) *httptest.ResponseRecorder {
 	if r.method == "" {
 		r.method = http.MethodGet
 	}
-	req := httptest.NewRequest(r.method, "http://"+testHost+r.path, nil)
+	req := httptest.NewRequest(r.method, "http://"+testHost+r.path, strings.NewReader(r.body))
 	req.Host = testHost
 	if r.host != "" {
 		req.Host = r.host
@@ -225,13 +226,29 @@ func TestUIRefusesForeignOriginAndHost(t *testing.T) {
 	}
 }
 
+// Every route except the three gate routes serves GET only; the gate routes
+// serve POST only. A same-origin POST elsewhere is still refused.
 func TestUIServesGetOnlyWithSecurityHeaders(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir()})
-	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions} {
-		r := authed("/api/molecules")
-		r.method = method
-		if w := do(t, h, r); w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodGet {
-			t.Errorf("%s: %d", method, w.Code)
+	for _, path := range []string{"/", "/api/lab", "/api/molecules", "/api/molecules/m1", "/api/molecules/m1/job", "/api/molecules/m1/ledger", "/api/molecules/m1/delivery", "/api/molecules/m1/merge", "/api/molecules/m1/delivery/merge", "/api/molecules/m1/x/scope"} {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions} {
+			r := authed(path)
+			r.method, r.origin = method, "http://"+testHost
+			if w := do(t, h, r); w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodGet {
+				t.Errorf("%s %s: %d", method, path, w.Code)
+			}
+		}
+	}
+	for _, path := range []string{"/api/molecules/m1/scope", "/api/molecules/m1/delivery/preview", "/api/molecules/m1/delivery/publish"} {
+		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions} {
+			r := authed(path)
+			r.method = method
+			if w := do(t, h, r); w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodPost {
+				t.Errorf("%s %s: %d", method, path, w.Code)
+			}
+		}
+		if w := do(t, h, authed(path)); w.Code != http.StatusNotFound {
+			t.Errorf("GET %s: %d", path, w.Code)
 		}
 	}
 	for _, path := range []string{"/", "/api/lab", "/api/molecules", "/nope"} {
@@ -479,7 +496,7 @@ func TestUILabIdentityWithoutAFormula(t *testing.T) {
 	lab := t.TempDir()
 	var v LabView
 	decode(t, do(t, testHandler(t, Options{LabDir: lab, Version: "v9"}), authed("/api/lab")), &v)
-	if v.Sample || !v.ReadOnly || v.Version != "v9" || v.Name != filepath.Base(lab) || v.Formula.State != "none" || len(v.Unavailable) == 0 {
+	if v.Sample || v.ReadOnly || len(v.Gates) != 2 || v.Version != "v9" || v.Name != filepath.Base(lab) || v.Formula.State != "none" || len(v.Unavailable) == 0 {
 		t.Fatalf("lab %+v", v)
 	}
 	if err := os.WriteFile(filepath.Join(lab, ".formula-write.lock"), nil, 0600); err != nil {
@@ -508,19 +525,34 @@ func snapshot(t *testing.T, dir string) string {
 	return b.String()
 }
 
+// Reads, writes to non-gate routes and unauthenticated or forged gate writes
+// never change the Lab and never reach the engine. Only gates_test.go covers
+// accepted gate writes, through engine seams.
 func TestUINeverWritesTheLab(t *testing.T) {
 	lab, r := labFixture(t)
 	writeReceipt(t, lab, r.ID, "published", "OPEN")
 	before := snapshot(t, lab)
 	h := testHandler(t, Options{LabDir: lab})
-	for _, path := range []string{"/", "/app.js", "/style.css", "/api/lab", "/api/molecules", "/api/molecules/" + r.ID, "/api/molecules/" + r.ID + "?yaml=1"} {
+	engine := refuseEngine(t, h)
+	for _, path := range []string{"/", "/app.js", "/style.css", "/api/lab", "/api/molecules", "/api/molecules/" + r.ID, "/api/molecules/" + r.ID + "?yaml=1", "/api/molecules/" + r.ID + "/job"} {
 		do(t, h, authed(path))
 		post := authed(path)
-		post.method = http.MethodPost
+		post.method, post.origin = http.MethodPost, "http://"+testHost
 		do(t, h, post)
+	}
+	body := `{"digest":"` + strings.Repeat("a", 64) + `","title":"t"}`
+	for _, action := range []string{"scope", "delivery/preview", "delivery/publish"} {
+		for name, forged := range forgedWrites("/api/molecules/"+r.ID+"/"+action, body) {
+			if w := do(t, h, forged); w.Code != http.StatusForbidden {
+				t.Errorf("%s %s: %d", name, action, w.Code)
+			}
+		}
 	}
 	if after := snapshot(t, lab); after != before {
 		t.Fatalf("the UI changed the Lab:\n%s\n---\n%s", before, after)
+	}
+	if n := engine.calls(); n != 0 {
+		t.Fatalf("refused writes reached the engine %d times", n)
 	}
 }
 
