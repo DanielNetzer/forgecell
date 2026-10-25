@@ -77,8 +77,9 @@ func TestSliceBAnalysisInstructionNamesLineRanges(t *testing.T) {
 	if !strings.Contains(analysisInstruction, sentence) {
 		t.Fatal("analysis instruction lacks the line-range sentence")
 	}
-	if AdapterProtocolVersion != "5" {
-		t.Fatalf("the line-range instruction is adapter protocol 5, not %q", AdapterProtocolVersion)
+	// The line-range instruction arrived in adapter protocol 5; later versions keep it.
+	if v := AdapterProtocolVersion; v == "2" || v == "3" || v == "4" {
+		t.Fatalf("the line-range instruction is adapter protocol 5 or later, not %q", v)
 	}
 	// Cursor ticket analysis is unavailable, so only the analysis-capable adapters carry it.
 	for _, id := range []string{"codex", "claude-code"} {

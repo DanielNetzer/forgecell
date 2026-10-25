@@ -17,6 +17,7 @@ var adapterContractDigests = map[string]string{
 	"3": "e6b8d50990a38664b0fa8c5248a4f1ed734ad4e20c208b7fc496fb05f1c5bf41",
 	"4": "1fc9b2bc45c047ebe028ea02753265786e8d43f83bd6b6bda3948bbf5f376208",
 	"5": "7be0c738aec6dea76f8a4d64dd61f4bb8c4d0326533bb3d38c458e37fb80435f",
+	"6": "65f4a5f18b8bcdcd538ab3ac5ce44c26de3fd62ebd07c8577f3413f14fc0e2fb",
 }
 
 func adapterContractDigest(t *testing.T) string {
@@ -37,6 +38,8 @@ func adapterContractDigest(t *testing.T) string {
 			{"molecule+extensions", codingWithExtensions}, {"ticket-analysis+extensions", analysisWithExtensions},
 			{"molecule+model", codingWithModel}, {"ticket-analysis+model", map[string]any{"kind": "ticket-analysis", "harnessModel": "model-fixture"}},
 			{"formula-improvement+model", map[string]any{"kind": "formula-improvement", "harnessModel": "model-fixture"}},
+			{"review", map[string]any{"kind": ReviewKind}}, {"review+extensions", map[string]any{"kind": ReviewKind, "mcpServers": servers}},
+			{"review+model", map[string]any{"kind": ReviewKind, "harnessModel": "model-fixture"}},
 		} {
 			call, err := BuildInvocation(id, c.request, "/fixture/result")
 			if err != nil {
