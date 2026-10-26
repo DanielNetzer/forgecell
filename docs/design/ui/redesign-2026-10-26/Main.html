@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forgecell · Inbox</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-400.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 500 600; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-500.woff2") format("woff2"); }
+body { margin: 0; background: #F3F2E8; }
+a { color: #1E4D3B; } a:hover { color: #123327; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 12px; font: 500 14px/1 "Instrument Sans", system-ui, sans-serif; text-decoration: none; cursor: pointer; transition: background-color .15s, border-color .15s, box-shadow .15s, transform .15s; touch-action: manipulation; }
+.btn:focus-visible, .nav a:focus-visible, .seg:focus-visible { outline: 2px solid #14523C; outline-offset: 3px; }
+.btn-primary { background: #1E4D3B; color: #FFFEF8; border: 1px solid #1E4D3B; box-shadow: inset 0 1px 0 #ffffff26, 0 1px 2px #12332733, 0 4px 12px #1e4d3b26; }
+.btn-primary:hover { background: #173E30; color: #FFFEF8; transform: translateY(-1px); }
+.btn-secondary { background: #FFFEF8; color: #1E4D3B; border: 1px solid #B9CCBA; }
+.btn-secondary:hover { border-color: #1E4D3B; color: #123327; background: #FFFFFF; }
+.btn-ghost { background: transparent; color: #1E4D3B; border: 1px solid transparent; }
+.btn-ghost:hover { background: #1e4d3b0f; }
+.nav a { display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 12px; border-radius: 12px; color: #3E5448; text-decoration: none; font-size: 14px; }
+.nav a:hover { background: #1e4d3b0d; color: #183E32; }
+@media (prefers-reduced-motion: reduce) { .btn { transition: none; } .btn-primary:hover { transform: none; } }
+</style>
+</helmet>
+<div style="position: relative; min-height: 1180px; overflow: hidden; font-family: 'Instrument Sans', system-ui, sans-serif; color: #183E32; background: radial-gradient(ellipse 60% 50% at 88% 0%, #cfe9de 0%, transparent 60%), radial-gradient(ellipse 50% 45% at 0% 100%, #e3ecd7 0%, transparent 60%), #F3F2E8;">
+
+<img src="../../../../lab/internal/ui/web/assets/glasshouse-fern.webp" alt="" aria-hidden="true" width="300" height="450" style="position: absolute; left: -96px; top: 210px; width: 300px; height: 450px; opacity: .55; pointer-events: none;">
+<img src="../../../../lab/internal/ui/web/assets/orchid-maidenhair.webp" alt="" aria-hidden="true" width="360" height="300" style="position: absolute; right: -110px; bottom: -40px; width: 360px; height: 300px; opacity: .5; pointer-events: none;">
+
+<header style="position: relative; display: flex; align-items: center; gap: 20px; height: 72px; padding: 0 32px; border-bottom: 1px solid #1e4d3b14; background: #fbfaf3cc; backdrop-filter: blur(16px) saturate(160%);">
+  <div style="display: flex; align-items: center; gap: 10px;">
+    <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="5" r="4" fill="#239F89"></circle><circle cx="5" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="21" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="13" cy="21" r="4" fill="#1E4D3B"></circle></svg>
+    <span style="font-size: 19px; font-weight: 600; letter-spacing: -0.01em;">Forgecell</span>
+  </div>
+  <span aria-hidden="true" style="width: 1px; height: 24px; background: #1e4d3b26;"></span>
+  <a href="https://github.com/DanielNetzer/forgecell" style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #3E5448; text-decoration: none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h12"></path></svg>DanielNetzer / forgecell</a>
+  <div style="flex: 1;"></div>
+  <div style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 6px 0 14px; border-radius: 999px; background: #FFFEF8; border: 1px solid #D9E3D6; font-size: 13px;">
+    <span style="display: inline-flex; align-items: center; gap: 8px; color: #3E5448;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #9FB3A6;"></span>Loop is idle</span>
+    <a class="btn btn-ghost" href="#run-loop" style="height: 30px; padding: 0 12px; font-size: 13px; border-radius: 999px;">Start loop</a>
+  </div>
+  <button type="button" aria-label="Operator: Daniel Netzer" title="Daniel Netzer" style="width: 40px; height: 40px; border-radius: 50%; border: 1px solid #1E4D3B; background: #1E4D3B; color: #FFFEF8; font: 600 14px 'Instrument Sans', system-ui, sans-serif; cursor: pointer;">DN</button>
+</header>
+
+<div style="position: relative; display: flex; flex-wrap: wrap; gap: 32px; max-width: 1376px; margin: 0 auto; padding: 32px;">
+
+  <nav class="nav" aria-label="Lab" style="flex: 0 0 216px; display: flex; flex-direction: column; gap: 4px;">
+    <a href="Main.dc.html" aria-current="page" style="background: #FFFEF8; color: #183E32; font-weight: 500; box-shadow: 0 1px 2px #1a3a2a14; border: 1px solid #D9E3D6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 13l3-8h10l3 8v6H4z"></path><path d="M4 13h5l1 2h4l1-2h5"></path></svg>Inbox<span style="margin-left: auto; min-width: 22px; height: 22px; padding: 0 7px; border-radius: 999px; background: #F6E7C8; color: #7A5410; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-variant-numeric: tabular-nums;">2</span></a>
+    <a href="Issues.dc.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><circle cx="12" cy="12" r="2"></circle></svg>Issues<span style="margin-left: auto; color: #6B7F72; font-size: 12px; font-variant-numeric: tabular-nums;">38</span></a>
+    <a href="#work"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="2"></rect><rect x="13" y="4" width="7" height="7" rx="2"></rect><rect x="4" y="13" width="7" height="7" rx="2"></rect><rect x="13" y="13" width="7" height="7" rx="2"></rect></svg>Work<span style="margin-left: auto; color: #6B7F72; font-size: 12px; font-variant-numeric: tabular-nums;">35</span></a>
+    <a href="#insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg>Insights</a>
+    <a href="#formula"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 4h12v16H6z"></path><path d="M9 8h6M9 12h6M9 16h3"></path></svg>Formula</a>
+    <div style="margin-top: 24px; padding: 14px; border-radius: 14px; background: #fffef8b3; border: 1px solid #D9E3D6; font-size: 12px; line-height: 1.5; color: #56695E;">
+      <div style="font-weight: 600; color: #183E32; margin-bottom: 4px;">Formula v12 · active</div>
+      Claude Code codes · Claude Code reviews (read-only) · 7 required checks
+    </div>
+  </nav>
+
+  <main id="main" style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 28px;">
+
+    <section style="display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap;">
+      <div>
+        <h1 style="margin: 0; font-size: 34px; font-weight: 500; letter-spacing: -0.02em; text-wrap: balance;">Good afternoon, Daniel</h1>
+        <p style="margin: 6px 0 0; font-size: 15px; color: #56695E;"><strong style="color: #7A5410; font-weight: 600;">2 things need you</strong> · 1 running · nothing blocked · 32 merged this month</p>
+      </div>
+      <a class="btn btn-secondary" href="Issues.dc.html"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Pick an Issue</a>
+    </section>
+
+    <section aria-labelledby="needs-you" style="display: flex; flex-direction: column; gap: 14px;">
+      <h2 id="needs-you" style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #6B7F72;">Needs you</h2>
+
+      <article style="display: flex; gap: 20px; align-items: center; padding: 22px 24px; border-radius: 20px; background: #fffef8e6; backdrop-filter: blur(20px) saturate(160%); border: 1px solid #1e4d3b1f; box-shadow: inset 0 1px 0 #ffffffd9, 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a12;">
+        <div aria-hidden="true" style="flex: 0 0 48px; height: 48px; border-radius: 14px; background: #F6E7C8; display: flex; align-items: center; justify-content: center;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#7A5410" stroke-width="1.8"><path d="M9 4h6M8 4h8v4l-3 4 3 4v4H8v-4l3-4-3-4z"></path></svg></div>
+        <div style="flex: 1; min-width: 0;">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span style="display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: #F6E7C8; color: #7A5410; font-size: 12px; font-weight: 600;">Plan ready for your approval</span>
+            <span style="font-size: 13px; color: #6B7F72;">#245 · planned 12 min ago</span>
+          </div>
+          <h3 style="margin: 8px 0 4px; font-size: 18px; font-weight: 500; line-height: 1.35;">Let a Formula turn on in-loop review</h3>
+          <p style="margin: 0; font-size: 14px; color: #56695E;">Adds <code style="font-size: 13px;">init --enable-review</code> · 5 files · 7 checks · usually 30–45 min to code and check</p>
+        </div>
+        <div style="display: flex; gap: 10px; flex: 0 0 auto;">
+          <a class="btn btn-primary" href="Plan.dc.html">Review plan<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></a>
+        </div>
+      </article>
+
+      <article style="display: flex; gap: 20px; align-items: center; padding: 22px 24px; border-radius: 20px; background: #fffef8e6; backdrop-filter: blur(20px) saturate(160%); border: 1px solid #1e4d3b1f; box-shadow: inset 0 1px 0 #ffffffd9, 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a12;">
+        <div aria-hidden="true" style="flex: 0 0 48px; height: 48px; border-radius: 14px; background: #DCEFE9; display: flex; align-items: center; justify-content: center;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1F6F60" stroke-width="1.8"><path d="M6 12l4 4 8-9"></path></svg></div>
+        <div style="flex: 1; min-width: 0;">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span style="display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: #DCEFE9; color: #1F5F52; font-size: 12px; font-weight: 600;">Ready to publish</span>
+            <span style="font-size: 13px; color: #6B7F72;">#241 · checks finished 3 min ago</span>
+          </div>
+          <h3 style="margin: 8px 0 4px; font-size: 18px; font-weight: 500; line-height: 1.35;">UI polish: Start Work controls, lane bar, sharper glass</h3>
+          <p style="margin: 0; font-size: 14px; color: #56695E;"><span style="color: #1F5F52; font-weight: 500;">7 of 7 checks passed</span> · review found nothing blocking · +412 −96 in 4 files</p>
+        </div>
+        <div style="display: flex; gap: 10px; flex: 0 0 auto;">
+          <a class="btn btn-primary" href="#publish">Review &amp; publish<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></a>
+        </div>
+      </article>
+
+      <article style="display: flex; gap: 20px; align-items: center; padding: 18px 24px; border-radius: 20px; background: #fffef880; border: 1px dashed #C7D5C8;">
+        <div aria-hidden="true" style="flex: 0 0 48px; height: 48px; border-radius: 14px; background: #F4DDD5; display: flex; align-items: center; justify-content: center;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#9A3B27" stroke-width="1.8"><path d="M12 8v5M12 16h.01"></path><path d="M10.3 4.3L2.6 18a2 2 0 001.7 3h15.4a2 2 0 001.7-3L13.7 4.3a2 2 0 00-3.4 0z"></path></svg></div>
+        <div style="flex: 1; min-width: 0;">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span style="display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: #F4DDD5; color: #8A3322; font-size: 12px; font-weight: 600;">Example · blocked</span>
+            <span style="font-size: 13px; color: #6B7F72;">how a blocked Molecule appears, with its fix</span>
+          </div>
+          <h3 style="margin: 8px 0 4px; font-size: 18px; font-weight: 500; line-height: 1.35;">2 existing tests changed on purpose</h3>
+          <p style="margin: 0; font-size: 14px; color: #56695E;">All new checks pass. Old versions of 2 tests fail because this change intends it.</p>
+        </div>
+        <div style="display: flex; gap: 10px; flex: 0 0 auto;">
+          <a class="btn btn-secondary" href="#accept">Review 2 test changes</a>
+        </div>
+      </article>
+    </section>
+
+    <section aria-labelledby="in-progress" style="display: flex; flex-direction: column; gap: 14px;">
+      <h2 id="in-progress" style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #6B7F72;">In progress</h2>
+      <article style="padding: 20px 24px; border-radius: 20px; background: #fffef8cc; border: 1px solid #1e4d3b1a; box-shadow: 0 1px 2px #1a3a2a0f;">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+          <span style="font-size: 13px; color: #6B7F72; font-variant-numeric: tabular-nums;">#244</span>
+          <h3 style="margin: 0; flex: 1; min-width: 0; font-size: 16px; font-weight: 500;">Say clearly when the coding agent isn’t signed in</h3>
+          <span style="font-size: 13px; color: #1F5F52;">Coding · 18 min</span>
+          <a class="btn btn-ghost" href="#watch" style="height: 34px; font-size: 13px;">Watch</a>
+        </div>
+        <ol aria-label="Progress" style="list-style: none; margin: 16px 0 0; padding: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px;">
+          <li style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #3E5448;"><span style="height: 6px; border-radius: 999px; background: #1E4D3B;"></span>Plan</li>
+          <li style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #3E5448;"><span style="height: 6px; border-radius: 999px; background: #1E4D3B;"></span>Approved</li>
+          <li aria-current="step" style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #183E32; font-weight: 600;"><span style="height: 6px; border-radius: 999px; background: linear-gradient(90deg, #239F89 55%, #D6E6DD 55%);"></span>Coding</li>
+          <li style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Checks</li>
+          <li style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Review</li>
+          <li style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Draft PR</li>
+          <li style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Merged</li>
+        </ol>
+      </article>
+    </section>
+
+    <section aria-labelledby="recent" style="display: flex; flex-direction: column; gap: 10px;">
+      <h2 id="recent" style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #6B7F72;">Recently merged</h2>
+      <div style="border-radius: 16px; background: #fffef8b3; border: 1px solid #1e4d3b14; overflow: hidden;">
+        <a href="#m236" style="display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 20px; text-decoration: none; color: #183E32; border-bottom: 1px solid #1e4d3b0f;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #2D5B46;"></span><span style="font-size: 13px; color: #6B7F72; width: 44px; font-variant-numeric: tabular-nums;">#236</span><span style="flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Retire stale Molecules from the CLI and the browser</span><span style="font-size: 13px; color: #6B7F72;">PR #240 · today</span></a>
+        <a href="#m231" style="display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 20px; text-decoration: none; color: #183E32; border-bottom: 1px solid #1e4d3b0f;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #2D5B46;"></span><span style="font-size: 13px; color: #6B7F72; width: 44px; font-variant-numeric: tabular-nums;">#231</span><span style="flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Accept by-design test changes with one reviewed command</span><span style="font-size: 13px; color: #6B7F72;">PR #234 · today</span></a>
+        <a href="#m232" style="display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 20px; text-decoration: none; color: #183E32;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #2D5B46;"></span><span style="font-size: 13px; color: #6B7F72; width: 44px; font-variant-numeric: tabular-nums;">#232</span><span style="flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Queue checks so parallel work never overloads the machine</span><span style="font-size: 13px; color: #6B7F72;">PR #233 · yesterday</span></a>
+      </div>
+    </section>
+  </main>
+
+  <aside aria-label="Lab status" style="flex: 0 0 300px; display: flex; flex-direction: column; gap: 20px;">
+    <div style="position: relative; padding: 24px; border-radius: 20px; background: #fffef8e6; backdrop-filter: blur(20px) saturate(160%); border: 1px solid #1e4d3b1f; box-shadow: inset 0 1px 0 #ffffffd9, 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a12; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px;">
+      <div aria-hidden="true" style="position: relative; width: 132px; height: 132px;">
+        <div style="position: absolute; left: 0; top: 0; width: 132px; height: 132px; background: url('../../../../lab/internal/ui/web/assets/lab-companions.webp') right center / 300% 100% no-repeat; filter: drop-shadow(0 10px 10px #0f2e2433);"></div>
+        <div style="position: absolute; left: 22px; right: 22px; bottom: -4px; height: 14px; border-radius: 50%; background: #c8e2d366; border: 1px solid #8caf9b80;"></div>
+      </div>
+      <div style="margin-top: 10px; font-size: 16px; font-weight: 500;">2 things are waiting for you</div>
+      <div style="font-size: 13px; color: #56695E;">The resident waves when you’re needed, studies a cube while work runs, and reads when all is quiet.</div>
+    </div>
+
+    <form id="run-loop" style="padding: 22px; border-radius: 20px; background: #fffef8e6; border: 1px solid #1e4d3b1f; box-shadow: 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a0f; display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <div style="font-size: 16px; font-weight: 500;">Run the loop</div>
+        <div style="font-size: 13px; color: #56695E; margin-top: 2px;">Plans each eligible Issue, then waits for your approval.</div>
+      </div>
+      <div role="group" aria-label="Which Issues" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 4px; gap: 4px; border-radius: 12px; background: #EEF0E6; border: 1px solid #D9E3D6;">
+        <button class="seg" type="button" aria-pressed="false" style="height: 34px; border-radius: 9px; border: 0; background: transparent; color: #3E5448; font: 500 13px 'Instrument Sans', system-ui, sans-serif; cursor: pointer;">Oldest</button>
+        <button class="seg" type="button" aria-pressed="true" style="height: 34px; border-radius: 9px; border: 0; background: #FFFEF8; color: #183E32; font: 600 13px 'Instrument Sans', system-ui, sans-serif; box-shadow: 0 1px 2px #1a3a2a24; cursor: pointer;">Milestone</button>
+        <button class="seg" type="button" aria-pressed="false" style="height: 34px; border-radius: 9px; border: 0; background: transparent; color: #3E5448; font: 500 13px 'Instrument Sans', system-ui, sans-serif; cursor: pointer;">Label</button>
+      </div>
+      <label style="display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 500;">Milestone
+        <input name="milestone" value="v1" autocomplete="off" style="height: 40px; padding: 0 12px; border-radius: 12px; border: 1px solid #B9CCBA; background: #FFFEF8; color: #183E32; font: 14px 'Instrument Sans', system-ui, sans-serif; box-shadow: inset 0 1px 2px #1a3a2a0d;">
+      </label>
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <span id="at-once" style="font-size: 13px; font-weight: 500;">At once</span>
+        <div role="group" aria-labelledby="at-once" style="display: flex; align-items: center; border: 1px solid #B9CCBA; border-radius: 12px; background: #FFFEF8; overflow: hidden;">
+          <button type="button" aria-label="Fewer at once" style="width: 40px; height: 38px; border: 0; background: transparent; color: #1E4D3B; font-size: 18px; cursor: pointer;">−</button>
+          <output style="width: 36px; text-align: center; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums;">2</output>
+          <button type="button" aria-label="More at once" style="width: 40px; height: 38px; border: 0; background: transparent; color: #1E4D3B; font-size: 18px; cursor: pointer;">+</button>
+        </div>
+      </div>
+      <button class="btn btn-primary" type="submit" style="width: 100%;">Start loop on 3 Issues</button>
+      <p style="margin: 0; font-size: 12px; color: #6B7F72;">Coding runs in parallel. Checks wait their turn, one at a time.</p>
+    </form>
+  </aside>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1180}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

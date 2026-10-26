@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forgecell · Review plan #245</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-400.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 500 600; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-500.woff2") format("woff2"); }
+body { margin: 0; background: #F3F2E8; }
+a { color: #1E4D3B; } a:hover { color: #123327; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 12px; font: 500 14px/1 "Instrument Sans", system-ui, sans-serif; text-decoration: none; cursor: pointer; transition: background-color .15s, border-color .15s, box-shadow .15s, transform .15s; touch-action: manipulation; }
+.btn:focus-visible, summary:focus-visible { outline: 2px solid #14523C; outline-offset: 3px; }
+.btn-primary { background: #1E4D3B; color: #FFFEF8; border: 1px solid #1E4D3B; box-shadow: inset 0 1px 0 #ffffff26, 0 1px 2px #12332733, 0 6px 16px #1e4d3b33; }
+.btn-primary:hover { background: #173E30; color: #FFFEF8; transform: translateY(-1px); }
+.btn-secondary { background: #FFFEF8; color: #1E4D3B; border: 1px solid #B9CCBA; }
+.btn-secondary:hover { border-color: #1E4D3B; background: #FFFFFF; }
+.btn-danger { background: #FFFEF8; color: #8A3322; border: 1px solid #E2B9AD; }
+.btn-danger:hover { border-color: #8A3322; background: #FDF6F3; }
+.file:hover { background: #1e4d3b08; }
+@media (prefers-reduced-motion: reduce) { .btn { transition: none; } .btn-primary:hover { transform: none; } }
+</style>
+</helmet>
+<div style="position: relative; min-height: 1280px; overflow: hidden; font-family: 'Instrument Sans', system-ui, sans-serif; color: #183E32; background: radial-gradient(ellipse 55% 45% at 90% 0%, #cfe9de 0%, transparent 60%), #F3F2E8;">
+
+<header style="display: flex; align-items: center; gap: 20px; height: 72px; padding: 0 32px; border-bottom: 1px solid #1e4d3b14; background: #fbfaf3cc; backdrop-filter: blur(16px) saturate(160%);">
+  <div style="display: flex; align-items: center; gap: 10px;">
+    <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="5" r="4" fill="#239F89"></circle><circle cx="5" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="21" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="13" cy="21" r="4" fill="#1E4D3B"></circle></svg>
+    <span style="font-size: 19px; font-weight: 600;">Forgecell</span>
+  </div>
+  <span aria-hidden="true" style="width: 1px; height: 24px; background: #1e4d3b26;"></span>
+  <nav aria-label="Breadcrumb" style="font-size: 14px; color: #56695E;"><a href="Main.dc.html" style="color: #3E5448; text-decoration: none;">Inbox</a><span aria-hidden="true" style="margin: 0 8px; color: #9FB3A6;">/</span><span aria-current="page" style="color: #183E32;">#245 · Review plan</span></nav>
+  <div style="flex: 1;"></div>
+  <button type="button" aria-label="Operator: Daniel Netzer" style="width: 40px; height: 40px; border-radius: 50%; border: 1px solid #1E4D3B; background: #1E4D3B; color: #FFFEF8; font: 600 14px 'Instrument Sans', system-ui, sans-serif;">DN</button>
+</header>
+
+<div style="max-width: 1240px; margin: 0 auto; padding: 32px;">
+
+  <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; flex-wrap: wrap;">
+    <div style="min-width: 0; flex: 1 1 600px;">
+      <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <span style="display: inline-flex; align-items: center; height: 26px; padding: 0 12px; border-radius: 999px; background: #F6E7C8; color: #7A5410; font-size: 13px; font-weight: 600;">Waiting for your approval</span>
+        <a href="https://github.com/DanielNetzer/forgecell/issues/245" style="font-size: 14px;">Issue #245<span aria-hidden="true"> ↗</span></a>
+        <span style="font-size: 14px; color: #6B7F72;">· planned today at 18:46 from the Issue as written then</span>
+      </div>
+      <h1 style="margin: 12px 0 0; font-size: 32px; font-weight: 500; letter-spacing: -0.02em; line-height: 1.2; text-wrap: balance;">init --enable-review: propose adding the review Atom to an approved Formula</h1>
+    </div>
+  </div>
+
+  <ol aria-label="Progress" style="list-style: none; margin: 28px 0 0; padding: 18px 20px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; border-radius: 18px; background: #fffef8b3; border: 1px solid #1e4d3b14;">
+    <li style="display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #3E5448;"><span style="height: 6px; border-radius: 999px; background: #1E4D3B;"></span><span><strong style="font-weight: 600;">Plan</strong> · done</span></li>
+    <li aria-current="step" style="display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #7A5410;"><span style="height: 6px; border-radius: 999px; background: #D99A2B;"></span><span><strong style="font-weight: 600;">Your approval</strong> · now</span></li>
+    <li style="display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Coding</li>
+    <li style="display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Checks</li>
+    <li style="display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Review</li>
+    <li style="display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Draft PR</li>
+    <li style="display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #6B7F72;"><span style="height: 6px; border-radius: 999px; background: #D6E6DD;"></span>Merged</li>
+  </ol>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 28px; margin-top: 28px; align-items: flex-start;">
+
+    <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 20px;">
+
+      <section style="padding: 24px 28px; border-radius: 20px; background: #fffef8e6; backdrop-filter: blur(20px) saturate(160%); border: 1px solid #1e4d3b1f; box-shadow: inset 0 1px 0 #ffffffd9, 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a0f;">
+        <h2 style="margin: 0 0 10px; font-size: 18px; font-weight: 600;">What Forgecell will do</h2>
+        <p style="margin: 0; font-size: 15px; line-height: 1.6; color: #2E4639;">Add <code>forgecell init --enable-review</code>. It proposes your current Formula with exactly one new step, a read-only <strong style="font-weight: 600;">review</strong> step after the checks, and changes nothing else. You approve that Formula change separately, as you do with every Formula change. If no reviewer can be resolved, it refuses and tells you how to configure one.</p>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px;">
+          <span style="display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 999px; background: #EEF0E6; font-size: 13px;">No open questions</span>
+          <span style="display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 999px; background: #EEF0E6; font-size: 13px;">Engine + CLI only · no UI changes</span>
+          <span style="display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 999px; background: #EEF0E6; font-size: 13px;">Coding budget 30 min</span>
+        </div>
+      </section>
+
+      <section aria-labelledby="files" style="border-radius: 20px; background: #fffef8e6; border: 1px solid #1e4d3b1f; box-shadow: 0 1px 2px #1a3a2a14; overflow: hidden;">
+        <div style="display: flex; align-items: baseline; justify-content: space-between; padding: 20px 28px 12px;">
+          <h2 id="files" style="margin: 0; font-size: 18px; font-weight: 600;">Files it may change <span style="color: #6B7F72; font-weight: 400;">5</span></h2>
+          <span style="font-size: 13px; color: #6B7F72;">Anything else needs your approval first</span>
+        </div>
+        <ul style="list-style: none; margin: 0; padding: 0;">
+          <li class="file" style="display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 16px; padding: 14px 28px; border-top: 1px solid #1e4d3b0f;">
+            <span style="align-self: start; display: inline-flex; justify-content: center; height: 22px; line-height: 22px; border-radius: 6px; background: #DCEFE9; color: #1F5F52; font-size: 11px; font-weight: 600; letter-spacing: .04em;">NEW</span>
+            <div style="min-width: 0;"><code style="font-size: 13px; color: #183E32;">lab/internal/onboarding/enable_review.go</code><div style="font-size: 14px; color: #56695E; margin-top: 4px;">The proposal: inserts the review step after the checks, verifies nothing else changed.</div></div>
+          </li>
+          <li class="file" style="display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 16px; padding: 14px 28px; border-top: 1px solid #1e4d3b0f;">
+            <span style="align-self: start; display: inline-flex; justify-content: center; height: 22px; line-height: 22px; border-radius: 6px; background: #DCEFE9; color: #1F5F52; font-size: 11px; font-weight: 600; letter-spacing: .04em;">NEW</span>
+            <div style="min-width: 0;"><code style="font-size: 13px;">lab/internal/onboarding/enable_review_test.go</code><div style="font-size: 14px; color: #56695E; margin-top: 4px;">Byte-identical except the new step; each refusal case; a tampered proposal is refused.</div></div>
+          </li>
+          <li class="file" style="display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 16px; padding: 14px 28px; border-top: 1px solid #1e4d3b0f;">
+            <span style="align-self: start; display: inline-flex; justify-content: center; height: 22px; line-height: 22px; border-radius: 6px; background: #EEF0E6; color: #3E5448; font-size: 11px; font-weight: 600; letter-spacing: .04em;">EDIT</span>
+            <div style="min-width: 0;"><code style="font-size: 13px;">lab/internal/onboarding/init.go</code><div style="font-size: 14px; color: #56695E; margin-top: 4px;">Route the new flag and refuse it while another proposal is pending.</div></div>
+          </li>
+          <li class="file" style="display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 16px; padding: 14px 28px; border-top: 1px solid #1e4d3b0f;">
+            <span style="align-self: start; display: inline-flex; justify-content: center; height: 22px; line-height: 22px; border-radius: 6px; background: #EEF0E6; color: #3E5448; font-size: 11px; font-weight: 600; letter-spacing: .04em;">EDIT</span>
+            <div style="min-width: 0;"><code style="font-size: 13px;">lab/internal/cli/cli.go</code><div style="font-size: 14px; color: #56695E; margin-top: 4px;">The <code>--enable-review</code> flag, its conflicts and the help line.</div></div>
+          </li>
+          <li class="file" style="display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 16px; padding: 14px 28px; border-top: 1px solid #1e4d3b0f;">
+            <span style="align-self: start; display: inline-flex; justify-content: center; height: 22px; line-height: 22px; border-radius: 6px; background: #DCEFE9; color: #1F5F52; font-size: 11px; font-weight: 600; letter-spacing: .04em;">NEW</span>
+            <div style="min-width: 0;"><code style="font-size: 13px;">lab/internal/cli/enable_review_flags_test.go</code><div style="font-size: 14px; color: #56695E; margin-top: 4px;">Flag conflicts and the help line.</div></div>
+          </li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="checks" style="border-radius: 20px; background: #fffef8e6; border: 1px solid #1e4d3b1f; box-shadow: 0 1px 2px #1a3a2a14; overflow: hidden;">
+        <div style="display: flex; align-items: baseline; justify-content: space-between; padding: 20px 28px 12px;">
+          <h2 id="checks" style="margin: 0; font-size: 18px; font-weight: 600;">Checks it must pass <span style="color: #6B7F72; font-weight: 400;">7</span></h2>
+          <span style="font-size: 13px; color: #6B7F72;">Run independently in a fresh checkout</span>
+        </div>
+        <ul style="list-style: none; margin: 0; padding: 0 28px 20px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;">
+          <li style="padding: 12px 14px; border-radius: 12px; background: #F6F7F0; border: 1px solid #1e4d3b0f;"><div style="font-size: 14px; font-weight: 500;">New tests for this change</div><code style="font-size: 12px; color: #56695E;">go test ./internal/onboarding/... ./internal/cli/...</code></li>
+          <li style="padding: 12px 14px; border-radius: 12px; background: #F6F7F0; border: 1px solid #1e4d3b0f;"><div style="font-size: 14px; font-weight: 500;">Full test suite</div><code style="font-size: 12px; color: #56695E;">go test -timeout 20m ./...</code></li>
+          <li style="padding: 12px 14px; border-radius: 12px; background: #F6F7F0; border: 1px solid #1e4d3b0f;"><div style="font-size: 14px; font-weight: 500;">Go vet · gofmt</div><code style="font-size: 12px; color: #56695E;">go vet ./... · gofmt -l</code></li>
+          <li style="padding: 12px 14px; border-radius: 12px; background: #F6F7F0; border: 1px solid #1e4d3b0f;"><div style="font-size: 14px; font-weight: 500;">Repository hygiene</div><code style="font-size: 12px; color: #56695E;">scripts/check-repo-hygiene.sh · its tests</code></li>
+        </ul>
+      </section>
+
+      <details style="border-radius: 16px; background: #fffef880; border: 1px solid #1e4d3b14; padding: 0 24px;">
+        <summary style="cursor: pointer; padding: 16px 0; font-size: 14px; color: #3E5448; font-weight: 500;">Plan details · version 1 · <code>11024d7</code></summary>
+        <p style="margin: 0 0 16px; font-size: 13px; color: #56695E;">Approval binds this exact plan. If the Issue or Formula changes before you approve, Forgecell asks you to review again. Full plan, evidence and ledger are in the timeline.</p>
+      </details>
+    </main>
+
+    <aside aria-label="Your decision" style="flex: 0 0 360px; position: sticky; top: 24px; display: flex; flex-direction: column; gap: 16px;">
+      <section style="padding: 26px; border-radius: 22px; background: #FFFEF8; border: 1px solid #1e4d3b24; box-shadow: inset 0 1px 0 #ffffff, 0 2px 4px #1a3a2a14, 0 20px 48px #1a3a2a1f;">
+        <h2 style="margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em;">Approve this plan?</h2>
+        <p style="margin: 10px 0 0; font-size: 14px; line-height: 1.55; color: #3E5448;">Forgecell will code these <strong style="font-weight: 600;">5 files</strong>, then run all <strong style="font-weight: 600;">7 checks</strong> on its own. Nothing is published until you approve the draft PR.</p>
+        <form style="display: flex; flex-direction: column; gap: 10px; margin-top: 20px;">
+          <button class="btn btn-primary" type="submit" style="height: 48px; font-size: 15px; border-radius: 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M5 12l5 5 9-10"></path></svg>Approve plan &amp; start coding</button>
+          <a class="btn btn-secondary" href="#changes" style="height: 44px;">Request changes…</a>
+        </form>
+        <p style="margin: 14px 0 0; font-size: 12px; color: #6B7F72;">Usually 30–45 min. You’ll find it back in your Inbox when it’s ready for review.</p>
+      </section>
+
+      <section style="padding: 18px 20px; border-radius: 18px; background: #fffef8b3; border: 1px solid #1e4d3b14; font-size: 13px; color: #3E5448; display: flex; flex-direction: column; gap: 10px;">
+        <div style="display: flex; justify-content: space-between;"><span>Coding agent</span><span style="color: #183E32; font-weight: 500;">Claude Code · Opus 5.5</span></div>
+        <div style="display: flex; justify-content: space-between;"><span>Reviewer</span><span style="color: #183E32; font-weight: 500;">Claude Code, read-only</span></div>
+        <div style="display: flex; justify-content: space-between;"><span>Planning cost so far</span><span style="color: #183E32; font-weight: 500; font-variant-numeric: tabular-nums;">$1.82</span></div>
+      </section>
+
+      <details style="padding: 0 20px; border-radius: 18px; border: 1px solid #ECCFC6; background: #FDF8F5;">
+        <summary style="cursor: pointer; padding: 14px 0; font-size: 13px; font-weight: 500; color: #8A3322;">Not needed anymore?</summary>
+        <div style="padding-bottom: 16px; display: flex; flex-direction: column; gap: 10px;">
+          <p style="margin: 0; font-size: 13px; color: #5E3A31;">Retiring keeps every record but this Molecule can’t be resumed. You can start a fresh one for the Issue later.</p>
+          <a class="btn btn-danger" href="#retire" style="height: 38px;">Retire this Molecule…</a>
+        </div>
+      </details>
+    </aside>
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1280}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

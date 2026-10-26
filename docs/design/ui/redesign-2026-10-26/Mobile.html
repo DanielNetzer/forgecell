@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forgecell · Inbox on a phone</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-400.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 500 600; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-500.woff2") format("woff2"); }
+body { margin: 0; background: #F3F2E8; }
+a { color: #1E4D3B; } a:hover { color: #123327; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 16px; border-radius: 12px; font: 500 15px/1 "Instrument Sans", system-ui, sans-serif; text-decoration: none; touch-action: manipulation; }
+.btn:focus-visible, .tab:focus-visible { outline: 2px solid #14523C; outline-offset: 3px; }
+.btn-primary { background: #1E4D3B; color: #FFFEF8; border: 1px solid #1E4D3B; box-shadow: inset 0 1px 0 #ffffff26, 0 4px 12px #1e4d3b26; }
+.btn-primary:hover { background: #173E30; color: #FFFEF8; }
+.tab { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; height: 60px; font-size: 11px; color: #56695E; text-decoration: none; }
+</style>
+</helmet>
+<div style="position: relative; width: 390px; height: 844px; overflow: hidden; display: flex; flex-direction: column; font-family: 'Instrument Sans', system-ui, sans-serif; color: #183E32; background: radial-gradient(ellipse 80% 40% at 100% 0%, #cfe9de 0%, transparent 60%), #F3F2E8;">
+
+  <header style="display: flex; align-items: center; gap: 10px; height: 60px; padding: 0 16px; border-bottom: 1px solid #1e4d3b14; background: #fbfaf3e6;">
+    <svg width="24" height="24" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="5" r="4" fill="#239F89"></circle><circle cx="5" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="21" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="13" cy="21" r="4" fill="#1E4D3B"></circle></svg>
+    <span style="font-size: 17px; font-weight: 600;">Inbox</span>
+    <div style="flex: 1;"></div>
+    <button type="button" aria-label="Operator: Daniel Netzer" style="width: 36px; height: 36px; border-radius: 50%; border: 1px solid #1E4D3B; background: #1E4D3B; color: #FFFEF8; font: 600 13px 'Instrument Sans', system-ui, sans-serif;">DN</button>
+  </header>
+
+  <main style="flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 14px;">
+    <div style="display: flex; align-items: center; gap: 14px;">
+      <div aria-hidden="true" style="width: 64px; height: 64px; background: url('../../../../lab/internal/ui/web/assets/lab-companions.webp') right center / 300% 100% no-repeat; filter: drop-shadow(0 6px 6px #0f2e2433);"></div>
+      <div>
+        <div style="font-size: 20px; font-weight: 500;">2 things need you</div>
+        <div style="font-size: 13px; color: #56695E;">1 running · nothing blocked</div>
+      </div>
+    </div>
+
+    <article style="padding: 18px; border-radius: 18px; background: #fffef8e6; border: 1px solid #1e4d3b1f; box-shadow: inset 0 1px 0 #ffffffd9, 0 1px 2px #1a3a2a14, 0 10px 24px #1a3a2a12; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 8px;"><span style="display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: #F6E7C8; color: #7A5410; font-size: 12px; font-weight: 600;">Plan ready</span><span style="font-size: 13px; color: #6B7F72;">#245</span></div>
+      <h2 style="margin: 0; font-size: 17px; font-weight: 500; line-height: 1.35;">Let a Formula turn on in-loop review</h2>
+      <p style="margin: 0; font-size: 14px; color: #56695E;">5 files · 7 checks · 30–45 min</p>
+      <a class="btn btn-primary" href="Plan.dc.html" style="width: 100%;">Review plan</a>
+    </article>
+
+    <article style="padding: 18px; border-radius: 18px; background: #fffef8e6; border: 1px solid #1e4d3b1f; box-shadow: inset 0 1px 0 #ffffffd9, 0 1px 2px #1a3a2a14, 0 10px 24px #1a3a2a12; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 8px;"><span style="display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: #DCEFE9; color: #1F5F52; font-size: 12px; font-weight: 600;">Ready to publish</span><span style="font-size: 13px; color: #6B7F72;">#241</span></div>
+      <h2 style="margin: 0; font-size: 17px; font-weight: 500; line-height: 1.35;">UI polish: Start Work controls, lane bar, sharper glass</h2>
+      <p style="margin: 0; font-size: 14px; color: #56695E;"><span style="color: #1F5F52; font-weight: 500;">7/7 checks passed</span> · nothing blocking in review</p>
+      <a class="btn btn-primary" href="#publish" style="width: 100%;">Review &amp; publish</a>
+    </article>
+
+    <article style="padding: 16px 18px; border-radius: 18px; background: #fffef8b3; border: 1px solid #1e4d3b14;">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;"><span style="font-size: 14px; font-weight: 500;">#244 · Coding</span><span style="font-size: 13px; color: #1F5F52;">18 min</span></div>
+      <div aria-hidden="true" style="margin-top: 10px; height: 6px; border-radius: 999px; background: linear-gradient(90deg, #1E4D3B 0 28%, #239F89 28% 40%, #D6E6DD 40%);"></div>
+    </article>
+  </main>
+
+  <nav aria-label="Lab" style="display: flex; border-top: 1px solid #1e4d3b14; background: #fbfaf3f2; padding-bottom: 8px;">
+    <a class="tab" href="Mobile.dc.html" aria-current="page" style="color: #183E32; font-weight: 600;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 13l3-8h10l3 8v6H4z"></path><path d="M4 13h5l1 2h4l1-2h5"></path></svg>Inbox</a>
+    <a class="tab" href="Issues.dc.html"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><circle cx="12" cy="12" r="2"></circle></svg>Issues</a>
+    <a class="tab" href="#work"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="2"></rect><rect x="13" y="4" width="7" height="7" rx="2"></rect><rect x="4" y="13" width="7" height="7" rx="2"></rect><rect x="13" y="13" width="7" height="7" rx="2"></rect></svg>Work</a>
+    <a class="tab" href="#more"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="5" cy="12" r="1.5"></circle><circle cx="12" cy="12" r="1.5"></circle><circle cx="19" cy="12" r="1.5"></circle></svg>More</a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

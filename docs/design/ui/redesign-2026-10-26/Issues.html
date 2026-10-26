@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forgecell · Issues</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-400.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 500 600; font-display: swap; src: url("../../../../lab/internal/ui/web/assets/instrument-sans-500.woff2") format("woff2"); }
+body { margin: 0; background: #F3F2E8; }
+a { color: #1E4D3B; } a:hover { color: #123327; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 10px; font: 500 13px/1 "Instrument Sans", system-ui, sans-serif; text-decoration: none; cursor: pointer; transition: background-color .15s, border-color .15s; touch-action: manipulation; }
+.btn:focus-visible, .seg:focus-visible, .nav a:focus-visible, .chip:focus-visible { outline: 2px solid #14523C; outline-offset: 3px; }
+.btn-primary { background: #1E4D3B; color: #FFFEF8; border: 1px solid #1E4D3B; box-shadow: inset 0 1px 0 #ffffff26, 0 1px 2px #12332733; }
+.btn-primary:hover { background: #173E30; color: #FFFEF8; }
+.btn-secondary { background: #FFFEF8; color: #1E4D3B; border: 1px solid #B9CCBA; }
+.btn-secondary:hover { border-color: #1E4D3B; background: #FFFFFF; }
+.row:hover { background: #fffef8; }
+.nav a { display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 12px; border-radius: 12px; color: #3E5448; text-decoration: none; font-size: 14px; }
+.nav a:hover { background: #1e4d3b0d; color: #183E32; }
+.chip { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid #D9E3D6; background: #FFFEF8; color: #3E5448; font: 500 13px 'Instrument Sans', system-ui, sans-serif; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.chip:hover { border-color: #1E4D3B; }
+</style>
+</helmet>
+<div style="position: relative; min-height: 1080px; overflow: hidden; font-family: 'Instrument Sans', system-ui, sans-serif; color: #183E32; background: radial-gradient(ellipse 55% 45% at 90% 0%, #cfe9de 0%, transparent 60%), #F3F2E8;">
+
+<img src="../../../../lab/internal/ui/web/assets/glasshouse-fern.webp" alt="" aria-hidden="true" width="280" height="420" style="position: absolute; left: -110px; bottom: 40px; width: 280px; height: 420px; opacity: .45; pointer-events: none;">
+
+<header style="position: relative; display: flex; align-items: center; gap: 20px; height: 72px; padding: 0 32px; border-bottom: 1px solid #1e4d3b14; background: #fbfaf3cc; backdrop-filter: blur(16px) saturate(160%);">
+  <div style="display: flex; align-items: center; gap: 10px;">
+    <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="5" r="4" fill="#239F89"></circle><circle cx="5" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="21" cy="13" r="4" fill="#5DBFA6"></circle><circle cx="13" cy="21" r="4" fill="#1E4D3B"></circle></svg>
+    <span style="font-size: 19px; font-weight: 600;">Forgecell</span>
+  </div>
+  <span aria-hidden="true" style="width: 1px; height: 24px; background: #1e4d3b26;"></span>
+  <span style="font-size: 14px; color: #3E5448;">DanielNetzer / forgecell</span>
+  <div style="flex: 1;"></div>
+  <button type="button" aria-label="Operator: Daniel Netzer" style="width: 40px; height: 40px; border-radius: 50%; border: 1px solid #1E4D3B; background: #1E4D3B; color: #FFFEF8; font: 600 14px 'Instrument Sans', system-ui, sans-serif;">DN</button>
+</header>
+
+<div style="position: relative; display: flex; flex-wrap: wrap; gap: 32px; max-width: 1376px; margin: 0 auto; padding: 32px;">
+  <nav class="nav" aria-label="Lab" style="flex: 0 0 216px; display: flex; flex-direction: column; gap: 4px;">
+    <a href="Main.dc.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 13l3-8h10l3 8v6H4z"></path><path d="M4 13h5l1 2h4l1-2h5"></path></svg>Inbox<span style="margin-left: auto; min-width: 22px; height: 22px; padding: 0 7px; border-radius: 999px; background: #F6E7C8; color: #7A5410; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center;">2</span></a>
+    <a href="Issues.dc.html" aria-current="page" style="background: #FFFEF8; color: #183E32; font-weight: 500; box-shadow: 0 1px 2px #1a3a2a14; border: 1px solid #D9E3D6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><circle cx="12" cy="12" r="2"></circle></svg>Issues<span style="margin-left: auto; color: #6B7F72; font-size: 12px;">38</span></a>
+    <a href="#work"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="2"></rect><rect x="13" y="4" width="7" height="7" rx="2"></rect><rect x="4" y="13" width="7" height="7" rx="2"></rect><rect x="13" y="13" width="7" height="7" rx="2"></rect></svg>Work</a>
+    <a href="#insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg>Insights</a>
+    <a href="#formula"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 4h12v16H6z"></path><path d="M9 8h6M9 12h6M9 16h3"></path></svg>Formula</a>
+  </nav>
+
+  <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 20px;">
+    <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+      <div>
+        <h1 style="margin: 0; font-size: 32px; font-weight: 500; letter-spacing: -0.02em;">Issues</h1>
+        <p style="margin: 6px 0 0; font-size: 14px; color: #56695E;">Open Issues in DanielNetzer/forgecell · synced from GitHub 40 s ago <a href="#refresh" style="margin-left: 6px;">Refresh</a></p>
+      </div>
+      <a class="btn btn-secondary" href="#loop" style="height: 40px;">Run the loop on milestone v1 <span style="color: #6B7F72; font-variant-numeric: tabular-nums;">· 3</span></a>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+      <div role="group" aria-label="Forgecell state" style="display: flex; gap: 4px; padding: 4px; border-radius: 14px; background: #EAEDE2; border: 1px solid #D9E3D6; overflow-x: auto;">
+        <button class="seg" type="button" aria-pressed="true" style="height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: #FFFEF8; color: #183E32; font: 600 13px 'Instrument Sans', system-ui, sans-serif; box-shadow: 0 1px 2px #1a3a2a24; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;">All <span style="font-variant-numeric: tabular-nums; color: #56695E; font-weight: 500;">38</span></button>
+        <button class="seg" type="button" aria-pressed="false" style="height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: transparent; color: #3E5448; font: 500 13px 'Instrument Sans', system-ui, sans-serif; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #6B7F72;"></span>Not started <span style="font-variant-numeric: tabular-nums; color: #6B7F72;">34</span></button>
+        <button class="seg" type="button" aria-pressed="false" style="height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: transparent; color: #3E5448; font: 500 13px 'Instrument Sans', system-ui, sans-serif; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #D99A2B;"></span>Needs you <span style="font-variant-numeric: tabular-nums; color: #6B7F72;">2</span></button>
+        <button class="seg" type="button" aria-pressed="false" style="height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: transparent; color: #3E5448; font: 500 13px 'Instrument Sans', system-ui, sans-serif; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #239F89;"></span>In progress <span style="font-variant-numeric: tabular-nums; color: #6B7F72;">1</span></button>
+        <button class="seg" type="button" aria-pressed="false" style="height: 34px; padding: 0 14px; border-radius: 10px; border: 0; background: transparent; color: #3E5448; font: 500 13px 'Instrument Sans', system-ui, sans-serif; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #B4492F;"></span>Blocked <span style="font-variant-numeric: tabular-nums; color: #6B7F72;">0</span></button>
+      </div>
+      <button class="chip" type="button" aria-haspopup="listbox">Milestone: any <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></button>
+      <button class="chip" type="button" aria-haspopup="listbox">Label: any <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></button>
+      <div style="flex: 1;"></div>
+      <label style="position: relative; display: flex; align-items: center; min-width: 260px;">
+        <span style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);">Search Issues</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6B7F72" stroke-width="2" aria-hidden="true" style="position: absolute; left: 12px;"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+        <input name="q" type="search" autocomplete="off" placeholder="Search by number or title…" style="width: 100%; height: 40px; padding: 0 12px 0 36px; border-radius: 12px; border: 1px solid #B9CCBA; background: #FFFEF8; color: #183E32; font: 14px 'Instrument Sans', system-ui, sans-serif;">
+      </label>
+    </div>
+
+    <div role="table" aria-label="Open Issues" style="border-radius: 20px; background: #fffef8cc; backdrop-filter: blur(20px) saturate(160%); border: 1px solid #1e4d3b1f; box-shadow: inset 0 1px 0 #ffffffd9, 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a0f; overflow: hidden;">
+      <div role="row" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) 140px 180px 150px; gap: 16px; align-items: center; height: 44px; padding: 0 24px; font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: #6B7F72; border-bottom: 1px solid #1e4d3b14;">
+        <span role="columnheader">Issue</span><span role="columnheader">Title</span><span role="columnheader">Milestone</span><span role="columnheader">Forgecell</span><span role="columnheader" style="text-align: right;">Action</span>
+      </div>
+
+      <div role="row" class="row" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) 140px 180px 150px; gap: 16px; align-items: center; min-height: 64px; padding: 10px 24px; border-bottom: 1px solid #1e4d3b0f;">
+        <span role="cell" style="font-size: 14px; color: #56695E; font-variant-numeric: tabular-nums;">#245</span>
+        <div role="cell" style="min-width: 0;"><div style="font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">init --enable-review: propose adding the review Atom to an approved Formula</div><div style="margin-top: 4px; display: flex; gap: 6px;"><span style="font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #E6EEF5; color: #2C4D66;">wave-6</span></div></div>
+        <span role="cell" style="font-size: 13px; color: #3E5448;">v1</span>
+        <span role="cell" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #7A5410; font-weight: 500;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #D99A2B;"></span>Plan needs you</span>
+        <div role="cell" style="text-align: right;"><a class="btn btn-primary" href="Plan.dc.html">Review plan</a></div>
+      </div>
+
+      <div role="row" class="row" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) 140px 180px 150px; gap: 16px; align-items: center; min-height: 64px; padding: 10px 24px; border-bottom: 1px solid #1e4d3b0f;">
+        <span role="cell" style="font-size: 14px; color: #56695E; font-variant-numeric: tabular-nums;">#244</span>
+        <div role="cell" style="min-width: 0;"><div style="font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Harness not authenticated: classify provider auth failures, show the login command</div><div style="margin-top: 4px; display: flex; gap: 6px;"><span style="font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #E6EEF5; color: #2C4D66;">wave-6</span></div></div>
+        <span role="cell" style="font-size: 13px; color: #3E5448;">v1</span>
+        <span role="cell" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #1F5F52; font-weight: 500;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #239F89;"></span>Coding · 18 min</span>
+        <div role="cell" style="text-align: right;"><a class="btn btn-secondary" href="#m244">Open</a></div>
+      </div>
+
+      <div role="row" class="row" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) 140px 180px 150px; gap: 16px; align-items: center; min-height: 64px; padding: 10px 24px; border-bottom: 1px solid #1e4d3b0f;">
+        <span role="cell" style="font-size: 14px; color: #56695E; font-variant-numeric: tabular-nums;">#247</span>
+        <div role="cell" style="min-width: 0;"><div style="font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">UI: operator avatar, the resident by the shelf, botanical greenery, Instrument Sans</div><div style="margin-top: 4px; display: flex; gap: 6px;"><span style="font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #E6EEF5; color: #2C4D66;">wave-6</span></div></div>
+        <span role="cell" style="font-size: 13px; color: #3E5448;">v1</span>
+        <span role="cell" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #56695E;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #6B7F72;"></span>Not started</span>
+        <div role="cell" style="text-align: right;"><button class="btn btn-primary" type="button">Start</button></div>
+      </div>
+
+      <div role="row" class="row" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) 140px 180px 150px; gap: 16px; align-items: center; min-height: 64px; padding: 10px 24px; border-bottom: 1px solid #1e4d3b0f;">
+        <span role="cell" style="font-size: 14px; color: #56695E; font-variant-numeric: tabular-nums;">#204</span>
+        <div role="cell" style="min-width: 0;"><div style="font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Engine: explicit pause and reopen for Molecules waiting at a gate</div><div style="margin-top: 4px; display: flex; gap: 6px;"><span style="font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #EEF0E6; color: #3E5448;">post-v1</span></div></div>
+        <span role="cell" style="font-size: 13px; color: #6B7F72;">—</span>
+        <span role="cell" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #56695E;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #6B7F72;"></span>Not started</span>
+        <div role="cell" style="text-align: right;"><button class="btn btn-secondary" type="button">Start</button></div>
+      </div>
+
+      <div role="row" class="row" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) 140px 180px 150px; gap: 16px; align-items: center; min-height: 64px; padding: 10px 24px; border-bottom: 1px solid #1e4d3b0f;">
+        <span role="cell" style="font-size: 14px; color: #56695E; font-variant-numeric: tabular-nums;">#203</span>
+        <div role="cell" style="min-width: 0;"><div style="font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Engine: Formula rollback as an audited selection of retained bytes</div><div style="margin-top: 4px; display: flex; gap: 6px;"><span style="font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #EEF0E6; color: #3E5448;">post-v1</span></div></div>
+        <span role="cell" style="font-size: 13px; color: #6B7F72;">—</span>
+        <span role="cell" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #56695E;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #6B7F72;"></span>Not started</span>
+        <div role="cell" style="text-align: right;"><button class="btn btn-secondary" type="button">Start</button></div>
+      </div>
+
+      <div role="row" class="row" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) 140px 180px 150px; gap: 16px; align-items: center; min-height: 64px; padding: 10px 24px;">
+        <span role="cell" style="font-size: 14px; color: #56695E; font-variant-numeric: tabular-nums;">#202</span>
+        <div role="cell" style="min-width: 0;"><div style="font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">UI-5: Lab UI — Formula suggestion review and Formula version history</div><div style="margin-top: 4px; display: flex; gap: 6px;"><span style="font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #EEF0E6; color: #3E5448;">post-v1</span></div></div>
+        <span role="cell" style="font-size: 13px; color: #6B7F72;">—</span>
+        <span role="cell" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #56695E;"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #6B7F72;"></span>Not started</span>
+        <div role="cell" style="text-align: right;"><button class="btn btn-secondary" type="button">Start</button></div>
+      </div>
+    </div>
+    <p style="margin: 0; font-size: 13px; color: #6B7F72;">Showing 6 of 38 · closed Issues and merged work live under Work › Merged.</p>
+  </main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1080}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
