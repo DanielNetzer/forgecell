@@ -93,6 +93,12 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 	result.Process = process.Run(ctx, process.Options{Argv: append([]string{o.Executable}, call.Args...), Dir: o.Dir, Env: o.Env, Stdin: []byte(call.Input), Timeout: o.Timeout})
 	providerStarted = true
 	if !coding && !result.Process.OK {
+		// A failed analysis or review is otherwise returned before stdout is read, so a
+		// structured authentication failure names the fixed login hint here instead of
+		// the bare exit status (#244). The provider's own text never enters the error.
+		if ClassifyAuthFailure(o.ID, result.Process.Stdout) {
+			result.Process.Error = NotAuthenticatedHint(o.ID)
+		}
 		return result
 	}
 	result.Raw = result.Process.Stdout
@@ -130,6 +136,10 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 			} else {
 				result.Process.Error = err.Error()
 			}
+		}
+		// An authentication failure replaces the bare exit status with the fixed hint.
+		if ClassifyAuthFailure(o.ID, result.Raw) {
+			result.Process.Error = NotAuthenticatedHint(o.ID)
 		}
 	} else {
 		result.Text, err = ReadResult(o.ID, result.Raw, true)

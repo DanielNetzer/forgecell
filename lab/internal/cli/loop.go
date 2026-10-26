@@ -271,6 +271,9 @@ func renderLoop(out io.Writer, report molecule.LoopReport, selector intake.Selec
 				}
 			}
 		}
+		if pass.Stopped != "" {
+			fmt.Fprintf(out, "Pass %d stopped: %s\n", n+1, flatten(pass.Stopped))
+		}
 	}
 	if n := report.NonProgress(); n > 0 {
 		fmt.Fprintf(out, "%d Issue(s) made no progress in the final pass and need attention\n", n)

@@ -945,6 +945,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if json.Unmarshal(raw, &view) == nil && molecule.QueuedForChecks(view) {
 			fmt.Fprintf(stderr, "Molecule %s is %s: another Molecule in this Lab holds the verification slot.\n", flatten(record.ID), molecule.QueuedForChecksLabel)
 		}
+		if hint, ok := molecule.NotAuthenticated(view); ok {
+			fmt.Fprintf(stderr, "Molecule %s stopped: %s (failureClass %s).\n", flatten(record.ID), hint, harness.HarnessNotAuthenticated)
+		}
 		return 0
 	}
 	if !*isolated {
@@ -1142,6 +1145,9 @@ func presentRun(out io.Writer, r molecule.Record) {
 		if a.Status == "blocked" || a.Status == "failed" {
 			fmt.Fprintf(out, "%s: %s\n", a.ID, a.Detail)
 		}
+	}
+	if hint, ok := molecule.NotAuthenticated(r); ok {
+		fmt.Fprintf(out, "Outcome: %s (failureClass %s)\n", hint, harness.HarnessNotAuthenticated)
 	}
 	if r.Verification != nil {
 		fmt.Fprintf(out, "Required checks passed: %t · independent acceptance verified: %t\n", r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified)
@@ -1545,6 +1551,9 @@ type doctorCandidate struct {
 	onboarding.Candidate
 	NextCommand string            `json:"nextCommand,omitempty"`
 	StepDetail  []onboarding.Step `json:"steps,omitempty"`
+	// AuthHint is the fixed "harness not authenticated" hint when the provider's
+	// own status check reports it is not logged in (#244).
+	AuthHint string `json:"authHint,omitempty"`
 }
 
 type doctorView struct {
@@ -1577,6 +1586,9 @@ type doctorCommands struct {
 
 func (x doctorCommands) view(c onboarding.Candidate, steps bool) doctorCandidate {
 	v := doctorCandidate{Candidate: c, NextCommand: x.candidate(c)}
+	if c.Authentication.State == "login-required" && authFailed(c) {
+		v.AuthHint = harness.NotAuthenticatedHint(c.ID)
+	}
 	if steps {
 		v.StepDetail = c.Steps
 	}
@@ -1628,9 +1640,7 @@ func providerOnPath(provider string) bool {
 	return ae == nil && be == nil && os.SameFile(a, b)
 }
 
-func loginCommand(id string) string {
-	return map[string]string{"codex": "codex login", "claude-code": "claude auth login", "cursor": "agent login"}[id]
-}
+func loginCommand(id string) string { return harness.LoginCommand(id) }
 
 func authFailed(c onboarding.Candidate) bool {
 	for _, s := range c.Failures {
@@ -1799,6 +1809,9 @@ func renderDoctorCandidate(out io.Writer, title string, c doctorCandidate) {
 	// Binding states are listed below; an unprobed provider leaves nothing else to say.
 	if c.Binding == nil || len(c.Binding.States) == 0 || c.Executable != "" {
 		fmt.Fprintf(out, "  %s\n", c.Detail)
+	}
+	if c.AuthHint != "" {
+		fmt.Fprintf(out, "  %s\n", c.AuthHint)
 	}
 	if b := c.Binding; b != nil {
 		fmt.Fprintf(out, "  Formula binding: %s · adapter: %s\n  Launcher (saved): %s — version %s (%s) · adapter protocol %s\n", b.FormulaBinding, b.Adapter, b.Launcher, b.LauncherVersion, b.LauncherVersionSource, orUnknown(b.LauncherProtocol))
