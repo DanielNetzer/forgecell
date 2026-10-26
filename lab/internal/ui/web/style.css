@@ -1,7 +1,14 @@
 /* Forgecell local Lab UI. Consolidated from the forest-glass prototype
    (docs/design/ui/forest-glass/style.css): its final light palette with the
-   appended overrides merged into one set of rules. No external assets are
-   loaded; fonts fall back to the system stack. */
+   appended overrides merged into one set of rules. The app shell follows the
+   approved redesign mockup (docs/design/ui/redesign-2026-10-26). Nothing is
+   fetched from a network: the font and art are served from the embedded
+   /assets/, and the font falls back to the system stack. The server replaces
+   __ASSET_VERSION__ with the binary's version, so the long asset cache never
+   outlives an upgrade. */
+
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("/assets/instrument-sans-400.woff2?v=__ASSET_VERSION__") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 500 600; font-display: swap; src: url("/assets/instrument-sans-500.woff2?v=__ASSET_VERSION__") format("woff2"); }
 
 :root {
   color-scheme: light;
@@ -25,11 +32,17 @@
   --radius-control: 12px;
   --shadow-glass: inset 0 1px 0 #ffffffcc, 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a12;
   --shadow-card: 0 1px 2px #1a3a2a0f, 0 4px 12px #1a3a2a08;
+  --shell-edge: #d9e3d6;
+  --needs-ink: #7a5410;
+  --needs-bg: #f6e7c8;
+  --danger-ink: #8a3322;
+  --danger-edge: #e2b9ad;
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--base); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; overflow-x: hidden; }
+body { margin: 0; background: var(--base); color: var(--ink); font: 15px/1.5 "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif; overflow-x: hidden; }
 button, a, input { font: inherit; }
+a, button, summary, input, label { touch-action: manipulation; }
 button { cursor: pointer; min-height: 44px; transition: background .2s, border-color .2s; }
 button:disabled { cursor: default; }
 a { color: inherit; }
@@ -48,17 +61,81 @@ code, .mono-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; 
 
 .field { position: fixed; inset: -80px; z-index: -1; background: radial-gradient(ellipse at 90% 10%, #d3e9de99, transparent 55%), radial-gradient(ellipse at 0 75%, #e5edce80, transparent 50%), var(--base); filter: blur(70px); }
 
-main { max-width: 1300px; margin: auto; padding: 0 36px; }
-header { display: flex; align-items: center; gap: 16px; min-height: 65px; border-bottom: 1px solid var(--line); }
-.brand { display: flex; align-items: center; gap: 12px; font-size: 21px; font-weight: 500; letter-spacing: -.7px; }
-.brand svg { color: #26b89d; }
-.brand small { font-size: 13px; letter-spacing: 0; color: var(--muted); }
-.divider { height: 22px; width: 1px; background: var(--line); margin: 0 6px; }
-.repo { margin-left: auto; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
-.repo a { text-decoration: underline; text-underline-offset: 3px; }
+/* App shell: header, left nav, one main and the side panel. */
+.skip-link { position: absolute; left: 16px; top: -80px; z-index: 200; padding: 10px 16px; border-radius: var(--radius-control); background: var(--forest); color: var(--paper); text-decoration: none; }
+.skip-link:focus { top: 12px; }
+.app-header { position: relative; z-index: 2; display: flex; align-items: center; gap: 16px; min-height: 72px; padding: 0 32px; border-bottom: 1px solid #1e4d3b14; background: #fbfaf3f2; }
+@supports (backdrop-filter: blur(16px)) { .app-header { background: #fbfaf3cc; backdrop-filter: blur(16px) saturate(160%); } }
+.brand { display: flex; align-items: center; gap: 10px; font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+.divider { height: 24px; width: 1px; background: #1e4d3b26; }
+.repo { min-width: 0; font-size: 14px; color: #3e5448; overflow-wrap: anywhere; }
+.repo a { text-decoration: none; }
+.repo a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.readonly-badge, .sample-badge { flex: none; }
+.app-header .readonly-badge, .app-header .sample-badge { margin-left: auto; }
+.app-header .sample-badge + .readonly-badge { margin-left: 0; }
+.loop-pill { position: relative; display: flex; align-items: center; gap: 8px; min-height: 40px; margin-left: auto; padding: 0 6px 0 14px; border-radius: 999px; background: var(--paper); border: 1px solid var(--shell-edge); color: #3e5448; font-size: 13px; font-variant-numeric: tabular-nums; }
+.readonly-badge:not([hidden]) ~ .loop-pill, .sample-badge:not([hidden]) ~ .loop-pill { margin-left: 0; }
+.loop-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #9fb3a6; }
+.loop-pill[data-loop=running] .loop-dot { background: var(--teal); }
+.loop-pill[data-loop=draining] .loop-dot { background: #d99a2b; }
+.loop-pill-action { height: 30px; min-height: 30px; padding: 0 12px; border-radius: 999px; font-size: 13px; text-decoration: none; }
+.loop-stop > summary { list-style: none; cursor: pointer; }
+.loop-stop > summary::-webkit-details-marker { display: none; }
+.loop-stop-confirm { position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; width: 280px; max-width: calc(100vw - 32px); padding: 16px; border-radius: var(--radius-card); background: var(--paper); border: 1px solid var(--card-edge); box-shadow: var(--shadow-glass); color: var(--ink); }
+.loop-stop-confirm p:first-child { font-weight: 500; overflow-wrap: anywhere; }
+.loop-stop-confirm .btn { margin-top: 12px; width: 100%; }
+.avatar { flex: none; display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--forest); background: #1e4d3b; color: var(--paper); font-size: 14px; font-weight: 600; }
+
+.shell { position: relative; z-index: 1; display: grid; grid-template-columns: 216px minmax(0, 1fr) 300px; gap: 28px; align-items: start; max-width: 1440px; margin: 0 auto; padding: 28px 32px; }
+main { min-width: 0; }
+main:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.app-nav { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 4px; padding: 10px; border-radius: var(--radius-panel); background: var(--glass-solid); border: 1px solid var(--shell-edge); box-shadow: var(--shadow-glass); }
+@supports (backdrop-filter: blur(20px)) { .app-nav { background: var(--glass); backdrop-filter: blur(20px) saturate(160%); } }
+.nav-link { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--radius-control); color: #3e5448; font-size: 14px; text-decoration: none; }
+.nav-link:hover { background: #1e4d3b0d; color: var(--ink); }
+.nav-link[aria-current=page] { background: var(--paper); color: var(--ink); font-weight: 500; border-color: var(--shell-edge); box-shadow: 0 1px 2px #1a3a2a14; }
+.nav-badge { margin-left: auto; min-width: 22px; height: 22px; padding: 0 7px; border-radius: 999px; background: var(--needs-bg); color: var(--needs-ink); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-variant-numeric: tabular-nums; }
+.view { min-width: 0; }
+.placeholder { padding: 28px; }
+.placeholder h1, .formula-view h1, .aggregate h1 { font-size: 28px; letter-spacing: -.02em; }
+.placeholder-summary { margin-top: 6px; font-size: 15px; color: var(--needs-ink); font-weight: 500; }
+.placeholder-note { margin-top: 12px; max-width: 62ch; font-size: 14px; color: #56695e; }
+.formula-view { padding: 24px; }
+.side-panel { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.side-panel .drive-panel { margin-top: 0; }
+.side-panel .drive-groups { grid-template-columns: minmax(0, 1fr); }
+
+/* The resident (Blob): a three-frame sprite, studying a cube, reading and
+   waving. Only the working pose floats. */
+.resident { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 24px; text-align: center; }
+.resident-figure { position: relative; width: 132px; height: 132px; }
+.resident-sprite { position: absolute; inset: 0; background: url("/assets/lab-companions.webp?v=__ASSET_VERSION__") center center / 300% 100% no-repeat; filter: drop-shadow(0 10px 10px #0f2e2433); }
+.resident[data-pose=studying] .resident-sprite { background-position: left center; animation: resident-float 4.2s ease-in-out infinite; }
+.resident[data-pose=reading] .resident-sprite { background-position: center center; }
+.resident[data-pose=waving] .resident-sprite { background-position: right center; }
+.resident-dish { position: absolute; left: 22px; right: 22px; bottom: -4px; height: 14px; border-radius: 50%; background: #c8e2d366; border: 1px solid #8caf9b80; }
+.resident-title { margin-top: 10px; font-size: 16px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.resident-copy { font-size: 13px; color: #56695e; }
+@keyframes resident-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+
+/* Art: decorative, behind the nav and side panel edges, never behind text. */
+.art { position: fixed; z-index: 0; pointer-events: none; user-select: none; opacity: .5; }
+.art-fern { left: -150px; top: 220px; width: 300px; height: 450px; }
+.art-orchid { right: -130px; bottom: -50px; width: 360px; height: 300px; }
+
+/* The bottom tab bar replaces the nav on phones. */
+.tab-bar { display: none; }
+.tab { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 60px; font-size: 11px; color: #56695e; text-decoration: none; }
+.tab[aria-current=page], .tab-more.is-current > .tab { color: var(--ink); font-weight: 600; }
+.tab-badge { position: absolute; top: 4px; left: calc(50% + 6px); margin: 0; min-width: 18px; height: 18px; padding: 0 5px; font-size: 11px; }
+.tab-more { flex: 1; display: flex; }
+.tab-more > summary { list-style: none; cursor: pointer; }
+.tab-more > summary::-webkit-details-marker { display: none; }
+.tab-more-menu { position: absolute; right: 8px; bottom: calc(100% + 8px); display: grid; gap: 4px; min-width: 180px; padding: 8px; border-radius: var(--radius-card); background: var(--paper); border: 1px solid var(--card-edge); box-shadow: var(--shadow-glass); }
 .sample-badge, .readonly-badge { font: 10px ui-monospace, monospace; border: 1px solid #aac5b2; border-radius: 5px; padding: 3px 6px; color: #53715e; white-space: nowrap; }
 .sample-badge { background: #fbe9c9; border-color: #c9a35d; color: #6b4a12; font-weight: 600; }
-.banner { margin-top: 16px; padding: 12px 16px; border-radius: 10px; background: #fbe9c9; border: 1px solid #c9a35d; color: #5a3d0c; font-size: 13px; }
+.banner { margin-bottom: 16px; padding: 12px 16px; border-radius: 10px; background: #fbe9c9; border: 1px solid #c9a35d; color: #5a3d0c; font-size: 13px; }
 
 /* Glass: opaque paper by default, translucent only where backdrop-filter works.
    A crisp 1px edge, a 1px inner top highlight and a layered shadow. */
@@ -67,7 +144,7 @@ header { display: flex; align-items: center; gap: 16px; min-height: 65px; border
 .card { background: var(--paper); color: var(--ink); border: 1px solid var(--card-edge); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
 
 /* Shelf: the contribution-style Molecule grid. One cell is one Molecule. */
-.shelf { position: relative; margin-top: 24px; padding: 20px 26px; background: linear-gradient(130deg, #fffffff2, #edf5e9e8); overflow: hidden; }
+.shelf { position: relative; margin-top: 0; padding: 20px 26px; background: linear-gradient(130deg, #fffffff2, #edf5e9e8); overflow: hidden; }
 .shelf::before { content: ''; position: absolute; inset: 90px 0 0; background-image: linear-gradient(#235f3a08 1px, transparent 1px), linear-gradient(90deg, #235f3a08 1px, transparent 1px); background-size: 26px 26px; pointer-events: none; mask-image: linear-gradient(transparent, #000); }
 .shelf > * { position: relative; }
 .shelf-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
@@ -118,6 +195,11 @@ header { display: flex; align-items: center; gap: 16px; min-height: 65px; border
 .btn-secondary { background: var(--paper); color: var(--forest); border-color: var(--forest); }
 .btn-secondary:hover:not(:disabled) { background: #eef5ec; }
 .btn-secondary:active:not(:disabled) { transform: translateY(1px); background: #e3eee1; }
+.btn-ghost { background: transparent; color: var(--forest); border-color: transparent; }
+.btn-ghost:hover:not(:disabled) { background: #1e4d3b0f; }
+/* Danger: paper with clay text, kept in its own block behind a disclosure. */
+.btn-danger { background: var(--paper); color: var(--danger-ink); border-color: var(--danger-edge); }
+.btn-danger:hover:not(:disabled) { background: #fbefeb; border-color: var(--danger-ink); }
 .btn:disabled, .btn[aria-disabled=true] { background: #e7ede4; color: #546a5c; border-color: #c3d2c3; box-shadow: none; cursor: not-allowed; }
 
 /* Lane bar: one pill of segments; the active segment is a raised paper thumb. */
@@ -250,7 +332,7 @@ header { display: flex; align-items: center; gap: 16px; min-height: 65px; border
 .scope-note { font-size: 11px; color: #53665b; line-height: 1.6; margin-top: 8px; }
 
 /* Lab overview. */
-.aggregate { margin-top: 22px; padding: 23px; }
+.aggregate { padding: 23px; }
 .aggregate h2 { font-size: 21px; }
 .aggregate-intro { font-size: 12px; margin-top: 7px; color: var(--muted); }
 .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
@@ -287,13 +369,34 @@ dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 ui-m
   .molecule-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .drive-groups { grid-template-columns: minmax(0, 1fr); }
 }
+@media (max-width: 1199px) {
+  .shell { grid-template-columns: 200px minmax(0, 1fr); }
+  .side-panel { grid-column: 2; display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); align-items: start; }
+  .side-panel .drive-groups { grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr); }
+  .art-orchid { display: none; }
+}
+@media (max-width: 900px) {
+  .art { display: none; }
+  .side-panel { grid-template-columns: minmax(0, 1fr); }
+  .side-panel .drive-groups { grid-template-columns: minmax(0, 1fr); }
+}
 @media (max-width: 720px) {
-  main { padding: 0 16px; }
-  header { gap: 10px; flex-wrap: wrap; padding: 10px 0; }
-  .brand { font-size: 20px; }
-  .brand small, .divider { display: none; }
-  .repo { margin-left: 0; flex-basis: 100%; order: 3; }
-  .sample-badge { margin-left: auto; }
+  .app-header { gap: 10px; flex-wrap: wrap; min-height: 60px; padding: 8px 16px; }
+  .brand { font-size: 17px; }
+  .divider { display: none; }
+  .repo { order: 3; flex-basis: 100%; font-size: 13px; }
+  .loop-pill { order: 2; }
+  .avatar { order: 2; width: 36px; height: 36px; font-size: 13px; }
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 16px 16px 96px; }
+  .app-nav { display: none; }
+  .side-panel { grid-column: 1; }
+  .resident { flex-direction: row; text-align: left; padding: 16px; }
+  .resident-figure { flex: none; width: 64px; height: 64px; }
+  .resident-copy { display: none; }
+  .tab-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; display: flex; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid #1e4d3b14; background: #fbfaf3f2; }
+  .placeholder { padding: 20px; }
+  .placeholder h1, .formula-view h1, .aggregate h1 { font-size: 22px; }
+  .formula-view { padding: 18px; }
   .shelf { padding: 16px; border-radius: 16px; }
   .grid-tools { gap: 10px; }
   .lane-bar { flex: 1 1 100%; }
@@ -332,15 +435,28 @@ dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 ui-m
   footer { flex-direction: column; gap: 5px; }
 }
 
-/* Motion: running cells animate; everything stops for reduced motion, the Motion
-   checkbox, a hidden page or an offscreen grid. */
+/* Coarse pointers get 44px targets everywhere. */
+@media (pointer: coarse) {
+  .nav-link, .tab, .btn, .loop-pill-action, .lane-segment, .text-button, summary, .motion-option { min-height: 44px; }
+}
+
+/* Motion: running cells and the resident's working pose animate; everything
+   stops for reduced motion, the Motion checkbox, a hidden page or an offscreen
+   grid or resident. */
 .motion-paused *, .page-hidden *, .shelf-offscreen .shelf * { animation-play-state: paused !important; }
+.motion-paused .resident-sprite, .page-hidden .resident-sprite, .resident-offscreen .resident-sprite { animation-play-state: paused !important; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .resident-sprite { animation: none !important; transform: none; }
   .motion-option { display: none; }
 }
 @media (forced-colors: active) {
   .field { display: none; }
+  .art { display: none; }
+  .app-header, .app-nav, .loop-pill, .loop-stop-confirm, .tab-bar, .tab-more-menu { background: Canvas; color: CanvasText; border: 1px solid CanvasText; box-shadow: none; backdrop-filter: none; }
+  .nav-link[aria-current=page], .tab[aria-current=page] { border: 1px solid Highlight; outline: 2px solid Highlight; }
+  .avatar, .nav-badge, .loop-dot { background: Canvas; color: CanvasText; border: 1px solid CanvasText; }
+  .resident-sprite { forced-color-adjust: none; }
   .glass, .card, .active-formula, .drive-panel, .review-row, .cube-button, .micro-cube, .atom-tab, .atom-detail { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
   .btn, .stepper-button, .lane-segment, .drive-field input, .stepper input, .grid-search, .lane-bar { border: 1px solid ButtonText; box-shadow: none; }
   .btn:disabled, .btn[aria-disabled=true] { color: GrayText; border-color: GrayText; }

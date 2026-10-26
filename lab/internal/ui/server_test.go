@@ -230,7 +230,7 @@ func TestUIRefusesForeignOriginAndHost(t *testing.T) {
 // only; those serve POST only. A same-origin POST elsewhere is still refused.
 func TestUIServesGetOnlyWithSecurityHeaders(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir()})
-	for _, path := range []string{"/", "/api/lab", "/api/loop", "/api/runs/1", "/api/molecules", "/api/molecules/m1", "/api/molecules/m1/job", "/api/molecules/m1/ledger", "/api/molecules/m1/delivery", "/api/molecules/m1/merge", "/api/molecules/m1/delivery/merge", "/api/molecules/m1/x/scope", "/api/molecules/m1/x/stop", "/api/loop/pause", "/api/runs/1/stop"} {
+	for _, path := range []string{"/", "/assets/glasshouse-fern.webp", "/api/lab", "/api/loop", "/api/runs/1", "/api/molecules", "/api/molecules/m1", "/api/molecules/m1/job", "/api/molecules/m1/ledger", "/api/molecules/m1/delivery", "/api/molecules/m1/merge", "/api/molecules/m1/delivery/merge", "/api/molecules/m1/x/scope", "/api/molecules/m1/x/stop", "/api/loop/pause", "/api/runs/1/stop"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions} {
 			r := authed(path)
 			r.method, r.origin = method, "http://"+testHost
@@ -251,7 +251,7 @@ func TestUIServesGetOnlyWithSecurityHeaders(t *testing.T) {
 			t.Errorf("GET %s: %d", path, w.Code)
 		}
 	}
-	for _, path := range []string{"/", "/api/lab", "/api/molecules", "/nope"} {
+	for _, path := range []string{"/", "/assets/instrument-sans-400.woff2", "/api/lab", "/api/molecules", "/nope"} {
 		w := do(t, h, authed(path))
 		csp := w.Header().Get("Content-Security-Policy")
 		if !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "frame-ancestors 'none'") {

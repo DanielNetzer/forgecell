@@ -87,8 +87,12 @@ func demoSummary(i int) Summary {
 }
 
 func demoLab(version string) LabView {
-	return LabView{Sample: true, ReadOnly: true, Name: "Sample Lab", Version: version, Repository: "sample/lab", Binding: "sample binding", Formula: formula.Identity{State: "sample", FormulaID: "repository-care", Name: "repository-care.yaml"}, Unavailable: unavailable}
+	return LabView{Sample: true, ReadOnly: true, Name: "Sample Lab", Version: version, Repository: "sample/lab", Binding: "sample binding", Formula: formula.Identity{State: "sample", FormulaID: "repository-care", Name: "repository-care.yaml"}, Unavailable: unavailable, Operator: demoOperator}
 }
+
+// demoOperator is a clearly synthetic operator; sample data never shows a real
+// name.
+var demoOperator = OperatorView{Name: "Sample operator", Initials: "SO", Set: true}
 
 func demoList() MoleculeList {
 	out := MoleculeList{Sample: true, ETag: `"sample"`, Complete: true, Diagnostics: []string{}, Molecules: make([]Summary, 0, demoCount)}

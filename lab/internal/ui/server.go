@@ -9,6 +9,7 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -53,6 +54,9 @@ type Options struct {
 	SourceRoot string
 	// Resources is the Lab's resource guard (#189) for work started from the UI.
 	Resources *resources.Guard
+	// Operator is the source checkout's git config user.name, as the CLI read it.
+	// It is untrusted: GET /api/lab serves it only through operatorView.
+	Operator string
 }
 
 // Server is a UI listening on 127.0.0.1.
@@ -183,11 +187,49 @@ var staticFiles = map[string]string{
 	// session.js only copies the exchange page's value into sessionStorage; it
 	// holds no secret, so it is served without the cookie.
 	"/session.js": "session.js",
+	// The committed art and fonts. Like every other file they need the cookie;
+	// any other /assets/ path is not found.
+	"/assets/glasshouse-fern.webp":      "assets/glasshouse-fern.webp",
+	"/assets/orchid-maidenhair.webp":    "assets/orchid-maidenhair.webp",
+	"/assets/lab-companions.webp":       "assets/lab-companions.webp",
+	"/assets/instrument-sans-400.woff2": "assets/instrument-sans-400.woff2",
+	"/assets/instrument-sans-500.woff2": "assets/instrument-sans-500.woff2",
+}
+
+// assetCache is the Cache-Control of the files under /assets/, which never
+// change within a release; every other response stays no-store.
+const assetCache = "private, max-age=31536000, immutable"
+
+// assetVersionMark is the placeholder index.html, app.js and style.css put in
+// every asset URL's ?v= query; file replaces it with assetVersion, so an
+// upgrade changes each asset URL and the immutable cache never serves stale art
+// or fonts.
+const assetVersionMark = "__ASSET_VERSION__"
+
+// maxAssetVersionBytes bounds the version in asset URLs.
+const maxAssetVersionBytes = 64
+
+// assetVersion is the binary's version reduced to URL-safe characters and
+// bounded, or "dev" when nothing is left.
+func assetVersion(version string) string {
+	var b strings.Builder
+	for _, r := range version {
+		if b.Len() == maxAssetVersionBytes {
+			break
+		}
+		if r < 0x80 && (r == '.' || r == '-' || r == '_' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "dev"
+	}
+	return b.String()
 }
 
 const sessionHeader = "X-Forgecell-Session"
 
-var contentTypes = map[string]string{".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
+var contentTypes = map[string]string{".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".webp": "image/webp", ".woff2": "font/woff2"}
 
 var moleculeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
 
@@ -365,6 +407,11 @@ func (h *handler) file(w http.ResponseWriter, name string) {
 		return
 	}
 	w.Header().Set("Content-Type", contentTypes[filepath.Ext(name)])
+	if strings.HasPrefix(name, "assets/") {
+		w.Header().Set("Cache-Control", assetCache)
+	} else {
+		data = bytes.ReplaceAll(data, []byte(assetVersionMark), []byte(assetVersion(h.opts.Version)))
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
@@ -384,6 +431,8 @@ type LabView struct {
 	Model       string           `json:"model"`
 	Formula     formula.Identity `json:"formula"`
 	Unavailable []string         `json:"unavailable"`
+	// Operator is read-only display text for the avatar; it is never an email.
+	Operator OperatorView `json:"operator"`
 }
 
 func (h *handler) lab(w http.ResponseWriter) {
@@ -397,7 +446,7 @@ func (h *handler) lab(w http.ResponseWriter) {
 	if h.opts.SourceRoot != "" {
 		actions = DriveActions
 	}
-	h.json(w, http.StatusOK, LabView{Gates: Gates, Actions: actions, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable})
+	h.json(w, http.StatusOK, LabView{Gates: Gates, Actions: actions, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable, Operator: operatorView(h.opts.Operator)})
 }
 
 func (h *handler) molecules(w http.ResponseWriter, r *http.Request) {
