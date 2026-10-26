@@ -520,6 +520,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	var wrapperEvidence []ProvenanceEvidence
 	var analysisDiagnostics *process.Diagnostics
 	var analysisUsage *harness.Usage
+	var analysisFailureClass string
 	if analysis == nil {
 		analysis = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
 			inputs := readiness.VerificationInputs{CheckInputs: o.CheckInputs, Checks: o.Checks, Setup: o.Setup, Artifacts: o.Artifacts, Policy: o.Policy}
@@ -541,6 +542,12 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 			// A wrapper or supplied analysis function never reaches here, so it records no
 			// usage (unavailable), as does a non-Claude binding.
 			analysisUsage = harness.AttemptUsage(b.Command, result.RawStdout, b.Model)
+			// A structured authentication failure stops intake with the fixed login hint
+			// alone; no provider text or stderr reaches the attempt or the notes (#244).
+			if hint, ok := harness.ClassifyAuthAttempt(b.Command, result); ok {
+				analysisFailureClass = harness.HarnessNotAuthenticated
+				return readiness.Analysis{}, errors.New(hint)
+			}
 			return decodeAnalysisResult(result)
 		}
 	}
@@ -631,7 +638,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		if correction != nil {
 			callCtx = withAnalysisCorrection(ctx, *correction)
 		}
-		wrapperEvidence, analysisDiagnostics, analysisUsage = nil, nil, nil
+		wrapperEvidence, analysisDiagnostics, analysisUsage, analysisFailureClass = nil, nil, nil, ""
 		a, err = analysis(callCtx, analysisBinding, issue, snapshot)
 		if err == nil {
 			// A supplied Analyze can return an over-cap response without an error; the
@@ -671,6 +678,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		attempt.FinishedAt = stamp()
 		attempt.Diagnostics = analysisDiagnostics
 		attempt.Usage = analysisUsage
+		attempt.FailureClass = analysisFailureClass
 		if err != nil {
 			attempt.Status = "failed"
 			attempt.Error = err.Error()
@@ -1089,6 +1097,8 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		waits                    int
 		resumed                  string
 		stage                    []string
+		authHint                 string
+		notAuthenticated         bool
 	)
 	for {
 		// A resume starts after a wait that may be long, so the Formula and its bindings
@@ -1161,6 +1171,12 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		// non-Claude binding or a run that emitted none records no usage (unavailable).
 		a.Usage = harness.AttemptUsage(codingBinding.Command, result.RawStdout, a.Model)
 		a.Classification = harness.ClassifyCodingAttempt(codingBinding.Command, result)
+		authHint, notAuthenticated = harness.ClassifyAuthAttempt(codingBinding.Command, result)
+		if notAuthenticated {
+			// The outcome names the fixed login hint, never the provider's text (#244).
+			a.FailureClass = harness.HarnessNotAuthenticated
+			coding.Reason, a.Coding.Reason = authHint, authHint
+		}
 		ref, err = historyFile(r, "harness-"+attemptID+"-result.json", struct {
 			process.Result
 			AttemptID  string `json:"attemptId"`
@@ -1272,8 +1288,11 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 			return r, err
 		}
 	}
-	if !result.OK {
+	if !result.OK || notAuthenticated {
 		summary := harnessOutcomeSummary(result, ref)
+		if notAuthenticated {
+			summary = authHint
+		}
 		if result.TimedOut || result.ParentDeadline {
 			summary = harnessTimeoutSummary(timeoutGate{Molecule: r.ID, Lab: r.LabDir, Digest: o.Approve, Attempt: attemptID, TimeoutMS: timeoutMS, Source: timeoutSource, CeilingMS: codingBinding.TimeoutCeilingMS()}, result, ref, capture, captureErr)
 		}

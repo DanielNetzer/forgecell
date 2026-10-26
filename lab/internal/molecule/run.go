@@ -126,6 +126,9 @@ type HarnessAttempt struct {
 	// Classification is harness.TransientProviderError when the provider reported a
 	// transient API error (#190); empty for every other attempt and in earlier ledgers.
 	Classification string `json:"classification,omitempty"`
+	// FailureClass is harness.HarnessNotAuthenticated when the provider CLI reported a
+	// structured authentication failure (#244); empty otherwise and in earlier ledgers.
+	FailureClass string `json:"failureClass,omitempty"`
 	// Resumed is "resumed after transient-provider-error (n of 2)" on an attempt the Lab
 	// started automatically from the retained tree of the transient attempt before it.
 	Resumed string `json:"resumed,omitempty"`
@@ -227,6 +230,50 @@ type AnalysisAttempt struct {
 	// run that emitted none, and every earlier ledger, all of which read as
 	// "unavailable" rather than as zero.
 	Usage *harness.Usage `json:"usage,omitempty"`
+	// FailureClass is harness.HarnessNotAuthenticated when the analysis provider
+	// reported a structured authentication failure (#244); Error is then the fixed
+	// login hint. Empty otherwise and in earlier ledgers.
+	FailureClass string `json:"failureClass,omitempty"`
+}
+
+// NotAuthenticated returns the fixed login hint of a Molecule whose last analysis,
+// coding or review attempt is classified harness.HarnessNotAuthenticated. A review
+// attempt counts only while it reviewed the last coding attempt. Only a hint from the
+// fixed table is ever returned; other recorded text falls back to the generic hint.
+func NotAuthenticated(r Record) (string, bool) {
+	hint := ""
+	switch {
+	case len(r.ReviewAttempts) > 0 && r.ReviewAttempts[len(r.ReviewAttempts)-1].FailureClass == harness.HarnessNotAuthenticated && reviewedLastAttempt(r, r.ReviewAttempts[len(r.ReviewAttempts)-1]):
+		hint = r.ReviewAttempts[len(r.ReviewAttempts)-1].Reason
+	case len(r.HarnessAttempts) > 0:
+		a := r.HarnessAttempts[len(r.HarnessAttempts)-1]
+		if a.FailureClass != harness.HarnessNotAuthenticated {
+			return "", false
+		}
+		hint = a.Result.Error
+	case len(r.AnalysisAttempts) > 0:
+		a := r.AnalysisAttempts[len(r.AnalysisAttempts)-1]
+		if a.FailureClass != harness.HarnessNotAuthenticated {
+			return "", false
+		}
+		hint = a.Error
+	default:
+		return "", false
+	}
+	if !harness.IsNotAuthenticatedHint(hint) {
+		hint = harness.NotAuthenticatedHint("")
+	}
+	return hint, true
+}
+
+// reviewedLastAttempt reports whether review pass a ran for the Molecule's last coding
+// attempt (or a continuation of it), as reviewAttemptKey names it.
+func reviewedLastAttempt(r Record, a ReviewAttempt) bool {
+	last := "none"
+	if n := len(r.HarnessAttempts); n > 0 {
+		last = r.HarnessAttempts[n-1].ID
+	}
+	return a.HarnessAttemptID == last || strings.HasPrefix(a.HarnessAttemptID, last+"/continuation-")
 }
 
 // PolicyEvidence points at the ledger value a policy decision relied on.

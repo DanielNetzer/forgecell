@@ -471,6 +471,11 @@ func ReadResult(id, output string, meta bool) (string, error) {
 	for _, key := range []string{"is_error", "error"} {
 		raw := strings.TrimSpace(string(value[key]))
 		if raw != "" && raw != "null" && raw != "false" && raw != `""` && raw != "0" {
+			// A structured authentication failure names the fixed login hint, never the
+			// provider's own text (#244).
+			if ClassifyAuthFailure(id, output) {
+				return "", fmt.Errorf("%s", NotAuthenticatedHint(id))
+			}
 			return "", fmt.Errorf("%s reported a failure", id)
 		}
 	}
@@ -888,6 +893,9 @@ func ReadCodingResult(id, output string) (string, []string, error) {
 	var value map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(output), &value); err != nil || value == nil {
 		return "", nil, fmt.Errorf("%s returned invalid JSON output", id)
+	}
+	if ClassifyAuthFailure(id, output) {
+		return "", nil, fmt.Errorf("%s", NotAuthenticatedHint(id))
 	}
 	// A transient provider error keeps its own classification and the bounded provider
 	// message, so the attempt is not reduced to a generic failure (#190).

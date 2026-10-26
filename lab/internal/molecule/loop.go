@@ -33,6 +33,9 @@ const (
 	// LoopRetired reports a retired Molecule: finished history, never a failure,
 	// never resumed (#236).
 	LoopRetired = "retired"
+	// LoopNotDispatched marks an Issue the pass left alone after a harness
+	// authentication failure (#244). It is neither a failure nor non-progress.
+	LoopNotDispatched = "not-dispatched"
 )
 
 // LoopOptions configures the Lab loop. Template carries the per-Molecule seams
@@ -81,13 +84,21 @@ type LoopItem struct {
 	Phase      string
 	Reason     string
 	Failed     bool
+	// FailureClass is harness.HarnessNotAuthenticated when the Molecule's last
+	// attempt was a harness authentication failure.
+	FailureClass string
 	// Proposal is the saved recovery proposal of an interrupted Molecule.
 	Proposal *LoopProposal
+	// authHint is the fixed login hint that goes with FailureClass.
+	authHint string
 }
 
 type LoopPass struct {
 	Items []LoopItem
 	Notes []string
+	// Stopped is why the pass dispatched nothing further, or "". After a harness
+	// authentication failure it holds the fixed login hint, and no further pass runs.
+	Stopped string
 }
 
 type LoopReport struct {
@@ -178,7 +189,7 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 			return report, err
 		}
 		report.Passes = append(report.Passes, pass)
-		if lo.Once || l.draining(ctx) || !pass.progressed() {
+		if lo.Once || l.draining(ctx) || pass.Stopped != "" || !pass.progressed() {
 			return report, nil
 		}
 	}
@@ -241,30 +252,69 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 	pruneRecoveryProposals(l.lab, l.analysisTimeout())
 	pass.Items = make([]LoopItem, len(eligible))
 	work := make(chan int)
+	// authStop closes after the first Molecule this pass started or approved ends on a
+	// harness authentication failure (#244): every later Issue would hit the same
+	// failure, so nothing further is dispatched. Molecules already in flight finish.
+	authStop := make(chan struct{})
+	var authOnce sync.Once
+	authHint := ""
+	notDispatched := func(issue intake.OpenIssue) LoopItem {
+		return LoopItem{Repository: issue.Repository, Issue: issue.Number, State: LoopNotDispatched, Reason: authHint + "; the loop dispatched nothing further in this pass"}
+	}
 	var wg sync.WaitGroup
 	for range min(l.o.MaxConcurrent, len(eligible)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := range work {
-				pass.Items[i] = l.process(l.work, inventory, eligible[i])
+				// The dispatcher may hand over an Issue in the same instant the stop
+				// closes, so the worker checks again before it starts anything.
+				if stopped(authStop) {
+					pass.Items[i] = notDispatched(eligible[i])
+					continue
+				}
+				item := l.process(l.work, inventory, eligible[i])
+				pass.Items[i] = item
+				if item.Failed && item.FailureClass == harness.HarnessNotAuthenticated {
+					authOnce.Do(func() {
+						authHint = item.authHint
+						close(authStop)
+					})
+				}
 			}
 		}()
 	}
 	for i, issue := range eligible {
-		if !l.draining(ctx) {
+		if !l.draining(ctx) && !stopped(authStop) {
 			select {
 			case work <- i:
 				continue
 			case <-ctx.Done():
 			case <-l.o.Drain:
+			case <-authStop:
 			}
+		}
+		if stopped(authStop) {
+			pass.Items[i] = notDispatched(issue)
+			continue
 		}
 		pass.Items[i] = LoopItem{Repository: issue.Repository, Issue: issue.Number, State: LoopInterrupted, Reason: "the loop was interrupted before this Issue was started"}
 	}
 	close(work)
 	wg.Wait()
+	if stopped(authStop) {
+		pass.Stopped = authHint + "; the loop dispatched no further Issue in this pass and starts no further pass"
+	}
 	return pass, nil
+}
+
+func stopped(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
 }
 
 func (l *loopRun) draining(ctx context.Context) bool {
@@ -559,6 +609,9 @@ func settle(item LoopItem, r Record) LoopItem {
 	item.MoleculeID, item.Status, item.Phase = r.ID, r.Status, statePhase(r)
 	item.State, item.Reason = state, reason
 	item.Failed = stopped && (item.Started || item.Approved)
+	if hint, ok := NotAuthenticated(r); ok && stopped {
+		item.FailureClass, item.authHint = harness.HarnessNotAuthenticated, hint
+	}
 	return item
 }
 

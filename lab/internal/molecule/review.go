@@ -78,6 +78,10 @@ type ReviewAttempt struct {
 	// non-Claude binding, a Claude run that emitted none, and every earlier ledger,
 	// all of which read as "unavailable" rather than as zero.
 	Usage *harness.Usage `json:"usage,omitempty"`
+	// FailureClass is harness.HarnessNotAuthenticated when the review provider
+	// reported a structured authentication failure (#244); Reason is then the fixed
+	// login hint. Empty otherwise and in earlier ledgers.
+	FailureClass string `json:"failureClass,omitempty"`
 }
 
 // ReviewDecision tells the caller whether delivery is blocked. A review that found
@@ -447,6 +451,12 @@ func runReviewAtom(ctx context.Context, o Options, r Record, f formula.Formula, 
 	// Effective model, tokens and reported cost for the review attempt (#149). A
 	// non-Claude binding or a run that emitted none records no usage (unavailable).
 	attempt.Usage = harness.AttemptUsage(resolution.Binding.Command, result.RawStdout, resolution.Binding.Model)
+	// A structured authentication failure records the fixed login hint alone; no
+	// provider text reaches the attempt, the Atom or the notes (#244).
+	if hint, ok := harness.ClassifyAuthAttempt(resolution.Binding.Command, result); ok {
+		attempt.FailureClass = harness.HarnessNotAuthenticated
+		return record(ReviewFailed, hint)
+	}
 	if !result.OK {
 		reason := "Review process failed: " + result.Error
 		if result.TimedOut || result.ParentDeadline {

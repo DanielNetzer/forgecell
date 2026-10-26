@@ -293,6 +293,18 @@ type AttemptView struct {
 	Model      string         `json:"model,omitempty"`
 	Binding    string         `json:"binding,omitempty"`
 	Usage      *harness.Usage `json:"usage,omitempty"`
+	// FailureClass is the attempt's typed failure class (harness-not-authenticated),
+	// shown only when it is that known class.
+	FailureClass string `json:"failureClass,omitempty"`
+}
+
+// knownFailureClass keeps a recorded attempt failure class only when it is one the
+// engine writes, so ledger text never reaches the view through it.
+func knownFailureClass(class string) string {
+	if class == harness.HarnessNotAuthenticated {
+		return class
+	}
+	return ""
 }
 
 // DeliveryView is the receipt state, reported exactly. Label is "Draft
@@ -577,6 +589,10 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 	out.Activity = Activity(out.Lane, molecule.QueuedForChecks(r))
 	out.Gate = gateState(r, out.Lane, d, view)
 	out.Next = nextAction(out.Lane, out.Activity, r.Status, out.Phase, out.CurrentAtom, out.Gate, view)
+	if hint, ok := molecule.NotAuthenticated(r); ok && out.Lane == LaneBlocked {
+		// The blocked reason is the fixed login hint, never the provider's text (#244).
+		out.Next = NextView{"Blocked · harness not authenticated", hint + ", then start this Issue again. Failure evidence stays in the ledger."}
+	}
 	if rt := r.Retired; rt != nil {
 		out.Retired = &RetiredView{At: stateText(rt.At), PriorStatus: stateText(rt.PriorStatus), Reason: harness.ReviewDisplayText(x.text(rt.Reason), molecule.MaxRetireReason)}
 	}
@@ -624,17 +640,17 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 		out.Atoms = append(out.Atoms, av)
 	}
 	for _, a := range r.AnalysisAttempts {
-		out.Attempts = append(out.Attempts, AttemptView{Kind: "analysis", ID: fmt.Sprintf("analysis-%d", a.Ordinal), Status: a.Status, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Usage: a.Usage})
+		out.Attempts = append(out.Attempts, AttemptView{Kind: "analysis", ID: fmt.Sprintf("analysis-%d", a.Ordinal), Status: a.Status, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Usage: a.Usage, FailureClass: knownFailureClass(a.FailureClass)})
 	}
 	for _, a := range r.HarnessAttempts {
 		status := ""
 		if a.Coding != nil {
 			status = a.Coding.Outcome
 		}
-		out.Attempts = append(out.Attempts, AttemptView{Kind: "coding", ID: a.ID, Status: status, Model: a.Model, Usage: a.Usage})
+		out.Attempts = append(out.Attempts, AttemptView{Kind: "coding", ID: a.ID, Status: status, Model: a.Model, Usage: a.Usage, FailureClass: knownFailureClass(a.FailureClass)})
 	}
 	for _, a := range r.ReviewAttempts {
-		out.Attempts = append(out.Attempts, AttemptView{Kind: "review", ID: fmt.Sprintf("review-%d", a.Ordinal), Status: a.Status, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Binding: a.Binding, Usage: a.Usage})
+		out.Attempts = append(out.Attempts, AttemptView{Kind: "review", ID: fmt.Sprintf("review-%d", a.Ordinal), Status: a.Status, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Binding: a.Binding, Usage: a.Usage, FailureClass: knownFailureClass(a.FailureClass)})
 	}
 	return out
 }
