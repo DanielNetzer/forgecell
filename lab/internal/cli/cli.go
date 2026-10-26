@@ -40,7 +40,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	harness.SetRunningVersion(version)
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\n"+demoUsage+"\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ninit --refresh-baseline [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\ndoctor --clean [--yes] [--lab DIR]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> [--add-scope PATH --reason TEXT]... [--add-acceptance TEXT]... [--note TEXT] [--continuation checks-only] [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --accept-protected-failures [--add-acceptance TEXT]... [--note TEXT] [--lab DIR]  (declare the tests that failed by design in the latest protected regression run as expectedProtectedDeltas; continues checks-only; takes no --run: review the printed list, then approve the digest with run <issue> --approve DIGEST)\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --parent DIGEST --rebase-formula [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nretire <molecule> --reason TEXT [--lab DIR]  (mark a stale Molecule retired: one-line reason of at most 200 characters; every record is kept, the loop never resumes it and may start a fresh Molecule for its Issue)\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\nui [--lab DIR] [--port N] [--no-open] [--demo]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nui serves a read-only Lab UI on 127.0.0.1 behind a per-launch token and opens it in the browser unless --no-open is given; --demo shows synthetic sample data. It stops on SIGINT or SIGTERM.\n\n"+demoHelp+"\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\n"+demoUsage+"\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ninit --refresh-baseline [--lab DIR] [--json]\ninit --enable-review [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\ndoctor --clean [--yes] [--lab DIR]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> [--add-scope PATH --reason TEXT]... [--add-acceptance TEXT]... [--note TEXT] [--continuation checks-only] [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --accept-protected-failures [--add-acceptance TEXT]... [--note TEXT] [--lab DIR]  (declare the tests that failed by design in the latest protected regression run as expectedProtectedDeltas; continues checks-only; takes no --run: review the printed list, then approve the digest with run <issue> --approve DIGEST)\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --parent DIGEST --rebase-formula [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nretire <molecule> --reason TEXT [--lab DIR]  (mark a stale Molecule retired: one-line reason of at most 200 characters; every record is kept, the loop never resumes it and may start a fresh Molecule for its Issue)\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\nui [--lab DIR] [--port N] [--no-open] [--demo]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nui serves a read-only Lab UI on 127.0.0.1 behind a per-launch token and opens it in the browser unless --no-open is given; --demo shows synthetic sample data. It stops on SIGINT or SIGTERM.\n\n"+demoHelp+"\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -372,6 +372,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		model := flags.String("model", "", "Propose a model pin on the approved Formula's native Claude bindings; an empty value removes the pin")
 		role := flags.String("role", "", "With --model, limit the pin to one declared harnesses.ROLE override (analysis, coding, meta or review)")
 		refreshBaseline := flags.Bool("refresh-baseline", false, "Propose a baseline-only requiredChecks refresh of the approved Formula, derived from the current CI workflows, for review")
+		enableReview := flags.Bool("enable-review", false, "Propose inserting the adversarial review Atom after the check Atom of the approved Formula, for review")
 		review := flags.String("review", "", "Inspect exact saved proposal without activation")
 		approve := flags.String("approve", "", "Approve exact saved proposal")
 		dismiss := flags.String("dismiss", "", "Dismiss exact saved proposal")
@@ -391,6 +392,24 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			rebindRequested = rebindRequested || f.Name == "rebind"
 			modelRequested = modelRequested || f.Name == "model"
 		})
+		if *enableReview {
+			switch {
+			case *preferred != "":
+				return fail(fmt.Errorf("--enable-review and --harness cannot be combined; propose each change separately"))
+			case rebindRequested:
+				return fail(fmt.Errorf("--enable-review and --rebind cannot be combined; propose each change separately"))
+			case metaRequested:
+				return fail(fmt.Errorf("--enable-review cannot be combined with --meta-harness or --meta-command"))
+			case modelRequested || *role != "":
+				return fail(fmt.Errorf("--enable-review cannot be combined with --model or --role; it only inserts the review Atom"))
+			case *timeoutMS != 0 || *maxTimeoutMS != 0:
+				return fail(fmt.Errorf("--enable-review cannot be combined with the timeout flags; it only inserts the review Atom"))
+			case *refreshBaseline:
+				return fail(fmt.Errorf("--enable-review and --refresh-baseline cannot be combined; propose each change separately"))
+			case *review != "" || *approve != "" || *dismiss != "":
+				return fail(fmt.Errorf("--enable-review proposes a change; review, approve or dismiss the saved proposal in a separate command"))
+			}
+		}
 		if *refreshBaseline {
 			switch {
 			case *preferred != "":
@@ -520,7 +539,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		for _, key := range []string{"CODEX_THREAD_ID", "CLAUDECODE", "CURSOR_AGENT", "TERM_PROGRAM"} {
 			env[key] = os.Getenv(key)
 		}
-		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Rebind: *rebind, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand, HarnessTimeoutMS: *timeoutMS, MaxTimeoutMS: *maxTimeoutMS, Model: *model, ModelSet: modelRequested, Role: *role, RefreshBaseline: *refreshBaseline})
+		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Rebind: *rebind, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand, HarnessTimeoutMS: *timeoutMS, MaxTimeoutMS: *maxTimeoutMS, Model: *model, ModelSet: modelRequested, Role: *role, RefreshBaseline: *refreshBaseline, EnableReview: *enableReview})
 		if err != nil {
 			return fail(err)
 		}
@@ -1484,13 +1503,34 @@ func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, js
 		return 1
 	}
 	command := fmt.Sprintf("forgecell init --lab %s --review %s", shellWord(dir), p.ID)
+	// The reviewer appears only for a Formula with a review Atom or role, so every
+	// other proposal renders as before.
+	reviewer, reviewConfigured, reviewErr := onboarding.ResolveReviewBinding(f)
 	if jsonMode {
-		return encode(out, stderr, map[string]any{"proposal": p, "verified": true, "repository": f.Intake.Repo, "harness": f.Harness.Binding, "harnesses": f.Harnesses, "atoms": process["atoms"], "repositoryContext": process["repositoryContext"], "reviewCommand": command, "nextAction": next, "metaBinding": proposalMeta(p), "beforeYaml": proposalBeforeYAML(p), "capabilityEvidence": proposalCapabilities(p), "capabilityEvidenceSource": "saved observation; not current verification"})
+		view := map[string]any{"proposal": p, "verified": true, "repository": f.Intake.Repo, "harness": f.Harness.Binding, "harnesses": f.Harnesses, "atoms": process["atoms"], "repositoryContext": process["repositoryContext"], "reviewCommand": command, "nextAction": next, "metaBinding": proposalMeta(p), "beforeYaml": proposalBeforeYAML(p), "capabilityEvidence": proposalCapabilities(p), "capabilityEvidenceSource": "saved observation; not current verification"}
+		if reviewConfigured && reviewErr == nil {
+			r := map[string]any{"binding": reviewer.Binding.Binding, "source": reviewer.Source, "sameCommandAsCoding": reviewer.SameCommandAsCoding}
+			if reviewer.SameCommandAsCoding {
+				r["warning"] = onboarding.SameReviewerWarning
+			}
+			view["reviewer"] = r
+		}
+		return encode(out, stderr, view)
 	}
 	fmt.Fprintf(out, "Formula proposal %s: %s\nRepository: %s\nCoding harness: %s\nVerified SHA-256: %s\nReview: %s\nEvidence: %s · %s\nOrdered Atoms (gates and check identities):\n", p.ID, p.Status, f.Intake.Repo, f.Harness.Binding, p.YAMLHash, command, p.EvidencePath, p.EvidenceHash)
 	for _, role := range formula.HarnessRoles {
 		if b, ok := f.Harnesses[string(role)]; ok {
 			fmt.Fprintf(out, "Role binding %s: %s (overrides the default harness %s)\n", role, b.Binding, f.Harness.Binding)
+		}
+	}
+	if reviewConfigured {
+		if reviewErr != nil {
+			fmt.Fprintf(out, "Reviewer: unresolved: %v\n", reviewErr)
+		} else {
+			fmt.Fprintf(out, "Reviewer: %s (from %s)\n", reviewer.Binding.Binding, reviewer.Source)
+			if reviewer.SameCommandAsCoding {
+				fmt.Fprintf(out, "WARNING: %s\n", onboarding.SameReviewerWarning)
+			}
 		}
 	}
 	report := proposalCapabilities(p)
