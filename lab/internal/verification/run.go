@@ -49,6 +49,11 @@ type Observation struct {
 	// Selection is how a check that declares select ran: the affected packages or the
 	// full suite and why. Command keeps the approved argv.
 	Selection *Selection `json:"selection,omitempty"`
+	// JSONAdded means the protected view ran this direct go test check with -json
+	// inserted after go test, because deltas are declared and its approved argv lacks
+	// -json. The events were parsed as a stream and Result.Stdout keeps only a bounded
+	// plain summary; Command keeps the approved argv.
+	JSONAdded bool `json:"jsonAdded,omitempty"`
 }
 
 // MatchesCheckObservation binds delivery evidence to the approved command and
@@ -206,6 +211,17 @@ func goCommandEnv(ctx context.Context, env []string, fresh bool) (out, forwarded
 	}
 	out, forwarded = resources.ApplyGoCache(env, c, resources.GoEnvOptions{Fresh: fresh})
 	return out, forwarded, true
+}
+
+// goFlagsFailfast reports whether a command env's GOFLAGS asks go test to stop after
+// its first failure, which would let a declared failure stand in for later tests.
+func goFlagsFailfast(env []string) bool {
+	for _, kv := range env {
+		if value, ok := strings.CutPrefix(kv, "GOFLAGS="); ok && readiness.RequestsGoTestFailfast([]string{value}) {
+			return true
+		}
+	}
+	return false
 }
 
 // CacheStatus is the cache state a check record states, derived from the env the check
@@ -660,15 +676,33 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			selection = &s
 			argv = s.Argv(argv)
 		}
-		options := process.Options{Argv: argv, Dir: dir, Env: commandEnv, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
 		protectedRegression := protected && i >= len(p.Setup) && command.Required && command.Category == "regression"
+		// The candidate view keeps exactly its earlier behaviour: only deltas naming the
+		// check lift its cap. The protected view gives a direct go test check the deltas
+		// that name it and those that opted into deltaScope identity (DeltasApplyingTo),
+		// unless the env the check runs with asks for -failfast, which could let a
+		// declared failure mask others.
 		declared := p.DeltasForCheck(command.ID)
+		identity := false
+		if protectedRegression {
+			if readiness.IdentityDeltaCheck(command) && !goFlagsFailfast(commandEnv) {
+				declared, identity = p.DeltasApplyingTo(command), true
+			}
+		}
+		// In the protected view only, a direct go test check that lacks -json runs with
+		// -json inserted after go test, so its declared deltas can be matched. The
+		// approved argv, recorded as Command, is unchanged.
+		jsonAdded := identity && len(declared) > 0 && !readiness.RequestsGoTestJSON(command.Argv)
+		if jsonAdded {
+			argv = readiness.WithGoTestJSON(argv)
+		}
+		options := process.Options{Argv: argv, Dir: dir, Env: commandEnv, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
 		// A required regression check with declared deltas asks for go test -json, which
 		// is read as a stream so a large suite is not cut off by the capture cap. Every
 		// other check keeps the cap, and exceeding it still fails the check.
 		var parser *failedTestParser
 		candidateStream := false
-		if i >= len(p.Setup) && command.Required && command.Category == "regression" && len(declared) > 0 && readiness.RequestsGoTestJSON(command.Argv) {
+		if i >= len(p.Setup) && command.Required && command.Category == "regression" && len(declared) > 0 && (readiness.RequestsGoTestJSON(command.Argv) || jsonAdded) {
 			options.StdoutLines = &process.LineSink{Line: func([]byte) error { return nil }}
 			if protected {
 				parser = newFailedTestParser()
@@ -678,6 +712,16 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			}
 		}
 		result := process.Run(ctx, options)
+		if jsonAdded {
+			// The stream was parsed while it ran; the retained copy is replaced by a
+			// bounded plain summary, never the raw -json stream or a prefix of it.
+			var failed []TestID
+			if !result.OK {
+				failed, _ = parser.Finish()
+			}
+			result.Stdout = parser.Summary(failed)
+			result.RawStdout, result.Truncated = result.Stdout, false
+		}
 		// The no-op sink above lifts the capture cap, so only this check keeps the
 		// candidate view's overflow guard: a truncated stream is not a pass.
 		var truncatedErr error
@@ -696,28 +740,60 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if command.Category == "independent-acceptance" {
 			cacheState = AcceptanceCacheStatus(cache)
 		}
-		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets), Cache: cacheState, Packages: CountGoTestPackages(result.Stdout), GoEnvForwarded: forwarded, Selection: selection}
+		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets), Cache: cacheState, Packages: CountGoTestPackages(result.Stdout), GoEnvForwarded: forwarded, Selection: selection, JSONAdded: jsonAdded}
 		if cache && !result.OK {
 			observation.Note = resources.CacheSettingsNote(observation.Result.Stdout+"\n"+observation.Result.Stderr, forwarded)
 		}
 		var deltaErr error
 		evaluated := false
 		if protectedRegression {
-			if len(declared) > 0 {
+			// A delta applies by identity only to a check that ran its package; one that
+			// names this check by CheckID always applies, as before. Which packages ran
+			// is known only from a stream that can be trusted, so a failing check whose
+			// stream was refused keeps every declared delta and is refused with its reason.
+			applicable := declared
+			trusted := false
+			if parser != nil {
+				_, finishErr := parser.Finish()
+				trusted = result.OK || (finishErr == nil && checkProtectedResult(observation.Result) == nil)
+			}
+			if identity && trusted {
+				applicable = nil
+				for _, d := range declared {
+					if d.CheckID == command.ID || parser.ran(d.Package) {
+						applicable = append(applicable, d)
+					}
+				}
+			}
+			// The failing set of a cleanly parsed failing stream is recorded even when
+			// it is not covered, so --accept-protected-failures can name it; it never
+			// changes the verdict.
+			recordStreamed := func() {
+				if parser != nil && !result.OK && checkProtectedResult(observation.Result) == nil {
+					if failed, err := parser.Finish(); err == nil {
+						observation.FailedTests = failed
+					}
+				}
+			}
+			if len(applicable) > 0 {
 				evaluated = true
 				var evaluation DeltaEvaluation
-				if deltaErr = verifyDeltaPackages(destination, declared); deltaErr == nil {
+				if deltaErr = verifyDeltaPackages(destination, applicable); deltaErr == nil {
 					if parser != nil {
-						evaluation, deltaErr = evaluateStreamedDeltas(declared, observation.Result, parser)
+						evaluation, deltaErr = evaluateStreamedDeltas(applicable, observation.Result, parser)
 					} else {
-						evaluation, deltaErr = EvaluateProtectedDeltas(declared, observation.Result)
+						evaluation, deltaErr = EvaluateProtectedDeltas(applicable, observation.Result)
 					}
 				}
 				if deltaErr == nil {
 					observation.FailedTests = evaluation.Failed
 					observation.AcceptedDeltas = evaluation.Accepted
 					observation.Warnings = evaluation.Warnings
+				} else {
+					recordStreamed()
 				}
+			} else if parser != nil {
+				recordStreamed()
 			} else if !result.OK && !result.Overflow && readiness.RequestsGoTestJSON(command.Argv) {
 				// No delta is declared, so this changes no verdict. The failing tests are
 				// recorded so a reviewer drafting expectedProtectedDeltas can name them.
@@ -767,8 +843,20 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			return fail(fmt.Errorf("required command %s did not pass", command.ID))
 		}
 		if evaluated && deltaErr == nil {
-			v.AcceptedDeltas = append(v.AcceptedDeltas, observation.AcceptedDeltas...)
-			v.Warnings = append(v.Warnings, observation.Warnings...)
+			// A delta applied by identity to several checks is listed once per
+			// declaration; each observation keeps its own copy.
+			for _, d := range observation.AcceptedDeltas {
+				if !slices.ContainsFunc(v.AcceptedDeltas, func(seen readiness.ProtectedDelta) bool {
+					return seen.CheckID == d.CheckID && seen.Package == d.Package && seen.Test == d.Test
+				}) {
+					v.AcceptedDeltas = append(v.AcceptedDeltas, d)
+				}
+			}
+			for _, w := range observation.Warnings {
+				if !slices.Contains(v.Warnings, w) {
+					v.Warnings = append(v.Warnings, w)
+				}
+			}
 		}
 	}
 	v.RequiredChecksPassed = true

@@ -197,6 +197,7 @@ func save(r Record) error {
 		fmt.Fprintf(&b, "\n## Independent verification\n\nTree: `%s`\nRequired checks passed: %t\nIndependent acceptance verified: %t\n", r.Verification.SourceTree, r.Verification.RequiredChecksPassed, r.Verification.IndependentAcceptanceVerified)
 		b.WriteString(goCacheLines(*r.Verification))
 		b.WriteString(selectionLines(*r.Verification))
+		b.WriteString(protectedJSONAddedLines(*r.Verification))
 		b.WriteString(reviewVerdictLine(r))
 		fmt.Fprintf(&b, "\n%s\n", r.Verification.Error)
 	}

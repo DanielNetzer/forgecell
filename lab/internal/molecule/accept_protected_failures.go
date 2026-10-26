@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,11 +33,14 @@ const (
 // retained tree into the expected protected deltas of a successor of latest. It
 // refuses, never guesses: the latest verification must be of the latest plan and
 // the retained tree, every required candidate-view command must have passed, the
-// protected view must have stopped on one required go test -json regression check
-// whose complete stream the delta parser accepts, every failing test's package must
-// have an in-scope _test.go file, and the total stays within MaxProtectedDeltas.
-// Deltas of other checks are kept; the failing check's deltas become exactly the
-// tests that failed.
+// protected view must have stopped on one required direct go test regression check
+// read as a -json stream (approved or engine-added) that the delta parser accepts,
+// every failing test's package must have an in-scope _test.go file, and the total
+// stays within MaxProtectedDeltas. The failing set is the union over every failing
+// protected Go check of the attempt, each test declared once with the check it was
+// first observed on and the in-scope test file that declares it as ScopePath. Deltas
+// of other checks are kept; a failing check's deltas become exactly what failed.
+// Every returned delta carries DeltaScopeIdentity.
 func protectedFailureDeltas(ctx context.Context, r Record, latest readiness.Proposal) ([]readiness.ProtectedDelta, error) {
 	const refuse = "--accept-protected-failures refused: "
 	if len(r.VerificationAttempts) == 0 || r.Capture == nil || !reviewRevision.MatchString(r.Capture.Tree) {
@@ -64,48 +68,167 @@ func protectedFailureDeltas(ctx context.Context, r Record, latest readiness.Prop
 	if err = candidateViewPassed(p, result, tree); err != nil {
 		return nil, fmt.Errorf(refuse+"%v", err)
 	}
-	check, obs, err := failingProtectedCheck(p, result)
+	failing, err := failingProtectedChecks(p, result)
 	if err != nil {
 		return nil, fmt.Errorf(refuse+"%v", err)
 	}
-	failed, err := verification.ProtectedFailuresForDeltas(obs)
-	if err != nil {
-		return nil, fmt.Errorf(refuse+"protected regression check %s on tree %s is not a clean go test failure: %v", check.ID, tree, err)
+	// The union of the failing tests of every failing protected Go check, each named
+	// once with the check it was first observed on.
+	type observed struct {
+		id    verification.TestID
+		check string
 	}
-	var kept []readiness.ProtectedDelta
-	for _, d := range p.ExpectedProtectedDeltas {
-		if d.CheckID != check.ID {
-			kept = append(kept, d)
+	var union []observed
+	seen := map[verification.TestID]bool{}
+	failingChecks := map[string]bool{}
+	for _, f := range failing {
+		failed, err := verification.ProtectedFailuresForDeltas(f.obs)
+		if err != nil {
+			return nil, fmt.Errorf(refuse+"protected regression check %s on tree %s is not a clean go test failure: %v", f.check.ID, tree, err)
+		}
+		failingChecks[f.check.ID] = true
+		for _, id := range failed {
+			if !seen[id] {
+				seen[id] = true
+				union = append(union, observed{id, f.check.ID})
+			}
 		}
 	}
-	if len(kept)+len(failed) > readiness.MaxProtectedDeltas {
-		return nil, fmt.Errorf(refuse+"check %s failed %d tests in the protected regression run; at most %d expected protected deltas are permitted", check.ID, len(failed), readiness.MaxProtectedDeltas-len(kept))
+	// Declarations of other checks are kept; those of a failing check stay only for a
+	// test that failed, so a failing check's deltas become exactly what failed.
+	var kept []readiness.ProtectedDelta
+	declared := map[verification.TestID]bool{}
+	for _, d := range p.ExpectedProtectedDeltas {
+		id := verification.TestID{Package: d.Package, Test: d.Test}
+		if !failingChecks[d.CheckID] || seen[id] {
+			kept = append(kept, d)
+			declared[id] = true
+		}
 	}
-	for _, id := range failed {
+	var added []observed
+	for _, o := range union {
+		if !declared[o.id] {
+			added = append(added, o)
+		}
+	}
+	if len(kept)+len(added) > readiness.MaxProtectedDeltas {
+		return nil, fmt.Errorf(refuse+"the protected regression run failed %d undeclared tests; at most %d expected protected deltas are permitted", len(added), readiness.MaxProtectedDeltas-len(kept))
+	}
+	for _, o := range added {
 		// A secret-shaped name is redacted in every persisted copy, so it could not be
 		// shown as reviewed or matched exactly; it never becomes a plan declaration.
-		if harness.RedactSecrets(id.Package) != id.Package || harness.RedactSecrets(id.Test) != id.Test {
-			return nil, fmt.Errorf(refuse+"a failing test of check %s has a secret-shaped name; review the protected run instead", check.ID)
+		if harness.RedactSecrets(o.id.Package) != o.id.Package || harness.RedactSecrets(o.id.Test) != o.id.Test {
+			return nil, fmt.Errorf(refuse+"a failing test of check %s has a secret-shaped name; review the protected run instead", o.check)
 		}
 	}
 	files, err := inScopeTestFiles(ctx, r.Workspace.Path, tree, p.Analysis.Scope)
 	if err != nil {
 		return nil, fmt.Errorf(refuse+"%v", err)
 	}
-	reason := fmt.Sprintf("Failed by design in the protected regression run of check %s on retained tree %s; accepted with amend --accept-protected-failures.", check.ID, tree)
+	sources := newTestSources(ctx, r.Workspace.Path, []string{tree, p.Inputs.BaseCommit})
 	deltas := kept
-	for _, id := range failed {
-		scoped, ok := files[id.Package]
-		if !ok {
-			return nil, fmt.Errorf(refuse+"failing test %s %s of check %s has no in-scope _test.go file in its package to justify it", id.Package, id.Test, check.ID)
+	for _, o := range added {
+		candidates, ok := files[o.id.Package]
+		if !ok || len(candidates) == 0 {
+			return nil, fmt.Errorf(refuse+"failing test %s %s of check %s has no in-scope _test.go file in its package to justify it", o.id.Package, o.id.Test, o.check)
+		}
+		scoped, err := sources.declaring(candidates, o.id.Test)
+		if err != nil {
+			return nil, fmt.Errorf(refuse+"%v", err)
 		}
 		evidence := append([]string(nil), scoped.Evidence...)
 		if len(evidence) == 0 {
 			evidence = []string{"issue"}
 		}
-		deltas = append(deltas, readiness.ProtectedDelta{CheckID: check.ID, Package: id.Package, Test: id.Test, ScopePath: scoped.Path, Reason: reason, Evidence: evidence})
+		reason := fmt.Sprintf("Failed by design in the protected regression run of check %s on retained tree %s; accepted with amend --accept-protected-failures.", o.check, tree)
+		deltas = append(deltas, readiness.ProtectedDelta{CheckID: o.check, Package: o.id.Package, Test: o.id.Test, ScopePath: scoped.Path, Reason: reason, Evidence: evidence})
+	}
+	// Every declaration of the successor opts into identity matching, which joins its
+	// digest and is shown at review, so the union covers each protected Go check that
+	// runs the package, the Formula baseline included.
+	for i := range deltas {
+		deltas[i].DeltaScope = readiness.DeltaScopeIdentity
 	}
 	return deltas, nil
+}
+
+// Bounds of reading in-scope test sources to find the file that declares a test. The
+// per-blob bound stays under the git helper's capture cap.
+const (
+	maxTestSourceBytes      = 900_000
+	maxTestSourceTotalBytes = 64_000_000
+)
+
+// testSources reads in-scope _test.go blobs from the given trees, once each, within
+// maxTestSourceBytes per blob and maxTestSourceTotalBytes in all. Only a regular blob
+// is read; a larger one is treated as not declaring anything.
+type testSources struct {
+	ctx       context.Context
+	workspace string
+	trees     []string
+	contents  map[string][]string
+	total     int
+}
+
+func newTestSources(ctx context.Context, workspace string, trees []string) *testSources {
+	return &testSources{ctx: ctx, workspace: workspace, trees: trees, contents: map[string][]string{}}
+}
+
+// read returns the bounded versions of file in each tree that has it as a regular blob.
+func (s *testSources) read(file string) ([]string, error) {
+	if versions, ok := s.contents[file]; ok {
+		return versions, nil
+	}
+	var versions []string
+	for _, tree := range s.trees {
+		if !reviewRevision.MatchString(tree) {
+			continue
+		}
+		entry, err := git(s.ctx, s.workspace, "ls-tree", "-z", tree, "--", file)
+		if err != nil {
+			return nil, fmt.Errorf("the retained tree cannot be read")
+		}
+		entry = strings.TrimSuffix(entry, "\x00")
+		header, name, ok := strings.Cut(entry, "\t")
+		parts := strings.Fields(header)
+		if entry == "" || !ok || name != file || len(parts) != 3 || parts[1] != "blob" || (parts[0] != "100644" && parts[0] != "100755") || !reviewRevision.MatchString(parts[2]) {
+			continue
+		}
+		size, err := git(s.ctx, s.workspace, "cat-file", "-s", parts[2])
+		n, convErr := strconv.Atoi(strings.TrimSpace(size))
+		if err != nil || convErr != nil || n < 0 || n > maxTestSourceBytes {
+			continue
+		}
+		if s.total += n; s.total > maxTestSourceTotalBytes {
+			return nil, fmt.Errorf("the in-scope test sources exceed %d bytes, so the file declaring a failing test cannot be found", maxTestSourceTotalBytes)
+		}
+		raw, err := git(s.ctx, s.workspace, "cat-file", "blob", parts[2])
+		if err != nil || len(raw) > maxTestSourceBytes {
+			continue
+		}
+		versions = append(versions, raw)
+	}
+	s.contents[file] = versions
+	return versions, nil
+}
+
+// declaring returns the first candidate whose retained or base version declares the
+// top-level function of test (func TestX(), or the first candidate when none does.
+func (s *testSources) declaring(candidates []readiness.ScopedPath, test string) (readiness.ScopedPath, error) {
+	top, _, _ := strings.Cut(test, "/")
+	declaration := regexp.MustCompile(`(?m)^func\s+` + regexp.QuoteMeta(top) + `\s*\(`)
+	for _, c := range candidates {
+		versions, err := s.read(c.Path)
+		if err != nil {
+			return readiness.ScopedPath{}, err
+		}
+		for _, v := range versions {
+			if declaration.MatchString(v) {
+				return c, nil
+			}
+		}
+	}
+	return candidates[0], nil
 }
 
 // readVerificationResult reads one retained verification result file under the
@@ -166,9 +289,36 @@ func candidateViewPassed(p readiness.Plan, result verification.Result, tree stri
 	return nil
 }
 
+// failingProtectedGoCheck is one failing protected Go check and its observation.
+type failingProtectedGoCheck struct {
+	check readiness.Check
+	obs   verification.Observation
+}
+
+// failingProtectedChecks returns every failing protected Go check of result, in run
+// order: the checks whose failure the protected view accepted under declared deltas,
+// then the required check it stopped on.
+func failingProtectedChecks(p readiness.Plan, result verification.Result) ([]failingProtectedGoCheck, error) {
+	c, obs, err := failingProtectedCheck(p, result)
+	if err != nil {
+		return nil, err
+	}
+	var out []failingProtectedGoCheck
+	for _, earlier := range result.Protected.Checks[:len(result.Protected.Checks)-1] {
+		// failingProtectedCheck has checked that each one is a required Go stream the
+		// view accepted; a failing optional check never gated the run.
+		if !earlier.Result.OK && earlier.Command.Required {
+			out = append(out, failingProtectedGoCheck{earlier.Command, earlier})
+		}
+	}
+	return append(out, failingProtectedGoCheck{c, obs}), nil
+}
+
 // failingProtectedCheck returns the required regression check the protected view of
 // result stopped on and its observation. The protected view must have failed for
 // that check's own exit, not for setup, a definition change or a source mutation.
+// An earlier check may have failed only where the view accepted it under declared
+// deltas.
 func failingProtectedCheck(p readiness.Plan, result verification.Result) (readiness.Check, verification.Observation, error) {
 	v := result.Protected
 	if v == nil || v.RequiredChecksPassed {
@@ -200,7 +350,7 @@ func failingProtectedCheck(p readiness.Plan, result verification.Result) (readin
 		if obs.ID != c.ID || obs.SourceTree != v.SourceTree || obs.Category != "regression" || !reflect.DeepEqual(obs.Command, c) {
 			return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression observation %d does not match the approved check", i+1)
 		}
-		if i < last && c.Required && !obs.Result.OK {
+		if i < last && c.Required && !obs.Result.OK && (len(obs.AcceptedDeltas) == 0 || !protectedGoStream(c, obs)) {
 			return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression check %s failed before the last one recorded", c.ID)
 		}
 	}
@@ -209,17 +359,30 @@ func failingProtectedCheck(p readiness.Plan, result verification.Result) (readin
 	if !c.Required || obs.Result.OK || (v.Error != stopped && !strings.HasPrefix(v.Error, stopped+": ")) {
 		return readiness.Check{}, verification.Observation{}, fmt.Errorf("the protected regression run did not stop on a failing required check")
 	}
-	if !readiness.RequestsGoTestJSON(c.Argv) || len(c.Argv) < 2 || c.Argv[0] != "go" || c.Argv[1] != "test" {
-		return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression check %s is not a direct go test -json command, so its failing tests cannot be declared", c.ID)
+	if !protectedGoStream(c, obs) {
+		return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression check %s is not a direct go test -json command and its protected run did not add -json, so its failing tests cannot be declared", c.ID)
 	}
 	return c, obs, nil
 }
 
-// inScopeTestFiles maps each Go package import path to the lexicographically first
-// in-scope _test.go file of that package directory. The import path is resolved
-// from the nearest go.mod in the retained tree, the rule verification applies to a
+// protectedGoStream reports whether the protected run of c was read as a go test
+// -json stream: a direct go test command that requests -json, or one the protected
+// view ran with engine-added -json.
+func protectedGoStream(c readiness.Check, obs verification.Observation) bool {
+	if !readiness.IsDirectGoTest(c.Argv) {
+		return false
+	}
+	if obs.JSONAdded {
+		return !readiness.RequestsGoTestJSON(c.Argv)
+	}
+	return readiness.RequestsGoTestJSON(c.Argv)
+}
+
+// inScopeTestFiles maps each Go package import path to the in-scope _test.go files of
+// that package directory, in lexicographic order. The import path is resolved from
+// the nearest go.mod in the retained tree, the rule verification applies to a
 // declared delta's scope path.
-func inScopeTestFiles(ctx context.Context, workspace, tree string, scope []readiness.ScopedPath) (map[string]readiness.ScopedPath, error) {
+func inScopeTestFiles(ctx context.Context, workspace, tree string, scope []readiness.ScopedPath) (map[string][]readiness.ScopedPath, error) {
 	tests := []readiness.ScopedPath{}
 	for _, s := range scope {
 		if strings.HasSuffix(s.Path, "_test.go") && readiness.ConventionalTestPath(s.Path) && readiness.ValidatePath(s.Path) == nil {
@@ -247,7 +410,7 @@ func inScopeTestFiles(ctx context.Context, workspace, tree string, scope []readi
 		modules[dir] = manifest{module, found}
 		return modules[dir], nil
 	}
-	out := map[string]readiness.ScopedPath{}
+	out := map[string][]readiness.ScopedPath{}
 	for _, s := range tests {
 		dir := readiness.DeltaPackageDir(s.Path)
 		root := dir
@@ -270,9 +433,7 @@ func inScopeTestFiles(ctx context.Context, workspace, tree string, scope []readi
 					}
 					pkg = m.module + "/" + rel
 				}
-				if _, seen := out[pkg]; !seen {
-					out[pkg] = s
-				}
+				out[pkg] = append(out[pkg], s)
 				break
 			}
 			if root == "." {

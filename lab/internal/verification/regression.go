@@ -264,22 +264,162 @@ func abnormalExitMarker(output string) (string, bool) {
 // unfinished, so the parser's memory never follows an untrusted stream's size.
 const maxStreamedFailures = 200_000
 
+// maxStreamedPackages bounds the distinct packages a streamed parse remembers having
+// run, for the same reason.
+const maxStreamedPackages = 100_000
+
+// maxStreamSummaryBytes bounds the plain summary an engine-streamed check keeps as its
+// stdout in place of the -json stream.
+const maxStreamSummaryBytes = 64_000
+
+// Bounds of the output tail an engine-streamed check keeps for each failing test, so a
+// reviewer can see why it failed: the last maxTailLines lines within maxTailBytes per
+// test, for at most maxTailedTests tests tracked at once, and maxTailSummaryBytes of
+// tails in the summary. Past a bound the tail says what it dropped.
+const (
+	maxTailLines        = 40
+	maxTailBytes        = 8 << 10
+	maxTailedTests      = 256
+	maxTailSummaryBytes = 128_000
+)
+
+// testTail is the bounded last output of one test.
+type testTail struct {
+	lines   []string
+	bytes   int
+	dropped int
+}
+
+func (t *testTail) add(line string) {
+	if len(line) > maxTailBytes {
+		line = line[len(line)-maxTailBytes:]
+	}
+	t.lines = append(t.lines, line)
+	t.bytes += len(line)
+	for len(t.lines) > maxTailLines || t.bytes > maxTailBytes {
+		t.bytes -= len(t.lines[0])
+		t.lines = t.lines[1:]
+		t.dropped++
+	}
+}
+
 // failedTestParser reads go test -json output one line at a time. Its state holds
-// only the failing and unfinished tests, never the stream. It fails closed: a line
-// that is not a JSON event or a build failure is remembered and reported by Finish,
-// a failed package without any failing test is an error, and an empty stream is an
-// error.
+// only the failing and unfinished tests, the packages that ran, a bounded copy of
+// their ok/FAIL summary lines and a bounded output tail of each running or failing
+// test, never the stream. It fails closed: a line that is not a JSON event or a build
+// failure is remembered and reported by Finish, a failed package without any failing
+// test is an error, and an empty stream is an error.
 type failedTestParser struct {
 	failed         map[TestID]bool
 	failedPackages map[string]bool
 	started        map[TestID]bool
 	aborted        map[string]string
+	packages       map[string]bool
+	tails          map[TestID]*testTail
+	tailsCut       bool
+	summary        strings.Builder
+	summaryCut     bool
 	events         int
 	err            error
 }
 
 func newFailedTestParser() *failedTestParser {
-	return &failedTestParser{failed: map[TestID]bool{}, failedPackages: map[string]bool{}, started: map[TestID]bool{}, aborted: map[string]string{}}
+	return &failedTestParser{failed: map[TestID]bool{}, failedPackages: map[string]bool{}, started: map[TestID]bool{}, aborted: map[string]string{}, packages: map[string]bool{}, tails: map[TestID]*testTail{}}
+}
+
+// keepTestOutput adds the lines of one output event to its test's tail. A test that
+// passes or is skipped drops its tail; past maxTailedTests a new test keeps none.
+func (p *failedTestParser) keepTestOutput(id TestID, output string) {
+	t, ok := p.tails[id]
+	if !ok {
+		if len(p.tails) >= maxTailedTests {
+			p.tailsCut = true
+			return
+		}
+		t = &testTail{}
+		p.tails[id] = t
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		t.add(strings.TrimRight(line, "\r"))
+	}
+}
+
+// ran reports whether the stream reported any event of the package.
+func (p *failedTestParser) ran(pkg string) bool { return p.packages[pkg] }
+
+// keepSummaryLine appends one package summary line within half of
+// maxStreamSummaryBytes (the failing ids take the other half); past the bound it marks
+// the summary cut, so a shortened summary is never silent.
+func (p *failedTestParser) keepSummaryLine(line string) {
+	if p.summaryCut {
+		return
+	}
+	if p.summary.Len()+len(line)+1 > maxStreamSummaryBytes/2 {
+		p.summaryCut = true
+		return
+	}
+	p.summary.WriteString(line)
+	p.summary.WriteByte('\n')
+}
+
+// Summary is the plain stdout an engine-streamed check keeps: one line per failing
+// test of the complete stream, then the ok and FAIL package lines, within
+// maxStreamSummaryBytes. failed is the set Finish returned, or nil when the run
+// passed or the stream could not be trusted.
+func (p *failedTestParser) Summary(failed []TestID) string {
+	var b strings.Builder
+	cut := p.summaryCut
+	for _, id := range failed {
+		line := "--- FAIL: " + id.Test + " (" + id.Package + ")\n"
+		if b.Len()+len(line) > maxStreamSummaryBytes/2 {
+			cut = true
+			break
+		}
+		b.WriteString(line)
+	}
+	b.WriteString(p.summary.String())
+	if cut {
+		fmt.Fprintf(&b, "[forgecell: summary cut at its %d byte bound; the observation records the complete failing set]\n", maxStreamSummaryBytes)
+	}
+	b.WriteString(p.tailSummary())
+	return b.String()
+}
+
+// tailSummary renders the kept output tail of each test that failed, then of each
+// test still unfinished (a timeout or panic stops one mid-run), within
+// maxTailSummaryBytes. Output of a passing run has no failing test and renders
+// nothing; the whole summary is redacted with the rest of the check output.
+func (p *failedTestParser) tailSummary() string {
+	var b strings.Builder
+	cut := p.tailsCut
+	render := func(ids []TestID, state string) {
+		for _, id := range ids {
+			t := p.tails[id]
+			if t == nil || len(t.lines) == 0 {
+				continue
+			}
+			var section strings.Builder
+			fmt.Fprintf(&section, "=== output tail of %s test %s (%s): last %d line(s)", state, id.Test, id.Package, len(t.lines))
+			if t.dropped > 0 {
+				fmt.Fprintf(&section, ", %d earlier line(s) dropped", t.dropped)
+			}
+			section.WriteString("\n")
+			for _, line := range t.lines {
+				section.WriteString("    " + line + "\n")
+			}
+			if b.Len()+section.Len() > maxTailSummaryBytes {
+				cut = true
+				return
+			}
+			b.WriteString(section.String())
+		}
+	}
+	render(sortedTests(p.failed), "failing")
+	render(sortedTests(p.started), "unfinished")
+	if cut {
+		fmt.Fprintf(&b, "[forgecell: output tails cut at their bounds (%d tests tracked, %d bytes shown); the observation records the complete failing set]\n", maxTailedTests, maxTailSummaryBytes)
+	}
+	return b.String()
 }
 
 // Line consumes one output line. It never returns an error, so a sink built on it
@@ -298,12 +438,28 @@ func (p *failedTestParser) Line(raw []byte) error {
 		return nil
 	}
 	p.events++
+	if ev.Package != "" && !p.packages[ev.Package] {
+		if len(p.packages) >= maxStreamedPackages {
+			p.err = fmt.Errorf("protected regression reports more than %d packages; no delta can be accepted", maxStreamedPackages)
+			return nil
+		}
+		p.packages[ev.Package] = true
+	}
 	if ev.Action == "output" {
 		if marker, ok := abortMarker(ev.Test, ev.Output); ok {
 			p.aborted[ev.Package] = marker
 		}
 		if marker, ok := abnormalExitMarker(ev.Output); ok {
 			p.aborted[ev.Package] = marker
+		}
+		if ev.Test == "" {
+			for _, line := range strings.Split(ev.Output, "\n") {
+				if line = strings.TrimRight(line, "\r"); goTestPackageLine.MatchString(line) {
+					p.keepSummaryLine(line)
+				}
+			}
+		} else {
+			p.keepTestOutput(TestID{Package: ev.Package, Test: ev.Test}, ev.Output)
 		}
 	}
 	key := TestID{Package: ev.Package, Test: ev.Test}
@@ -314,6 +470,7 @@ func (p *failedTestParser) Line(raw []byte) error {
 		}
 	case "pass", "skip":
 		delete(p.started, key)
+		delete(p.tails, key)
 	}
 	switch ev.Action {
 	case "build-fail":
@@ -449,7 +606,9 @@ func checkProtectedResult(r process.Result) error {
 // evaluator's own path: the process must have run to a normal failing exit, the
 // retained stream must be complete, and the failedTestParser must accept it, so a
 // timeout, panic, build failure, abort marker or truncated output is refused, never
-// turned into a list of deltas.
+// turned into a list of deltas. An engine-streamed observation (JSONAdded) keeps only
+// a plain summary as stdout, so its recorded failing set is used: the runner records
+// it only from a complete stream the parser accepted.
 func ProtectedFailuresForDeltas(obs Observation) ([]TestID, error) {
 	r := obs.Result
 	if err := checkProtectedResult(r); err != nil {
@@ -457,6 +616,12 @@ func ProtectedFailuresForDeltas(obs Observation) ([]TestID, error) {
 	}
 	if r.OK {
 		return nil, fmt.Errorf("protected regression passed; there is no failure to accept")
+	}
+	if obs.JSONAdded {
+		if len(obs.FailedTests) == 0 {
+			return nil, fmt.Errorf("protected regression with engine-added -json recorded no clean failing set (its stream was refused or had no failing test); no delta can be accepted")
+		}
+		return append([]TestID(nil), obs.FailedTests...), nil
 	}
 	if r.Truncated {
 		return nil, fmt.Errorf("protected regression output was truncated and was not parsed as a stream; no delta can be accepted")
@@ -541,17 +706,23 @@ func evaluateStreamedDeltas(declared []readiness.ProtectedDelta, r process.Resul
 // against the approved plan. The compact ledger projection drops captured streams,
 // so the recorded failing set is checked for coverage; whenever the complete stream
 // is still present it is re-parsed and must yield the same failing set. A streamed
-// observation whose retained capture is only a prefix is judged by its recorded set.
+// observation whose retained capture is only a prefix, or an engine-streamed one whose
+// stdout is a plain summary, is judged by its recorded set. Deltas apply by test
+// identity to a direct go test check, as in the protected view.
 func acceptedProtectedFailure(p readiness.Plan, check readiness.Check, obs Observation) bool {
 	if check.Category != "regression" || !check.Required || p.Validate() != nil {
 		return false
 	}
-	declared := p.DeltasForCheck(check.ID)
+	declared := p.DeltasApplyingTo(check)
 	r := obs.Result
 	if len(declared) == 0 || len(obs.FailedTests) == 0 || r.Incomplete() || !r.Reconciled || r.Code <= 0 {
 		return false
 	}
-	if r.Stdout != "" && !r.Truncated {
+	// Only the runner adds -json, and only to a direct go test check that lacks it.
+	if obs.JSONAdded && (!readiness.IdentityDeltaCheck(check) || readiness.RequestsGoTestJSON(check.Argv)) {
+		return false
+	}
+	if r.Stdout != "" && !r.Truncated && !obs.JSONAdded {
 		e, err := EvaluateProtectedDeltas(declared, r)
 		if err != nil || len(e.Failed) != len(obs.FailedTests) {
 			return false
