@@ -38,7 +38,8 @@ func TestProtectedDeltaValidation(t *testing.T) {
 			p.Analysis.Checks = append(p.Analysis.Checks, Check{ID: "cand", Category: "candidate", Argv: []string{"go", "vet", "./..."}, Dir: "lab", TimeoutMS: 60000, Required: true, Definitions: []string{"manifest"}, Reason: "Candidate run", Evidence: []string{"manifest"}})
 			p.Analysis.Checks[0].Required = false
 		}},
-		{"no json argv", func(p *Plan) { p.Analysis.Checks[0].Argv = []string{"go", "test", "./..."} }},
+		{"wrapper without json", func(p *Plan) { p.Analysis.Checks[0].Argv = []string{"/bin/sh", "-c", "go test ./..."} }},
+		{"plain direct go test with failfast", func(p *Plan) { p.Analysis.Checks[0].Argv = []string{"go", "test", "-failfast", "./..."} }},
 		{"empty package", func(p *Plan) { p.ExpectedProtectedDeltas[0].Package = "" }},
 		{"wildcard package", func(p *Plan) { p.ExpectedProtectedDeltas[0].Package = "github.com/owner/repo/..." }},
 		{"relative package", func(p *Plan) { p.ExpectedProtectedDeltas[0].Package = "./lab" }},
@@ -278,6 +279,111 @@ func TestProtectedDeltaFixturePathsAndLookup(t *testing.T) {
 	}
 	if len(p.DeltasForCheck("regression")) != 1 || len(p.DeltasForCheck("other")) != 0 {
 		t.Fatal("lookup by check identity is wrong")
+	}
+}
+
+// A delta may cite a plain direct go test check, such as a Formula baseline, because
+// the protected view runs it with -json added; wrappers, -failfast and over-cap
+// declarations are still refused.
+func TestProtectedDeltaMayCiteAPlainDirectGoTestBaseline(t *testing.T) {
+	p := protectedDeltaPlan()
+	p.Analysis.Checks[0].Argv = []string{"go", "test", "-timeout", "20m", "./..."}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("a delta citing a plain direct go test baseline was refused: %v", err)
+	}
+	if err := p.ValidateDirectDeltaChecks(); err != nil {
+		t.Fatalf("a plain direct go test check is direct: %v", err)
+	}
+	wrapped := protectedDeltaPlan()
+	wrapped.Analysis.Checks[0].Argv = []string{"/bin/sh", "-c", "go test -json ./..."}
+	if err := wrapped.ValidateDirectDeltaChecks(); err == nil || !strings.Contains(err.Error(), "direct `go test`") {
+		t.Fatalf("a -json wrapper was accepted for coding: %v", err)
+	}
+	for _, argv := range [][]string{{"go", "test", "-failfast", "./..."}, {"go", "test", "-test.failfast=true", "./..."}, {"env", "go", "test", "./..."}} {
+		bad := protectedDeltaPlan()
+		bad.Analysis.Checks[0].Argv = argv
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("%v: a delta check that can mask failures was accepted", argv)
+		}
+	}
+	over := protectedDeltaPlan()
+	over.Analysis.Checks[0].Argv = []string{"go", "test", "./..."}
+	for i := 0; i < MaxProtectedDeltas; i++ {
+		d := over.ExpectedProtectedDeltas[0]
+		d.Test = fmt.Sprintf("TestMany%d", i)
+		over.ExpectedProtectedDeltas = append(over.ExpectedProtectedDeltas, d)
+	}
+	if err := over.Validate(); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("over-cap declaration on a plain baseline was accepted: %v", err)
+	}
+}
+
+func TestDeltasApplyByTestIdentityToDirectGoTestChecks(t *testing.T) {
+	p := protectedDeltaPlan()
+	targeted := p.Analysis.Checks[0]
+	baseline := Check{ID: "baseline-go-test-lab", Category: "regression", Argv: []string{"go", "test", "-timeout", "20m", "./..."}, Dir: "lab", TimeoutMS: 60000, Required: true, Definitions: []string{"manifest"}, Reason: "Formula baseline", Evidence: []string{"manifest"}}
+	p.Analysis.Checks = append(p.Analysis.Checks, baseline)
+	second := p.ExpectedProtectedDeltas[0]
+	second.CheckID, second.Reason = baseline.ID, "Observed on the baseline"
+	p.ExpectedProtectedDeltas = append(p.ExpectedProtectedDeltas, second)
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// One entry per exact package and test; the delta naming the check is preferred.
+	if got := p.DeltasApplyingTo(targeted); len(got) != 1 || got[0].CheckID != "regression" {
+		t.Fatalf("targeted: %+v", got)
+	}
+	if got := p.DeltasApplyingTo(baseline); len(got) != 1 || got[0].CheckID != baseline.ID {
+		t.Fatalf("baseline: %+v", got)
+	}
+	p.ExpectedProtectedDeltas = p.ExpectedProtectedDeltas[:1]
+	// Without the digest-bound opt-in, a delta applies only to the check it names.
+	if got := p.DeltasApplyingTo(baseline); len(got) != 0 {
+		t.Fatalf("a delta without deltaScope identity excused another check: %+v", got)
+	}
+	if got := p.ExpectedProtectedDeltas[0].ScopeText(); got != "apply to check regression" {
+		t.Fatalf("scope text %q", got)
+	}
+	before, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ExpectedProtectedDeltas[0].DeltaScope = DeltaScopeIdentity
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := p.Digest(); err != nil || after == before {
+		t.Fatalf("deltaScope identity must change the plan digest: %v", err)
+	}
+	if got := p.ExpectedProtectedDeltas[0].ScopeText(); got != "apply to every protected go test check running the package" {
+		t.Fatalf("scope text %q", got)
+	}
+	if got := p.DeltasApplyingTo(baseline); len(got) != 1 || got[0].CheckID != "regression" {
+		t.Fatalf("a delta observed on another check must apply to the baseline by identity: %+v", got)
+	}
+	bad := p
+	bad.ExpectedProtectedDeltas = []ProtectedDelta{p.ExpectedProtectedDeltas[0]}
+	bad.ExpectedProtectedDeltas[0].DeltaScope = "everything"
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "deltaScope") {
+		t.Fatalf("an unknown deltaScope was accepted: %v", err)
+	}
+	// Older plans: a wrapper or -failfast check keeps only the deltas naming it.
+	wrapper := targeted
+	wrapper.Argv = []string{"/bin/sh", "-c", "go test -json ./..."}
+	if got := p.DeltasApplyingTo(wrapper); len(got) != 1 {
+		t.Fatalf("a wrapper check lost the delta naming it: %+v", got)
+	}
+	wrapper.ID = "other"
+	if got := p.DeltasApplyingTo(wrapper); len(got) != 0 {
+		t.Fatalf("a wrapper check was given a delta of another check: %+v", got)
+	}
+	failfast := baseline
+	failfast.Argv = []string{"go", "test", "-failfast", "./..."}
+	if got := p.DeltasApplyingTo(failfast); len(got) != 0 {
+		t.Fatalf("a -failfast check was given deltas by identity: %+v", got)
+	}
+	if got := WithGoTestJSON(baseline.Argv); strings.Join(got, " ") != "go test -json -timeout 20m ./..." || strings.Join(baseline.Argv, " ") != "go test -timeout 20m ./..." {
+		t.Fatalf("WithGoTestJSON = %v (approved %v)", got, baseline.Argv)
 	}
 }
 

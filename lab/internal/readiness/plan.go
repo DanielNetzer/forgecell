@@ -325,8 +325,11 @@ func ValidateOperatorText(s string, max int) error {
 
 // ProtectedDelta names one test, matched by exact Go package import path and
 // exact test name (subtests as Test/sub/case), that may fail in the protected run
-// of a required regression check. ScopePath is the approved protected test source
-// whose intentional change justifies the failure.
+// of a required regression check. By default it applies only to the check CheckID
+// names. With DeltaScope "identity", an explicit opt-in that joins the plan digest,
+// it applies by that identity to every direct go test regression check
+// (DeltasApplyingTo), and CheckID is the check it was observed on. ScopePath is the
+// approved protected test source whose intentional change justifies the failure.
 type ProtectedDelta struct {
 	CheckID   string   `json:"checkId"`
 	Package   string   `json:"package"`
@@ -334,6 +337,24 @@ type ProtectedDelta struct {
 	ScopePath string   `json:"scopePath"`
 	Reason    string   `json:"reason"`
 	Evidence  []string `json:"evidence"`
+	// DeltaScope is empty (the check CheckID names) or DeltaScopeIdentity. Empty keeps
+	// the digest of every earlier plan unchanged.
+	DeltaScope string `json:"deltaScope,omitempty"`
+}
+
+// DeltaScopeIdentity applies a declared delta by exact package and test to every
+// protected required direct go test regression check that runs its package.
+const DeltaScopeIdentity = "identity"
+
+// ByIdentity reports whether d applies by test identity across protected Go checks.
+func (d ProtectedDelta) ByIdentity() bool { return d.DeltaScope == DeltaScopeIdentity }
+
+// ScopeText says, for review, which protected checks d applies to.
+func (d ProtectedDelta) ScopeText() string {
+	if d.ByIdentity() {
+		return "apply to every protected go test check running the package"
+	}
+	return "apply to check " + d.CheckID
 }
 
 // MaxProtectedDeltas bounds a declaration so it stays reviewable.
@@ -1167,6 +1188,33 @@ func requestsGoTestFailfast(argv []string) bool {
 // streams the output of checks that ask for it.
 func RequestsGoTestJSON(argv []string) bool { return requestsGoTestJSON(argv) }
 
+// IsDirectGoTest reports whether argv is a direct go test invocation (argv[0] go,
+// argv[1] test), so the Lab sees every flag it passes.
+func IsDirectGoTest(argv []string) bool {
+	return len(argv) >= 2 && argv[0] == "go" && argv[1] == "test"
+}
+
+// RequestsGoTestFailfast is requestsGoTestFailfast for the verification runner, which
+// never applies a declared delta to a check that stops after its first failure.
+func RequestsGoTestFailfast(argv []string) bool { return requestsGoTestFailfast(argv) }
+
+// IdentityDeltaCheck reports whether declared deltas apply by test identity to c: a
+// required regression check that is a direct go test invocation without -failfast,
+// such as a targeted package check or a Formula baseline.
+func IdentityDeltaCheck(c Check) bool {
+	return c.Category == "regression" && c.Required && IsDirectGoTest(c.Argv) && !requestsGoTestFailfast(c.Argv)
+}
+
+// WithGoTestJSON returns a copy of a direct go test argv with -json inserted right
+// after go test. The protected view runs it in place of the approved argv, which is
+// never changed; any other argv is returned unchanged.
+func WithGoTestJSON(argv []string) []string {
+	if !IsDirectGoTest(argv) {
+		return append([]string{}, argv...)
+	}
+	return append([]string{argv[0], argv[1], "-json"}, argv[2:]...)
+}
+
 // protectedTestSource mirrors what the protected view restores from the base
 // commit: conventional test paths and every regression check definition.
 func (p Plan) protectedTestSource(file string) bool {
@@ -1212,8 +1260,10 @@ func (p Plan) validateProtectedDeltas(scope map[string]bool, cited func([]string
 		if !ok || c.Category != "regression" || !c.Required {
 			return fmt.Errorf("expected protected delta %s %s needs a required regression check, not %q", d.Package, d.Test, d.CheckID)
 		}
-		if !requestsGoTestJSON(c.Argv) {
-			return fmt.Errorf("expected protected delta %s %s needs check %s to request go test -json", d.Package, d.Test, d.CheckID)
+		// A direct go test check without -json, such as a Formula baseline, is run with
+		// -json added in the protected view, so it may be the check a delta names.
+		if !requestsGoTestJSON(c.Argv) && !IsDirectGoTest(c.Argv) {
+			return fmt.Errorf("expected protected delta %s %s needs check %s to request go test -json or be a direct `go test` command", d.Package, d.Test, d.CheckID)
 		}
 		if requestsGoTestFailfast(c.Argv) {
 			return fmt.Errorf("expected protected delta %s %s cannot use check %s: it requests -failfast, so tests after the first failure never run and a declared failure could mask them", d.Package, d.Test, d.CheckID)
@@ -1223,6 +1273,9 @@ func (p Plan) validateProtectedDeltas(scope map[string]bool, cited func([]string
 		}
 		if !validGoTestName(d.Test) {
 			return fmt.Errorf("expected protected delta needs an exact test name without wildcards: %q", d.Test)
+		}
+		if d.DeltaScope != "" && d.DeltaScope != DeltaScopeIdentity {
+			return fmt.Errorf("expected protected delta %s %s has deltaScope %q; only %q or none is permitted", d.Package, d.Test, d.DeltaScope, DeltaScopeIdentity)
 		}
 		key := d.CheckID + "\x00" + d.Package + "\x00" + d.Test
 		if seen[key] {
@@ -1315,6 +1368,37 @@ func (p Plan) DeltasForCheck(id string) []ProtectedDelta {
 		if d.CheckID == id {
 			out = append(out, d)
 		}
+	}
+	return out
+}
+
+// DeltasApplyingTo returns the declared deltas that may excuse a failure of check c in
+// the protected view, one per exact package and test, in plan order. A delta that
+// opted into DeltaScopeIdentity applies by test identity to an IdentityDeltaCheck;
+// every other delta, as every earlier plan declared them, applies only to the check
+// its CheckID names, so an approved plan never excuses a failure in a check its
+// reviewer did not approve. A delta that names c is preferred, so its CheckID and
+// reason are the ones recorded on c.
+func (p Plan) DeltasApplyingTo(c Check) []ProtectedDelta {
+	if !IdentityDeltaCheck(c) {
+		return p.DeltasForCheck(c.ID)
+	}
+	type key struct{ pkg, test string }
+	index := map[key]int{}
+	var out []ProtectedDelta
+	for _, d := range p.ExpectedProtectedDeltas {
+		if d.CheckID != c.ID && !d.ByIdentity() {
+			continue
+		}
+		k := key{d.Package, d.Test}
+		if i, ok := index[k]; ok {
+			if d.CheckID == c.ID && out[i].CheckID != c.ID {
+				out[i] = d
+			}
+			continue
+		}
+		index[k] = len(out)
+		out = append(out, d)
 	}
 	return out
 }
@@ -1415,11 +1499,13 @@ func (p Plan) ValidateDirectDeltaChecks() error {
 		checks[c.ID] = c
 	}
 	for _, d := range p.ExpectedProtectedDeltas {
+		// Validate already refuses a check that neither requests -json nor is a direct
+		// go test, so only a -json wrapper can reach this rule.
 		c, ok := checks[d.CheckID]
 		if !ok || !requestsGoTestJSON(c.Argv) {
 			continue
 		}
-		if len(c.Argv) < 2 || c.Argv[0] != "go" || c.Argv[1] != "test" {
+		if !IsDirectGoTest(c.Argv) {
 			return fmt.Errorf("expected protected delta %s %s needs check %s to be a direct `go test` command (argv[0] go, argv[1] test), not a shell, env or script wrapper, because a wrapper can hide flags such as -failfast that stop later tests from running", d.Package, d.Test, d.CheckID)
 		}
 	}

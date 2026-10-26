@@ -20,19 +20,36 @@ const (
 	acceptCheck   = "go-test-lab"
 )
 
-// acceptFakeGo answers `go test -json` from the pinned test source the check runs
-// against: the candidate's version says "new", the base version restored by the
-// protected view says "old". The mode file next to it picks how the old version
-// fails, so no Go toolchain runs and nothing depends on time.
+// acceptFakeGo answers `go test` from the pinned test source the check runs against:
+// the candidate's version says "new", the base version restored by the protected
+// view says "old". It answers in -json only when its argv asks for it, and a -timeout
+// argument marks the plain Formula baseline. The mode file next to it picks how the
+// old version fails, so no Go toolchain runs and nothing depends on time.
 const acceptFakeGo = `#!/bin/sh
 [ "$1" = test ] || exit 2
 mode=$(cat "$(dirname "$0")/mode")
 pkg=example.test/lab/pin
+json=no
+baseline=no
+for a in "$@"; do
+	case "$a" in
+	-json) json=yes ;;
+	-timeout) baseline=yes ;;
+	esac
+done
 fail() {
 	for name in "$@"; do
-		printf '{"Action":"run","Package":"%s","Test":"%s"}\n{"Action":"fail","Package":"%s","Test":"%s"}\n' "$failpkg" "$name" "$failpkg" "$name"
+		if [ $json = yes ]; then
+			printf '{"Action":"run","Package":"%s","Test":"%s"}\n{"Action":"fail","Package":"%s","Test":"%s"}\n' "$failpkg" "$name" "$failpkg" "$name"
+		else
+			printf '%s\n' "--- FAIL: $name"
+		fi
 	done
-	printf '{"Action":"fail","Package":"%s"}\n' "$failpkg"
+	if [ $json = yes ]; then
+		printf '{"Action":"fail","Package":"%s"}\n' "$failpkg"
+	else
+		printf 'FAIL\t%s\t0.01s\n' "$failpkg"
+	fi
 	exit 1
 }
 failpkg=$pkg
@@ -43,11 +60,18 @@ if grep -q new pin/pin_test.go || [ "$mode" = pass ]; then
 	if [ "$mode" = candidate-audit ]; then
 		printf stray > stray.txt
 	fi
-	printf '{"Action":"run","Package":"%s","Test":"TestX"}\n{"Action":"pass","Package":"%s","Test":"TestX"}\n{"Action":"pass","Package":"%s"}\n' "$pkg" "$pkg" "$pkg"
+	if [ $json = yes ]; then
+		printf '{"Action":"run","Package":"%s","Test":"TestX"}\n{"Action":"pass","Package":"%s","Test":"TestX"}\n{"Action":"pass","Package":"%s"}\n' "$pkg" "$pkg" "$pkg"
+	else
+		printf 'ok  \t%s\t0.01s\n' "$pkg"
+	fi
 	exit 0
 fi
+if [ $baseline = yes ] && [ "$mode" = baseline-extra ]; then
+	fail TestX TestY
+fi
 case "$mode" in
-by-design|candidate-audit) fail TestX ;;
+by-design|candidate-audit|baseline-extra) fail TestX ;;
 extra) fail TestX TestY ;;
 other-package) failpkg=example.test/lab/other; fail TestY ;;
 many) fail $(seq -f 'Test%g' 1 65) ;;
@@ -67,6 +91,25 @@ exit 3
 // is therefore not parallel.
 func acceptFixture(t *testing.T, mode string) (Options, Record) {
 	t.Helper()
+	return acceptFixtureFiles(t, mode, map[string]string{acceptTest: "package pin\n\n// pinned: old\n"}, false)
+}
+
+const (
+	acceptBaseline   = "baseline-go-test-lab"
+	acceptOtherTest  = "lab/pin/aaa_test.go"
+	acceptPinnedBase = "package pin\n\nimport \"testing\"\n\n// pinned: old\nfunc TestX(t *testing.T) {}\n"
+)
+
+// acceptBaselineFixture adds a plain `go test -timeout 20m ./...` Formula-style
+// baseline after the targeted go test -json check, and a second in-scope test file of
+// the package that sorts first and declares TestY, not TestX.
+func acceptBaselineFixture(t *testing.T, mode string) (Options, Record) {
+	t.Helper()
+	return acceptFixtureFiles(t, mode, map[string]string{acceptTest: acceptPinnedBase, acceptOtherTest: "package pin\n\nimport \"testing\"\n\nfunc TestY(t *testing.T) {}\n"}, true)
+}
+
+func acceptFixtureFiles(t *testing.T, mode string, tests map[string]string, baseline bool) (Options, Record) {
+	t.Helper()
 	bin := resolvedTempDir(t)
 	if err := writeStub(filepath.Join(bin, "go"), []byte(acceptFakeGo), 0700); err != nil {
 		t.Fatal(err)
@@ -74,7 +117,11 @@ func acceptFixture(t *testing.T, mode string) (Options, Record) {
 	setAcceptMode(t, bin, mode)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	o, repo := fixture(t)
-	for file, body := range map[string]string{"lab/go.mod": "module example.test/lab\n", acceptTest: "package pin\n\n// pinned: old\n"} {
+	files := map[string]string{"lab/go.mod": "module example.test/lab\n"}
+	for file, body := range tests {
+		files[file] = body
+	}
+	for file, body := range files {
 		if err := os.MkdirAll(filepath.Join(repo, filepath.Dir(file)), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -99,6 +146,10 @@ func acceptFixture(t *testing.T, mode string) (Options, Record) {
 		}
 		a.Scope = append(a.Scope, readiness.ScopedPath{Path: acceptTest, Reason: "The pinned behaviour changes by design", Evidence: []string{"issue"}})
 		a.Checks = append(a.Checks, readiness.Check{ID: acceptCheck, Category: "regression", Argv: []string{"go", "test", "-json", "./..."}, Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: "Module tests", Evidence: []string{"issue", manifest}})
+		if baseline {
+			a.Scope = append(a.Scope, readiness.ScopedPath{Path: acceptOtherTest, Reason: "Another test of the package", Evidence: []string{"issue"}})
+			a.Checks = append(a.Checks, readiness.Check{ID: acceptBaseline, Category: "regression", Argv: []string{"go", "test", "-timeout", "20m", "./..."}, Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: "Formula baseline", Evidence: []string{"issue", manifest}})
+		}
 		return a, err
 	}
 	r, err := runApprovedFixture(t, o)
@@ -205,6 +256,73 @@ func TestAcceptProtectedFailuresUndeclaredExtraFailureStillFails(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "TestX,TestY" {
 		t.Fatalf("deltas %v", names)
+	}
+}
+
+// The #235 flow: a by-design failure declared from the targeted check also covers the
+// plain Formula baseline, which the protected view runs with -json added. When the
+// baseline then fails one more test, accepting again declares the union of both
+// checks' failing tests once, each with the in-scope file that declares it.
+func TestAcceptProtectedFailuresCoversThePlainBaselineAndDeclaresTheUnion(t *testing.T) {
+	o, r := acceptBaselineFixture(t, "by-design")
+	if r.Verification.Protected == nil || len(r.Verification.Protected.Checks) != 1 || r.Verification.Protected.Checks[0].ID != acceptCheck {
+		t.Fatalf("the protected view must stop on the targeted check first: %+v", r.Verification.Protected)
+	}
+	r, err := AmendFromLatest(context.Background(), o.LabDir, r.ID, AmendRequest{AcceptProtectedFailures: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := latestPlan(r).Plan.ExpectedProtectedDeltas
+	if len(deltas) != 1 || deltas[0].Test != "TestX" || deltas[0].CheckID != acceptCheck || deltas[0].ScopePath != acceptTest {
+		t.Fatalf("ScopePath must be the file declaring TestX, not the first test file of the package: %+v", deltas)
+	}
+	// Identity matching is the digest-bound opt-in the amend sets and review shows.
+	if deltas[0].DeltaScope != readiness.DeltaScopeIdentity || deltas[0].ScopeText() != "apply to every protected go test check running the package" {
+		t.Fatalf("the accepted delta did not opt into identity matching: %+v", deltas[0])
+	}
+
+	// The baseline also fails an undeclared test: it still fails, by name.
+	setAcceptMode(t, acceptBin(t), "baseline-extra")
+	o.Approve = latestPlan(r).Digest
+	if r, err = Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	v := r.Verification
+	if v == nil || v.RequiredChecksPassed || v.Protected == nil || len(v.Protected.Checks) != 2 || !strings.Contains(v.Error, "required command "+acceptBaseline+" did not pass") || !strings.Contains(v.Error, acceptPackage+" TestY") {
+		t.Fatalf("an undeclared baseline failure passed: %+v", v)
+	}
+	if b := v.Protected.Checks[1]; !b.JSONAdded || len(b.FailedTests) != 2 || b.Command.Argv[2] != "-timeout" {
+		t.Fatalf("the ledger's compact projection lost the engine-streamed evidence: %+v", b)
+	}
+	if r, err = AmendFromLatest(context.Background(), o.LabDir, r.ID, AmendRequest{AcceptProtectedFailures: true}); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range latestPlan(r).Plan.ExpectedProtectedDeltas {
+		got = append(got, d.Test+"@"+d.CheckID+"@"+d.ScopePath)
+	}
+	if want := []string{"TestX@" + acceptCheck + "@" + acceptTest, "TestY@" + acceptBaseline + "@" + acceptOtherTest}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("deltas %v, want the union once %v", got, want)
+	}
+
+	o.Approve = latestPlan(r).Digest
+	if r, err = Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	v = r.Verification
+	if r.Readiness.Phase != "review-waiting" || v == nil || !v.RequiredChecksPassed || len(v.AcceptedDeltas) != 2 {
+		t.Fatalf("the declared union was not accepted in both checks: phase %s %+v", r.Readiness.Phase, v)
+	}
+	targeted, baseline := v.Protected.Checks[0], v.Protected.Checks[1]
+	if targeted.JSONAdded || len(targeted.AcceptedDeltas) != 1 || !baseline.JSONAdded || len(baseline.AcceptedDeltas) != 2 {
+		t.Fatalf("targeted %+v baseline %+v", targeted, baseline)
+	}
+	lines := protectedJSONAddedLines(*v)
+	if !strings.Contains(lines, "`"+acceptBaseline+"` jsonAdded") || !strings.Contains(lines, "observed on check `"+acceptCheck+"`") || strings.Contains(lines, o.LabDir) {
+		t.Fatalf("ledger lines %q", lines)
+	}
+	if strings.Contains(string(ledgerBytes(t, r)), o.LabDir+"/verification-history") {
+		t.Fatal("the ledger recorded a local evidence path")
 	}
 }
 

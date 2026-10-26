@@ -20,6 +20,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"go.yaml.in/yaml/v4"
 	"io"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -1089,10 +1091,15 @@ func presentRun(out io.Writer, r molecule.Record) {
 		}
 		if len(p.ExpectedProtectedDeltas) > 0 {
 			fmt.Fprintln(out, "EXPECTED PROTECTED-TEST FAILURES — approving this exact digest accepts these failures in the protected regression run:")
+			identity := false
 			for _, d := range p.ExpectedProtectedDeltas {
-				fmt.Fprintf(out, "  %s %s · check %s · justified by scope path %s — %s\n", d.Package, d.Test, d.CheckID, d.ScopePath, d.Reason)
+				fmt.Fprintf(out, "  %s %s · check %s · justified by scope path %s — %s\n    scope: %s\n", d.Package, d.Test, d.CheckID, d.ScopePath, d.Reason, d.ScopeText())
+				identity = identity || d.ByIdentity()
 			}
 			fmt.Fprintln(out, "  Any other failing test still fails the check, including the parent of a declared subtest, which must be declared explicitly. A declared test that does not fail is only a warning; amend the plan to remove it.")
+			if identity {
+				fmt.Fprintln(out, "  A test that says 'apply to every protected go test check running the package' (deltaScope identity) applies, by exact package and test, to every required direct `go test` regression check that runs its package, the Formula baseline included; the check named is where it was observed. The protected run adds -json after `go test` to such a check that lacks it; its approved argv is unchanged.")
+			}
 		} else if advisory := p.ProtectedDeltaAdvisory(protectedFailures(r)...); advisory != "" {
 			fmt.Fprintln(out, advisory)
 		}
@@ -1140,6 +1147,9 @@ func presentRun(out io.Writer, r molecule.Record) {
 			for _, d := range r.Verification.AcceptedDeltas {
 				fmt.Fprintf(out, "  %s %s · check %s · justified by scope path %s — %s\n", d.Package, d.Test, d.CheckID, d.ScopePath, d.Reason)
 			}
+		}
+		for _, line := range protectedJSONAddedLines(*r.Verification) {
+			fmt.Fprintln(out, line)
 		}
 		for _, w := range r.Verification.Warnings {
 			fmt.Fprintf(out, "Warning: %s\n", w)
@@ -1210,6 +1220,37 @@ func presentReview(out io.Writer, r molecule.Record) {
 		}
 		fmt.Fprintf(out, "  Draft follow-up (not filed): %s\n", text(d.Title))
 	}
+}
+
+// protectedJSONAddedLines names each protected regression check the protected view ran
+// with engine-added -json, with the failing tests it recorded and the deltas it
+// accepted. Names come from the record, so they are redacted and kept to one line.
+func protectedJSONAddedLines(v verification.Result) []string {
+	if v.Protected == nil {
+		return nil
+	}
+	var lines []string
+	for _, o := range v.Protected.Checks {
+		if !o.JSONAdded {
+			continue
+		}
+		line := fmt.Sprintf("Protected run of check %s added -json after `go test` (jsonAdded; approved argv unchanged; stdout keeps a plain summary) · %d failing test(s) recorded · %d declared delta(s) accepted", oneLineText(o.ID), len(o.FailedTests), len(o.AcceptedDeltas))
+		for _, d := range o.AcceptedDeltas {
+			line += fmt.Sprintf("\n  accepted %s %s · observed on check %s · %s", oneLineText(d.Package), oneLineText(d.Test), oneLineText(d.CheckID), oneLineText(d.ScopeText()))
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// oneLineText redacts secret-shaped values and strips control characters.
+func oneLineText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, harness.RedactSecrets(s))
 }
 
 // protectedFailures lists the tests that failed in the protected regression run

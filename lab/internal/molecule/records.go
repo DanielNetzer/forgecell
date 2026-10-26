@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
+	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -123,6 +125,28 @@ func ReadRecord(lab, id string) (Record, error) {
 		return Record{}, fmt.Errorf("ledger identity mismatch")
 	}
 	return r, nil
+}
+
+// protectedJSONAddedLines renders, for the Markdown ledger, one line for each
+// protected regression check the protected view ran with engine-added -json: the
+// jsonAdded marker, the failing tests it recorded and each accepted delta with the
+// check it was observed on. Every name comes from the record, so it is bounded and
+// stripped of control characters. Checks without jsonAdded render nothing.
+func protectedJSONAddedLines(v verification.Result) string {
+	if v.Protected == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, o := range v.Protected.Checks {
+		if !o.JSONAdded {
+			continue
+		}
+		fmt.Fprintf(&b, "Protected regression `%s` jsonAdded: the protected run added -json after `go test` (approved argv unchanged); %d failing test(s) recorded, %d declared delta(s) accepted\n", oneLine(o.ID), len(o.FailedTests), len(o.AcceptedDeltas))
+		for _, d := range o.AcceptedDeltas {
+			fmt.Fprintf(&b, "- accepted `%s` `%s` · observed on check `%s` · %s\n", oneLine(d.Package), oneLine(d.Test), oneLine(d.CheckID), oneLine(d.ScopeText()))
+		}
+	}
+	return b.String()
 }
 
 // sameLab compares a recorded Lab directory with the one being read, after making

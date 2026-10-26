@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -67,6 +68,38 @@ func TestStreamedParserKeepsOnlyFailureStateNotTheStream(t *testing.T) {
 	}
 	if len(p.failed) != 0 || len(p.started) != 0 || len(p.failedPackages) != 0 || len(p.aborted) != 0 {
 		t.Fatalf("output events must not accumulate state: %+v", p)
+	}
+}
+
+// The plain summary an engine-streamed check keeps is bounded and says when it was
+// cut; the parser's package memory is bounded too and fails closed past it.
+func TestStreamSummaryAndPackageMemoryAreBounded(t *testing.T) {
+	p := newFailedTestParser()
+	line := `{"Action":"output","Package":"example.test/p","Output":"ok  \texample.test/p\t0.01s\n"}`
+	for i := 0; i < 5000; i++ {
+		p.Line([]byte(line))
+	}
+	p.Line([]byte(`{"Action":"output","Package":"example.test/p","Test":"TestA","Output":"FAIL\texample.test/q\t0.01s\n"}`))
+	var failed []TestID
+	for i := 0; i < 5000; i++ {
+		failed = append(failed, TestID{Package: "example.test/p", Test: "TestMany" + strings.Repeat("x", 20)})
+	}
+	summary := p.Summary(failed)
+	if len(summary) > maxStreamSummaryBytes+200 || !strings.Contains(summary, "summary cut") || strings.Contains(summary, `"Action"`) || strings.Contains(summary, "example.test/q") {
+		t.Fatalf("summary of %d bytes: %.200q", len(summary), summary)
+	}
+	if !strings.HasPrefix(summary, "--- FAIL: TestMany") || !strings.Contains(summary, "ok  \texample.test/p\t0.01s\n") {
+		t.Fatalf("summary keeps failing ids then package lines: %.200q", summary)
+	}
+	if short := newFailedTestParser().Summary(nil); short != "" {
+		t.Fatalf("an empty stream has an empty summary: %q", short)
+	}
+	many := newFailedTestParser()
+	for i := 0; i <= maxStreamedPackages; i++ {
+		many.Line([]byte(`{"Action":"pass","Package":"example.test/p` + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + `/` + strconv.Itoa(i) + `"}`))
+	}
+	if _, err := many.Finish(); err == nil || !strings.Contains(err.Error(), "packages") || len(many.packages) > maxStreamedPackages {
+		t.Fatalf("package memory: %d, %v", len(many.packages), err)
 	}
 }
 
