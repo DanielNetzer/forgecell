@@ -98,6 +98,9 @@ type Result struct {
 	IndependentAcceptanceVerified bool          `json:"independentAcceptanceVerified"`
 	Containment                   string        `json:"containment"`
 	Error                         string        `json:"error,omitempty"`
+	// CandidateError keeps the candidate view's own failure reason when a later step,
+	// such as the protected regression view, replaces Error.
+	CandidateError string `json:"candidateError,omitempty"`
 	// AcceptedDeltas failed in the protected view exactly as the approved plan declared.
 	AcceptedDeltas []readiness.ProtectedDelta `json:"acceptedProtectedDeltas,omitempty"`
 	// Warnings name declared deltas that did not fail or were never exercised.

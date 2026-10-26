@@ -139,6 +139,7 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 	}
 	tree, err := ProtectedTree(ctx, source, p, c.Tree)
 	if err != nil {
+		keepCandidateError(&candidate)
 		candidate.Error = err.Error()
 		candidate.RequiredChecksPassed = false
 		candidate.IndependentAcceptanceVerified = false
@@ -159,6 +160,7 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 	preserved := runViewDeltas(ctx, source, destination+"-protected", plan, copy, observe, true)
 	candidate.Protected = &preserved
 	if !preserved.RequiredChecksPassed {
+		keepCandidateError(&candidate)
 		candidate.RequiredChecksPassed = false
 		candidate.IndependentAcceptanceVerified = false
 		candidate.Error = "protected regression did not pass: " + preserved.Error
@@ -169,6 +171,18 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 		candidate.Warnings = append(candidate.Warnings, preserved.Warnings...)
 	}
 	return candidate
+}
+
+// keepCandidateError records the candidate view's own failure on CandidateError
+// before Error is replaced, so a candidate failure is never read as a pass.
+func keepCandidateError(candidate *Result) {
+	if candidate.RequiredChecksPassed || candidate.CandidateError != "" {
+		return
+	}
+	candidate.CandidateError = candidate.Error
+	if candidate.CandidateError == "" {
+		candidate.CandidateError = "candidate view did not pass"
+	}
 }
 
 // TestID identifies one Go test by package import path and test name, as
@@ -428,6 +442,33 @@ func checkProtectedResult(r process.Result) error {
 		return fmt.Errorf("protected regression did not exit with a failing status; no delta can be accepted")
 	}
 	return nil
+}
+
+// ProtectedFailuresForDeltas returns the failing tests of one failed protected
+// regression observation, for a reviewer's delta proposal. It is the delta
+// evaluator's own path: the process must have run to a normal failing exit, the
+// retained stream must be complete, and the failedTestParser must accept it, so a
+// timeout, panic, build failure, abort marker or truncated output is refused, never
+// turned into a list of deltas.
+func ProtectedFailuresForDeltas(obs Observation) ([]TestID, error) {
+	r := obs.Result
+	if err := checkProtectedResult(r); err != nil {
+		return nil, err
+	}
+	if r.OK {
+		return nil, fmt.Errorf("protected regression passed; there is no failure to accept")
+	}
+	if r.Truncated {
+		return nil, fmt.Errorf("protected regression output was truncated and was not parsed as a stream; no delta can be accepted")
+	}
+	failed, err := parseFailedTests(r.Stdout)
+	if err != nil {
+		return nil, err
+	}
+	if len(failed) == 0 {
+		return nil, fmt.Errorf("protected regression exited non-zero without any failing test; no delta can be accepted")
+	}
+	return failed, nil
 }
 
 // matchDeltas applies the declared deltas to the failing set of a failed check, or

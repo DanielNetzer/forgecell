@@ -244,6 +244,14 @@ type AmendRequest struct {
 	// Continuation is "" (code again) or "checks-only".
 	Continuation string
 	AcceptTree   string
+	// AcceptProtectedFailures declares the tests that failed in the latest protected
+	// regression run of the retained tree as expected protected deltas and continues
+	// checks-only. The deltas are derived under the Molecule lock, never supplied.
+	AcceptProtectedFailures bool
+	// Run reports that the caller approves and runs the new revision right after
+	// the amend (amend --run).
+	Run             bool
+	protectedDeltas []readiness.ProtectedDelta
 }
 
 // Bounds of one flag-driven amendment. Plan.Validate bounds the totals.
@@ -277,6 +285,13 @@ func (q AmendRequest) validate() error {
 	}
 	if q.Continuation != "" && q.Continuation != checksOnlyContinue {
 		return fmt.Errorf("--continuation accepts only checks-only")
+	}
+	if q.AcceptProtectedFailures && len(q.AddScope) > 0 {
+		return fmt.Errorf("--accept-protected-failures re-verifies the retained tree, so it takes no --add-scope")
+	}
+	if q.AcceptProtectedFailures && q.Run {
+		// The deltas are derived from tool output, so a human reads them first.
+		return fmt.Errorf("--accept-protected-failures takes no --run: review the printed EXPECTED PROTECTED-TEST FAILURES, then approve the new digest with forgecell run <issue> --approve <digest>")
 	}
 	return nil
 }
@@ -369,6 +384,11 @@ func AmendFromLatest(ctx context.Context, lab, id string, req AmendRequest) (Rec
 		return r, fmt.Errorf("coding checkout unavailable; refresh intake")
 	}
 	latest := r.Readiness.Plans[len(r.Readiness.Plans)-1]
+	if req.AcceptProtectedFailures {
+		if req.protectedDeltas, err = protectedFailureDeltas(ctx, r, latest); err != nil {
+			return r, err
+		}
+	}
 	next, err := buildRevision(r, latest.Plan, req)
 	if err != nil {
 		return r, err
@@ -393,6 +413,11 @@ func buildRevision(r Record, previous readiness.Plan, req AmendRequest) (readine
 	snapshot := *r.RepositoryEvidence
 	next.Continuation, next.AdoptAttempt = req.Continuation, ""
 	next.OperatorNote = req.Note
+	if req.AcceptProtectedFailures {
+		// The retained tree is re-verified, not re-coded, under the derived deltas.
+		next.Continuation = checksOnlyContinue
+		next.ExpectedProtectedDeltas = append([]readiness.ProtectedDelta(nil), req.protectedDeltas...)
+	}
 	inScope := map[string]bool{}
 	for _, s := range next.Analysis.Scope {
 		inScope[s.Path] = true
@@ -536,6 +561,9 @@ func AmendDiffSummary(previous, next readiness.Plan) string {
 		parts = append(parts, "note set")
 	case next.OperatorNote == "" && previous.OperatorNote != "":
 		parts = append(parts, "note cleared")
+	}
+	if !reflect.DeepEqual(next.ExpectedProtectedDeltas, previous.ExpectedProtectedDeltas) {
+		parts = append(parts, fmt.Sprintf("expected protected failures: %d", len(next.ExpectedProtectedDeltas)))
 	}
 	if next.Continuation != previous.Continuation {
 		if next.Continuation == "" {
