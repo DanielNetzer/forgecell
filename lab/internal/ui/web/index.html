@@ -46,15 +46,38 @@
 <main id="main" tabindex="-1">
 <p id="load-error" class="banner" role="alert" hidden></p>
 
-<section id="view-inbox" class="view glass placeholder" data-view-panel="inbox" aria-labelledby="inbox-title">
-  <h1 id="inbox-title">Inbox</h1>
-  <p id="inbox-summary" class="placeholder-summary"></p>
-  <p class="placeholder-note">Coming next: everything that needs you, one card each, with one clear action. Until then, the Molecules waiting for your decision are under <a href="?view=work" data-view="work">Work</a>.</p>
+<section id="view-inbox" class="view inbox" data-view-panel="inbox" aria-labelledby="inbox-title">
+  <div class="inbox-greeting">
+    <div>
+      <h1 id="inbox-title">Good day</h1>
+      <p id="inbox-counts" class="inbox-counts"></p>
+    </div>
+    <a class="btn btn-secondary" href="?view=issues" data-view="issues"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Pick an Issue</a>
+  </div>
+  <p id="inbox-live" class="sr-only" role="status" aria-live="polite"></p>
+  <p id="inbox-note" class="inventory-note" hidden></p>
+  <section class="inbox-section" aria-labelledby="needs-you-title">
+    <h2 id="needs-you-title" class="inbox-heading">Needs you</h2>
+    <div id="inbox-needs" class="inbox-list"></div>
+    <p id="inbox-needs-empty" class="inbox-empty" hidden>Nothing needs you right now.</p>
+    <p id="inbox-needs-more" class="inbox-more" hidden></p>
+  </section>
+  <section class="inbox-section" aria-labelledby="in-progress-title">
+    <h2 id="in-progress-title" class="inbox-heading">In progress</h2>
+    <div id="inbox-progress" class="inbox-list"></div>
+    <p id="inbox-progress-empty" class="inbox-empty" hidden>Nothing is running.</p>
+    <p id="inbox-progress-more" class="inbox-more" hidden></p>
+  </section>
+  <section class="inbox-section" aria-labelledby="recent-title">
+    <h2 id="recent-title" class="inbox-heading">Recently recorded</h2>
+    <div id="inbox-recent" class="inbox-recent"></div>
+    <p id="inbox-recent-empty" class="inbox-empty" hidden>No draft PR is recorded yet.</p>
+  </section>
 </section>
 
 <section id="view-issues" class="view glass placeholder" data-view-panel="issues" aria-labelledby="issues-title" hidden>
   <h1 id="issues-title">Issues</h1>
-  <p class="placeholder-note">Coming next: every open Issue, including ones never started, with one action per row. Until then, start intake on an Issue number from the Start Work panel.</p>
+  <p class="placeholder-note">Coming next: every open Issue, including ones never started, with one action per row. Until then, start intake on an Issue number with Start intake in the side panel.</p>
 </section>
 
 <div id="view-work" class="view" data-view-panel="work" hidden>
@@ -157,7 +180,7 @@
   <aside class="side-panel" aria-label="Lab status">
     <div id="resident" class="glass resident" data-pose="reading">
       <div class="resident-figure" aria-hidden="true"><div class="resident-sprite"></div><div class="resident-dish"></div></div>
-      <p id="resident-title" class="resident-title">All is quiet</p>
+      <p id="resident-title" class="resident-title">All quiet</p>
       <p class="resident-copy">The resident waves when you’re needed, studies a cube while work runs, and reads when all is quiet.</p>
     </div>
     <div id="drive-slot" class="drive-slot"></div>

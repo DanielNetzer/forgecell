@@ -222,49 +222,59 @@ func TestUIServedJSStartWorkAndLaneBar(t *testing.T) {
 		}
 	}
 
+	// Run the loop and Start intake are real forms (#250): labelled inputs with a
+	// name, autocomplete off and an example placeholder, a segmented scope
+	// control, the labelled stepper bounded 1..max and submit buttons, so Enter
+	// submits. Stop loop is no longer beside the primary; it is behind the header
+	// pill's disclosure and confirmation.
 	panel := jsFunction(t, js, "ensureDrive")
 	for _, want := range []string{
-		"el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Issue #'), issue)",
-		"el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Select'), select)",
+		"el('label', { class: 'field-label', for: 'drive-issue' }, 'Issue number'), issue)",
+		"type: 'text', id: 'drive-issue', name: 'issue', inputmode: 'numeric', maxlength: '10', autocomplete: 'off', placeholder: '245…', 'aria-describedby': 'drive-run-error'",
+		"type: 'text', id: 'drive-value', name: 'value', maxlength: '200', autocomplete: 'off', spellcheck: 'false', placeholder: 'v1…', 'aria-describedby': 'drive-loop-error'",
 		"el('label', { class: 'field-label', for: 'drive-max' }, 'At once')",
-		"type: 'number', id: 'drive-max', min: '1', max: '8', step: '1', value: '1', dataset: { drive: 'max' }",
-		"list: 'drive-select-options'",
-		"el('datalist', { id: 'drive-select-options' }, ['oldest', 'label:', 'milestone:'].map((v) => el('option', { value: v })))",
+		"type: 'number', id: 'drive-max', name: 'maxConcurrent', min: '1', max: '8', step: '1', value: '1', inputmode: 'numeric', autocomplete: 'off', 'aria-describedby': 'drive-loop-error', dataset: { drive: 'max' }",
+		"el('div', { class: 'segmented', role: 'group', 'aria-label': 'Which Issues' }, modes)",
+		"el('button', { type: 'button', class: 'seg', 'aria-pressed': String(mode === drive.mode), dataset: { drive: 'mode-' + mode }, onclick: () => chooseMode(mode) }, m.label)",
 		"'aria-label': 'Fewer at once', 'aria-controls': 'drive-max', dataset: { drive: 'fewer' }, onclick: () => step(-1)",
 		"'aria-label': 'More at once', 'aria-controls': 'drive-max', dataset: { drive: 'more' }, onclick: () => step(1)",
 		"max.value = String(Math.max(1, Math.min(Number.isInteger(limit) ? limit : 8, next)));",
-		"class: 'btn btn-primary', dataset: { drive: 'run' }, onclick: () => startRun(issue.value) }",
-		"class: 'btn btn-primary', dataset: { drive: 'start' }, onclick: () => startLoop(select.value, max.value) }",
-		"class: 'btn btn-secondary', dataset: { drive: 'stop' }, onclick: stopLoop }",
-		"'START INTAKE'",
-		"'RUN THE LOOP'",
+		"el('button', { type: 'submit', class: 'btn btn-primary drive-submit', dataset: { drive: 'start' } }, 'Start loop')",
+		"el('button', { type: 'submit', class: 'btn btn-secondary', dataset: { drive: 'run' } }, 'Start intake')",
+		"el('form', { class: 'drive-panel drive-form', id: 'drive-run', 'aria-labelledby': 'drive-run-title', novalidate: true, onsubmit: submitRun }",
+		"el('p', { class: 'drive-error', id: 'drive-loop-error', tabindex: '-1', hidden: true })",
+		"el('p', { class: 'drive-error', id: 'drive-run-error', tabindex: '-1', hidden: true })",
+		"'Run the loop'",
 		"el('p', { class: 'drive-help' },",
+		"fill($('#drive-slot'), drive.panel);",
 	} {
 		if !strings.Contains(panel, want) {
 			t.Errorf("ensureDrive lacks %q", want)
 		}
 	}
-	if strings.Contains(panel, "text-button") {
-		t.Error("Start Work still uses underlined text buttons")
+	for _, gone := range []string{"text-button", "stopLoop", "btn-danger", "datalist"} {
+		if strings.Contains(panel, gone) {
+			t.Errorf("the side panel forms still have %q", gone)
+		}
 	}
 
 	render := jsFunction(t, js, "renderDrive")
 	for _, want := range []string{
 		"c.run.disabled = drive.pending || Boolean(drive.run && drive.run.state === 'running');",
 		"c.start.disabled = drive.pending || looping;",
-		"c.stop.disabled = drive.pending || !loop || loop.state !== 'running';",
 		"b.setAttribute('aria-disabled', String(b.disabled))",
-		"fill(c.run, drive.pending && drive.where === 'run' ? 'Working…' : 'Start intake');",
-		"fill(c.start, drive.pending && drive.where === 'loop' ? 'Working…' : 'Start loop');",
+		"setText(c.run, drive.pending && drive.where === 'run' ? 'Starting…' : 'Start intake');",
+		"setText(c.start, drive.pending && drive.where === 'loop' ? 'Starting…' : looping ? 'Loop is running' : 'Start loop');",
 		"if (loop && Number.isInteger(loop.maxConcurrentLimit)) c.max.max = String(loop.maxConcurrentLimit);",
+		"if (text && drive.announce) { drive.announce = false; error.focus(); }",
 	} {
 		if !strings.Contains(render, want) {
 			t.Errorf("renderDrive lacks %q", want)
 		}
 	}
 	for _, want := range []string{
-		"if (!/^[1-9][0-9]{0,9}$/.test(value)) { drive.message = 'Enter an Issue number.'; renderDrive(); return; }",
-		"if (!Number.isInteger(n) || n < 1) { drive.message = 'Enter how many Molecules to advance at once.'; renderDrive(); return; }",
+		"if (!/^[1-9][0-9]{0,9}$/.test(value)) { driveMessage('Enter an Issue number, such as 245.'); return; }",
+		"if (!Number.isInteger(n) || n < 1) { driveMessage('Enter how many Molecules to advance at once.'); return; }",
 		"if (drive.pending) return null;",
 		"const FOCUS_KEYS = ['id', 'filter', 'atom', 'origin', 'review', 'evidence', 'gate', 'drive'];",
 	} {

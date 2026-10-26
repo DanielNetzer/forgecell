@@ -232,6 +232,8 @@
         el('small', null, (states[f.state] || notRecorded(f.state)) + (f.decisionId ? ' · decision ' + f.decisionId : '') + '. Applies to future Molecules; existing Molecules keep their saved snapshot.')),
       el('div', { class: 'formula-actions' }, el('span', { class: 'unavailable-tag', title: 'Version history and rollback are not connected in this slice' }, 'Versions & history · Unavailable')));
     renderOperator(lab.operator);
+    // The greeting names the operator.
+    if (state.list) renderInbox();
     const drives = !sample && Array.isArray(lab.actions) && lab.actions.length > 0;
     $('.readonly-badge').hidden = drives;
     if (!drives) $('#loop-pill').hidden = true;
@@ -247,9 +249,18 @@
   // meanwhile, and after an ambiguous response (none, or a 5xx) the state is read
   // back and never resubmitted. A run shows as started only once the server's
   // ledger read-back finds its Molecule; the loop's report comes from the engine.
-  // where names the group (run or loop) whose status shows the pending note and
-  // the last message; it changes only what is displayed where.
-  const drive = { panel: null, controls: null, loaded: false, pending: false, where: 'run', message: '', runIssue: null, run: null, loop: null, timer: null, token: 0 };
+  // where names the form (run or loop) whose status shows the pending note and
+  // whose inline error shows the last message; it changes only what is displayed
+  // where. announce moves focus to that error once, when a message is set.
+  const drive = { panel: null, controls: null, loaded: false, pending: false, where: 'run', message: '', announce: false, mode: 'oldest', runIssue: null, run: null, loop: null, timer: null, token: 0 };
+
+  // driveMessage shows text as the inline error of the form drive.where names,
+  // and moves focus to it.
+  function driveMessage(text) {
+    drive.message = text;
+    drive.announce = Boolean(text);
+    renderDrive();
+  }
 
   async function drivePost(path, body) {
     const session = tabSession();
@@ -276,10 +287,11 @@
     drive.pending = false;
     if (!res || res.status >= 500) {
       drive.message = 'The response was lost or ambiguous. The state is read back; nothing is resubmitted.';
+      drive.announce = true;
       readDrive();
       return null;
     }
-    if (!res.ok) { drive.message = refusalText(body); renderDrive(); return null; }
+    if (!res.ok) { driveMessage(refusalText(body)); return null; }
     return body;
   }
 
@@ -308,7 +320,7 @@
   async function startRun(text) {
     const value = String(text).trim();
     if (!drive.pending) drive.where = 'run';
-    if (!/^[1-9][0-9]{0,9}$/.test(value)) { drive.message = 'Enter an Issue number.'; renderDrive(); return; }
+    if (!/^[1-9][0-9]{0,9}$/.test(value)) { driveMessage('Enter an Issue number, such as 245.'); return; }
     drive.runIssue = Number(value);
     drive.run = null;
     const job = await submitDrive('/api/runs', JSON.stringify({ issue: drive.runIssue }));
@@ -318,7 +330,7 @@
   async function startLoop(select, max) {
     const n = Number(max);
     if (!drive.pending) drive.where = 'loop';
-    if (!Number.isInteger(n) || n < 1) { drive.message = 'Enter how many Molecules to advance at once.'; renderDrive(); return; }
+    if (!Number.isInteger(n) || n < 1) { driveMessage('Enter how many Molecules to advance at once.'); return; }
     const loop = await submitDrive('/api/loop/start', JSON.stringify({ select: String(select).trim(), maxConcurrent: n }));
     if (loop) { drive.loop = loop; readDrive(); }
   }
@@ -328,11 +340,56 @@
     if (loop) { drive.loop = loop; readDrive(); }
   }
 
+  // The Run-the-loop selector: Oldest, or a milestone title or label name from
+  // the value field, as the same selector string the loop takes; the server
+  // parses and validates it again.
+  const LOOP_MODES = {
+    oldest: { label: 'Oldest', field: '', placeholder: '' },
+    milestone: { label: 'Milestone', field: 'Milestone title', placeholder: 'v1…' },
+    label: { label: 'Label', field: 'Label name', placeholder: 'ready…' },
+  };
+  function loopSelector(mode, value) { return mode === 'oldest' ? 'oldest' : mode + ':' + String(value).trim(); }
+
+  // submitLoop is the Run-the-loop form's submit handler, so Enter submits. The
+  // CSP sets form-action 'none': the form never navigates, it posts through
+  // startLoop exactly as before.
+  function submitLoop(e) {
+    e.preventDefault();
+    const c = drive.controls;
+    if (drive.mode !== 'oldest' && !c.value.value.trim()) {
+      if (!drive.pending) drive.where = 'loop';
+      driveMessage('Enter a ' + LOOP_MODES[drive.mode].field.toLowerCase() + ', or choose Oldest.');
+      return;
+    }
+    startLoop(loopSelector(drive.mode, c.value.value), c.max.value);
+  }
+
+  function submitRun(e) {
+    e.preventDefault();
+    startRun(drive.controls.issue.value);
+  }
+
+  function chooseMode(mode) {
+    const c = drive.controls, m = LOOP_MODES[mode];
+    if (!c || !m) return;
+    drive.mode = mode;
+    for (const b of c.modes) b.setAttribute('aria-pressed', String(b.dataset.drive === 'mode-' + mode));
+    c.valueField.hidden = mode === 'oldest';
+    setText(c.valueLabel, m.field || 'Value');
+    c.value.placeholder = m.placeholder;
+  }
+
+  // ensureDrive builds the side panel's two forms once: Run the loop, which the
+  // header's Start loop link points at, and Start intake by Issue number. Their
+  // controls persist, so a poll never rebuilds an input being typed in. Stopping
+  // the loop is behind the header pill's disclosure and confirmation only.
   function ensureDrive() {
     if (drive.panel) return;
-    const issue = el('input', { type: 'text', inputmode: 'numeric', maxlength: '10', placeholder: 'Issue number', dataset: { drive: 'issue' } });
-    const select = el('input', { type: 'text', maxlength: '256', value: 'oldest', spellcheck: 'false', list: 'drive-select-options', autocomplete: 'off', dataset: { drive: 'select' } });
-    const max = el('input', { type: 'number', id: 'drive-max', min: '1', max: '8', step: '1', value: '1', dataset: { drive: 'max' } });
+    const modes = Object.entries(LOOP_MODES).map(([mode, m]) => el('button', { type: 'button', class: 'seg', 'aria-pressed': String(mode === drive.mode), dataset: { drive: 'mode-' + mode }, onclick: () => chooseMode(mode) }, m.label));
+    const value = el('input', { type: 'text', id: 'drive-value', name: 'value', maxlength: '200', autocomplete: 'off', spellcheck: 'false', placeholder: 'v1…', 'aria-describedby': 'drive-loop-error', dataset: { drive: 'value' } });
+    const valueLabel = el('label', { class: 'field-label', for: 'drive-value' }, 'Milestone title');
+    const valueField = el('div', { class: 'drive-field' }, valueLabel, value);
+    const max = el('input', { type: 'number', id: 'drive-max', name: 'maxConcurrent', min: '1', max: '8', step: '1', value: '1', inputmode: 'numeric', autocomplete: 'off', 'aria-describedby': 'drive-loop-error', dataset: { drive: 'max' } });
     // The stepper clamps to 1 and the input's max; startLoop still validates.
     const step = (delta) => {
       const limit = Number(max.max), n = Number(max.value);
@@ -341,34 +398,35 @@
     };
     const fewer = el('button', { type: 'button', class: 'stepper-button', 'aria-label': 'Fewer at once', 'aria-controls': 'drive-max', dataset: { drive: 'fewer' }, onclick: () => step(-1) }, '−');
     const more = el('button', { type: 'button', class: 'stepper-button', 'aria-label': 'More at once', 'aria-controls': 'drive-max', dataset: { drive: 'more' }, onclick: () => step(1) }, '+');
-    const run = el('button', { type: 'button', class: 'btn btn-primary', dataset: { drive: 'run' }, onclick: () => startRun(issue.value) }, 'Start intake');
-    const start = el('button', { type: 'button', class: 'btn btn-primary', dataset: { drive: 'start' }, onclick: () => startLoop(select.value, max.value) }, 'Start loop');
-    const stop = el('button', { type: 'button', class: 'btn btn-secondary', dataset: { drive: 'stop' }, onclick: stopLoop }, 'Stop loop');
-    const runStatus = el('div', { class: 'drive-status', role: 'status' });
+    const start = el('button', { type: 'submit', class: 'btn btn-primary drive-submit', dataset: { drive: 'start' } }, 'Start loop');
+    const loopError = el('p', { class: 'drive-error', id: 'drive-loop-error', tabindex: '-1', hidden: true });
     const loopStatus = el('div', { class: 'drive-status', role: 'status' });
-    drive.controls = { run: run, start: start, stop: stop, max: max, runStatus: runStatus, loopStatus: loopStatus };
-    drive.panel = el('div', { class: 'drive-panel', id: 'drive-panel' },
-      el('span', { class: 'label' }, 'START WORK · THROUGH THE ENGINE'),
-      el('div', { class: 'drive-groups' },
-        el('div', { class: 'drive-group', role: 'group', 'aria-labelledby': 'drive-run-title' },
-          el('span', { class: 'label', id: 'drive-run-title' }, 'START INTAKE'),
-          el('div', { class: 'drive-row' },
-            el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Issue #'), issue),
-            run),
-          runStatus),
-        el('div', { class: 'drive-group', id: 'drive-loop', tabindex: '-1', role: 'group', 'aria-labelledby': 'drive-loop-title' },
-          el('span', { class: 'label', id: 'drive-loop-title' }, 'RUN THE LOOP'),
-          el('div', { class: 'drive-row' },
-            el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Select'), select),
-            el('div', { class: 'drive-field drive-field-stepper' },
-              el('label', { class: 'field-label', for: 'drive-max' }, 'At once'),
-              el('div', { class: 'stepper' }, fewer, max, more)),
-            start, stop),
-          loopStatus)),
-      el('datalist', { id: 'drive-select-options' }, ['oldest', 'label:', 'milestone:'].map((v) => el('option', { value: v }))),
-      el('p', { class: 'drive-help' }, 'The engine runs the bound harness from this checkout. Intake stops at the scope gate; the loop approves only what the Formula policy approves. Stopping the loop dispatches no new Issue and lets Molecules in flight finish.'));
-    // The Run-the-loop form the header's Start loop link points at.
+    const issue = el('input', { type: 'text', id: 'drive-issue', name: 'issue', inputmode: 'numeric', maxlength: '10', autocomplete: 'off', placeholder: '245…', 'aria-describedby': 'drive-run-error', dataset: { drive: 'issue' } });
+    const run = el('button', { type: 'submit', class: 'btn btn-secondary', dataset: { drive: 'run' } }, 'Start intake');
+    const runError = el('p', { class: 'drive-error', id: 'drive-run-error', tabindex: '-1', hidden: true });
+    const runStatus = el('div', { class: 'drive-status', role: 'status' });
+    drive.controls = { modes: modes, value: value, valueLabel: valueLabel, valueField: valueField, max: max, start: start, loopError: loopError, loopStatus: loopStatus, issue: issue, run: run, runError: runError, runStatus: runStatus };
+    drive.panel = el('div', { class: 'drive-forms', id: 'drive-panel' },
+      el('form', { class: 'drive-panel drive-form', id: 'drive-loop', tabindex: '-1', 'aria-labelledby': 'drive-loop-title', novalidate: true, onsubmit: submitLoop },
+        el('div', null,
+          el('h2', { class: 'drive-title', id: 'drive-loop-title' }, 'Run the loop'),
+          el('p', { class: 'drive-help' }, 'Plans each eligible Issue, then waits for your approval.')),
+        el('div', { class: 'segmented', role: 'group', 'aria-label': 'Which Issues' }, modes),
+        valueField,
+        el('div', { class: 'drive-at-once' },
+          el('label', { class: 'field-label', for: 'drive-max' }, 'At once'),
+          el('div', { class: 'stepper' }, fewer, max, more)),
+        start, loopError, loopStatus,
+        el('p', { class: 'drive-help' }, 'Coding runs in parallel. Checks wait their turn, one at a time. The loop approves only what the Formula policy approves.')),
+      el('form', { class: 'drive-panel drive-form', id: 'drive-run', 'aria-labelledby': 'drive-run-title', novalidate: true, onsubmit: submitRun },
+        el('h2', { class: 'drive-title', id: 'drive-run-title' }, 'Start intake'),
+        el('div', { class: 'drive-row' },
+          el('div', { class: 'drive-field' }, el('label', { class: 'field-label', for: 'drive-issue' }, 'Issue number'), issue),
+          run),
+        runError, runStatus,
+        el('p', { class: 'drive-help' }, 'Intake plans one Issue and stops at the scope gate for your approval.')));
     fill($('#drive-slot'), drive.panel);
+    chooseMode(drive.mode);
   }
 
   function runText(run) {
@@ -376,7 +434,7 @@
     const c = run.canonical || {};
     let status;
     if (c.unreadable) status = 'The ledger could not be read back; nothing is shown as started.';
-    else if (run.committed) status = 'The ledger shows Molecule ' + notRecorded(c.moleculeId) + ' · status ' + notRecorded(c.status) + (c.phase ? ' · phase ' + c.phase : '') + '.';
+    else if (run.committed) status = 'Started: the ledger records a Molecule for this Issue' + (c.lane === 'decision' ? ', waiting for your approval.' : '.');
     else if (run.state === 'running') status = 'Running. Not shown as started until a ledger for this Issue appears' + (c.incomplete ? '; the ledger inventory is incomplete' : '') + '.';
     else status = 'No ledger from this run was found' + (c.incomplete ? '; the ledger inventory is incomplete' : '') + '.';
     return el('div', { class: 'gate-job' },
@@ -392,33 +450,37 @@
     const items = r && Array.isArray(r.items) ? r.items : [];
     let status = '';
     if (loop.state === 'draining') status = 'Stopping: no new Issue is dispatched; Molecules in flight finish.';
-    else if (loop.state === 'running') status = 'Running. Molecules appear in the grid as their ledgers are written.';
+    else if (loop.state === 'running') status = 'Running. Molecules appear in the Inbox as their ledgers are written.';
     else if (r) status = 'Final pass: ' + items.length + ' eligible Issue(s)' + (r.truncated ? ', list truncated' : '') + ' after ' + notRecorded(r.passes) + ' pass(es).';
     return el('div', { class: 'gate-job' },
       el('strong', null, 'Loop · ' + notRecorded(loop.state) + (loop.select ? ' · select ' + loop.select : '') + (loop.maxConcurrent ? ' · ' + loop.maxConcurrent + ' at once' : '')),
       status ? el('p', { class: 'scope-note' }, status) : null,
       loop.error ? el('p', { class: 'scope-note' }, (loop.category ? loop.category + ': ' : '') + loop.error + '.' + reasonText(loop)) : null,
-      items.length ? el('ul', { class: 'diagnostics' }, items.slice(0, 20).map((i) => el('li', null, '#' + notRecorded(i.issue) + ' · ' + notRecorded(i.state) + (i.moleculeId ? ' · ' + i.moleculeId : '') + (i.started ? ' · started intake' : '') + (i.approved ? ' · approved by policy' : '')))) : null);
+      items.length ? el('ul', { class: 'diagnostics' }, items.slice(0, 20).map((i) => el('li', null, '#' + notRecorded(i.issue) + ' · ' + notRecorded(i.state) + (i.started ? ' · started intake' : '') + (i.approved ? ' · approved by policy' : '')))) : null);
   }
 
   function renderDrive() {
     if (!drive.panel) return;
     const c = drive.controls, loop = drive.loop;
     const looping = Boolean(loop && (loop.state === 'running' || loop.state === 'draining'));
+    // A submit button stays enabled until its request starts, then shows progress.
     c.run.disabled = drive.pending || Boolean(drive.run && drive.run.state === 'running');
     c.start.disabled = drive.pending || looping;
-    c.stop.disabled = drive.pending || !loop || loop.state !== 'running';
-    for (const b of [c.run, c.start, c.stop]) b.setAttribute('aria-disabled', String(b.disabled));
-    // A pending primary shows a short inline label; the others stay as they are.
-    fill(c.run, drive.pending && drive.where === 'run' ? 'Working…' : 'Start intake');
-    fill(c.start, drive.pending && drive.where === 'loop' ? 'Working…' : 'Start loop');
+    for (const b of [c.run, c.start]) b.setAttribute('aria-disabled', String(b.disabled));
+    setText(c.run, drive.pending && drive.where === 'run' ? 'Starting…' : 'Start intake');
+    setText(c.start, drive.pending && drive.where === 'loop' ? 'Starting…' : looping ? 'Loop is running' : 'Start loop');
     if (loop && Number.isInteger(loop.maxConcurrentLimit)) c.max.max = String(loop.maxConcurrentLimit);
-    const notes = (where) => drive.where !== where ? null : [
-      drive.pending ? el('p', { class: 'scope-note' }, 'Submitting…') : null,
-      drive.message ? el('p', { class: 'scope-note', role: 'alert' }, drive.message) : null,
-    ];
-    fill(c.runStatus, notes('run'), runText(drive.run));
-    fill(c.loopStatus, notes('loop'), loopText(loop));
+    // The message is the inline error of the form it belongs to, linked from its
+    // inputs by aria-describedby; focus moves to it once when it is set.
+    for (const [where, error] of [['run', c.runError], ['loop', c.loopError]]) {
+      const text = drive.where === where ? drive.message : '';
+      setText(error, text);
+      error.hidden = !text;
+      if (text && drive.announce) { drive.announce = false; error.focus(); }
+    }
+    const pending = (where) => drive.pending && drive.where === where ? el('p', { class: 'scope-note' }, 'Submitting…') : null;
+    fill(c.runStatus, pending('run'), runText(drive.run));
+    fill(c.loopStatus, pending('loop'), loopText(loop));
     renderLoopPill();
   }
 
@@ -467,6 +529,7 @@
     applyFilter();
     renderOverview();
     renderShell();
+    renderInbox();
   }
 
   // The note is a status region: it is rebuilt, and so announced, only when its
@@ -594,6 +657,9 @@
     state.selectedId = id;
     state.detail = null;
     state.atomIndex = null;
+    // The selection lives in the URL (?view=work&m=…), so reload and copied links
+    // restore it.
+    if (moleculeFromURL() !== id) history.replaceState({ view: 'work', m: id }, '', moleculeHref(id));
     $('#selected').hidden = false;
     cells().forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
     const m = molecules().find((x) => x.id === id);
@@ -609,6 +675,7 @@
     state.detailToken++;
     clearTimeout(state.gate.timer);
     state.gate = newGate(null);
+    if (moleculeFromURL()) history.replaceState({ view: state.view }, '', '?view=' + state.view);
     $('#selected').hidden = true;
     cells().forEach((b) => b.setAttribute('aria-pressed', 'false'));
     $('#selection-label').textContent = 'All Molecules · select a cell to inspect';
@@ -1192,7 +1259,33 @@
     e.preventDefault();
     navigate(link.dataset.view, true);
   });
-  window.addEventListener('popstate', () => showView(viewFromURL()));
+  window.addEventListener('popstate', () => { showView(viewFromURL()); restoreSelection(); });
+
+  // A Molecule link (?view=work&m=…) is a real link: a plain click opens the
+  // Molecule under Work through history.pushState, so Back returns here.
+  const MOLECULE_ID = /^[A-Za-z0-9_-]{1,200}$/;
+  function moleculeHref(id) { return '?view=work&m=' + encodeURIComponent(id); }
+  function moleculeFromURL() {
+    const id = new URLSearchParams(location.search).get('m');
+    return id && MOLECULE_ID.test(id) ? id : null;
+  }
+  function restoreSelection() {
+    const id = moleculeFromURL();
+    if (state.view === 'work' && id && id !== state.selectedId) select(id);
+  }
+  function openMolecule(id) {
+    if (location.search !== moleculeHref(id)) history.pushState({ view: 'work', m: id }, '', moleculeHref(id));
+    showView('work');
+    if (id !== state.selectedId || $('#selected').hidden) select(id);
+    $('#main').focus({ preventScroll: true });
+  }
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a[data-molecule]');
+    if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (!MOLECULE_ID.test(link.dataset.molecule)) return;
+    e.preventDefault();
+    openMolecule(link.dataset.molecule);
+  });
 
   // Counts read as words through Intl.PluralRules.
   const plural = new Intl.PluralRules('en-US');
@@ -1203,28 +1296,29 @@
   function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
 
   // The resident's pose follows Lab state: waving when anything needs you,
-  // studying a cube while any Molecule runs, reading otherwise.
-  function residentPose(counts) {
-    if ((counts.decision || 0) > 0) return 'waving';
+  // studying a cube while any Molecule runs, reading otherwise. waiting is the
+  // needsYou() count.
+  function residentPose(waiting, counts) {
+    if (waiting > 0) return 'waving';
     if ((counts.running || 0) > 0) return 'studying';
     return 'reading';
   }
-  const RESIDENT_TITLES = { waving: (c) => needsYouText(c.decision), studying: (c) => runningText(c.running), reading: () => 'All is quiet' };
+  const RESIDENT_TITLES = { waving: (w) => w + (plural.select(w) === 'one' ? ' thing is waiting for you' : ' things are waiting for you'), studying: (w, c) => runningText(c.running), reading: () => 'All quiet' };
 
-  // renderShell patches the badge and the resident in place from the list counts.
+  // renderShell patches the badge and the resident in place from needsYou() and
+  // the list counts.
   function renderShell() {
     const counts = (state.list && state.list.counts) || {};
-    const waiting = counts.decision || 0;
+    const waiting = needsYou().length;
     for (const badge of [$('#needs-you-badge'), $('#needs-you-tab-badge')]) {
       badge.hidden = waiting === 0;
       setText(badge, String(waiting));
       badge.setAttribute('aria-label', needsYouText(waiting));
     }
-    setText($('#inbox-summary'), waiting ? needsYouText(waiting) + '.' : 'Nothing needs you right now.');
-    const pose = residentPose(counts);
+    const pose = residentPose(waiting, counts);
     const resident = $('#resident');
     if (resident.dataset.pose !== pose) resident.dataset.pose = pose;
-    setText($('#resident-title'), RESIDENT_TITLES[pose](counts));
+    setText($('#resident-title'), RESIDENT_TITLES[pose](waiting, counts));
     renderLoopPill();
   }
 
@@ -1254,8 +1348,8 @@
   }
   $('#loop-stop-confirm').addEventListener('click', stopLoop);
   $('#loop-start-link').addEventListener('click', () => {
-    // The form is in the side panel, beside every view; focus its selector.
-    const input = document.querySelector('[data-drive="select"]');
+    // The form is in the side panel, beside every view; focus its chosen scope.
+    const input = document.querySelector('#drive-loop [aria-pressed="true"]');
     if (input) setTimeout(() => input.focus({ preventScroll: true }), 0);
   });
 
@@ -1269,10 +1363,238 @@
     avatar.setAttribute('aria-label', 'Operator: ' + name);
     avatar.title = name;
     setText($('#operator-initials'), initials);
-    $('#operator-glyph').hidden = Boolean(initials);
+    // The glyph is an <svg>: hidden is an HTMLElement property that SVG ignores,
+    // so the attribute is toggled instead.
+    $('#operator-glyph').toggleAttribute('hidden', Boolean(initials));
+  }
+
+  // ---- Inbox --------------------------------------------------------------------
+  // The home view: what needs you first, then work in progress, then the last
+  // drafts recorded. Every entry is the server's InboxView, in plain words, so
+  // no phase code, id, digest or timestamp is turned into text here. Polling
+  // patches entries in place, keyed by Molecule id: an entry already shown keeps
+  // its node and has only its changed text and attributes updated.
+  const STEPS = ['Plan', 'Your approval', 'Coding', 'Checks', 'Review', 'Draft PR', 'Merged'];
+  const NEEDS_KINDS = ['scope', 'publish', 'blocked'];
+  const CARD_KINDS = { scope: ['is-needs', '◇'], publish: ['is-ready', '✓'], blocked: ['is-blocked', '!'] };
+  // Bounds: at most this many cards or rows each, and the last five recorded.
+  const MAX_ENTRIES = 20, MAX_RECENT = 5;
+  const relativeTime = new Intl.RelativeTimeFormat('en-US', { numeric: 'auto' });
+  const fullDate = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+
+  function inboxOf(m) {
+    const v = m && m.inbox;
+    return v && typeof v === 'object' && typeof v.kind === 'string' && v.kind && MOLECULE_ID.test(m.id) ? v : null;
+  }
+  function plainText(value, fallback) { return typeof value === 'string' && value ? value : fallback; }
+  // count is a served count, or 0 when it was omitted as zero; callers show it
+  // only when its recorded flag (planned, verified, captured) is set.
+  function count(n) { return Number.isInteger(n) && n >= 0 ? n : 0; }
+  function counted(n, one, many) { return n + ' ' + (plural.select(n) === 'one' ? one : many); }
+  function timeOf(m) { const t = Date.parse(m.finishedAt || m.startedAt); return Number.isFinite(t) ? t : 0; }
+  function newestFirst(a, b) { return timeOf(b) - timeOf(a) || (a.id < b.id ? -1 : 1); }
+  // needsYou is the one definition of what needs you: the Molecules shown under
+  // Needs you (scope gate, ready to publish, blocked), newest first. The headline,
+  // the live region, the nav badge and the resident all count it.
+  function needsYou() {
+    return molecules().filter((m) => { const v = live(m) && inboxOf(m); return Boolean(v) && NEEDS_KINDS.includes(v.kind); }).sort(newestFirst);
+  }
+  function numberText(m) { return Number.isInteger(m.number) ? '#' + m.number : ''; }
+  function titleText(m) { return (state.list && state.list.sample ? '[Sample] ' : '') + plainText(m.title, 'Untitled'); }
+
+  // ago is a recorded time as relative words ("12 minutes ago"); dateTitle is
+  // the same time as a full local date, for a tooltip.
+  function ago(iso) {
+    const t = Date.parse(iso || '');
+    if (!Number.isFinite(t)) return '';
+    const s = Math.round((t - Date.now()) / 1000), abs = Math.abs(s);
+    if (abs < 60) return 'just now';
+    if (abs < 3600) return relativeTime.format(Math.round(s / 60), 'minute');
+    if (abs < 86400) return relativeTime.format(Math.round(s / 3600), 'hour');
+    return relativeTime.format(Math.round(s / 86400), 'day');
+  }
+  function dateTitle(iso) { const t = Date.parse(iso || ''); return Number.isFinite(t) ? fullDate.format(t) : ''; }
+  function minutesText(ms) {
+    const min = Math.floor(ms / 60000);
+    if (min < 1) return 'under a minute';
+    if (min < 60) return min + ' min';
+    return Math.floor(min / 60) + ' h' + (min % 60 ? ' ' + (min % 60) + ' min' : '');
+  }
+  function stepIndex(v) { return Number.isInteger(v.step) && v.step >= 0 && v.step < STEPS.length ? v.step : 0; }
+  // stepText is the current step with its elapsed time: "Coding · 18 min".
+  function stepText(v) {
+    if (v.queued) return 'Queued for checks';
+    const label = plainText(v.stepLabel, STEPS[stepIndex(v)]);
+    const t = Date.parse(v.stepSince || '');
+    return Number.isFinite(t) ? label + ' · ' + minutesText(Math.max(0, Date.now() - t)) : label;
+  }
+  function detailText(v) {
+    const parts = [];
+    if (v.kind === 'scope') {
+      if (typeof v.summary === 'string' && v.summary) parts.push(v.summary);
+      if (v.planned) parts.push(counted(count(v.files), 'file', 'files'), counted(count(v.checks), 'check', 'checks'));
+    } else if (v.kind === 'publish') {
+      if (v.verified) parts.push(count(v.passed) + ' of ' + counted(count(v.ran), 'check', 'checks') + ' passed');
+      if (v.captured) parts.push(counted(count(v.changed), 'file', 'files') + ' changed');
+    } else if (typeof v.summary === 'string' && v.summary) parts.push(v.summary);
+    return parts.join(' · ');
+  }
+  function metaText(m, v) {
+    const when = v.kind === 'scope' ? ago(m.startedAt) : ago(m.finishedAt || m.startedAt);
+    const verb = { scope: 'planned ', publish: 'finished ', blocked: 'stopped ' }[v.kind] || '';
+    return [numberText(m), when ? verb + when : ''].filter(Boolean).join(' · ');
+  }
+
+  function slot(node, name) { return node.querySelector('[data-slot="' + name + '"]'); }
+  function setAttr(node, name, value) { if (node.getAttribute(name) !== value) node.setAttribute(name, value); }
+  // setLink points a Molecule link at its ?view=work&m= URL, labelled with its action.
+  function setLink(a, m, text) {
+    setAttr(a, 'href', moleculeHref(m.id));
+    if (a.dataset.molecule !== m.id) a.dataset.molecule = m.id;
+    setText(a, text);
+    setAttr(a, 'aria-label', text + ': ' + [numberText(m), titleText(m)].filter(Boolean).join(' '));
+  }
+
+  // patchList keeps container's children in items' order, keyed by Molecule id:
+  // the node of an id already shown is kept and updated in place, a new id gets
+  // a new node, and the node of an id no longer listed is removed.
+  function patchList(container, items, create, update) {
+    const existing = new Map([...container.children].map((node) => [node.dataset.inboxId, node]));
+    let at = container.firstElementChild;
+    for (const m of items) {
+      let node = existing.get(m.id);
+      existing.delete(m.id);
+      if (!node) { node = create(); node.dataset.inboxId = m.id; }
+      update(node, m, inboxOf(m));
+      if (node === at) at = at.nextElementSibling;
+      else container.insertBefore(node, at);
+    }
+    for (const node of existing.values()) {
+      if (node.contains(document.activeElement)) $('#main').focus({ preventScroll: true });
+      node.remove();
+    }
+  }
+
+  function createCard() {
+    return el('article', { class: 'inbox-card glass' },
+      el('div', { class: 'inbox-icon', 'aria-hidden': 'true' }, el('span', { dataset: { slot: 'icon' } })),
+      el('div', { class: 'inbox-body' },
+        el('div', { class: 'inbox-head' }, el('span', { class: 'inbox-badge', dataset: { slot: 'badge' } }), el('span', { class: 'inbox-meta', dataset: { slot: 'meta' } })),
+        el('h3', { class: 'inbox-title', dataset: { slot: 'title' } }),
+        el('p', { class: 'inbox-detail', dataset: { slot: 'detail' } })),
+      el('a', { class: 'btn btn-primary inbox-action', dataset: { slot: 'action' } }));
+  }
+  function updateCard(node, m, v) {
+    const [cls, icon] = CARD_KINDS[v.kind];
+    setAttr(node, 'class', 'inbox-card glass ' + cls);
+    setText(slot(node, 'icon'), icon);
+    setText(slot(node, 'badge'), plainText(v.title, 'Needs you'));
+    const meta = slot(node, 'meta');
+    setText(meta, metaText(m, v));
+    setAttr(meta, 'title', dateTitle(v.kind === 'scope' ? m.startedAt : m.finishedAt || m.startedAt));
+    setText(slot(node, 'title'), titleText(m));
+    const detail = slot(node, 'detail'), text = detailText(v);
+    setText(detail, text);
+    detail.hidden = !text;
+    // One primary action per card. Until the plan view (slice 3) exists, every
+    // action opens the Molecule's detail under Work.
+    setLink(slot(node, 'action'), m, plainText(v.action, 'Open'));
+  }
+
+  function createRow() {
+    return el('article', { class: 'inbox-row' },
+      el('div', { class: 'inbox-row-head' },
+        el('span', { class: 'inbox-number', dataset: { slot: 'number' } }),
+        el('h3', { class: 'inbox-title', dataset: { slot: 'title' } }),
+        el('span', { class: 'inbox-step', dataset: { slot: 'step' } }),
+        el('a', { class: 'btn btn-ghost inbox-watch', dataset: { slot: 'action' } })),
+      el('ol', { class: 'inbox-steps', 'aria-label': 'Progress' }, STEPS.map((label) => el('li', null, el('span', { class: 'step-bar', 'aria-hidden': 'true' }), label))));
+  }
+  function updateRow(node, m, v) {
+    setText(slot(node, 'number'), numberText(m));
+    setText(slot(node, 'title'), titleText(m));
+    setText(slot(node, 'step'), stepText(v));
+    setLink(slot(node, 'action'), m, plainText(v.action, 'Watch'));
+    const at = stepIndex(v);
+    node.querySelectorAll('.inbox-steps li').forEach((li, i) => {
+      const cls = i < at ? 'is-done' : i === at ? 'is-current' : '';
+      if (li.className !== cls) li.className = cls;
+      if (i === at) setAttr(li, 'aria-current', 'step');
+      else if (li.hasAttribute('aria-current')) li.removeAttribute('aria-current');
+    });
+  }
+
+  function createRecent() {
+    return el('a', { class: 'inbox-recent-row' },
+      el('span', { class: 'recent-dot', 'aria-hidden': 'true' }),
+      el('span', { class: 'inbox-number', dataset: { slot: 'number' } }),
+      el('span', { class: 'recent-title', dataset: { slot: 'title' } }),
+      el('span', { class: 'inbox-meta', dataset: { slot: 'meta' } }));
+  }
+  function updateRecent(node, m, v) {
+    setAttr(node, 'href', moleculeHref(m.id));
+    if (node.dataset.molecule !== m.id) node.dataset.molecule = m.id;
+    setText(slot(node, 'number'), numberText(m));
+    setText(slot(node, 'title'), titleText(m));
+    const when = ago(m.finishedAt || m.startedAt);
+    setText(slot(node, 'meta'), plainText(v.title, 'Draft published') + (when ? ' · ' + when : ''));
+    setAttr(node, 'title', dateTitle(m.finishedAt || m.startedAt));
+  }
+
+  function moreText(node, total, where) {
+    const extra = total - MAX_ENTRIES;
+    setText(node, extra > 0 ? counted(extra, 'more', 'more') + ' under ' + where + '.' : '');
+    node.hidden = extra <= 0;
+  }
+
+  function partOfDay(hour) { return hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening'; }
+  // firstName is the first word of a configured operator name, or '' for the
+  // fallback.
+  function firstName() {
+    const o = state.lab && state.lab.operator;
+    if (!o || !o.set || typeof o.name !== 'string') return '';
+    const word = o.name.trim().split(/\s+/)[0] || '';
+    return /\p{L}/u.test(word) && !word.includes('[') ? word : '';
+  }
+
+  function renderInbox() {
+    const counts = (state.list && state.list.counts) || {};
+    const entries = molecules().filter((m) => live(m) && inboxOf(m));
+    const kind = (k) => entries.filter((m) => inboxOf(m).kind === k);
+    const needs = needsYou();
+    const running = kind('progress').sort(newestFirst);
+    const recent = kind('recorded').sort(newestFirst).slice(0, MAX_RECENT);
+    patchList($('#inbox-needs'), needs.slice(0, MAX_ENTRIES), createCard, updateCard);
+    patchList($('#inbox-progress'), running.slice(0, MAX_ENTRIES), createRow, updateRow);
+    patchList($('#inbox-recent'), recent, createRecent, updateRecent);
+    $('#inbox-needs-empty').hidden = needs.length > 0;
+    $('#inbox-progress-empty').hidden = running.length > 0;
+    $('#inbox-recent-empty').hidden = recent.length > 0;
+    moreText($('#inbox-needs-more'), needs.length, 'Work');
+    moreText($('#inbox-progress-more'), running.length, 'Work, Running');
+
+    const name = firstName();
+    setText($('#inbox-title'), 'Good ' + partOfDay(new Date().getHours()) + (name ? ', ' + name : ''));
+    const waiting = needs.length, inFlight = counts.running || 0, blocked = counts.blocked || 0, drafts = counts.finished || 0;
+    // Merged counts need verified merge attribution; until then drafts are counted.
+    const parts = [
+      waiting ? needsYouText(waiting) : 'Nothing needs you',
+      inFlight ? inFlight + ' running' : 'nothing running',
+      blocked ? blocked + ' blocked' : 'nothing blocked',
+      drafts ? counted(drafts, 'draft published', 'drafts published') : 'no draft published yet',
+    ];
+    const line = $('#inbox-counts');
+    if (line.textContent !== parts.join(' · ')) fill(line, el('strong', null, parts[0]), ' · ' + parts.slice(1).join(' · '));
+    // One persistent live region, changed only when its text changes.
+    setText($('#inbox-live'), waiting ? needsYouText(waiting) + '.' : 'Nothing needs you right now.');
+    const note = $('#inbox-note');
+    const complete = !state.list || state.list.complete;
+    setText(note, complete ? '' : 'Some ledgers could not be read, so this Inbox may be missing Molecules. See Work for the diagnostics.');
+    note.hidden = complete;
   }
 
   showView(viewFromURL());
+  restoreSelection();
 
   // ---- Dialog, motion and visibility -------------------------------------------
   let dialogReturn = null;
@@ -1301,6 +1623,9 @@
 
   loadLab().then(poll).catch(failed);
   setInterval(poll, 5000);
+  // An unchanged list answers 304, so the Inbox's elapsed and relative times are
+  // patched on their own interval.
+  setInterval(() => { if (!document.hidden && state.list) renderInbox(); }, 30000);
   // The Lab header also changes without a ledger change, as when a Formula is
   // activated, so it is refreshed on its own slower interval.
   setInterval(() => { if (!document.hidden && !state.sessionLost) loadLab().catch(failed); }, 30000);

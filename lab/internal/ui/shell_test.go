@@ -133,10 +133,12 @@ func TestUIShellServedPageHasViewsNavAndTabBar(t *testing.T) {
 			t.Errorf("panel %s hidden=%t", panel[1], hidden)
 		}
 	}
-	for _, id := range []string{"view-inbox", "view-issues"} {
-		if !strings.Contains(between(t, page, `id="`+id+`"`, "</section>"), "Coming next") {
-			t.Errorf("%s is not a coming-next placeholder", id)
-		}
+	if !strings.Contains(between(t, page, `id="view-issues"`, "</section>"), "Coming next") {
+		t.Error("view-issues is not a coming-next placeholder")
+	}
+	// The Inbox is built (#250): its containers replace the placeholder.
+	if inbox := between(t, page, `id="view-inbox"`, `id="view-issues"`); strings.Contains(inbox, "Coming next") {
+		t.Error("the Inbox is still a coming-next placeholder")
 	}
 	work := between(t, page, `id="view-work"`, `id="aggregate"`)
 	for _, want := range []string{`id="run-filters"`, `id="cubes"`, `id="molecule-search"`, `id="selected"`, `id="motion-toggle"`, "Inside your Lab."} {
@@ -197,7 +199,7 @@ func TestUIShellServedJSRoutesViewsBadgePillAvatarAndPose(t *testing.T) {
 		"const view = new URLSearchParams(location.search).get('view');",
 		"return VIEWS.includes(view) ? view : 'inbox';",
 		"if (view !== viewFromURL()) history.pushState({ view: view }, '', '?view=' + view);",
-		"window.addEventListener('popstate', () => showView(viewFromURL()));",
+		"window.addEventListener('popstate', () => { showView(viewFromURL()); restoreSelection(); });",
 		"const link = e.target.closest('a[data-view]');",
 		"if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;",
 		"panel.hidden = panel.dataset.viewPanel !== view;",
@@ -205,8 +207,8 @@ func TestUIShellServedJSRoutesViewsBadgePillAvatarAndPose(t *testing.T) {
 		"showView(viewFromURL());",
 		// A Molecule opens under Work from any view.
 		"if (elsewhere) navigate('work', false);",
-		// The badge and the resident follow the list counts, patched in place.
-		"const waiting = counts.decision || 0;",
+		// The badge and the resident count what Needs you shows, patched in place.
+		"const waiting = needsYou().length;",
 		"for (const badge of [$('#needs-you-badge'), $('#needs-you-tab-badge')]) {",
 		"badge.hidden = waiting === 0;",
 		"setText(badge, String(waiting));",
@@ -218,7 +220,7 @@ func TestUIShellServedJSRoutesViewsBadgePillAvatarAndPose(t *testing.T) {
 		"$('#loop-stop-confirm').addEventListener('click', stopLoop);",
 		"phase === 'idle' ? 'Loop is idle' : (phase === 'draining' ? 'Loop stopping · ' : 'Loop running · ') + inFlight + ' in flight'",
 		"'Stop the loop' + (loop && loop.select ? ' on “' + loop.select + '”' : '') + '?'",
-		"id: 'drive-loop', tabindex: '-1', role: 'group', 'aria-labelledby': 'drive-loop-title'",
+		"id: 'drive-loop', tabindex: '-1', 'aria-labelledby': 'drive-loop-title', novalidate: true, onsubmit: submitLoop",
 		"fill($('#drive-slot'), drive.panel);",
 		"renderLoopPill();",
 		// The avatar is text and attributes only.
@@ -226,14 +228,19 @@ func TestUIShellServedJSRoutesViewsBadgePillAvatarAndPose(t *testing.T) {
 		"avatar.setAttribute('aria-label', 'Operator: ' + name);",
 		"/^[\\p{L}\\p{N}]{1,2}$/u.test(o.initials)",
 		"setText($('#operator-initials'), initials);",
+		// The glyph is an SVG, which ignores the hidden property (#250).
+		"$('#operator-glyph').toggleAttribute('hidden', Boolean(initials));",
 		"toggle('resident-offscreen', !entry.isIntersecting)).observe($('#resident'));",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js lacks %q", want)
 		}
 	}
+	if regexp.MustCompile(`operator-glyph'\)\.hidden\s*=`).MatchString(js) {
+		t.Error("app.js still sets the hidden property on the SVG operator glyph")
+	}
 	pose := jsFunction(t, js, "residentPose")
-	waving := strings.Index(pose, "if ((counts.decision || 0) > 0) return 'waving';")
+	waving := strings.Index(pose, "if (waiting > 0) return 'waving';")
 	studying := strings.Index(pose, "if ((counts.running || 0) > 0) return 'studying';")
 	reading := strings.Index(pose, "return 'reading';")
 	if waving < 0 || studying < waving || reading < studying {

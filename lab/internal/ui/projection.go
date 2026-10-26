@@ -33,6 +33,8 @@ type Summary struct {
 	Lane        string `json:"lane"`
 	Activity    string `json:"activity,omitempty"`
 	Delivery    string `json:"delivery,omitempty"`
+	// Inbox is the Molecule's Inbox entry, or absent for one the Inbox does not list.
+	Inbox InboxView `json:"inbox,omitzero"`
 }
 
 // MoleculeList is GET /api/molecules. Counts are taken from Molecules, so they
@@ -578,6 +580,7 @@ func summarize(lab string, r molecule.Record, read receiptReader) Summary {
 	if view != nil {
 		s.Delivery = view.Label
 	}
+	s.Inbox = inboxView(x, r, s.Lane, s.Activity, d)
 	return s
 }
 

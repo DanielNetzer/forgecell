@@ -186,6 +186,68 @@ main:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .drive-status .diagnostics { margin-top: 8px; }
 .drive-help { margin-top: 12px; max-width: 70ch; font-size: 12px; line-height: 1.5; color: var(--muted); }
 
+/* Run the loop and Start intake: real forms in the side panel. */
+.drive-forms { display: grid; gap: 20px; min-width: 0; }
+.drive-form { display: flex; flex-direction: column; gap: 14px; padding: 22px; border-radius: var(--radius-panel); }
+.drive-form .drive-help { margin-top: 2px; }
+.drive-form:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.drive-title { font-size: 16px; font-weight: 500; letter-spacing: 0; }
+.segmented { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: var(--radius-control); background: #eef0e6; border: 1px solid var(--shell-edge); }
+.seg { min-height: 34px; padding: 0 6px; border: 0; border-radius: 9px; background: transparent; color: #3e5448; font-size: 13px; font-weight: 500; }
+.seg:hover { background: #ffffff99; }
+.seg[aria-pressed=true] { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px #1a3a2a24; }
+.drive-at-once { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.drive-at-once .field-label { font-size: 13px; font-weight: 500; color: var(--ink); }
+.drive-submit { width: 100%; }
+.drive-error { padding: 8px 12px; border-radius: var(--radius-control); background: #f4ddd5; color: var(--danger-ink); font-size: 13px; overflow-wrap: anywhere; }
+.drive-error:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Inbox: the greeting, Needs-you cards with one primary action, In-progress
+   rows with the seven-step bar, and Recently recorded links. */
+.inbox { display: flex; flex-direction: column; gap: 28px; }
+.inbox-greeting { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; flex-wrap: wrap; }
+.inbox-greeting h1 { font-size: 34px; letter-spacing: -.02em; text-wrap: balance; overflow-wrap: anywhere; }
+.inbox-counts { margin-top: 6px; font-size: 15px; color: #56695e; font-variant-numeric: tabular-nums; }
+.inbox-counts strong { color: var(--needs-ink); font-weight: 600; }
+.inbox-section { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.inbox-heading { font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #6b7f72; }
+.inbox-list { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.inbox-list:empty, .inbox-recent:empty { display: none; }
+.inbox-empty, .inbox-more { font-size: 14px; color: #56695e; }
+.inbox-card { display: flex; align-items: center; gap: 20px; padding: 22px 24px; min-width: 0; }
+.inbox-card.is-blocked { border-style: dashed; }
+.inbox-icon { flex: 0 0 48px; height: 48px; display: grid; place-items: center; border-radius: var(--radius-card); background: var(--needs-bg); color: var(--needs-ink); font-size: 20px; font-weight: 600; }
+.inbox-card.is-ready .inbox-icon, .inbox-card.is-ready .inbox-badge { background: #dcefe9; color: #1f5f52; }
+.inbox-card.is-blocked .inbox-icon, .inbox-card.is-blocked .inbox-badge { background: #f4ddd5; color: var(--danger-ink); }
+.inbox-body { flex: 1; min-width: 0; }
+.inbox-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.inbox-badge { display: inline-flex; align-items: center; min-height: 24px; padding: 0 10px; border-radius: 999px; background: var(--needs-bg); color: var(--needs-ink); font-size: 12px; font-weight: 600; }
+.inbox-meta { font-size: 13px; color: #6b7f72; font-variant-numeric: tabular-nums; }
+.inbox-title { margin-top: 8px; font-size: 18px; line-height: 1.35; overflow-wrap: anywhere; }
+.inbox-detail { margin-top: 4px; font-size: 14px; color: #56695e; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.inbox-action { flex: 0 0 auto; text-decoration: none; }
+.inbox-row { padding: 20px 24px; border-radius: var(--radius-panel); background: var(--paper); border: 1px solid #1e4d3b1a; box-shadow: 0 1px 2px #1a3a2a0f; min-width: 0; }
+.inbox-row-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.inbox-number { font-size: 13px; color: #6b7f72; font-variant-numeric: tabular-nums; }
+.inbox-row .inbox-title { flex: 1; min-width: 0; margin: 0; font-size: 16px; }
+.inbox-step { font-size: 13px; color: #1f5f52; font-variant-numeric: tabular-nums; }
+.inbox-watch { height: 34px; min-height: 34px; text-decoration: none; }
+.inbox-steps { list-style: none; margin: 16px 0 0; padding: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.inbox-steps li { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; color: #6b7f72; overflow-wrap: anywhere; }
+.step-bar { height: 6px; border-radius: 999px; background: #d6e6dd; }
+.inbox-steps li.is-done { color: #3e5448; }
+.inbox-steps li.is-done .step-bar { background: #1e4d3b; }
+.inbox-steps li.is-current { color: var(--ink); font-weight: 600; }
+.inbox-steps li.is-current .step-bar { background: linear-gradient(90deg, var(--teal) 55%, #d6e6dd 55%); }
+.inbox-recent { border-radius: 16px; background: var(--paper); border: 1px solid #1e4d3b14; overflow: hidden; }
+.inbox-recent-row { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 0 20px; color: var(--ink); text-decoration: none; border-bottom: 1px solid #1e4d3b0f; }
+.inbox-recent-row:last-child { border-bottom: 0; }
+.inbox-recent-row:hover { background: #1e4d3b08; }
+.inbox-recent-row:focus-visible { outline-offset: -2px; }
+.recent-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #2d5b46; }
+.inbox-recent-row .inbox-number { width: 52px; flex: none; }
+.recent-title { flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* Buttons: primary (forest fill) and secondary (paper, forest edge). Scoped to
    .btn; .text-button keeps its link look elsewhere. */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 40px; min-height: 40px; padding: 0 16px; border-radius: var(--radius-control); border: 1px solid transparent; font-size: 13px; font-weight: 500; white-space: nowrap; transition: background .15s, border-color .15s, box-shadow .15s, transform .15s; }
@@ -395,6 +457,21 @@ dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 ui-m
   .resident-copy { display: none; }
   .tab-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; display: flex; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid #1e4d3b14; background: #fbfaf3f2; }
   .placeholder { padding: 20px; }
+  .inbox { gap: 22px; }
+  .inbox-greeting h1 { font-size: 26px; }
+  .inbox-greeting > .btn { width: 100%; height: 44px; }
+  .inbox-card { flex-direction: column; align-items: stretch; gap: 12px; padding: 18px; border-radius: 16px; }
+  .inbox-icon { display: none; }
+  .inbox-title { font-size: 17px; }
+  .inbox-action { width: 100%; height: 48px; min-height: 48px; }
+  .inbox-row { padding: 16px; border-radius: 16px; }
+  .inbox-row .inbox-title { flex-basis: 100%; order: -1; }
+  .inbox-steps { gap: 4px; }
+  .inbox-steps li { font-size: 0; gap: 0; }
+  .inbox-steps li.is-current { font-size: 11px; gap: 4px; grid-column: span 1; }
+  .inbox-recent-row { padding: 0 14px; }
+  .inbox-recent-row .inbox-meta { display: none; }
+  .drive-form { padding: 16px; }
   .placeholder h1, .formula-view h1, .aggregate h1 { font-size: 22px; }
   .formula-view { padding: 18px; }
   .shelf { padding: 16px; border-radius: 16px; }
@@ -438,6 +515,7 @@ dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 ui-m
 /* Coarse pointers get 44px targets everywhere. */
 @media (pointer: coarse) {
   .nav-link, .tab, .btn, .loop-pill-action, .lane-segment, .text-button, summary, .motion-option { min-height: 44px; }
+  .seg, .stepper-button, .inbox-watch, .inbox-recent-row { min-height: 44px; }
 }
 
 /* Motion: running cells and the resident's working pose animate; everything
@@ -464,6 +542,12 @@ dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 ui-m
   .lane-segment[aria-pressed=true] .lane-count { background: Canvas; color: CanvasText; }
   .lane-dot { border: 1px solid CanvasText; }
   .lane-divider { background: CanvasText; }
+  .inbox-row, .inbox-recent, .inbox-icon, .inbox-badge, .drive-error, .segmented { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
+  .seg { border: 1px solid ButtonText; }
+  .seg[aria-pressed=true] { background: Highlight; color: HighlightText; border-color: Highlight; }
+  .step-bar { forced-color-adjust: none; background: Canvas; border: 1px solid CanvasText; }
+  .inbox-steps li.is-done .step-bar, .inbox-steps li.is-current .step-bar { background: Highlight; }
+  .recent-dot { background: CanvasText; }
   .cube-button[aria-pressed=true], .atom-tab[aria-selected=true], .lane-segment[aria-pressed=true] { outline: 2px solid Highlight; }
   button:focus-visible, summary:focus-visible, a:focus-visible, input:focus-visible { outline-color: Highlight; }
 }

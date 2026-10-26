@@ -83,7 +83,21 @@ func demoCurrent(p string) string {
 func demoSummary(i int) Summary {
 	p := demoPhase(i)
 	status, phase, d := demoState(p)
-	return Summary{ID: fmt.Sprintf("demo-%d", 101+i), Repository: "sample/lab", Number: int64(101 + i), Title: demoTitle(i), FormulaID: demoFormula(i), Status: status, Phase: phase, CurrentAtom: demoCurrent(p), Lane: Lane(status, phase, d), Delivery: DeliveryLabel(d)}
+	return Summary{ID: fmt.Sprintf("demo-%d", 101+i), Repository: "sample/lab", Number: int64(101 + i), Title: demoTitle(i), FormulaID: demoFormula(i), Status: status, Phase: phase, CurrentAtom: demoCurrent(p), Lane: Lane(status, phase, d), Delivery: DeliveryLabel(d), Inbox: demoInbox(p)}
+}
+
+// demoInbox is a sample Molecule's Inbox entry. Sample data records no plan,
+// check results or times, so it carries no counts and no elapsed time.
+func demoInbox(p string) InboxView {
+	switch p {
+	case "working":
+		return InboxView{Kind: InboxProgress, Title: "Coding", Action: "Watch", Step: StepCoding, StepLabel: "Coding"}
+	case "decision":
+		return InboxView{Kind: InboxPublish, Title: "Ready to publish", Action: "Review & publish", Step: StepReview, StepLabel: "Review"}
+	case "failed":
+		return InboxView{Kind: InboxBlocked, Title: "Blocked", Summary: "Required checks did not pass.", Action: "Open", Step: StepChecks, StepLabel: "Checks"}
+	}
+	return InboxView{Kind: InboxRecorded, Title: "Draft published", Action: "Open", Step: StepMerged, StepLabel: "Draft published"}
 }
 
 func demoLab(version string) LabView {
