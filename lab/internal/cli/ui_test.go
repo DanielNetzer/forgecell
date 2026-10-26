@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -76,6 +77,10 @@ func TestUINoOpenStartsServesAndStops(t *testing.T) {
 	previous := openBrowser
 	openBrowser = func(string) error { opened = true; return nil }
 	t.Cleanup(func() { openBrowser = previous })
+	// No real git config is read.
+	previousName := gitIdentity
+	gitIdentity = func(context.Context, string, ...string) (string, error) { return "Test Operator\n", nil }
+	t.Cleanup(func() { gitIdentity = previousName })
 
 	url, stop := startUI(t, "--no-open", "--lab", t.TempDir())
 	jar, _ := cookiejar.New(nil)
@@ -206,6 +211,12 @@ func TestUIDemoNeverResolvesTheDefaultLab(t *testing.T) {
 		return labResolution{}, fmt.Errorf("not resolvable here")
 	}
 	t.Cleanup(func() { resolveLab = previous })
+	previousName := gitIdentity
+	gitIdentity = func(context.Context, string, ...string) (string, error) {
+		t.Error("ui --demo read git config")
+		return "", fmt.Errorf("not here")
+	}
+	t.Cleanup(func() { gitIdentity = previousName })
 	_, stop := startUI(t, "--demo", "--no-open")
 	if code, output := stop(); code != 0 || !strings.Contains(output, "no Lab is read") {
 		t.Fatalf("demo: %d %s", code, output)
@@ -217,7 +228,112 @@ func TestUIDemoNeverResolvesTheDefaultLab(t *testing.T) {
 	}
 }
 
+// The avatar name is read through the gitIdentity seam, in the source checkout:
+// git config user.name first; when that is unset, empty or oversized, the name
+// part of git var GIT_AUTHOR_IDENT, never its email. A failure, an empty value
+// or an oversized one gives "" so the UI shows its fallback, and nothing is
+// printed.
+func TestUIOperatorNameReadsGitConfigThroughTheSeam(t *testing.T) {
+	previous := gitIdentity
+	t.Cleanup(func() { gitIdentity = previous })
+	unset := fmt.Errorf("exit status 1 in /Users/someone")
+	type read struct {
+		out string
+		err error
+	}
+	for name, c := range map[string]struct {
+		config, ident read
+		want          string
+	}{
+		"configured":          {config: read{out: "  Ada Lovelace\n"}, ident: read{out: "Other <other@example.invalid> 1700000000 +0000\n"}, want: "Ada Lovelace"},
+		"empty":               {config: read{out: ""}, ident: read{err: unset}, want: ""},
+		"blank":               {config: read{out: " \n"}, ident: read{out: " \n"}, want: ""},
+		"error":               {config: read{out: "Ada", err: unset}, ident: read{err: unset}, want: ""},
+		"oversized":           {config: read{out: strings.Repeat("a", maxGitUserNameBytes+1)}, ident: read{err: unset}, want: ""},
+		"at bound":            {config: read{out: strings.Repeat("a", maxGitUserNameBytes)}, want: strings.Repeat("a", maxGitUserNameBytes)},
+		"ident when unset":    {config: read{err: unset}, ident: read{out: "Ada Lovelace <ada@example.invalid> 1700000000 +0000\n"}, want: "Ada Lovelace"},
+		"ident when empty":    {config: read{out: "\n"}, ident: read{out: "Ada Lovelace <ada@example.invalid> 1700000000 +0000\n"}, want: "Ada Lovelace"},
+		"ident oversized":     {config: read{err: unset}, ident: read{out: strings.Repeat("a", maxGitUserNameBytes) + " <a@example.invalid>"}, want: ""},
+		"ident no name":       {config: read{err: unset}, ident: read{out: " <ada@example.invalid> 1700000000 +0000\n"}, want: ""},
+		"ident email only":    {config: read{err: unset}, ident: read{out: "ada@example.invalid 1700000000 +0000\n"}, want: ""},
+		"ident email in name": {config: read{err: unset}, ident: read{out: "ada@example.invalid <ada@example.invalid> 1700000000 +0000\n"}, want: ""},
+		"ident error":         {config: read{err: unset}, ident: read{out: "Ada <ada@example.invalid>", err: unset}, want: ""},
+	} {
+		var calls [][]string
+		gitIdentity = func(_ context.Context, d string, args ...string) (string, error) {
+			if d != "/src/checkout" {
+				t.Errorf("%s: read in %q", name, d)
+			}
+			calls = append(calls, args)
+			if strings.Join(args, " ") == "config --get user.name" {
+				return c.config.out, c.config.err
+			}
+			if strings.Join(args, " ") == "var GIT_AUTHOR_IDENT" {
+				return c.ident.out, c.ident.err
+			}
+			t.Errorf("%s: unexpected git %q", name, args)
+			return "", unset
+		}
+		got := operatorName(context.Background(), "/src/checkout")
+		if got != c.want || strings.Contains(got, "@") {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+		if configured := c.want != "" && c.config.err == nil && strings.TrimSpace(c.config.out) == c.want; configured && len(calls) != 1 {
+			t.Errorf("%s: read the ident although user.name was set: %q", name, calls)
+		}
+	}
+}
+
+// With a real git whose config has no user.name, the avatar name comes from the
+// author identity git would commit with, and its email never appears. HOME and
+// the global and system configs point into the test's own temp dir.
+func TestUIOperatorNameFallsBackToTheAuthorIdent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.gitconfig")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("GIT_CONFIG_GLOBAL", empty)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CEILING_DIRECTORIES", dir)
+	t.Setenv("GIT_AUTHOR_NAME", "Ada Lovelace")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ada@example.invalid")
+	if _, err := gitIdentity(context.Background(), dir, gitUserNameArgs...); err == nil {
+		t.Fatal("the test config has a user.name")
+	}
+	if got := operatorName(context.Background(), dir); got != "Ada Lovelace" || strings.Contains(got, "example.invalid") {
+		t.Fatalf("operator %q", got)
+	}
+}
+
+// The git output buffer keeps at most its limit, drains the rest and records
+// the overflow, so an oversized name is refused rather than cut.
+func TestUIOperatorBoundedBufferRefusesOverflow(t *testing.T) {
+	b := &boundedBuffer{limit: 8}
+	for _, chunk := range []string{"abc", "defgh", "ijk"} {
+		if n, err := b.Write([]byte(chunk)); n != len(chunk) || err != nil {
+			t.Fatalf("write %q: %d %v", chunk, n, err)
+		}
+	}
+	if !b.overflow || b.b.String() != "abcdefgh" {
+		t.Fatalf("buffer %q overflow %t", b.b.String(), b.overflow)
+	}
+	fits := &boundedBuffer{limit: 8}
+	fits.Write([]byte("abcdefgh"))
+	if fits.overflow || fits.b.String() != "abcdefgh" {
+		t.Fatalf("a value at the bound overflowed: %q", fits.b.String())
+	}
+}
+
 func TestUIRejectsBadArguments(t *testing.T) {
+	previousName := gitIdentity
+	gitIdentity = func(context.Context, string, ...string) (string, error) { return "", fmt.Errorf("not read here") }
+	t.Cleanup(func() { gitIdentity = previousName })
 	for _, args := range [][]string{{"ui", "--lab", t.TempDir(), "extra"}, {"ui", "--lab", t.TempDir(), "--port", "70000"}} {
 		var out, stderr bytes.Buffer
 		if code := Run(context.Background(), args, strings.NewReader(""), &out, &stderr, "ui-test"); code == 0 {

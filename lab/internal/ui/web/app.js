@@ -231,8 +231,10 @@
         el('strong', null, f.formulaId || 'None', f.sha256 ? el('span', { class: 'version-tag', title: f.sha256 }, 'sha256 ' + short(f.sha256)) : null),
         el('small', null, (states[f.state] || notRecorded(f.state)) + (f.decisionId ? ' · decision ' + f.decisionId : '') + '. Applies to future Molecules; existing Molecules keep their saved snapshot.')),
       el('div', { class: 'formula-actions' }, el('span', { class: 'unavailable-tag', title: 'Version history and rollback are not connected in this slice' }, 'Versions & history · Unavailable')));
+    renderOperator(lab.operator);
     const drives = !sample && Array.isArray(lab.actions) && lab.actions.length > 0;
     $('.readonly-badge').hidden = drives;
+    if (!drives) $('#loop-pill').hidden = true;
     if (drives) {
       ensureDrive();
       renderDrive();
@@ -354,7 +356,7 @@
             el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Issue #'), issue),
             run),
           runStatus),
-        el('div', { class: 'drive-group', role: 'group', 'aria-labelledby': 'drive-loop-title' },
+        el('div', { class: 'drive-group', id: 'drive-loop', tabindex: '-1', role: 'group', 'aria-labelledby': 'drive-loop-title' },
           el('span', { class: 'label', id: 'drive-loop-title' }, 'RUN THE LOOP'),
           el('div', { class: 'drive-row' },
             el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Select'), select),
@@ -365,7 +367,8 @@
           loopStatus)),
       el('datalist', { id: 'drive-select-options' }, ['oldest', 'label:', 'milestone:'].map((v) => el('option', { value: v }))),
       el('p', { class: 'drive-help' }, 'The engine runs the bound harness from this checkout. Intake stops at the scope gate; the loop approves only what the Formula policy approves. Stopping the loop dispatches no new Issue and lets Molecules in flight finish.'));
-    $('#active-formula').after(drive.panel);
+    // The Run-the-loop form the header's Start loop link points at.
+    fill($('#drive-slot'), drive.panel);
   }
 
   function runText(run) {
@@ -416,6 +419,7 @@
     ];
     fill(c.runStatus, notes('run'), runText(drive.run));
     fill(c.loopStatus, notes('loop'), loopText(loop));
+    renderLoopPill();
   }
 
   // ---- Grid, filters and search -------------------------------------------
@@ -462,6 +466,7 @@
     renderFilters();
     applyFilter();
     renderOverview();
+    renderShell();
   }
 
   // The note is a status region: it is rebuilt, and so announced, only when its
@@ -582,12 +587,14 @@
 
   // ---- Selection --------------------------------------------------------------
   function select(id) {
-    if (id === state.selectedId && !$('#selected').hidden) { overview(); return; }
+    // A Molecule opens under Work, from any view (the Insights queue, Start Work).
+    const elsewhere = state.view !== 'work';
+    if (elsewhere) navigate('work', false);
+    if (id === state.selectedId && !$('#selected').hidden) { if (!elsewhere) overview(); return; }
     state.selectedId = id;
     state.detail = null;
     state.atomIndex = null;
     $('#selected').hidden = false;
-    $('#aggregate').hidden = true;
     cells().forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
     const m = molecules().find((x) => x.id === id);
     $('#selection-label').textContent = m ? 'Selected #' + m.number + ' · ' + (m.title || m.id) : 'Selected ' + id;
@@ -603,7 +610,6 @@
     clearTimeout(state.gate.timer);
     state.gate = newGate(null);
     $('#selected').hidden = true;
-    $('#aggregate').hidden = false;
     cells().forEach((b) => b.setAttribute('aria-pressed', 'false'));
     $('#selection-label').textContent = 'All Molecules · select a cell to inspect';
     applyFilter();
@@ -1155,6 +1161,119 @@
       models.truncated ? el('p', { class: 'scope-note' }, countText(models.ungrouped) + ' attempts beyond the group bound are not shown; the breakdown is truncated.') : null);
   }
 
+  // ---- App shell: views, needs-you badge, loop pill, operator, resident --------
+  // The view lives in the URL (?view=…), set through history.pushState by real
+  // <a href> links, so Back, reload and copied links restore it.
+  const VIEWS = ['inbox', 'issues', 'work', 'insights', 'formula'];
+  function viewFromURL() {
+    const view = new URLSearchParams(location.search).get('view');
+    return VIEWS.includes(view) ? view : 'inbox';
+  }
+  function showView(view) {
+    state.view = view;
+    document.querySelectorAll('[data-view-panel]').forEach((panel) => { panel.hidden = panel.dataset.viewPanel !== view; });
+    document.querySelectorAll('a[data-view]').forEach((link) => {
+      if (link.dataset.view === view && !link.closest('main')) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+    const more = $('#tab-more');
+    more.classList.toggle('is-current', view === 'insights' || view === 'formula');
+    more.open = false;
+    hideTip();
+  }
+  function navigate(view, focus) {
+    if (view !== viewFromURL()) history.pushState({ view: view }, '', '?view=' + view);
+    showView(view);
+    if (focus) $('#main').focus({ preventScroll: true });
+  }
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a[data-view]');
+    if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    navigate(link.dataset.view, true);
+  });
+  window.addEventListener('popstate', () => showView(viewFromURL()));
+
+  // Counts read as words through Intl.PluralRules.
+  const plural = new Intl.PluralRules('en-US');
+  function needsYouText(n) { return n + (plural.select(n) === 'one' ? ' thing needs you' : ' things need you'); }
+  function runningText(n) { return n + (plural.select(n) === 'one' ? ' Molecule running' : ' Molecules running'); }
+  // setText changes a node's text only when it differs, so a poll never
+  // re-announces or disturbs what is already shown.
+  function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
+
+  // The resident's pose follows Lab state: waving when anything needs you,
+  // studying a cube while any Molecule runs, reading otherwise.
+  function residentPose(counts) {
+    if ((counts.decision || 0) > 0) return 'waving';
+    if ((counts.running || 0) > 0) return 'studying';
+    return 'reading';
+  }
+  const RESIDENT_TITLES = { waving: (c) => needsYouText(c.decision), studying: (c) => runningText(c.running), reading: () => 'All is quiet' };
+
+  // renderShell patches the badge and the resident in place from the list counts.
+  function renderShell() {
+    const counts = (state.list && state.list.counts) || {};
+    const waiting = counts.decision || 0;
+    for (const badge of [$('#needs-you-badge'), $('#needs-you-tab-badge')]) {
+      badge.hidden = waiting === 0;
+      setText(badge, String(waiting));
+      badge.setAttribute('aria-label', needsYouText(waiting));
+    }
+    setText($('#inbox-summary'), waiting ? needsYouText(waiting) + '.' : 'Nothing needs you right now.');
+    const pose = residentPose(counts);
+    const resident = $('#resident');
+    if (resident.dataset.pose !== pose) resident.dataset.pose = pose;
+    setText($('#resident-title'), RESIDENT_TITLES[pose](counts));
+    renderLoopPill();
+  }
+
+  // The loop pill reads the loop this UI runs: idle with a Start loop link to the
+  // Run-the-loop form, or running with N in flight and Stop behind a disclosure
+  // and a confirmation that names the loop. Stop reuses stopLoop unchanged.
+  function renderLoopPill() {
+    const pill = $('#loop-pill');
+    if (!drive.panel) { pill.hidden = true; return; }
+    pill.hidden = false;
+    const loop = drive.loop;
+    const phase = loop && (loop.state === 'running' || loop.state === 'draining') ? loop.state : 'idle';
+    const inFlight = (state.list && state.list.counts && state.list.counts.running) || 0;
+    if (pill.dataset.loop !== phase) pill.dataset.loop = phase;
+    setText($('#loop-pill-text'), phase === 'idle' ? 'Loop is idle' : (phase === 'draining' ? 'Loop stopping · ' : 'Loop running · ') + inFlight + ' in flight');
+    $('#loop-start-link').hidden = phase !== 'idle';
+    const stop = $('#loop-stop');
+    if (phase !== 'running' && !stop.hidden) {
+      if (stop.contains(document.activeElement)) pill.focus({ preventScroll: true });
+      stop.open = false;
+      stop.hidden = true;
+    } else if (phase === 'running') stop.hidden = false;
+    setText($('#loop-stop-question'), 'Stop the loop' + (loop && loop.select ? ' on “' + loop.select + '”' : '') + '?');
+    const confirm = $('#loop-stop-confirm');
+    confirm.disabled = drive.pending;
+    setText(confirm, drive.pending && drive.where === 'loop' ? 'Stopping…' : 'Stop loop');
+  }
+  $('#loop-stop-confirm').addEventListener('click', stopLoop);
+  $('#loop-start-link').addEventListener('click', () => {
+    // The form is in the side panel, beside every view; focus its selector.
+    const input = document.querySelector('[data-drive="select"]');
+    if (input) setTimeout(() => input.focus({ preventScroll: true }), 0);
+  });
+
+  // The avatar shows the operator's initials from GET /api/lab, or a generic
+  // glyph for the fallback; the name is only an accessible label and a title.
+  function renderOperator(operator) {
+    const o = operator && typeof operator === 'object' ? operator : {};
+    const name = typeof o.name === 'string' && o.name ? o.name : 'Operator';
+    const initials = typeof o.initials === 'string' && /^[\p{L}\p{N}]{1,2}$/u.test(o.initials) ? o.initials : '';
+    const avatar = $('#operator-avatar');
+    avatar.setAttribute('aria-label', 'Operator: ' + name);
+    avatar.title = name;
+    setText($('#operator-initials'), initials);
+    $('#operator-glyph').hidden = Boolean(initials);
+  }
+
+  showView(viewFromURL());
+
   // ---- Dialog, motion and visibility -------------------------------------------
   let dialogReturn = null;
   function show(title, body, note) {
@@ -1176,6 +1295,8 @@
   });
   if ('IntersectionObserver' in window) {
     new IntersectionObserver(([entry]) => document.body.classList.toggle('shelf-offscreen', !entry.isIntersecting)).observe($('.shelf'));
+    // The resident's working pose pauses while it is offscreen.
+    new IntersectionObserver(([entry]) => document.body.classList.toggle('resident-offscreen', !entry.isIntersecting)).observe($('#resident'));
   }
 
   loadLab().then(poll).catch(failed);

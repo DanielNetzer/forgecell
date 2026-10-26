@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // openBrowser opens a local file or URL in the default browser without a shell;
@@ -34,6 +35,91 @@ var openBrowser = func(url string) error {
 	}
 	go cmd.Wait()
 	return nil
+}
+
+// maxGitUserNameBytes bounds each git identity read; a longer value is refused
+// and the UI shows its neutral fallback.
+const maxGitUserNameBytes = 1024
+
+// gitUserNameTimeout bounds each git identity read at start-up.
+const gitUserNameTimeout = 5 * time.Second
+
+// The two fixed git reads behind the avatar: the configured name, then the
+// author identity git itself would commit with (for example from the OS
+// account's full name) when no name is configured.
+var (
+	gitUserNameArgs    = []string{"config", "--get", "user.name"}
+	gitAuthorIdentArgs = []string{"var", "GIT_AUTHOR_IDENT"}
+)
+
+// gitIdentity runs git with one of the fixed argv above in dir, without a
+// shell, with a bounded output and a timeout; tests replace it so no real git
+// config is read.
+var gitIdentity = func(ctx context.Context, dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, gitUserNameTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	out := &boundedBuffer{limit: maxGitUserNameBytes}
+	cmd.Stdout = out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	if out.overflow {
+		return "", fmt.Errorf("git %s is longer than %d bytes", args[0], maxGitUserNameBytes)
+	}
+	return out.b.String(), nil
+}
+
+// boundedBuffer keeps at most limit bytes and records whether more were written.
+type boundedBuffer struct {
+	b        strings.Builder
+	limit    int
+	overflow bool
+}
+
+// Write reports the whole of p as written, so the process is drained rather than
+// blocked; the excess is dropped.
+func (w *boundedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := w.limit - w.b.Len(); n > room {
+		w.overflow = true
+		p = p[:max(room, 0)]
+	}
+	w.b.Write(p)
+	return n, nil
+}
+
+// operatorName is the source checkout's git config user.name for the avatar or,
+// when that is unset or empty, the name part of git var GIT_AUTHOR_IDENT; it is
+// "" when neither can be read, both are empty or a value is oversized. Errors
+// are ignored and never printed: they can name local paths. The UI redacts and
+// bounds the value and refuses any email in it.
+func operatorName(ctx context.Context, dir string) string {
+	if name := gitRead(ctx, dir, gitUserNameArgs); name != "" {
+		return name
+	}
+	return identName(gitRead(ctx, dir, gitAuthorIdentArgs))
+}
+
+// gitRead is one trimmed identity read, or "" on an error or an oversized value.
+func gitRead(ctx context.Context, dir string, args []string) string {
+	out, err := gitIdentity(ctx, dir, args...)
+	if err != nil || len(out) > maxGitUserNameBytes {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// identName is the name before " <" in a git ident ("Name <email> 1700000000
+// +0000"), so the email and the timestamp are never kept; an ident without that
+// shape gives "".
+func identName(ident string) string {
+	name, _, ok := strings.Cut(ident, " <")
+	if !ok || strings.ContainsAny(name, "<>@\n") {
+		return ""
+	}
+	return strings.TrimSpace(name)
 }
 
 // runUI serves the Lab UI on 127.0.0.1 until ctx is cancelled (SIGINT or SIGTERM
@@ -70,6 +156,8 @@ func runUI(ctx context.Context, args []string, defaultLab, version string, out, 
 			return fail(err)
 		}
 		options.SourceRoot, options.Resources = cwd, guard
+		// The avatar's name; demo mode never reads git.
+		options.Operator = operatorName(ctx, cwd)
 	}
 	s, err := ui.Listen(options)
 	if err != nil {
