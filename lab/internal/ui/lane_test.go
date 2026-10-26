@@ -175,6 +175,61 @@ func TestUILaneCountsReconcileWithMoleculeList(t *testing.T) {
 	}
 }
 
+// Retired (#236) outranks every phase and receipt, and an unknown status still
+// falls back safely: it never lands in Retired.
+func TestUILaneRetiredOutranksEveryOtherLane(t *testing.T) {
+	for _, phase := range lanePhases {
+		for _, d := range laneReceipts {
+			if got := Lane(molecule.StatusRetired, phase, d); got != LaneRetired {
+				t.Errorf("retired, %q, %+v: lane %s", phase, d, got)
+			}
+			if got := Lane("future-status", phase, d); got == LaneRetired {
+				t.Errorf("unknown status reached Retired")
+			}
+		}
+	}
+	if Lane("future-status", "", nil) != LaneOther {
+		t.Error("an unknown status does not fall back to Other")
+	}
+	if FilterLanes[len(FilterLanes)-1] != LaneRetired || len(FilterLanes) != len(Lanes)+1 {
+		t.Errorf("filter lanes %v", FilterLanes)
+	}
+}
+
+// Retired Molecules are listed and counted under their own key but excluded
+// from All and from every lane that sums to it; analytics includes them.
+func TestUILaneCountsExcludeRetired(t *testing.T) {
+	lab := t.TempDir()
+	for i, s := range []struct{ status, phase string }{{"waiting", "scope-waiting"}, {"blocked", ""}, {molecule.StatusRetired, "review-waiting"}, {molecule.StatusRetired, "scope-waiting"}} {
+		r := molecule.Record{SchemaVersion: "v0", Kind: "molecule", ID: fmt.Sprintf("m%d", i), Status: s.status, FormulaID: "f", Mode: "ticket", StartedAt: fmt.Sprintf("2026-10-24T10:00:0%dZ", i), FinishedAt: fmt.Sprintf("2026-10-24T10:01:0%dZ", i), LabDir: lab, Issue: molecule.Issue{Repo: "o/r", Number: int64(i + 1), Title: "t"}}
+		if s.phase != "" {
+			r.Readiness = readinessPhase(s.phase)
+		}
+		if s.status == molecule.StatusRetired {
+			r.Retired = &molecule.Retirement{At: "2026-10-26T10:00:00Z", Reason: "stale", PriorStatus: "waiting"}
+		}
+		writeRecord(t, lab, r)
+	}
+	h := testHandler(t, Options{LabDir: lab})
+	var list MoleculeList
+	decode(t, do(t, h, authed("/api/molecules")), &list)
+	if len(list.Molecules) != 4 || list.Counts["all"] != 2 || list.Counts[LaneRetired] != 2 || list.Counts[LaneDecision] != 1 || list.Counts[LaneBlocked] != 1 {
+		t.Fatalf("counts %v, %d molecules", list.Counts, len(list.Molecules))
+	}
+	sum := 0
+	for _, lane := range Lanes {
+		sum += list.Counts[lane]
+	}
+	if sum != list.Counts["all"] {
+		t.Fatalf("lanes sum to %d of %d", sum, list.Counts["all"])
+	}
+	var a AnalyticsView
+	decode(t, do(t, h, authed("/api/analytics")), &a)
+	if a.Molecules != 4 || a.Counts[LaneRetired] != 2 || a.Time.WallClock.Molecules != 4 || a.Time.WallClock.Recorded != 4 {
+		t.Fatalf("analytics %d %v %+v", a.Molecules, a.Counts, a.Time.WallClock)
+	}
+}
+
 func readinessPhase(phase string) *readiness.State {
 	return &readiness.State{SchemaVersion: "v1", Phase: phase, Plans: []readiness.Proposal{}, Events: []readiness.Event{}}
 }

@@ -1,8 +1,8 @@
 // Package ui serves the local Lab UI on the loopback interface. It reads the Lab
 // only through engine Go functions, never a shell. Every read is a GET; the only
-// writes are the human gates in gates.go (scope approval and draft publication)
-// and the drive actions in drive.go (start intake, start or stop the loop, stop
-// a Molecule this UI runs), each a POST that needs the session cookie, the exact
+// writes are the human gates in gates.go (scope approval and draft publication),
+// the drive actions in drive.go (start intake, start or stop the loop, stop
+// a Molecule this UI runs) and retiring one Molecule (retire.go), each a POST that needs the session cookie, the exact
 // Origin and the per-tab session header, and each performed by the engine, which
 // validates digests, locks and receipts. It never merges, deploys, recovers or
 // changes permissions.
@@ -171,6 +171,8 @@ type handler struct {
 	runIssue func(context.Context, molecule.Options) (molecule.Record, error)
 	runLoop  func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error)
 	loop     *driveLoop
+	// retire is the engine call behind the retire route; tests may replace it.
+	retire func(lab, id, reason string) (molecule.Record, error)
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -213,7 +215,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.Run, runLoop: molecule.RunLoop, loop: &driveLoop{}}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.Run, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -278,6 +280,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if drive {
 			h.drive(w, r, driveID, driveAction)
+			return
+		}
+		if h.refuseRetiredScope(w, gateID, gateAction) {
 			return
 		}
 		h.gate(w, r, gateID, gateAction)
@@ -387,7 +392,8 @@ func (h *handler) lab(w http.ResponseWriter) {
 		return
 	}
 	id := formula.ActiveIdentity(h.opts.LabDir)
-	actions := []string{}
+	// Retiring needs no source checkout; starting work does.
+	actions := []string{RetireAction}
 	if h.opts.SourceRoot != "" {
 		actions = DriveActions
 	}
@@ -409,14 +415,19 @@ func (h *handler) molecules(w http.ResponseWriter, r *http.Request) {
 	h.json(w, http.StatusOK, h.list(etag))
 }
 
-// counts tallies lanes from the same summaries the response carries.
+// counts tallies lanes from the same summaries the response carries. All, and
+// the Lanes summing to it, exclude retired Molecules; they are counted under
+// their own key, so none is silently dropped.
 func counts(ms []Summary) map[string]int {
-	c := map[string]int{"all": len(ms)}
-	for _, lane := range Lanes {
+	c := map[string]int{"all": 0}
+	for _, lane := range FilterLanes {
 		c[lane] = 0
 	}
 	for _, m := range ms {
 		c[m.Lane]++
+		if m.Lane != LaneRetired {
+			c["all"]++
+		}
 	}
 	return c
 }

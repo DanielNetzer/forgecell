@@ -56,16 +56,20 @@
     finished: { label: 'Draft published', short: 'draft published', symbol: '✓', cls: 'finished' },
     other: { label: 'Other', short: 'other', symbol: '·', cls: 'other' },
   };
+  // Retired is finished history: its own lane and filter, never part of All,
+  // Needs my decision or the headline counts, but shown in analytics.
+  const RETIRED = 'retired';
+  const ALL_LANES = Object.assign({}, LANES, { retired: { label: 'Retired', short: 'retired', symbol: '–', cls: 'other' } });
   const FILTERS = [
     ['all', 'All'], ['running', 'Running'], ['decision', 'Needs my decision'], ['paused', 'Paused'],
-    ['blocked', 'Blocked'], ['finished', 'Finished · Draft published'], ['other', 'Other'],
+    ['blocked', 'Blocked'], ['finished', 'Finished · Draft published'], ['other', 'Other'], ['retired', 'Retired'],
   ];
 
   const state = { lab: null, list: null, etag: null, analytics: null, analyticsEtag: null, analyticsToken: 0, filter: 'all', query: '', selectedId: null, detail: null, detailText: null, atomIndex: null, detailToken: 0, labToken: 0, pollToken: 0, polling: false, noteKey: null, sessionLost: false, gate: newGate(null) };
 
   // gate is the selected Molecule's gate state: one request in flight at most,
   // the last preview shown, and the last job read back from the server.
-  function newGate(id) { return { id: id, pending: false, preview: null, job: null, stop: null, message: '', title: '', accept: false, timer: null }; }
+  function newGate(id) { return { id: id, pending: false, preview: null, job: null, stop: null, retire: null, reason: '', message: '', title: '', accept: false, timer: null }; }
 
   function notRecorded(value) { return value === undefined || value === null || value === '' ? 'Not recorded' : String(value); }
   function short(digest) { return typeof digest === 'string' && digest.length > 12 ? digest.slice(0, 12) + '…' : notRecorded(digest); }
@@ -379,7 +383,8 @@
 
   // ---- Grid, filters and search -------------------------------------------
   function molecules() { return (state.list && state.list.molecules) || []; }
-  function laneOf(m) { return LANES[m.lane] || LANES.other; }
+  function laneOf(m) { return ALL_LANES[m.lane] || LANES.other; }
+  function live(m) { return m.lane !== RETIRED; }
   // A running Molecule waiting for the Lab's verification slot reads as queued,
   // not running. Only the one known activity is shown; any other value is ignored.
   const QUEUED = 'queued for checks';
@@ -390,7 +395,7 @@
   }
 
   function matches(m) {
-    const inLane = state.filter === 'all' || m.lane === state.filter;
+    const inLane = state.filter === 'all' ? live(m) : m.lane === state.filter;
     const terms = state.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const haystack = ('#' + m.number + ' ' + (m.title || '') + ' ' + (m.formulaId || '') + ' ' + m.id).toLowerCase();
     return inLane && terms.every((term) => haystack.includes(term));
@@ -401,8 +406,9 @@
     const all = molecules();
     const counts = list.counts || {};
     const sample = Boolean(list.sample);
-    $('#shelf-count').textContent = (sample ? 'Sample data · ' : '') + all.length + ' Molecules · ' +
-      Object.entries(LANES).map(([id, lane]) => (counts[id] || 0) + ' ' + lane.short).join(' · ');
+    $('#shelf-count').textContent = (sample ? 'Sample data · ' : '') + all.filter(live).length + ' Molecules · ' +
+      Object.entries(LANES).map(([id, lane]) => (counts[id] || 0) + ' ' + lane.short).join(' · ') +
+      (counts[RETIRED] ? ' · ' + counts[RETIRED] + ' retired (not counted)' : '');
     renderNote(list);
     const cubes = $('#cubes');
     fill(cubes, all.map((m, i) => {
@@ -753,6 +759,27 @@
     if (stop && state.gate === gate) { gate.stop = stop; rerenderGate(gate); loadDetail(gate.id, false); }
   }
 
+  // retireMolecule posts once with the typed reason; the retirement shows as
+  // committed only when the response's ledger read-back records it.
+  async function retireMolecule() {
+    const gate = state.gate;
+    const reason = gate.reason.trim();
+    if (!reason || /[\r\n]/.test(reason) || [...reason].length > 200) { gate.message = 'Enter a one-line reason of at most 200 characters.'; rerenderGate(gate); return; }
+    const retired = await submitGate('/retire', JSON.stringify({ reason: reason }));
+    if (retired && state.gate === gate) { gate.retire = retired; rerenderGate(gate); loadDetail(gate.id, false); }
+  }
+
+  function retireText(d, gate) {
+    const r = d.retired;
+    if (d.lane === RETIRED && r) {
+      return el('p', { class: 'scope-note', role: gate.retire ? 'status' : null }, 'Retired at ' + notRecorded(r.at) + ' (was ' + notRecorded(r.priorStatus) + '). Reason: ' + notRecorded(r.reason) + '. Every record is kept.');
+    }
+    if (gate.retire) return el('p', { class: 'scope-note', role: 'status' }, gate.retire.committed ? 'Committed: the ledger records the retirement.' : 'Not committed: the ledger read back does not record the retirement.');
+    return null;
+  }
+
+  function hasAction(name) { return Boolean(state.lab && Array.isArray(state.lab.actions) && state.lab.actions.includes(name)); }
+
   function latestDigest(d) {
     const plans = (d.readiness && d.readiness.plans) || [];
     const last = plans[plans.length - 1];
@@ -822,13 +849,22 @@
         ] : null));
     }
     const live = d.status === 'running' || d.status === 'allocating';
-    if ((live || gate.stop) && state.lab && Array.isArray(state.lab.actions) && state.lab.actions.length) {
+    if ((live || gate.stop) && hasAction('stop Molecule')) {
       let note = 'Stops the engine call this Lab UI runs for this Molecule; its process group is killed and the ledger records the stop. Work run by a loop or the CLI is refused.';
       if (gate.stop) note = live ? 'Stop requested. Not committed until the ledger no longer shows this Molecule running.' : 'Stopped: the ledger shows status ' + notRecorded(d.status) + (d.phase ? ' · phase ' + d.phase : '') + '. Inspect or re-run it with the forgecell CLI.';
       parts.push(el('div', { class: 'gate' },
         el('strong', null, 'Stop this Molecule'),
         el('p', { class: 'scope-note', role: gate.stop ? 'status' : null }, note),
         live ? el('button', { type: 'button', class: 'text-button', dataset: { gate: 'stop' }, disabled: gate.pending || Boolean(gate.stop), onclick: stopMolecule }, gate.pending ? 'Submitting…' : 'Stop Molecule') : null));
+    }
+    if (d.lane === RETIRED || gate.retire) {
+      parts.push(el('div', { class: 'gate' }, el('strong', null, 'Retired'), retireText(d, gate)));
+    } else if (!live && hasAction('retire Molecule')) {
+      parts.push(el('div', { class: 'gate' },
+        el('strong', null, 'Retire this Molecule'),
+        el('p', { class: 'scope-note' }, 'Marks a stale Molecule retired: it leaves All and Needs my decision, and every record is kept. The loop never resumes it and may start a fresh Molecule for its Issue. The engine refuses a running, locked or delivering Molecule.'),
+        el('label', null, 'Reason ', el('input', { type: 'text', maxlength: '200', value: gate.reason, dataset: { gate: 'reason' }, oninput: (e) => { gate.reason = e.target.value; } })),
+        el('button', { type: 'button', class: 'text-button', dataset: { gate: 'retire' }, disabled: gate.pending || running, onclick: retireMolecule }, gate.pending ? 'Submitting…' : 'Retire Molecule')));
     }
     if (parts.length === 1) parts.push(el('p', { class: 'scope-note' }, 'No human gate is open for this Molecule. This page updates from the ledger.'));
     if (gate.message) parts.push(el('p', { class: 'scope-note', role: 'alert' }, gate.message));
@@ -1009,7 +1045,7 @@
 
   // ---- Overview ----------------------------------------------------------------
   function renderOverview() {
-    const all = molecules();
+    const all = molecules().filter(live);
     const counts = (state.list && state.list.counts) || {};
     const sample = Boolean(state.list && state.list.sample);
     $('#aggregate .panel-head .mono').textContent = sample ? 'LAB OVERVIEW · SAMPLE DATA' : 'LAB OVERVIEW';
@@ -1064,7 +1100,7 @@
       el('p', null, notRecorded(c.coverage) + (total ? ' · ' + notRecorded(c.basisLabel) : '') + '. Unknown is not zero.'),
       a.complete ? null : el('p', { class: 'scope-note' }, (a.truncated ? 'Inventory truncated by safety bounds' : 'Inventory incomplete') + '; skipped ledgers are not counted.'),
       el('dl', { class: 'atom-meta' },
-        el('div', null, el('dt', null, 'Outcomes by lane'), el('dd', null, Object.entries(LANES).map(([id, lane]) => lane.label + ' ' + countText(counts[id])).join(' · '))),
+        el('div', null, el('dt', null, 'Outcomes by lane'), el('dd', null, Object.entries(ALL_LANES).map(([id, lane]) => lane.label + ' ' + countText(id === RETIRED ? counts[id] || 0 : counts[id])).join(' · '))),
         measure('Wall-clock', t.wallClock),
         measure('Active Atom time', t.activeAtom),
         measure('Waiting time', t.waiting),

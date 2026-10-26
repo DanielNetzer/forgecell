@@ -27,6 +27,7 @@ import (
 //	POST /api/loop/stop            {}                         → closes Drain; in-flight work finishes
 //	GET  /api/loop                                            → the loop and its last report
 //	POST /api/molecules/{id}/stop  {}                         → cancels this UI's engine call for it
+//	POST /api/molecules/{id}/retire {"reason"}                → molecule.Retire (retire.go)
 //
 // A started run counts only once a ledger for its Issue appears, and a stop only
 // once the ledger no longer reports the Molecule running; the job's own outcome
@@ -46,7 +47,7 @@ const (
 )
 
 // DriveActions lists the work this UI starts and stops through the engine.
-var DriveActions = []string{"start intake", "loop", "stop Molecule"}
+var DriveActions = []string{"start intake", "loop", "stop Molecule", RetireAction}
 
 var repositoryName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
 
@@ -76,6 +77,9 @@ func driveRoute(path string) (id, action string, ok bool) {
 	if id, found = strings.CutSuffix(rest, "/stop"); found && !strings.Contains(id, "/") {
 		return id, "stop", true
 	}
+	if id, found = strings.CutSuffix(rest, "/retire"); found && !strings.Contains(id, "/") {
+		return id, "retire", true
+	}
 	return "", "", false
 }
 
@@ -92,22 +96,29 @@ type emptyRequest struct{}
 
 // drive serves one POST drive route after the write protection has passed.
 func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action string) {
-	if action == "stop" && !moleculeID.MatchString(id) {
+	if (action == "stop" || action == "retire") && !moleculeID.MatchString(id) {
 		h.refuseGate(w, http.StatusBadRequest, "invalid", "invalid Molecule id")
 		return
 	}
 	if h.opts.Demo {
+		if action == "retire" {
+			h.refuseGate(w, http.StatusNotFound, "sample", "sample data cannot be retired; nothing was written")
+			return
+		}
 		h.refuseGate(w, http.StatusNotFound, "sample", "sample data cannot start or stop work; nothing was started")
 		return
 	}
 	var run runRequest
 	var loop loopRequest
+	var retire retireRequest
 	var body any = &emptyRequest{}
 	switch action {
 	case "run":
 		body = &run
 	case "loop/start":
 		body = &loop
+	case "retire":
+		body = &retire
 	}
 	if decodeGate(w, r, body) != nil {
 		h.refuseGate(w, http.StatusBadRequest, "invalid", "send one small JSON object with exactly the action's fields")
@@ -120,6 +131,8 @@ func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action strin
 		h.startLoop(w, loop)
 	case "loop/stop":
 		h.stopLoop(w)
+	case "retire":
+		h.retireMolecule(w, id, retire)
 	default:
 		h.stopMolecule(w, id)
 	}

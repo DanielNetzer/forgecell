@@ -852,6 +852,11 @@ func findPending(lab, digest string) (Record, error) {
 	if found.ID == "" {
 		return found, fmt.Errorf("no Molecule matches this approval digest")
 	}
+	// Every caller re-reads through findPending under the Molecule lock, so this
+	// also refuses a Retire that completed between the unlocked and locked reads.
+	if err = refuseRetired(found); err != nil {
+		return found, err
+	}
 	if found.Workspace.Path == "" || (found.CheckoutStatus != "" && found.CheckoutStatus != "available") {
 		return found, fmt.Errorf("coding checkout unavailable; refresh intake")
 	}

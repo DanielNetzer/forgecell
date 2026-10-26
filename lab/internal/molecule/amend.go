@@ -56,6 +56,9 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 // plan of r. The caller holds the Molecule flock and the approval lock directory.
 func amendLocked(ctx context.Context, r Record, parent string, next readiness.Plan, acceptTree string) (Record, error) {
 	id := r.ID
+	if err := refuseRetired(r); err != nil {
+		return r, err
+	}
 	roles, err := resolveExecutionRoles(r)
 	if err != nil {
 		return r, err
@@ -376,6 +379,9 @@ func AmendFromLatest(ctx context.Context, lab, id string, req AmendRequest) (Rec
 			err = pathErr.Err
 		}
 		return empty, fmt.Errorf("Molecule %s ledger cannot be read: %v", id, err)
+	}
+	if err = refuseRetired(r); err != nil {
+		return r, err
 	}
 	if r.Readiness == nil || len(r.Readiness.Plans) == 0 {
 		return r, fmt.Errorf("Molecule has no readiness plan to amend")
