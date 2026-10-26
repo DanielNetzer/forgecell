@@ -60,8 +60,9 @@
   // Needs my decision or the headline counts, but shown in analytics.
   const RETIRED = 'retired';
   const ALL_LANES = Object.assign({}, LANES, { retired: { label: 'Retired', short: 'retired', symbol: '–', cls: 'other' } });
+  // The lane bar. Paused is not a filter: the engine has no pause semantics.
   const FILTERS = [
-    ['all', 'All'], ['running', 'Running'], ['decision', 'Needs my decision'], ['paused', 'Paused'],
+    ['all', 'All'], ['running', 'Running'], ['decision', 'Needs my decision'],
     ['blocked', 'Blocked'], ['finished', 'Finished · Draft published'], ['other', 'Other'], ['retired', 'Retired'],
   ];
 
@@ -244,7 +245,9 @@
   // meanwhile, and after an ambiguous response (none, or a 5xx) the state is read
   // back and never resubmitted. A run shows as started only once the server's
   // ledger read-back finds its Molecule; the loop's report comes from the engine.
-  const drive = { panel: null, controls: null, loaded: false, pending: false, message: '', runIssue: null, run: null, loop: null, timer: null, token: 0 };
+  // where names the group (run or loop) whose status shows the pending note and
+  // the last message; it changes only what is displayed where.
+  const drive = { panel: null, controls: null, loaded: false, pending: false, where: 'run', message: '', runIssue: null, run: null, loop: null, timer: null, token: 0 };
 
   async function drivePost(path, body) {
     const session = tabSession();
@@ -257,6 +260,7 @@
   async function submitDrive(path, payload) {
     if (drive.pending) return null;
     drive.pending = true;
+    drive.where = path === '/api/runs' ? 'run' : 'loop';
     drive.message = '';
     renderDrive();
     let res = null, body = {};
@@ -301,6 +305,7 @@
 
   async function startRun(text) {
     const value = String(text).trim();
+    if (!drive.pending) drive.where = 'run';
     if (!/^[1-9][0-9]{0,9}$/.test(value)) { drive.message = 'Enter an Issue number.'; renderDrive(); return; }
     drive.runIssue = Number(value);
     drive.run = null;
@@ -310,6 +315,7 @@
 
   async function startLoop(select, max) {
     const n = Number(max);
+    if (!drive.pending) drive.where = 'loop';
     if (!Number.isInteger(n) || n < 1) { drive.message = 'Enter how many Molecules to advance at once.'; renderDrive(); return; }
     const loop = await submitDrive('/api/loop/start', JSON.stringify({ select: String(select).trim(), maxConcurrent: n }));
     if (loop) { drive.loop = loop; readDrive(); }
@@ -323,20 +329,42 @@
   function ensureDrive() {
     if (drive.panel) return;
     const issue = el('input', { type: 'text', inputmode: 'numeric', maxlength: '10', placeholder: 'Issue number', dataset: { drive: 'issue' } });
-    const select = el('input', { type: 'text', maxlength: '256', value: 'oldest', spellcheck: 'false', dataset: { drive: 'select' } });
-    const max = el('input', { type: 'number', min: '1', max: '8', step: '1', value: '1', dataset: { drive: 'max' } });
-    const run = el('button', { type: 'button', class: 'text-button', dataset: { drive: 'run' }, onclick: () => startRun(issue.value) }, 'Start intake');
-    const start = el('button', { type: 'button', class: 'text-button', dataset: { drive: 'start' }, onclick: () => startLoop(select.value, max.value) }, 'Start loop');
-    const stop = el('button', { type: 'button', class: 'text-button', dataset: { drive: 'stop' }, onclick: stopLoop }, 'Stop loop');
-    const status = el('div', { role: 'status' });
-    drive.controls = { run: run, start: start, stop: stop, max: max, status: status };
-    drive.panel = el('div', { class: 'active-formula', id: 'drive-panel' },
-      el('div', null,
-        el('span', { class: 'label' }, 'START WORK · THROUGH THE ENGINE'),
-        el('div', null, el('label', null, 'Issue # ', issue), ' ', run),
-        el('div', null, el('label', null, 'Select ', select), ' ', el('label', null, 'At once ', max), ' ', start, ' ', stop),
-        el('small', null, 'The engine runs the bound harness from this checkout. Intake stops at the scope gate; the loop approves only what the Formula policy approves. Stopping the loop dispatches no new Issue and lets Molecules in flight finish.'),
-        status));
+    const select = el('input', { type: 'text', maxlength: '256', value: 'oldest', spellcheck: 'false', list: 'drive-select-options', autocomplete: 'off', dataset: { drive: 'select' } });
+    const max = el('input', { type: 'number', id: 'drive-max', min: '1', max: '8', step: '1', value: '1', dataset: { drive: 'max' } });
+    // The stepper clamps to 1 and the input's max; startLoop still validates.
+    const step = (delta) => {
+      const limit = Number(max.max), n = Number(max.value);
+      const next = Number.isInteger(n) ? n + delta : 1;
+      max.value = String(Math.max(1, Math.min(Number.isInteger(limit) ? limit : 8, next)));
+    };
+    const fewer = el('button', { type: 'button', class: 'stepper-button', 'aria-label': 'Fewer at once', 'aria-controls': 'drive-max', dataset: { drive: 'fewer' }, onclick: () => step(-1) }, '−');
+    const more = el('button', { type: 'button', class: 'stepper-button', 'aria-label': 'More at once', 'aria-controls': 'drive-max', dataset: { drive: 'more' }, onclick: () => step(1) }, '+');
+    const run = el('button', { type: 'button', class: 'btn btn-primary', dataset: { drive: 'run' }, onclick: () => startRun(issue.value) }, 'Start intake');
+    const start = el('button', { type: 'button', class: 'btn btn-primary', dataset: { drive: 'start' }, onclick: () => startLoop(select.value, max.value) }, 'Start loop');
+    const stop = el('button', { type: 'button', class: 'btn btn-secondary', dataset: { drive: 'stop' }, onclick: stopLoop }, 'Stop loop');
+    const runStatus = el('div', { class: 'drive-status', role: 'status' });
+    const loopStatus = el('div', { class: 'drive-status', role: 'status' });
+    drive.controls = { run: run, start: start, stop: stop, max: max, runStatus: runStatus, loopStatus: loopStatus };
+    drive.panel = el('div', { class: 'drive-panel', id: 'drive-panel' },
+      el('span', { class: 'label' }, 'START WORK · THROUGH THE ENGINE'),
+      el('div', { class: 'drive-groups' },
+        el('div', { class: 'drive-group', role: 'group', 'aria-labelledby': 'drive-run-title' },
+          el('span', { class: 'label', id: 'drive-run-title' }, 'START INTAKE'),
+          el('div', { class: 'drive-row' },
+            el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Issue #'), issue),
+            run),
+          runStatus),
+        el('div', { class: 'drive-group', role: 'group', 'aria-labelledby': 'drive-loop-title' },
+          el('span', { class: 'label', id: 'drive-loop-title' }, 'RUN THE LOOP'),
+          el('div', { class: 'drive-row' },
+            el('label', { class: 'drive-field' }, el('span', { class: 'field-label' }, 'Select'), select),
+            el('div', { class: 'drive-field drive-field-stepper' },
+              el('label', { class: 'field-label', for: 'drive-max' }, 'At once'),
+              el('div', { class: 'stepper' }, fewer, max, more)),
+            start, stop),
+          loopStatus)),
+      el('datalist', { id: 'drive-select-options' }, ['oldest', 'label:', 'milestone:'].map((v) => el('option', { value: v }))),
+      el('p', { class: 'drive-help' }, 'The engine runs the bound harness from this checkout. Intake stops at the scope gate; the loop approves only what the Formula policy approves. Stopping the loop dispatches no new Issue and lets Molecules in flight finish.'));
     $('#active-formula').after(drive.panel);
   }
 
@@ -377,8 +405,17 @@
     c.run.disabled = drive.pending || Boolean(drive.run && drive.run.state === 'running');
     c.start.disabled = drive.pending || looping;
     c.stop.disabled = drive.pending || !loop || loop.state !== 'running';
+    for (const b of [c.run, c.start, c.stop]) b.setAttribute('aria-disabled', String(b.disabled));
+    // A pending primary shows a short inline label; the others stay as they are.
+    fill(c.run, drive.pending && drive.where === 'run' ? 'Working…' : 'Start intake');
+    fill(c.start, drive.pending && drive.where === 'loop' ? 'Working…' : 'Start loop');
     if (loop && Number.isInteger(loop.maxConcurrentLimit)) c.max.max = String(loop.maxConcurrentLimit);
-    fill(c.status, drive.pending ? el('p', { class: 'scope-note' }, 'Submitting…') : null, drive.message ? el('p', { class: 'scope-note', role: 'alert' }, drive.message) : null, runText(drive.run), loopText(loop));
+    const notes = (where) => drive.where !== where ? null : [
+      drive.pending ? el('p', { class: 'scope-note' }, 'Submitting…') : null,
+      drive.message ? el('p', { class: 'scope-note', role: 'alert' }, drive.message) : null,
+    ];
+    fill(c.runStatus, notes('run'), runText(drive.run));
+    fill(c.loopStatus, notes('loop'), loopText(loop));
   }
 
   // ---- Grid, filters and search -------------------------------------------
@@ -446,17 +483,19 @@
     note.hidden = Boolean(list.complete);
   }
 
+  // Each lane is a segment of one bar: its cube-legend dot, label and count.
+  // Retired sits last, after a hairline divider.
   function renderFilters() {
     const counts = (state.list && state.list.counts) || {};
-    fill($('#run-filters'), FILTERS.map(([id, label]) => {
-      if (id === 'paused') {
-        return el('button', { type: 'button', class: 'filter-chip', disabled: true, title: 'The engine has no pause semantics', 'aria-disabled': 'true' }, label, el('span', null, 'Unavailable'));
-      }
-      return el('button', {
-        type: 'button', class: 'filter-chip', dataset: { filter: id }, 'aria-pressed': String(state.filter === id),
+    fill($('#run-filters'), FILTERS.flatMap(([id, label]) => [
+      id === RETIRED ? el('span', { class: 'lane-divider', 'aria-hidden': 'true' }) : null,
+      el('button', {
+        type: 'button', class: 'lane-segment', dataset: { filter: id }, 'aria-pressed': String(state.filter === id),
         onclick: () => { hideTip(); state.filter = id; renderFilters(); applyFilter(); $('[data-filter="' + id + '"]').focus({ preventScroll: true }); },
-      }, label, el('span', null, String(id === 'all' ? counts.all || 0 : counts[id] || 0)));
-    }));
+      }, id === 'all' ? null : el('span', { class: 'lane-dot lane-dot-' + id, 'aria-hidden': 'true' }),
+      el('span', { class: 'lane-name' }, label),
+      el('span', { class: 'lane-count' }, String(id === 'all' ? counts.all || 0 : counts[id] || 0))),
+    ]));
   }
 
   function cells() { return [...document.querySelectorAll('#cubes [data-id]')]; }
