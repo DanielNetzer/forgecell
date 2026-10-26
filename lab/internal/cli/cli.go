@@ -40,7 +40,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	harness.SetRunningVersion(version)
 	if len(args) == 0 || args[0] == "--help" || args[0] == "help" {
-		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\n"+demoUsage+"\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ninit --refresh-baseline [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\ndoctor --clean [--yes] [--lab DIR]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> [--add-scope PATH --reason TEXT]... [--add-acceptance TEXT]... [--note TEXT] [--continuation checks-only] [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --accept-protected-failures [--add-acceptance TEXT]... [--note TEXT] [--lab DIR]  (declare the tests that failed by design in the latest protected regression run as expectedProtectedDeltas; continues checks-only; takes no --run: review the printed list, then approve the digest with run <issue> --approve DIGEST)\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --parent DIGEST --rebase-formula [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\nui [--lab DIR] [--port N] [--no-open] [--demo]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nui serves a read-only Lab UI on 127.0.0.1 behind a per-launch token and opens it in the browser unless --no-open is given; --demo shows synthetic sample data. It stops on SIGINT or SIGTERM.\n\n"+demoHelp+"\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
+		fmt.Fprintln(out, "Forgecell Lab — Go migration preview\n\n"+demoUsage+"\ninit [--lab DIR] [--harness ID | --rebind ID] [--meta-harness ID | --meta-command JSON_ARGV] [--harness-timeout-ms MS] [--max-timeout-ms MS] [--json] [--review ID | --approve ID | --dismiss ID]\ninit --model ID [--role analysis|coding|meta|review] [--lab DIR] [--json]\ninit --refresh-baseline [--lab DIR] [--json]\ndoctor [--lab DIR] [--harness ID] [--json] [--verbose]\ndoctor --clean [--yes] [--lab DIR]\nrun <issue> [--lab DIR] [--formula ID] [--base COMMIT] [--target BRANCH] [--approve DIGEST] [--json]\namend <molecule> [--add-scope PATH --reason TEXT]... [--add-acceptance TEXT]... [--note TEXT] [--continuation checks-only] [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --accept-protected-failures [--add-acceptance TEXT]... [--note TEXT] [--lab DIR]  (declare the tests that failed by design in the latest protected regression run as expectedProtectedDeltas; continues checks-only; takes no --run: review the printed list, then approve the digest with run <issue> --approve DIGEST)\namend <molecule> --parent DIGEST --plan FILE [--accept-existing-tree TREE] [--run] [--lab DIR]\namend <molecule> --parent DIGEST --rebase-formula [--lab DIR]\nrecover <molecule> --plan DIGEST --confirm-stopped [--lab DIR]\nretire <molecule> --reason TEXT [--lab DIR]  (mark a stale Molecule retired: one-line reason of at most 200 characters; every record is kept, the loop never resumes it and may start a fresh Molecule for its Issue)\nloop [--lab DIR] [--select oldest|label:L|milestone:M] [--max-concurrent N] [--once]\nloop [--lab DIR] --watch [--interval DURATION] [--learn]\nledger <molecule> [--lab DIR]\nissues --repo OWNER/REPO [--page N --page-size N | --select ISSUE_REF] [--lab DIR] [--json]\nlearn <molecule...> [--lab DIR] [--json]\nlearn --pending [--lab DIR] [--json]\nsuggestion <id> [--lab DIR] [--approve | --dismiss | --link-evaluation DIR | --baseline-ledger ID --candidate-ledger ID --comparability-basis TEXT] [--evaluation-parent DIR] [--json]\nrollback\ndev install [--from CHECKOUT] [--activate] [--allow-dirty]\nevaluate --inputs PLAN --out NEW_DIRECTORY [--source REPO] [--approve DIGEST]\nevaluate --cohort FILE --out DIRECTORY [--source REPO] [--approve DIGEST] [--parallel N] [--recheck]\nevaluate replay --repo OWNER/REPO --pr N [--pr M ...] --source CHECKOUT --out NEW_DIRECTORY\ndeliver <molecule> --lab DIR --base BRANCH [--approve DIGEST --title TITLE] -- FILE...\nchecks --lab DIR --molecule ID --repo OWNER/REPO --pr NUMBER --commit SHA --required NAME [--required NAME]\nlabs [--json]\nui [--lab DIR] [--port N] [--no-open] [--demo]\n--version\n--protocol\n\nThe default Lab is keyed by the checkout's GitHub origin (OWNER/REPO), not its path; --lab DIR always wins and --lab-name NAME selects a named Lab for the repository on any command that takes a Lab. labs lists every Lab, read-only.\n\ndev install is developer-only: it builds the checkout's lab/cmd/forgecell with the local Go toolchain and then runs the result, so the checkout is trusted code. Without --activate the build is only staged under releases/ and current is unchanged. A tree with uncommitted, untracked or ignored Go source changes is refused unless --allow-dirty is given. --protocol prints the adapter protocol version.\n\nui serves a read-only Lab UI on 127.0.0.1 behind a per-launch token and opens it in the browser unless --no-open is given; --demo shows synthetic sample data. It stops on SIGINT or SIGTERM.\n\n"+demoHelp+"\n\nRuns analyze a ticket before coding and wait for exact scope approval. Required checks run independently before final review.\n\nloop starts intake for eligible open Issues of the Formula's repository, oldest first, and approves a scope gate only where the Formula declares a policy that approves that exact plan. It stops each Molecule at any human gate, open question or failure and reports why; it never delivers, merges or approves a human gate. --once makes a single pass. --watch repeats single passes every --interval (default 5m, at least 1m) until SIGINT or SIGTERM, which stop it between passes after in-flight Molecules finish; it cannot be combined with --once. --learn, which is off by default, runs the pending learn requests after each pass like learn --pending; suggestions stay pending for your decision. For an interrupted Molecule whose owner is gone, the loop saves a recovery proposal (the exact forgecell recover command) under the Lab's recovery-proposals directory and shows it in its report and in doctor; it never runs recover or amend.\n\nTicket readiness is a development preview; existing Formulas require an explicitly reviewed scope gate.")
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "-v" {
@@ -64,7 +64,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		return demo.ServeStub(args[1:], in, out, stderr)
 	}
 	defaultLab := ""
-	if labCommands[args[0]] || args[0] == "loop" || args[0] == "ui" {
+	if labCommands[args[0]] || args[0] == "loop" || args[0] == "ui" || args[0] == "retire" {
 		rest, name, explicitLab, err := labArgs(args)
 		if err != nil {
 			return fail(err)
@@ -894,6 +894,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			return fail(err)
 		}
 		return encode(out, stderr, r)
+	}
+	if args[0] == "retire" {
+		return runRetire(args[1:], defaultLab, out, stderr)
 	}
 	if args[0] != "run" && args[0] != "ledger" {
 		return fail(fmt.Errorf("unknown command %q; use --help", args[0]))
@@ -1871,6 +1874,44 @@ func proposalMeta(p onboarding.Proposal) onboarding.MetaReport {
 	f, _ := formula.Parse([]byte(p.YAML))
 	return onboarding.DescribeFormulaMeta(f)
 }
+
+// runRetire is retire <molecule> --reason TEXT [--lab DIR]. It marks one Molecule
+// retired through molecule.Retire, which keeps every record; there is no bulk
+// form. Refusals are the engine's path-free reasons and exit non-zero.
+func runRetire(args []string, defaultLab string, out, stderr io.Writer) int {
+	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fail(fmt.Errorf("retire requires one Molecule id: retire <molecule> --reason TEXT [--lab DIR]"))
+	}
+	id := args[0]
+	flags := flag.NewFlagSet("retire", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	lab := flags.String("lab", defaultLab, "Lab directory")
+	reason := flags.String("reason", "", "One-line reason for retiring the Molecule (required, at most 200 characters)")
+	if err := flags.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		return fail(fmt.Errorf("retire takes exactly one Molecule id; there is no bulk retire"))
+	}
+	if !safeID.MatchString(id) {
+		return fail(fmt.Errorf("invalid Molecule id"))
+	}
+	if *lab == "" {
+		return fail(fmt.Errorf("retire needs a Lab; give --lab DIR"))
+	}
+	r, err := molecule.Retire(*lab, id, *reason)
+	if err != nil {
+		return fail(err)
+	}
+	at, prior, why := "", "", ""
+	if r.Retired != nil {
+		at, prior, why = r.Retired.At, r.Retired.PriorStatus, r.Retired.Reason
+	}
+	fmt.Fprintf(out, "Retired Molecule %s (was %s) at %s.\nReason: %s\nEvery record is kept: the ledger, workspace, evidence and receipts. The loop never resumes it and may start a fresh Molecule for its Issue. Inspect it with forgecell ledger %s.\n", flatten(r.ID), flatten(prior), flatten(at), flatten(why), flatten(r.ID))
+	return 0
+}
+
 func renderMeta(out io.Writer, r onboarding.MetaReport, source string) {
 	argv, _ := json.Marshal(r.Command)
 	fmt.Fprintf(out, "Meta harness (%s): %s — %s\nCommand argv: %s\nTimeout: %d ms\nInstalled CLI: %s — %s\nAuthentication: %s — %s\nModel access: %s — %s\nMeta containment: %s — %s\nPermission limits: %s\nEvidence inputs: %s\nLearning consent: %s\n", source, r.Capability.State, r.Capability.Reason, argv, r.TimeoutMS, r.Candidate.Installed.State, r.Candidate.Installed.Reason, r.Candidate.Authentication.State, r.Candidate.Authentication.Reason, r.Candidate.Capabilities.ModelAccess.State, r.Candidate.Capabilities.ModelAccess.Reason, r.Containment.State, r.Containment.Reason, r.Restrictions, r.EvidenceInputs, r.NextAction)

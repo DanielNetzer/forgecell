@@ -15,6 +15,9 @@ import (
 // inventory pass as /api/molecules, so for one ETag its counts equal that list's
 // and skipped ledgers are left out of both. A missing value is null and reads as
 // Not recorded or Unknown, never as zero; each total carries its coverage.
+// Retired Molecules (#236) are included: Molecules and every measure count them,
+// and Counts carries their own outcome count under "retired", although Counts'
+// "all" excludes them as the list's headline does.
 type AnalyticsView struct {
 	Sample          bool            `json:"sample"`
 	ETag            string          `json:"etag"`

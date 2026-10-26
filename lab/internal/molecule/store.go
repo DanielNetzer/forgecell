@@ -118,6 +118,9 @@ func save(r Record) error {
 	if r.CheckoutStatus != "" {
 		fmt.Fprintf(&b, "Checkout availability: %s\n", r.CheckoutStatus)
 	}
+	if r.Retired != nil {
+		fmt.Fprintf(&b, "\n## Retired\n\n- Retired at: %s\n- Prior status: %s\n- Reason: %s\n\nRetired history: every record is kept; the loop never resumes this Molecule.\n", oneLine(r.Retired.At), oneLine(r.Retired.PriorStatus), oneLine(r.Retired.Reason))
+	}
 	fmt.Fprintln(&b, "\n## Clarification history (informational; no inherited approval)")
 	for _, id := range r.ClarificationPredecessors {
 		fmt.Fprintf(&b, "- [%s](%s.md)\n", id, id)

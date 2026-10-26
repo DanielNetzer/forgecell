@@ -26,14 +26,18 @@ type QueueInventory struct {
 	Attempts    []QueueAttempt `json:"-"`
 }
 type QueueSummary struct {
-	Attempts          []QueueAttempt `json:"attempts"`
-	State             string         `json:"state"`
-	Latest            *QueueAttempt  `json:"latest,omitempty"`
-	Active            int            `json:"ledgerReportedActiveAttempts"`
-	Blocked           int            `json:"blockedAttempts"`
-	DuplicateActive   bool           `json:"duplicateActive"`
-	Partial           bool           `json:"partial"`
-	OrderingUncertain bool           `json:"orderingUncertain"`
+	Attempts []QueueAttempt `json:"attempts"`
+	State    string         `json:"state"`
+	Latest   *QueueAttempt  `json:"latest,omitempty"`
+	Active   int            `json:"ledgerReportedActiveAttempts"`
+	Blocked  int            `json:"blockedAttempts"`
+	// Retired counts retired attempts. They stay in Attempts as history but are
+	// never Latest and never count as active, blocked or ordering evidence, so an
+	// Issue whose attempts are all retired summarizes as StateRetired.
+	Retired           int  `json:"retiredAttempts"`
+	DuplicateActive   bool `json:"duplicateActive"`
+	Partial           bool `json:"partial"`
+	OrderingUncertain bool `json:"orderingUncertain"`
 }
 
 func (q *QueueInventory) problem(message string) {
@@ -138,10 +142,29 @@ func readQueueInventory(lab string, wrap func(string, io.Reader) io.Reader) Queu
 	}
 	return q
 }
+
+// Summary states. StateRetired is an Issue whose every recorded attempt is
+// retired: like StateUntouched it is free for a fresh Molecule.
+const (
+	StateUntouched = "untouched"
+	StateRetired   = "retired"
+)
+
+// Startable reports a summary that allows a fresh Molecule for its Issue.
+func (s QueueSummary) Startable() bool {
+	return s.State == StateUntouched || s.State == StateRetired
+}
+
 func (q QueueInventory) Summarize(repository string, number int64) QueueSummary {
 	s := QueueSummary{State: "unknown", Partial: !q.Complete, Attempts: []QueueAttempt{}}
+	var retired []QueueAttempt
 	for _, a := range q.Attempts {
 		if !strings.EqualFold(repository, a.Repository) || number != a.Number {
+			continue
+		}
+		if a.Status == StatusRetired {
+			s.Retired++
+			retired = append(retired, a)
 			continue
 		}
 		s.Attempts = append(s.Attempts, a)
@@ -157,26 +180,33 @@ func (q QueueInventory) Summarize(repository string, number int64) QueueSummary 
 	}
 	s.DuplicateActive = s.Active >= 2
 	if len(s.Attempts) == 0 {
-		if q.Complete {
-			s.State = "untouched"
+		switch {
+		case !q.Complete:
+		case len(retired) > 0:
+			s.State = StateRetired
+		default:
+			s.State = StateUntouched
 		}
+		s.Attempts = append(s.Attempts, retired...)
 		return s
 	}
 	s.State = "recorded"
 	if !q.Complete {
 		s.OrderingUncertain = true
 	}
-	if s.OrderingUncertain {
-		return s
+	if !s.OrderingUncertain {
+		sort.Slice(s.Attempts, func(i, j int) bool {
+			a, _ := time.Parse(time.RFC3339Nano, s.Attempts[i].StartedAt)
+			b, _ := time.Parse(time.RFC3339Nano, s.Attempts[j].StartedAt)
+			if a.Equal(b) {
+				return s.Attempts[i].ID < s.Attempts[j].ID
+			}
+			return a.After(b)
+		})
+		latest := s.Attempts[0]
+		s.Latest = &latest
 	}
-	sort.Slice(s.Attempts, func(i, j int) bool {
-		a, _ := time.Parse(time.RFC3339Nano, s.Attempts[i].StartedAt)
-		b, _ := time.Parse(time.RFC3339Nano, s.Attempts[j].StartedAt)
-		if a.Equal(b) {
-			return s.Attempts[i].ID < s.Attempts[j].ID
-		}
-		return a.After(b)
-	})
-	s.Latest = &s.Attempts[0]
+	// Retired attempts follow the live ones, so Latest is never a retired one.
+	s.Attempts = append(s.Attempts, retired...)
 	return s
 }

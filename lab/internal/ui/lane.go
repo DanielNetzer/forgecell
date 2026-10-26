@@ -1,5 +1,7 @@
 package ui
 
+import "github.com/DanielNetzer/forgecell/lab/internal/molecule"
+
 // Lanes are the UI's Molecule filters. Each Molecule has exactly one, chosen in
 // this order (operator decisions, 2026-10-24 and 2026-10-26):
 //
@@ -13,16 +15,25 @@ package ui
 // publishes without moving the ledger phase, so a delivered Molecule is finished,
 // not waiting for a decision. Anything else is other: it appears under All only.
 // There is no paused lane, because the engine has no pause semantics.
+//
+// Retired (#236) outranks every other lane: a retired Molecule is finished
+// history. It is excluded from All, Needs my decision and the headline counts,
+// but counted under its own key, and analytics includes it.
 const (
 	LaneBlocked  = "blocked"
 	LaneDecision = "decision"
 	LaneRunning  = "running"
 	LaneFinished = "finished"
 	LaneOther    = "other"
+	LaneRetired  = "retired"
 )
 
-// Lanes lists every lane in filter-bar order; their counts always sum to All.
+// Lanes lists every lane in All, in filter-bar order; their counts always sum to
+// All. LaneRetired is not among them: it is its own filter after them.
 var Lanes = []string{LaneRunning, LaneDecision, LaneBlocked, LaneFinished, LaneOther}
+
+// FilterLanes is every lane filter in filter-bar order: Lanes, then Retired.
+var FilterLanes = append(append([]string{}, Lanes...), LaneRetired)
 
 // activePhases are readiness phases in which the Lab is working: the scope is
 // approved and coding or checks have started or are about to.
@@ -66,6 +77,8 @@ func (d *DeliveryState) Published() bool {
 // Lane maps a ledger status, readiness phase and optional receipt to one lane.
 func Lane(status, phase string, delivery *DeliveryState) string {
 	switch {
+	case status == molecule.StatusRetired:
+		return LaneRetired
 	case status == "blocked" || status == "failed":
 		return LaneBlocked
 	case phase == "scope-waiting" || phase == "review-waiting" && !delivery.Published():

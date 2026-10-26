@@ -301,6 +301,9 @@ type Record struct {
 	// because its transient provider errors outlasted the automatic resumes (#190). Only
 	// that path writes it; see TransientRetriesExhausted.
 	TransientExhausted []string `json:"transientExhausted,omitempty"`
+	// Retired is the retired event Retire appends with status retired (#236).
+	// Additive and omitempty: a ledger without it decodes unchanged.
+	Retired *Retirement `json:"retired,omitempty"`
 }
 type Options struct {
 	MandatoryConstraints []string

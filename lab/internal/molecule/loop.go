@@ -30,6 +30,9 @@ const (
 	// counted as non-progress, unlike a wait at a human gate.
 	LoopStalled     = "stalled"
 	LoopInterrupted = "interrupted"
+	// LoopRetired reports a retired Molecule: finished history, never a failure,
+	// never resumed (#236).
+	LoopRetired = "retired"
 )
 
 // LoopOptions configures the Lab loop. Template carries the per-Molecule seams
@@ -276,7 +279,7 @@ func (l *loopRun) draining(ctx context.Context) bool {
 func (l *loopRun) process(ctx context.Context, inventory QueueInventory, issue intake.OpenIssue) LoopItem {
 	item := LoopItem{Repository: issue.Repository, Issue: issue.Number}
 	summary := inventory.Summarize(issue.Repository, issue.Number)
-	if summary.State == "untouched" {
+	if summary.Startable() {
 		return l.start(ctx, item)
 	}
 	return l.existing(ctx, item, summary)
@@ -420,7 +423,7 @@ func (l *loopRun) start(ctx context.Context, item LoopItem) LoopItem {
 		item.Reason = "the local ledger inventory became incomplete, so no Molecule was started: " + inventoryCause(fresh)
 		return item
 	}
-	if summary := fresh.Summarize(item.Repository, item.Issue); summary.State != "untouched" {
+	if summary := fresh.Summarize(item.Repository, item.Issue); !summary.Startable() {
 		release()
 		return l.existing(ctx, item, summary)
 	}
@@ -582,6 +585,9 @@ func classify(r Record) (state, reason string, stopped bool) {
 			return LoopWaiting, fmt.Sprintf("clarification required: the analysis has %d open question(s); update the Issue body, then run forgecell run %d", len(r.Analysis.Questions), r.Issue.Number), false
 		}
 		return LoopStopped, stoppedReason(r), true
+	case StatusRetired:
+		// Retired is finished history, never a failure and never resumed.
+		return LoopRetired, "retired: finished history; the loop never resumes it and may start a fresh Molecule for this Issue", false
 	}
 	return LoopUnknown, "unrecognized ledger status " + strconv.Quote(oneLine(r.Status)), false
 }

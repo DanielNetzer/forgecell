@@ -36,7 +36,8 @@ type Summary struct {
 }
 
 // MoleculeList is GET /api/molecules. Counts are taken from Molecules, so they
-// always reconcile with it, and lane counts sum to All.
+// always reconcile with it, and the Lanes' counts sum to All. Molecules also
+// lists retired ones, counted only under "retired" and never in All.
 type MoleculeList struct {
 	Sample      bool           `json:"sample"`
 	ETag        string         `json:"etag"`
@@ -72,7 +73,16 @@ type Detail struct {
 	Delivery    *DeliveryView  `json:"delivery"`
 	Gate        GateView       `json:"gate"`
 	Next        NextView       `json:"next"`
+	Retired     *RetiredView   `json:"retired"`
 	Diagnostics []string       `json:"diagnostics"`
+}
+
+// RetiredView is a retired Molecule's retired event: its time, the status it
+// replaced and its reason, redacted and bounded to one line.
+type RetiredView struct {
+	At          string `json:"at"`
+	PriorStatus string `json:"priorStatus"`
+	Reason      string `json:"reason"`
 }
 
 // Gate states. GATES AND DECISIONS and NEXT ACTION both render the one GateView
@@ -109,6 +119,9 @@ type NextView struct {
 // of a Molecule waiting for a decision first, then a published receipt, then an
 // unpublished finished Molecule. A running or blocked Molecule has no open gate.
 func gateState(r molecule.Record, lane string, d *DeliveryState, view *DeliveryView) GateView {
+	if lane == LaneRetired {
+		return GateView{State: GateNone}
+	}
 	if digest, ok := pendingDigest(r); ok && lane == LaneDecision && sha256Hex.MatchString(digest) {
 		return GateView{State: GateScope, Digest: digest}
 	}
@@ -159,6 +172,8 @@ func nextAction(lane, activity, status, phase, current string, g GateView, deliv
 		return NextView{"Blocked" + at, strings.TrimSpace("Status " + recorded(status) + ". Failure evidence stays in the ledger; a failed or blocked run is not a delivery. " + label)}
 	case LaneFinished:
 		return NextView{"Draft published", NextPublished}
+	case LaneRetired:
+		return NextView{"Retired", "This Molecule was retired: it is finished history and every record is kept. The loop never resumes it and may start a fresh Molecule for its Issue."}
 	}
 	if g.State == GateDelivery {
 		return NextView{"Ready for a draft PR" + at, strings.TrimSpace("This Molecule finished with status " + recorded(status) + ". Preview and publish a draft PR under Gates and decisions, or with the forgecell CLI. " + label)}
@@ -562,6 +577,9 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 	out.Activity = Activity(out.Lane, molecule.QueuedForChecks(r))
 	out.Gate = gateState(r, out.Lane, d, view)
 	out.Next = nextAction(out.Lane, out.Activity, r.Status, out.Phase, out.CurrentAtom, out.Gate, view)
+	if rt := r.Retired; rt != nil {
+		out.Retired = &RetiredView{At: stateText(rt.At), PriorStatus: stateText(rt.PriorStatus), Reason: harness.ReviewDisplayText(x.text(rt.Reason), molecule.MaxRetireReason)}
+	}
 	out.Issue = IssueView{Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), Body: x.text(r.Issue.Body), State: r.Issue.State, UpdatedAt: r.Issue.UpdatedAt, URL: issueURL(r.Issue)}
 	if r.Issue.URL != "" && out.Issue.URL == "" {
 		out.Diagnostics = append(out.Diagnostics, "recorded Issue URL does not name this Issue on GitHub; no link is shown")
