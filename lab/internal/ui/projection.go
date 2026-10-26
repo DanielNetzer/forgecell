@@ -70,7 +70,103 @@ type Detail struct {
 	Atoms       []AtomView     `json:"atoms"`
 	Attempts    []AttemptView  `json:"attempts"`
 	Delivery    *DeliveryView  `json:"delivery"`
+	Gate        GateView       `json:"gate"`
+	Next        NextView       `json:"next"`
 	Diagnostics []string       `json:"diagnostics"`
+}
+
+// Gate states. GATES AND DECISIONS and NEXT ACTION both render the one GateView
+// of a Detail, so they cannot disagree about whether a gate is open.
+const (
+	// GateScope: the exact plan Digest waits for scope approval.
+	GateScope = "scope"
+	// GateDelivery: the finished Molecule may be previewed and published as a draft.
+	GateDelivery = "delivery"
+	// GatePublished: the review gate was resolved by draft publication.
+	GatePublished = "published"
+	// GateNone: no human gate this UI performs is open.
+	GateNone = "none"
+)
+
+// GateView is the selected Molecule's gate state. Receipt, Lifecycle and URL are
+// set for GatePublished; URL only when it is the Issue repository's pull request.
+type GateView struct {
+	State     string `json:"state"`
+	Digest    string `json:"digest,omitempty"`
+	Receipt   string `json:"receipt,omitempty"`
+	Lifecycle string `json:"lifecycle,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// NextView is the NEXT ACTION title and copy, derived from the lane and the
+// GateView: it names Gates and decisions only while a gate there is open.
+type NextView struct {
+	Title string `json:"title"`
+	Copy  string `json:"copy"`
+}
+
+// gateState is the one gate state of a record in lane: a pending scope approval
+// of a Molecule waiting for a decision first, then a published receipt, then an
+// unpublished finished Molecule. A running or blocked Molecule has no open gate.
+func gateState(r molecule.Record, lane string, d *DeliveryState, view *DeliveryView) GateView {
+	if digest, ok := pendingDigest(r); ok && lane == LaneDecision && sha256Hex.MatchString(digest) {
+		return GateView{State: GateScope, Digest: digest}
+	}
+	if d.Published() {
+		g := GateView{State: GatePublished, Receipt: stateText(d.State), Lifecycle: stateText(d.Lifecycle)}
+		if view != nil {
+			g.URL = view.URL
+		}
+		return g
+	}
+	if (lane == LaneDecision || lane == LaneOther) && r.FinishedAt != "" && (r.Status == "waiting" || r.Status == "recorded") {
+		return GateView{State: GateDelivery}
+	}
+	return GateView{State: GateNone}
+}
+
+// NextPublished is NEXT ACTION for a published draft.
+const NextPublished = "Draft published · merge on GitHub; merge and production are not verified by Forgecell."
+
+// nextAction is NEXT ACTION for a Molecule in lane with gate g.
+func nextAction(lane, activity, status, phase, current string, g GateView, delivery *DeliveryView) NextView {
+	at := ""
+	if current = stateText(current); current != "" {
+		at = " · " + current
+	}
+	recorded := func(s string) string {
+		if s = stateText(s); s != "" {
+			return s
+		}
+		return "Not recorded"
+	}
+	label := ""
+	if delivery != nil {
+		label = delivery.Label + "."
+	}
+	switch lane {
+	case LaneDecision:
+		if g.State == GateScope || g.State == GateDelivery {
+			return NextView{"Needs your decision" + at, "This Molecule waits at a human gate (phase " + recorded(phase) + "). Review it and decide under Gates and decisions, or with the forgecell CLI. The engine checks every decision again."}
+		}
+		return NextView{"Waiting at a human gate" + at, "This Molecule waits at a human gate (phase " + recorded(phase) + ") that this Lab UI does not perform. Inspect it with forgecell ledger and decide with the forgecell CLI. The engine checks every decision again."}
+	case LaneRunning:
+		if activity == ActivityQueued {
+			return NextView{"Queued for checks" + at, "Another Molecule in this Lab holds the verification slot. Checks start, and their time budgets begin, when the slot is free. This view updates from the ledger."}
+		}
+		return NextView{"Running" + at, "The Lab is working within the approved scope. This view updates from the ledger."}
+	case LaneBlocked:
+		return NextView{"Blocked" + at, strings.TrimSpace("Status " + recorded(status) + ". Failure evidence stays in the ledger; a failed or blocked run is not a delivery. " + label)}
+	case LaneFinished:
+		return NextView{"Draft published", NextPublished}
+	}
+	if g.State == GateDelivery {
+		return NextView{"Ready for a draft PR" + at, strings.TrimSpace("This Molecule finished with status " + recorded(status) + ". Preview and publish a draft PR under Gates and decisions, or with the forgecell CLI. " + label)}
+	}
+	if label == "" {
+		label = "No published delivery receipt. This Molecule is in no lane; it appears under All and Other."
+	}
+	return NextView{"Recorded · " + recorded(status), label}
 }
 
 type IssueView struct {
@@ -464,6 +560,8 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 	d, view := loadDelivery(read, lab, r)
 	out := Detail{ID: r.ID, Status: r.Status, Phase: phase(r), Lane: Lane(r.Status, phase(r), d), Mode: r.Mode, FormulaID: r.FormulaID, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, CurrentAtom: currentAtom(r), Delivery: view, Diagnostics: []string{}, Atoms: []AtomView{}, Attempts: []AttemptView{}}
 	out.Activity = Activity(out.Lane, molecule.QueuedForChecks(r))
+	out.Gate = gateState(r, out.Lane, d, view)
+	out.Next = nextAction(out.Lane, out.Activity, r.Status, out.Phase, out.CurrentAtom, out.Gate, view)
 	out.Issue = IssueView{Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), Body: x.text(r.Issue.Body), State: r.Issue.State, UpdatedAt: r.Issue.UpdatedAt, URL: issueURL(r.Issue)}
 	if r.Issue.URL != "" && out.Issue.URL == "" {
 		out.Diagnostics = append(out.Diagnostics, "recorded Issue URL does not name this Issue on GitHub; no link is shown")

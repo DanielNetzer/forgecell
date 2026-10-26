@@ -19,11 +19,24 @@
       else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
       else node.setAttribute(key, value === true ? '' : String(value));
     }
+    return add(node, ...children);
+  }
+
+  // add appends children to node: nodes as they are, strings as text nodes, and
+  // null, undefined and false not at all, so no child ever renders as "null".
+  function add(node, ...children) {
     for (const child of children.flat()) {
       if (child === undefined || child === null || child === false) continue;
       node.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
     return node;
+  }
+
+  // fill replaces node's children, skipping null children as add does. Every
+  // render goes through fill, never through replaceChildren with arguments.
+  function fill(node, ...children) {
+    node.replaceChildren();
+    return add(node, ...children);
   }
 
   const ISSUE_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/[1-9][0-9]*$/;
@@ -191,11 +204,10 @@
     document.body.classList.toggle('sample', sample);
     document.title = sample ? 'Forgecell · Sample data' : 'Forgecell · ' + notRecorded(lab.name);
     const repo = $('#lab-repo');
-    repo.replaceChildren();
     if (!sample && REPOSITORY.test(lab.repository || '')) {
-      repo.append(el('a', { href: 'https://github.com/' + lab.repository, target: '_blank', rel: 'noopener noreferrer' }, lab.repository + ' ↗'));
+      fill(repo, el('a', { href: 'https://github.com/' + lab.repository, target: '_blank', rel: 'noopener noreferrer' }, lab.repository + ' ↗'));
     } else {
-      repo.append(lab.repository || 'Repository not recorded');
+      fill(repo, lab.repository || 'Repository not recorded');
     }
     $('#footer-version').textContent = 'Forgecell ' + notRecorded(lab.version) + ' · Lab ' + notRecorded(lab.name) + (lab.binding ? ' · binding ' + lab.binding : '') + (lab.model ? ' · model ' + lab.model : '');
     const f = lab.formula || {};
@@ -208,7 +220,7 @@
       sample: 'Sample data · not a real Formula',
     };
     const box = $('#active-formula');
-    box.replaceChildren(
+    fill(box,
       el('div', null,
         el('span', { class: 'label', text: 'NEW MOLECULES · ACTIVE FORMULA' }),
         el('strong', null, f.formulaId || 'None', f.sha256 ? el('span', { class: 'version-tag', title: f.sha256 }, 'sha256 ' + short(f.sha256)) : null),
@@ -335,7 +347,7 @@
     return el('div', { class: 'gate-job' },
       el('strong', null, 'Intake · Issue #' + notRecorded(run.issue) + ' · ' + notRecorded(run.state)),
       el('p', { class: 'scope-note' }, status),
-      run.error ? el('p', { class: 'scope-note' }, (run.category ? run.category + ': ' : '') + run.error + '.') : null,
+      run.error ? el('p', { class: 'scope-note' }, (run.category ? run.category + ': ' : '') + run.error + '.' + reasonText(run)) : null,
       run.committed && c.moleculeId ? el('button', { type: 'button', class: 'text-button', dataset: { drive: 'open' }, onclick: () => select(c.moleculeId) }, 'Open Molecule') : null);
   }
 
@@ -350,7 +362,7 @@
     return el('div', { class: 'gate-job' },
       el('strong', null, 'Loop · ' + notRecorded(loop.state) + (loop.select ? ' · select ' + loop.select : '') + (loop.maxConcurrent ? ' · ' + loop.maxConcurrent + ' at once' : '')),
       status ? el('p', { class: 'scope-note' }, status) : null,
-      loop.error ? el('p', { class: 'scope-note' }, (loop.category ? loop.category + ': ' : '') + loop.error + '.') : null,
+      loop.error ? el('p', { class: 'scope-note' }, (loop.category ? loop.category + ': ' : '') + loop.error + '.' + reasonText(loop)) : null,
       items.length ? el('ul', { class: 'diagnostics' }, items.slice(0, 20).map((i) => el('li', null, '#' + notRecorded(i.issue) + ' · ' + notRecorded(i.state) + (i.moleculeId ? ' · ' + i.moleculeId : '') + (i.started ? ' · started intake' : '') + (i.approved ? ' · approved by policy' : '')))) : null);
   }
 
@@ -362,7 +374,7 @@
     c.start.disabled = drive.pending || looping;
     c.stop.disabled = drive.pending || !loop || loop.state !== 'running';
     if (loop && Number.isInteger(loop.maxConcurrentLimit)) c.max.max = String(loop.maxConcurrentLimit);
-    c.status.replaceChildren(...[drive.pending ? el('p', { class: 'scope-note' }, 'Submitting…') : null, drive.message ? el('p', { class: 'scope-note', role: 'alert' }, drive.message) : null, runText(drive.run), loopText(loop)].filter(Boolean));
+    fill(c.status, drive.pending ? el('p', { class: 'scope-note' }, 'Submitting…') : null, drive.message ? el('p', { class: 'scope-note', role: 'alert' }, drive.message) : null, runText(drive.run), loopText(loop));
   }
 
   // ---- Grid, filters and search -------------------------------------------
@@ -393,7 +405,7 @@
       Object.entries(LANES).map(([id, lane]) => (counts[id] || 0) + ' ' + lane.short).join(' · ');
     renderNote(list);
     const cubes = $('#cubes');
-    cubes.replaceChildren(...all.map((m, i) => {
+    fill(cubes, all.map((m, i) => {
       const lane = laneOf(m);
       const button = el('button', {
         type: 'button', class: 'cube-button ' + lane.cls, dataset: { id: m.id },
@@ -418,10 +430,10 @@
     state.noteKey = key;
     const note = $('#inventory-note');
     const wasOpen = Boolean(note.querySelector('details[open]'));
-    note.replaceChildren();
+    fill(note);
     if (!list.complete) {
       const count = (list.diagnostics || []).length;
-      note.append(el('strong', null, list.truncated ? 'Inventory truncated by safety bounds. ' : 'Inventory incomplete. '),
+      add(note, el('strong', null, list.truncated ? 'Inventory truncated by safety bounds. ' : 'Inventory incomplete. '),
         count + ' ledger problem' + (count === 1 ? '' : 's') + ' reported; those Molecules are not shown and are not counted.',
         count ? el('details', { open: wasOpen }, el('summary', null, 'Diagnostics'), el('ul', null, diagnostics.map((d) => el('li', null, d)))) : null);
     }
@@ -430,7 +442,7 @@
 
   function renderFilters() {
     const counts = (state.list && state.list.counts) || {};
-    $('#run-filters').replaceChildren(...FILTERS.map(([id, label]) => {
+    fill($('#run-filters'), FILTERS.map(([id, label]) => {
       if (id === 'paused') {
         return el('button', { type: 'button', class: 'filter-chip', disabled: true, title: 'The engine has no pause semantics', 'aria-disabled': 'true' }, label, el('span', null, 'Unavailable'));
       }
@@ -506,7 +518,7 @@
     clearTimeout(tipTimer);
     if (tipAnchor) tipAnchor.removeAttribute('aria-describedby');
     tipAnchor = button;
-    tip.replaceChildren(
+    fill(tip,
       el('span', { class: 'label' }, 'MOLECULE #' + m.number + ' · ' + m.id),
       el('strong', null, m.title || 'Untitled'),
       el('dl', null, el('dt', null, 'Current Atom'), el('dd', null, m.currentAtom || 'None'), el('dt', null, 'Lane'), el('dd', null, laneOf(m).label), el('dt', null, 'Status'), el('dd', null, notRecorded(m.status) + (m.phase ? ' · ' + m.phase : ''))));
@@ -556,13 +568,13 @@
     $('#run-id').textContent = id;
     $('#run-title').textContent = 'Loading…';
     $('#run-state').textContent = '';
-    for (const s of ['#run-origin', '#molecule-totals', '#atoms', '#readiness', '#attempts']) $(s).replaceChildren();
+    for (const s of ['#run-origin', '#molecule-totals', '#atoms', '#readiness', '#attempts']) fill($(s));
   }
 
   function renderMissingDetail(id, status) {
     renderLoadingDetail(id);
     $('#run-title').textContent = status === 404 ? 'This Molecule is no longer in the Lab.' : 'This ledger was refused: it is invalid, unsafe, oversized or not this Lab\'s.';
-    $('#run-origin').append(el('button', { type: 'button', class: 'text-button', onclick: overview }, 'Clear selection'));
+    add($('#run-origin'), el('button', { type: 'button', class: 'text-button', onclick: overview }, 'Clear selection'));
   }
 
   // ---- Selected Molecule -------------------------------------------------------
@@ -582,7 +594,7 @@
     $('#run-title').textContent = (d.sample ? '[Sample] ' : '') + (d.issue.title || 'Untitled');
     const issueLink = externalLink(d.issue.url, ISSUE_URL, 'Issue #' + d.issue.number + ' ↗');
     const pullLink = d.delivery ? externalLink(d.delivery.url, PULL_URL, 'Pull request ↗') : null;
-    $('#run-origin').replaceChildren(
+    fill($('#run-origin'),
       el('span', null, notRecorded(d.issue.repository) + ' #' + d.issue.number + (d.issue.state ? ' · ' + d.issue.state : '')),
       issueLink || el('span', { class: 'muted' }, 'Issue link unavailable'),
       pullLink || el('span', { class: 'muted' }, d.delivery ? 'PR link unavailable' : 'PR · not created'),
@@ -595,7 +607,7 @@
     const wall = elapsed(d.startedAt, d.finishedAt);
     const attempts = d.attempts || [];
     const costs = attempts.filter((a) => a.usage && typeof a.usage.totalCostUsd === 'number');
-    $('#molecule-totals').replaceChildren(
+    fill($('#molecule-totals'),
       el('div', null, el('span', { class: 'label' }, 'WALL-CLOCK DURATION'), el('strong', null, wall !== null ? durationLabel(wall) : d.startedAt ? 'Not finished' : 'Not recorded'),
         el('small', null, 'Started ' + notRecorded(d.startedAt) + (d.finishedAt ? ' · finished ' + d.finishedAt : ''))),
       el('div', null, el('span', { class: 'label' }, 'REPORTED COST · PARTIAL'),
@@ -617,24 +629,18 @@
     renderReadiness(d);
     renderAttempts(d);
     const diagnostics = $('#run-diagnostics');
-    diagnostics.replaceChildren(...(d.diagnostics || []).map((text) => el('li', null, text)));
+    fill(diagnostics, (d.diagnostics || []).map((text) => el('li', null, text)));
     diagnostics.hidden = !(d.diagnostics || []).length;
     renderAction(d);
   }
 
+  // NEXT ACTION and GATES AND DECISIONS render the server's one gate state:
+  // d.next is derived from d.gate, so it names Gates and decisions only while a
+  // gate there is open.
   function renderAction(d) {
-    const current = d.currentAtom ? ' · ' + d.currentAtom : '';
-    const copy = {
-      decision: ['Needs your decision' + current, 'This Molecule waits at a human gate (phase ' + notRecorded(d.phase) + '). Review it and decide under Gates and decisions, or with the forgecell CLI. The engine checks every decision again.'],
-      running: queued(d)
-        ? ['Queued for checks' + current, 'Another Molecule in this Lab holds the verification slot. Checks start, and their time budgets begin, when the slot is free. This view updates from the ledger.']
-        : ['Running' + current, 'The Lab is working within the approved scope. This view updates from the ledger.'],
-      blocked: ['Blocked' + current, 'Status ' + notRecorded(d.status) + '. Failure evidence stays in the ledger; a failed or blocked run is not a delivery.' + (d.delivery ? ' ' + d.delivery.label + '.' : '')],
-      finished: ['Draft published', 'A publication receipt is recorded. Merge and production outcomes are not verified here.'],
-      other: ['Recorded · ' + notRecorded(d.status), d.delivery ? d.delivery.label + '.' : 'No published delivery receipt. This Molecule is in no lane; it appears under All and Other.'],
-    }[d.lane] || ['Recorded', ''];
-    $('#action-title').textContent = copy[0];
-    $('#action-copy').textContent = copy[1];
+    const next = d.next || {};
+    $('#action-title').textContent = typeof next.title === 'string' && next.title ? next.title : 'Recorded';
+    $('#action-copy').textContent = typeof next.copy === 'string' ? next.copy : '';
     renderGate(d);
   }
 
@@ -657,9 +663,14 @@
     return res;
   }
 
+  // reasonText is the server's bounded, redacted next step for a refusal, or ''.
+  function reasonText(body) {
+    return body && typeof body.reason === 'string' && body.reason ? ' ' + body.reason + '.' : '';
+  }
+
   function refusalText(body) {
     const category = body && typeof body.category === 'string' ? body.category : 'refused';
-    return 'Refused (' + category + '): ' + notRecorded(body && body.error) + '. Nothing was resubmitted.';
+    return 'Refused (' + category + '): ' + notRecorded(body && body.error) + '.' + reasonText(body) + ' Nothing was resubmitted.';
   }
 
   function rerenderGate(gate) {
@@ -701,7 +712,8 @@
       const res = await api('/api/molecules/' + encodeURIComponent(gate.id) + '/job');
       const job = res.ok ? await res.json() : null;
       if (state.gate !== gate) return;
-      gate.job = job;
+      // A Molecule with no job from this Lab UI answers 200 with state none.
+      gate.job = job && job.state !== 'none' ? job : null;
       if (job && job.state === 'running') gate.timer = setTimeout(() => readBack(gate), 2000);
     } catch (error) { failed(error); }
     rerenderGate(gate);
@@ -760,7 +772,7 @@
     return el('div', { class: 'gate-job', role: 'status' },
       el('strong', null, kind + ' · ' + notRecorded(job.state)),
       el('p', { class: 'scope-note' }, status),
-      job.error ? el('p', { class: 'scope-note' }, (job.category ? job.category + ': ' : '') + job.error + '.') : null);
+      job.error ? el('p', { class: 'scope-note' }, (job.category ? job.category + ': ' : '') + job.error + '.' + reasonText(job)) : null);
   }
 
   function renderGate(d) {
@@ -774,21 +786,27 @@
     const gate = state.gate;
     const label = el('span', { class: 'label' }, 'GATES AND DECISIONS');
     if (d.sample || (state.lab && state.lab.readOnly)) {
-      card.replaceChildren(label, el('p', { class: 'unavailable' }, 'Unavailable'), el('p', { class: 'scope-note' }, 'Sample data has no gates. Nothing here writes.'));
+      fill(card, label, el('p', { class: 'unavailable' }, 'Unavailable'), el('p', { class: 'scope-note' }, 'Sample data has no gates. Nothing here writes.'));
       return;
     }
     const running = Boolean(gate.job && gate.job.state === 'running');
     const parts = [label];
-    const digest = latestDigest(d);
-    if (d.phase === 'scope-waiting' && digest) {
+    const g = d.gate || { state: 'none' };
+    const digest = typeof g.digest === 'string' && /^[0-9a-f]{64}$/.test(g.digest) && g.digest === latestDigest(d) ? g.digest : '';
+    if (g.state === 'scope' && digest) {
       parts.push(el('div', { class: 'gate' },
         el('strong', null, 'Approve exact scope'),
         el('code', { title: digest }, 'plan ' + digest),
         el('p', { class: 'scope-note' }, GATE_COPY.scope),
         el('button', { type: 'button', class: 'text-button', dataset: { gate: 'scope' }, disabled: state.gate.pending || running, onclick: () => approveScope(digest) }, gate.pending ? 'Submitting…' : 'Approve this plan')));
     }
-    const deliverable = d.finishedAt && (d.status === 'waiting' || d.status === 'recorded') && !(d.delivery && d.delivery.published);
-    if (deliverable) {
+    if (g.state === 'published') {
+      parts.push(el('div', { class: 'gate' },
+        el('strong', null, 'Review gate · resolved by draft publication'),
+        el('p', { class: 'scope-note' }, 'Receipt ' + notRecorded(g.receipt) + (g.lifecycle ? ' · lifecycle ' + g.lifecycle : '') + '. Merge on GitHub; merge and production are not verified by Forgecell.'),
+        externalLink(g.url, PULL_URL, 'Pull request ↗') || el('span', { class: 'muted' }, 'PR link unavailable')));
+    }
+    if (g.state === 'delivery') {
       const preview = gate.preview;
       parts.push(el('div', { class: 'gate' },
         el('strong', null, 'Publish a draft PR'),
@@ -815,7 +833,7 @@
     if (parts.length === 1) parts.push(el('p', { class: 'scope-note' }, 'No human gate is open for this Molecule. This page updates from the ledger.'));
     if (gate.message) parts.push(el('p', { class: 'scope-note', role: 'alert' }, gate.message));
     parts.push(jobText(gate.job));
-    card.replaceChildren(...parts.filter(Boolean));
+    fill(card, parts);
   }
 
   // Atom statuses the engine writes (done, failed, active, waiting, skipped,
@@ -844,7 +862,7 @@
     const atoms = d.atoms || [];
     const box = $('#atoms');
     if (!atoms.length) {
-      box.replaceChildren(el('p', { class: 'scope-note' }, 'No Atoms are recorded for this Molecule.'));
+      fill(box, el('p', { class: 'scope-note' }, 'No Atoms are recorded for this Molecule.'));
       return;
     }
     if (state.atomIndex === null || state.atomIndex >= atoms.length) state.atomIndex = defaultAtom(d);
@@ -863,7 +881,7 @@
       const next = { ArrowRight: (i + 1) % n, ArrowLeft: (i + n - 1) % n, Home: 0, End: n - 1 }[e.key];
       if (next !== undefined) { e.preventDefault(); chooseAtom(next); }
     });
-    box.replaceChildren(flow, atomDetail(d, atoms[state.atomIndex], state.atomIndex));
+    fill(box, flow, atomDetail(d, atoms[state.atomIndex], state.atomIndex));
   }
 
   function chooseAtom(i) {
@@ -960,8 +978,8 @@
   function renderReadiness(d) {
     const r = d.readiness;
     const box = $('#readiness');
-    if (!r) { box.replaceChildren(el('p', { class: 'scope-note' }, 'No readiness state recorded.')); return; }
-    box.replaceChildren(
+    if (!r) { fill(box, el('p', { class: 'scope-note' }, 'No readiness state recorded.')); return; }
+    fill(box,
       el('p', { class: 'scope-note' }, 'Phase ' + notRecorded(r.phase)),
       el('ul', { class: 'record-list' }, (r.plans || []).map((p) => el('li', null, el('strong', null, 'Revision ' + p.revision), el('code', { title: p.digest }, 'digest ' + short(p.digest)), el('code', { title: p.parentDigest || '' }, p.parentDigest ? 'parent ' + short(p.parentDigest) : 'no parent')))),
       el('ul', { class: 'record-list events' }, (r.events || []).map((e) => el('li', null, el('span', { class: 'mono-text' }, notRecorded(e.at)), el('strong', null, notRecorded(e.kind)), e.detail ? el('span', null, e.detail) : null))));
@@ -969,7 +987,7 @@
 
   function renderAttempts(d) {
     const attempts = d.attempts || [];
-    $('#attempts').replaceChildren(attempts.length
+    fill($('#attempts'), attempts.length
       ? el('ul', { class: 'record-list' }, attempts.map((a) => {
         const u = a.usage, t = (u && u.total) || {};
         const tokens = u ? 'tokens in ' + notRecorded(t.input) + ' · out ' + notRecorded(t.output) : 'usage unavailable';
@@ -997,12 +1015,12 @@
     $('#aggregate .panel-head .mono').textContent = sample ? 'LAB OVERVIEW · SAMPLE DATA' : 'LAB OVERVIEW';
     $('#aggregate-count').textContent = 'All ' + all.length + ' Molecules';
     const waiting = all.filter((m) => m.lane === 'decision');
-    $('#review-queue').replaceChildren(...(waiting.length
+    fill($('#review-queue'), (waiting.length
       ? waiting.slice(0, 5).map((m) => el('button', { type: 'button', class: 'review-row', dataset: { review: m.id }, onclick: () => select(m.id) },
         el('span', { class: 'review-id' }, '#' + m.number), el('strong', null, m.title || m.id), el('span', null, notRecorded(m.phase)), el('span', { 'aria-hidden': 'true' }, '→')))
       : [el('p', { class: 'scope-note' }, 'No Molecules wait at a human gate.')]));
-    if (waiting.length > 5) $('#review-queue').append(el('p', { class: 'scope-note' }, (waiting.length - 5) + ' more under Needs my decision.'));
-    $('#outcome-bars').replaceChildren(...Object.entries(LANES).map(([id, lane]) => {
+    if (waiting.length > 5) add($('#review-queue'), el('p', { class: 'scope-note' }, (waiting.length - 5) + ' more under Needs my decision.'));
+    fill($('#outcome-bars'), Object.entries(LANES).map(([id, lane]) => {
       const n = counts[id] || 0;
       const bar = el('span', { class: 'bar ' + lane.cls });
       bar.style.width = (all.length ? (n / all.length) * 100 : 0) + '%';
@@ -1034,12 +1052,13 @@
   function renderAnalytics() {
     const box = $('#analytics');
     const a = state.analytics;
-    if (!a) { box.replaceChildren(el('span', { class: 'label' }, 'ANALYTICS'), el('strong', null, 'Loading…')); return; }
+    if (!a) { fill(box, el('span', { class: 'label' }, 'ANALYTICS'), el('strong', null, 'Loading…')); return; }
     const t = a.time || {}, c = a.cost || {}, models = a.models || {}, counts = a.counts || {};
     const groups = Array.isArray(models.groups) ? models.groups : [];
     const total = usd(c.totalUsd);
     const measure = (label, m) => el('div', null, el('dt', null, label), el('dd', null, measureText(m) + ' · ' + measureCoverage(m)));
-    box.replaceChildren(
+    // fill skips an absent note instead of rendering it as text.
+    fill(box,
       el('span', { class: 'label' }, a.sample ? 'ANALYTICS · SAMPLE DATA' : 'ANALYTICS · REPORTED COST'),
       el('strong', null, total || (c.notFinite ? 'Unavailable (sum not finite)' : 'Unknown')),
       el('p', null, notRecorded(c.coverage) + (total ? ' · ' + notRecorded(c.basisLabel) : '') + '. Unknown is not zero.'),

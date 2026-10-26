@@ -217,7 +217,7 @@ func TestUIDriveRunRefusalsFailSafe(t *testing.T) {
 	// Engine error text, which names local paths, is never served.
 	viewOf[RunJobView](t, do(t, h, gatePost("/api/runs", `{"issue":11}`)), http.StatusAccepted)
 	waitJob(t, h, runKey(11))
-	if v := viewOf[RunJobView](t, do(t, h, authed("/api/runs/11")), http.StatusOK); v.State != "refused" || v.Category != "refused" || v.Committed {
+	if v := viewOf[RunJobView](t, do(t, h, authed("/api/runs/11")), http.StatusOK); v.State != "refused" || v.Category != "refused" || v.Committed || v.Reason != categoryReasons["refused"] {
 		t.Fatalf("refused run %+v", v)
 	}
 	// A registry full of running jobs refuses; finished jobs are evicted first.
@@ -379,6 +379,40 @@ func TestUIDriveStopsAScopeApprovalJob(t *testing.T) {
 	if s, _ := h.(*handler).jobs.get(r.ID); s.state != "interrupted" {
 		t.Fatalf("scope job %+v", s)
 	}
+}
+
+// A refused run or loop names the next step for the engine error it recognises,
+// and never serves the engine text, its paths, environment values or tokens.
+func TestUIDriveRefusalsNameTheNextStepWithoutLeaks(t *testing.T) {
+	lab, _ := labFixture(t)
+	secret := " in " + filepath.Join(lab, "ledgers") + " with ANTHROPIC_API_KEY=sk-ant-" + strings.Repeat("b", 30) + " ghp_" + strings.Repeat("C", 36)
+	auth := "Harness not authenticated: run its login command (claude auth login for Claude Code, codex login for Codex, agent login for Cursor), then start again"
+	h, _ := driveHandler(t, lab, nil, &fakeDrive{
+		run: func(context.Context, molecule.Options) error {
+			return errors.New("analysis harness failed: authentication_error" + secret)
+		},
+		loop: func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error) {
+			return molecule.LoopReport{}, errors.New("the approved Formula's intake.repo changed from o/r to acme/widgets during the run; restart the loop" + secret)
+		},
+	})
+	viewOf[RunJobView](t, do(t, h, gatePost("/api/runs", `{"issue":11}`)), http.StatusAccepted)
+	waitJob(t, h, runKey(11))
+	w := do(t, h, authed("/api/runs/11"))
+	if v := viewOf[RunJobView](t, w, http.StatusOK); v.State != "refused" || v.Reason != auth {
+		t.Fatalf("refused run %+v", v)
+	}
+	noLeak(t, w.Body.String(), lab, "sk-ant-", "ANTHROPIC_API_KEY", "authentication_error")
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`)), http.StatusAccepted)
+	waitLoop(t, h)
+	w = do(t, h, authed("/api/loop"))
+	if v := viewOf[LoopView](t, w, http.StatusOK); v.State != "refused" || v.Category != "refused" || v.Reason != "This Lab's Formula now targets acme/widgets; restart the loop" {
+		t.Fatalf("refused loop %+v", v)
+	}
+	noLeak(t, w.Body.String(), lab, "sk-ant-", "ANTHROPIC_API_KEY")
+	// Every refusal the UI makes itself carries its category's next step.
+	refusalOf(t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusConflict, "not-running")
+	refusalOf(t, do(t, h, gatePost("/api/runs", `{"issue":0}`)), http.StatusBadRequest, "invalid")
+	refusalOf(t, do(t, h, authed("/api/runs/12")), http.StatusNotFound, "none")
 }
 
 // molecule.Run takes no per-Issue lock, so a UI run and the UI loop never run

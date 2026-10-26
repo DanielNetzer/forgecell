@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -120,15 +121,21 @@ func validTitle(s string) bool {
 	return true
 }
 
-// gateRefusal is a refused gate request: a category the UI keys on and a fixed
-// message. Engine error text, which can name local paths, is never served.
+// gateRefusal is a refused gate request: a category the UI keys on, a fixed
+// message and an actionable reason naming the next step. Engine error text, which
+// can name local paths, is never served: the reason is a fixed phrase.
 type gateRefusal struct {
 	Error    string `json:"error"`
 	Category string `json:"category"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 func (h *handler) refuseGate(w http.ResponseWriter, code int, category, message string) {
-	h.json(w, code, gateRefusal{Error: message, Category: category})
+	h.refuseWith(w, code, category, message, refusalReason(category, ""))
+}
+
+func (h *handler) refuseWith(w http.ResponseWriter, code int, category, message, reason string) {
+	h.json(w, code, gateRefusal{Error: message, Category: category, Reason: reason})
 }
 
 // gate serves one POST gate after the write protection has passed.
@@ -265,14 +272,14 @@ func (h *handler) previewDelivery(w http.ResponseWriter, r molecule.Record) {
 	defer cancel()
 	p, err := h.preview(ctx, opts)
 	if err != nil {
-		state, category, message := classify(err)
+		state, category, message, reason := classify(err)
 		code := http.StatusConflict
 		if state == "interrupted" {
 			code = http.StatusServiceUnavailable
 		} else if category == "refused" || category == "demo" {
 			code = http.StatusUnprocessableEntity
 		}
-		h.refuseGate(w, code, category, message)
+		h.refuseWith(w, code, category, message, reason)
 		return
 	}
 	h.json(w, http.StatusOK, previewView(h.opts.LabDir, r, p))
@@ -320,17 +327,18 @@ func (h *handler) refuseJobStart(w http.ResponseWriter, err error, busy string) 
 	return true
 }
 
-// classify maps an engine error to a job state, a category and a fixed
-// message. The error text itself is never served or logged.
-func classify(err error) (state, category, message string) {
+// classify maps an engine error to a job state, a category, a fixed message and
+// an actionable reason. The error text itself is never served or logged: it only
+// selects one of the fixed reasons, which names the next step.
+func classify(err error) (state, category, message, reason string) {
 	if err == nil {
-		return "finished", "", ""
+		return "finished", "", "", ""
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "interrupted", "interrupted", "the request was interrupted before the engine finished; the canonical state was read back"
+		return "interrupted", "interrupted", "the request was interrupted before the engine finished; the canonical state was read back", refusalReason("interrupted", "")
 	}
 	if errors.Is(err, delivery.ErrDemoLab) {
-		return "refused", "demo", "this is a forgecell demo Lab; it never contacts GitHub"
+		return "refused", "demo", "this is a forgecell demo Lab; it never contacts GitHub", refusalReason("demo", "")
 	}
 	text := err.Error()
 	has := func(parts ...string) bool {
@@ -341,19 +349,89 @@ func classify(err error) (state, category, message string) {
 		}
 		return false
 	}
+	state, category, message = "refused", "refused", "the engine refused the request; nothing else was attempted"
 	switch {
 	case has("PR reconciliation required"):
-		return "reconciliation-required", "reconciliation", "the pull request outcome is uncertain; the receipt was read back and nothing is retried. Reconcile it with the forgecell CLI"
+		state, category, message = "reconciliation-required", "reconciliation", "the pull request outcome is uncertain; the receipt was read back and nothing is retried"
 	case has("is locked", "lock could not be taken", "delivery lock exists"):
-		return "refused", "locked", "the Molecule or its delivery is locked by another command or a loop; nothing is retried. Wait for it to finish"
+		category, message = "locked", "the Molecule or its delivery is locked by another command or a loop; nothing is retried"
 	case has("resume must match the recorded review content"):
-		return "refused", "receipt-mismatch", "the recorded delivery receipt was reviewed with a different digest, title or file scope; nothing was published"
+		category, message = "receipt-mismatch", "the recorded delivery receipt was reviewed with a different digest, title or file scope; nothing was published"
 	case has("independent acceptance is unverified", "lacks explicit acceptance review"):
-		return "refused", "acceptance-unverified", "independent acceptance is unverified; explicit human acceptance review is required before publication"
+		category, message = "acceptance-unverified", "independent acceptance is unverified; explicit human acceptance review is required before publication"
 	case has("approval is stale", "approval requires the exact pending plan digest", "no Molecule matches this approval digest", "readiness inputs changed", "prepared content changed", "issue or Formula changed", "source base changed", "pending workspace changed", "review required", "differs from reviewed", "differs from verified"):
-		return "refused", "stale", "the reviewed content or plan changed; reload the Molecule and review it again"
+		category, message = "stale", "the reviewed content or plan changed"
 	}
-	return "refused", "refused", "the engine refused the request; run the matching forgecell command for details. Nothing else was attempted"
+	return state, category, message, refusalReason(category, text)
+}
+
+// categoryReasons names the next step for each refusal category the UI serves.
+var categoryReasons = map[string]string{
+	"invalid":               "Correct the value and submit again; nothing was sent to the engine",
+	"sample":                "Sample data never writes; run forgecell ui in a Lab of your own repository to act on real Molecules",
+	"missing":               "No ledger in this Lab has this id; reload the Lab and choose a Molecule from the grid",
+	"none":                  "Nothing was started for it from this Lab UI",
+	"stale":                 "Reload this Molecule, review the current plan or preview, and decide again",
+	"busy":                  "Wait for the running work to finish and read its result here, then try again",
+	"not-ready":             "Delivery needs an approved plan with a target branch and a file scope; approve the plan first, or refresh intake with forgecell run",
+	"unavailable":           "Restart forgecell ui from a checkout of this Lab's repository so the engine can run there",
+	"resources":             "Free memory or disk space on the Lab's volumes until they are above the resource floors, then try again",
+	"not-running":           "Nothing is running to stop; this page shows the current ledger state",
+	"not-owned":             "Stop it where it was started: stop the loop here, or interrupt the forgecell command that runs it",
+	"stopped":               "Restart forgecell ui and open the new link it prints",
+	"refused":               "Run the same action with the forgecell CLI to see the engine's own reason; this page shows only reasons it can state safely",
+	"locked":                "Wait for the loop or the other forgecell command to finish, then try again",
+	"receipt-mismatch":      "Publish with the digest, title and files the receipt records, or inspect the receipt with the forgecell CLI first",
+	"acceptance-unverified": "Review acceptance yourself, tick the acceptance confirmation, then preview and publish again",
+	"reconciliation":        "Check the pull request on GitHub, then reconcile the receipt with forgecell deliver; this page never retries a publication",
+	"demo":                  "This demo Lab never contacts GitHub; run forgecell init in a Lab of your own repository to publish",
+	"interrupted":           "Read the state back here; if the Molecule stays locked, inspect it with forgecell ledger and recover it with forgecell recover",
+}
+
+// engineReasons are exact next steps for engine errors the UI recognises,
+// checked in order before the category's reason. Only the fixed reason is
+// served, never the matched text.
+var engineReasons = []struct {
+	parts  []string
+	reason string
+}{
+	{[]string{"authentication_error", "not logged in", "Please run /login", "Invalid API key", "invalid x-api-key", "OAuth token has expired"}, "Harness not authenticated: run its login command (claude auth login for Claude Code, codex login for Codex, agent login for Cursor), then start again"},
+	{[]string{"issue repository does not match the approved Formula"}, "This Issue is not in the repository this Lab's Formula targets; give the number of an Issue in that repository"},
+	{[]string{"Issue is closed"}, "Issue is closed or is not the requested Issue; reopen it on GitHub or choose an open Issue"},
+	{[]string{"approve a Formula with init before running"}, "This Lab has no approved Formula; approve one with forgecell init, then start again"},
+	{[]string{"Git origin does not match the issue repository", "repository origin changed"}, "The source checkout's Git origin is not this Lab's repository; restart forgecell ui from a checkout of that repository"},
+	{[]string{"open Issue listing was truncated"}, "There are too many open Issues to apply the selector to; narrow it with label:NAME or milestone:TITLE"},
+	{[]string{"approved Formula could not be reloaded"}, "The approved Formula could not be reloaded; check it with forgecell init, then restart the loop"},
+	{[]string{"inspect an interrupted attempt before recovery"}, "An interrupted attempt left the Molecule locked; inspect it with forgecell ledger and, once no Lab process runs, recover it with forgecell recover"},
+	{[]string{"delivery lock exists"}, "A delivery lock exists; make sure no forgecell deliver is running, then recover the lock with the forgecell CLI"},
+	{[]string{"readiness inputs changed", "issue or Formula changed", "source base changed", "pending workspace changed"}, "The Issue, Formula, source base or workspace changed since the plan; refresh intake with forgecell run, then review the new plan"},
+	{[]string{"carries Claude project configuration"}, "The base commit carries Claude project configuration; remove it from the repository, commit that and refresh intake"},
+	{[]string{"required extension"}, "A required extension is unavailable; repair or re-pin it through a reviewed Formula change"},
+	{[]string{"PR not found"}, "The recorded pull request was not found on GitHub; check the delivery branch, then reconcile the receipt with forgecell deliver"},
+	{[]string{"multiple PRs found"}, "More than one pull request matches this delivery; close the extra ones on GitHub, then reconcile the receipt with forgecell deliver"},
+	{[]string{"PR is CLOSED"}, "The pull request is closed on GitHub; reopen it, then reconcile the receipt with forgecell deliver"},
+	{[]string{"PR is MERGED"}, "The pull request is already merged on GitHub; reconcile the receipt with forgecell deliver"},
+	{[]string{"PR is not a confirmed draft"}, "The pull request is not a confirmed draft; check it on GitHub, then reconcile the receipt with forgecell deliver"},
+}
+
+// formulaRepoChanged captures the repository a loop's Formula now targets.
+var formulaRepoChanged = regexp.MustCompile(`intake\.repo changed from \S+ to (\S+) during the run`)
+
+// refusalReason is the bounded, redacted, actionable reason for a refusal of
+// category whose engine error text is text ("" for a refusal the UI makes).
+func refusalReason(category, text string) string {
+	reason := categoryReasons[category]
+	if m := formulaRepoChanged.FindStringSubmatch(text); m != nil && repository(m[1]) != "" {
+		reason = "This Lab's Formula now targets " + m[1] + "; restart the loop"
+	} else {
+		for _, e := range engineReasons {
+			if slices.ContainsFunc(e.parts, func(p string) bool { return strings.Contains(text, p) }) {
+				reason = e.reason
+				break
+			}
+		}
+	}
+	return redactor{}.reason(reason)
 }
 
 // GateJobView is GET /api/molecules/{id}/job and every accepted gate response.
@@ -364,6 +442,7 @@ type GateJobView struct {
 	State     string        `json:"state"`
 	Category  string        `json:"category,omitempty"`
 	Error     string        `json:"error,omitempty"`
+	Reason    string        `json:"reason,omitempty"`
 	Committed bool          `json:"committed"`
 	Canonical CanonicalView `json:"canonical"`
 }
@@ -384,7 +463,7 @@ type CanonicalView struct {
 // records the approval of exactly the submitted digest; publication once a
 // receipt is committed or published with a lifecycle observation.
 func (h *handler) jobView(id string, j jobSnapshot) GateJobView {
-	v := GateJobView{Kind: j.kind, Digest: j.digest, State: j.state, Category: j.category, Error: j.message}
+	v := GateJobView{Kind: j.kind, Digest: j.digest, State: j.state, Category: j.category, Error: j.message, Reason: j.reason}
 	record, err := h.records(h.opts.LabDir, id)
 	if j.kind == "scope" {
 		v.Canonical.Source = "ledger"
@@ -424,13 +503,26 @@ func (h *handler) jobView(id string, j jobSnapshot) GateJobView {
 	return v
 }
 
+// NoJobView is GET /api/molecules/{id}/job for a Molecule with no gate job from
+// this Lab UI: 200 with state none, so selecting a Molecule is not an error.
+type NoJobView struct {
+	State string `json:"state"`
+}
+
+// job serves the job of a Molecule in this Lab; an unknown id stays 404.
 func (h *handler) job(w http.ResponseWriter, id string) {
-	j, ok := h.jobs.get(id)
-	if !ok {
-		h.refuseGate(w, http.StatusNotFound, "none", "no gate job was started for this Molecule by this Lab UI")
+	if j, ok := h.jobs.get(id); ok {
+		h.json(w, http.StatusOK, h.jobView(id, j))
 		return
 	}
-	h.json(w, http.StatusOK, h.jobView(id, j))
+	switch _, err := h.records(h.opts.LabDir, id); {
+	case err == nil:
+		h.json(w, http.StatusOK, NoJobView{State: "none"})
+	case errors.Is(err, os.ErrNotExist):
+		h.refuseGate(w, http.StatusNotFound, "missing", "no such Molecule")
+	default:
+		h.refuseGate(w, http.StatusUnprocessableEntity, "refused", "the ledger was refused: it is invalid, unsafe, oversized or not this Lab's")
+	}
 }
 
 var (
@@ -458,19 +550,19 @@ type gateJob struct {
 	started time.Time
 	cancel  context.CancelFunc
 	// done is closed when the engine call has returned and the state is set.
-	done                     chan struct{}
-	state, category, message string
+	done                             chan struct{}
+	state, category, message, reason string
 }
 
 type jobSnapshot struct {
-	kind, digest, state, category, message string
-	started                                time.Time
+	kind, digest, state, category, message, reason string
+	started                                        time.Time
 }
 
 func (j *gateJob) snapshot(mu *sync.Mutex) jobSnapshot {
 	mu.Lock()
 	defer mu.Unlock()
-	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message, j.started}
+	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message, j.reason, j.started}
 }
 
 func newGateJobs() *gateJobs {
@@ -500,9 +592,9 @@ func (g *gateJobs) start(id, kind, digest string, run func(context.Context) erro
 		defer g.wg.Done()
 		defer close(j.done)
 		defer cancel()
-		state, category, message := classify(guarded(ctx, run))
+		state, category, message, reason := classify(guarded(ctx, run))
 		g.mu.Lock()
-		j.state, j.category, j.message = state, category, message
+		j.state, j.category, j.message, j.reason = state, category, message, reason
 		g.mu.Unlock()
 	}()
 	return j, nil
@@ -549,7 +641,7 @@ func (g *gateJobs) get(id string) (jobSnapshot, bool) {
 	if j == nil {
 		return jobSnapshot{}, false
 	}
-	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message, j.started}, true
+	return jobSnapshot{j.kind, j.digest, j.state, j.category, j.message, j.reason, j.started}, true
 }
 
 // cancelRunning cancels the running job under id when its kind is one of kinds

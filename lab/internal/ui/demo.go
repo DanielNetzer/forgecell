@@ -129,5 +129,11 @@ func demoDetail(id string, withYAML bool) (Detail, bool) {
 	if d != nil {
 		out.Delivery = &DeliveryView{State: d.State, Lifecycle: d.Lifecycle, Published: d.Published(), Label: DeliveryLabel(d)}
 	}
+	// Sample data has no gates: its gate state is published or none, never open.
+	out.Gate = GateView{State: GateNone}
+	if d.Published() {
+		out.Gate = GateView{State: GatePublished, Receipt: d.State, Lifecycle: d.Lifecycle}
+	}
+	out.Next = nextAction(out.Lane, "", out.Status, out.Phase, out.CurrentAtom, out.Gate, out.Delivery)
 	return out, true
 }

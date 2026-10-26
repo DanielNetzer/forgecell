@@ -254,12 +254,13 @@ type RunJobView struct {
 	State     string        `json:"state"`
 	Category  string        `json:"category,omitempty"`
 	Error     string        `json:"error,omitempty"`
+	Reason    string        `json:"reason,omitempty"`
 	Committed bool          `json:"committed"`
 	Canonical MoleculeState `json:"canonical"`
 }
 
 func (h *handler) runView(issue int64, j jobSnapshot) RunJobView {
-	v := RunJobView{Issue: issue, State: j.state, Category: j.category, Error: j.message, Canonical: MoleculeState{Source: "ledger"}}
+	v := RunJobView{Issue: issue, State: j.state, Category: j.category, Error: j.message, Reason: j.reason, Canonical: MoleculeState{Source: "ledger"}}
 	id, found, incomplete := h.runMolecule(issue, j.started)
 	if !found {
 		v.Canonical.Incomplete = incomplete
@@ -354,15 +355,15 @@ func (g *gateJobs) running(kind string) bool {
 // driveLoop is this UI's single loop slot. Drain stops dispatching; cancel, used
 // only when the server stops, also cancels the Molecules in flight.
 type driveLoop struct {
-	mu                       sync.Mutex
-	stopped, running, drain  bool
-	drained                  chan struct{}
-	cancel                   context.CancelFunc
-	done                     chan struct{}
-	selector                 string
-	max                      int
-	state, category, message string
-	report                   *molecule.LoopReport
+	mu                               sync.Mutex
+	stopped, running, drain          bool
+	drained                          chan struct{}
+	cancel                           context.CancelFunc
+	done                             chan struct{}
+	selector                         string
+	max                              int
+	state, category, message, reason string
+	report                           *molecule.LoopReport
 }
 
 // start refuses while runsBusy reports a UI run job running; the check and the
@@ -385,19 +386,19 @@ func (l *driveLoop) start(o molecule.LoopOptions, runsBusy func() bool, run func
 	o.Drain, o.Work = drained, ctx
 	l.running, l.drain, l.drained, l.cancel, l.done = true, false, drained, cancel, done
 	l.selector, l.max, l.report = o.Select.String(), o.MaxConcurrent, nil
-	l.state, l.category, l.message = "running", "", ""
+	l.state, l.category, l.message, l.reason = "running", "", "", ""
 	go func() {
 		defer close(done)
 		defer cancel()
 		var report molecule.LoopReport
-		state, category, message := classify(guarded(ctx, func(ctx context.Context) error {
+		state, category, message, reason := classify(guarded(ctx, func(ctx context.Context) error {
 			var err error
 			report, err = run(ctx, o)
 			return err
 		}))
 		l.mu.Lock()
 		l.running, l.report = false, &report
-		l.state, l.category, l.message = state, category, message
+		l.state, l.category, l.message, l.reason = state, category, message, reason
 		l.mu.Unlock()
 	}()
 	return nil
@@ -500,6 +501,7 @@ type LoopView struct {
 	State         string          `json:"state"`
 	Category      string          `json:"category,omitempty"`
 	Error         string          `json:"error,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
 	Select        string          `json:"select,omitempty"`
 	MaxConcurrent int             `json:"maxConcurrent,omitempty"`
 	Limit         int             `json:"maxConcurrentLimit"`
@@ -541,7 +543,7 @@ func (h *handler) loopView() LoopView {
 	l := h.loop
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	v := LoopView{State: l.state, Category: l.category, Error: l.message, Select: l.selector, MaxConcurrent: l.max, Limit: maxLoopConcurrent}
+	v := LoopView{State: l.state, Category: l.category, Error: l.message, Reason: l.reason, Select: l.selector, MaxConcurrent: l.max, Limit: maxLoopConcurrent}
 	if v.State == "" {
 		v.State = "idle"
 	}

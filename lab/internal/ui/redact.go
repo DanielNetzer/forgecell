@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"regexp"
 	"sort"
 	"strings"
@@ -9,6 +10,16 @@ import (
 
 // secretMark replaces every secret in served evidence and ledger text.
 const secretMark = "[redacted]"
+
+// maxReasonRunes bounds a served refusal reason.
+const maxReasonRunes = 300
+
+// reason makes a refusal reason safe to serve: secrets are replaced, then the
+// record's directories and any other local path, and the result is one line of
+// at most maxReasonRunes runes with control characters stripped.
+func (x redactor) reason(s string) string {
+	return harness.ReviewDisplayText(x.text(redactSecrets(s)), maxReasonRunes)
+}
 
 // secretRule finds one kind of secret; group is the submatch that holds the
 // secret itself, so a name such as OPENAI_API_KEY= or Authorization: stays
