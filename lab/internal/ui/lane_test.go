@@ -24,16 +24,18 @@ var (
 
 // wantLane restates the operator's order independently of Lane.
 func wantLane(status, phase string, d *DeliveryState) string {
+	published := d != nil && d.State == "published" && (d.Lifecycle == "" || d.Lifecycle == "OPEN" || d.Lifecycle == "MERGED")
 	if status == "blocked" || status == "failed" {
 		return LaneBlocked
 	}
-	if phase == "scope-waiting" || phase == "review-waiting" {
+	// A published draft outranks review-waiting, never scope-waiting (2026-10-26).
+	if phase == "scope-waiting" || phase == "review-waiting" && !published {
 		return LaneDecision
 	}
 	if status == "running" || status == "allocating" || phase == "approved" || phase == "coding" || phase == "check-pending" {
 		return LaneRunning
 	}
-	if d != nil && d.State == "published" && (d.Lifecycle == "" || d.Lifecycle == "OPEN" || d.Lifecycle == "MERGED") {
+	if published {
 		return LaneFinished
 	}
 	return LaneOther
@@ -72,8 +74,16 @@ func TestUILaneExamplesFromTheOperatorDecision(t *testing.T) {
 		{"blocked", "", published, LaneBlocked},
 		{"failed", "coding", published, LaneBlocked},
 		{"failed", "review-waiting", nil, LaneBlocked},
+		{"blocked", "review-waiting", published, LaneBlocked},
 		{"waiting", "scope-waiting", published, LaneDecision},
 		{"running", "review-waiting", nil, LaneDecision},
+		// forgecell deliver publishes without moving the phase: a delivered
+		// Molecule is finished, not waiting for a decision.
+		{"waiting", "review-waiting", published, LaneFinished},
+		{"waiting", "review-waiting", &DeliveryState{State: "published", Lifecycle: "MERGED"}, LaneFinished},
+		{"waiting", "review-waiting", &DeliveryState{State: "committed", Lifecycle: "OPEN"}, LaneDecision},
+		{"waiting", "review-waiting", &DeliveryState{State: "published", Lifecycle: "CLOSED"}, LaneDecision},
+		{"waiting", "review-waiting", nil, LaneDecision},
 		{"running", "", nil, LaneRunning},
 		{"allocating", "", nil, LaneRunning},
 		{"waiting", "check-pending", published, LaneRunning},

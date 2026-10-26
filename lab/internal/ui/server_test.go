@@ -395,6 +395,105 @@ func TestUIRecordProjectionOfARetainedMolecule(t *testing.T) {
 	}
 }
 
+// forgecell deliver publishes the draft without moving the ledger phase: a
+// review-waiting Molecule with a published receipt is finished, counted as Draft
+// published, and its detail shows the review gate resolved by draft publication
+// and the merge-on-GitHub next action.
+func TestUIPublishedReviewWaitingMoleculeIsFinishedWithTheGateResolved(t *testing.T) {
+	lab, r := labFixture(t)
+	r.FinishedAt = "2026-10-24T10:30:00Z"
+	writeRecord(t, lab, r)
+	writeReceipt(t, lab, r.ID, "published", "OPEN")
+	h := testHandler(t, Options{LabDir: lab})
+	var list MoleculeList
+	decode(t, do(t, h, authed("/api/molecules")), &list)
+	if len(list.Molecules) != 1 || list.Molecules[0].Lane != LaneFinished || list.Counts[LaneFinished] != 1 || list.Counts[LaneDecision] != 0 || list.Molecules[0].Delivery != "Draft published" {
+		t.Fatalf("list %+v counts %v", list.Molecules, list.Counts)
+	}
+	var analytics AnalyticsView
+	decode(t, do(t, h, authed("/api/analytics")), &analytics)
+	if analytics.Counts[LaneFinished] != 1 || analytics.Counts[LaneDecision] != 0 {
+		t.Fatalf("analytics counts %v", analytics.Counts)
+	}
+	w := do(t, h, authed("/api/molecules/"+r.ID))
+	var d Detail
+	decode(t, w, &d)
+	if d.Lane != LaneFinished || d.Gate != (GateView{State: GatePublished, Receipt: "published", Lifecycle: "OPEN", URL: "https://github.com/o/r/pull/5"}) {
+		t.Fatalf("lane %q gate %+v", d.Lane, d.Gate)
+	}
+	if d.Next.Title != "Draft published" || d.Next.Copy != "Draft published · merge on GitHub; merge and production are not verified by Forgecell." || strings.Contains(d.Next.Copy, "Gates and decisions") {
+		t.Fatalf("next %+v", d.Next)
+	}
+	noLeak(t, w.Body.String(), lab)
+	// A receipt from a PR on another repository is never linked.
+	if err := os.WriteFile(filepath.Join(lab, "deliveries", r.ID+".json"), []byte(`{"state":"published","title":"t","acceptanceReviewAcknowledged":false,"preview":{"moleculeId":"`+r.ID+`"},"url":"https://github.com/x/y/pull/5"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d = Detail{}
+	decode(t, do(t, h, authed("/api/molecules/"+r.ID)), &d)
+	if d.Gate.State != GatePublished || d.Gate.URL != "" {
+		t.Fatalf("foreign PR gate %+v", d.Gate)
+	}
+	// Blocked with a receipt stays blocked; scope-waiting with one stays a decision.
+	blocked := r
+	blocked.Status = "blocked"
+	writeRecord(t, lab, blocked)
+	writeReceipt(t, lab, r.ID, "published", "OPEN")
+	d = Detail{}
+	decode(t, do(t, h, authed("/api/molecules/"+r.ID)), &d)
+	if d.Lane != LaneBlocked || strings.Contains(d.Next.Copy, "Gates and decisions") {
+		t.Fatalf("blocked lane %q next %+v", d.Lane, d.Next)
+	}
+	_, scope, digest := gateFixture(t)
+	scope.LabDir = lab
+	writeRecord(t, lab, scope)
+	d = Detail{}
+	decode(t, do(t, h, authed("/api/molecules/"+scope.ID)), &d)
+	if d.Lane != LaneDecision || d.Gate != (GateView{State: GateScope, Digest: digest}) || !strings.Contains(d.Next.Copy, "decide under Gates and decisions") {
+		t.Fatalf("scope-waiting lane %q gate %+v next %+v", d.Lane, d.Gate, d.Next)
+	}
+}
+
+// NEXT ACTION and GATES AND DECISIONS come from one gate state: NEXT ACTION tells
+// the user to decide under Gates and decisions exactly when a gate there is open.
+func TestUINextActionAgreesWithTheGateState(t *testing.T) {
+	lab, base := labFixture(t)
+	h := testHandler(t, Options{LabDir: lab})
+	digest := strings.Repeat("ab", 32)
+	pending := &readiness.State{SchemaVersion: "v1", Phase: "scope-waiting", Plans: []readiness.Proposal{{Plan: readiness.Plan{Revision: 1}, Digest: digest}}}
+	n := 0
+	for _, status := range []string{"waiting", "recorded", "running", "blocked", "completed"} {
+		for _, finished := range []string{"", "2026-10-24T10:30:00Z"} {
+			for _, readinessState := range []*readiness.State{nil, readinessPhase("review-waiting"), readinessPhase("scope-waiting"), pending, readinessPhase("coding")} {
+				for _, receipt := range []string{"", "committed", "published"} {
+					n++
+					r := base
+					r.ID, r.Status, r.FinishedAt, r.Readiness = fmt.Sprintf("m%03d", n), status, finished, readinessState
+					writeRecord(t, lab, r)
+					if receipt != "" {
+						writeReceipt(t, lab, r.ID, receipt, "OPEN")
+					}
+					var d Detail
+					decode(t, do(t, h, authed("/api/molecules/"+r.ID)), &d)
+					open := d.Gate.State == GateScope || d.Gate.State == GateDelivery
+					if open && (d.Lane == LaneRunning || d.Lane == LaneBlocked || d.Lane == LaneFinished) {
+						t.Errorf("%s: a %s Molecule has open gate %+v", r.ID, d.Lane, d.Gate)
+					}
+					if says := strings.Contains(d.Next.Copy, "Gates and decisions"); says != open {
+						t.Errorf("%s %s finished %q receipt %q: gate %+v, next %+v", status, d.Phase, finished, receipt, d.Gate, d.Next)
+					}
+					if d.Next.Title == "" || d.Next.Copy == "" || (d.Gate.State == GateScope) != (d.Gate.Digest == digest) {
+						t.Errorf("%s: gate %+v next %+v", r.ID, d.Gate, d.Next)
+					}
+					if receipt == "published" && d.Gate.State != GateScope && d.Gate.State != GatePublished {
+						t.Errorf("%s: a published receipt left gate %+v", r.ID, d.Gate)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestUIRejectsAnIssueURLForAnotherIssue(t *testing.T) {
 	lab, r := labFixture(t)
 	for _, url := range []string{"https://github.com/o/r/issues/8", "https://github.com/x/r/issues/7", "javascript:alert(1)", "http://github.com/o/r/issues/7"} {
@@ -592,6 +691,31 @@ func TestUIServedJSNeverAssignsDataToInnerHTML(t *testing.T) {
 	}
 }
 
+// DOM replaceChildren and append render a null child as the text "null", so the
+// served script renders only through el, add and fill, which skip null,
+// undefined and false: the overview, analytics included, has no literal null.
+func TestUIServedJSNeverRendersNullChildren(t *testing.T) {
+	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	if !strings.Contains(js, "if (child === undefined || child === null || child === false) continue;") || !strings.Contains(js, "return add(node, ...children);") {
+		t.Fatal("el and fill do not skip null children through add")
+	}
+	if m := regexp.MustCompile(`replaceChildren\(\s*[^)\s]`).FindAllString(js, -1); len(m) != 0 {
+		t.Errorf("app.js passes children to replaceChildren directly: %q", m)
+	}
+	if n := strings.Count(js, ".append("); n != 1 || !strings.Contains(js, "node.append(child instanceof Node ? child : document.createTextNode(String(child)));") {
+		t.Errorf("app.js appends outside add: %d calls", n)
+	}
+	for _, name := range []string{"renderOverview", "renderAnalytics"} {
+		body := regexp.MustCompile(`(?s)function ` + name + `\(\) \{(.*?)\n  \}\n`).FindStringSubmatch(js)
+		if body == nil {
+			t.Fatalf("app.js has no %s", name)
+		}
+		if strings.Contains(body[1], "replaceChildren") || !strings.Contains(body[1], "fill(") || regexp.MustCompile(`['"]null['"]`).MatchString(body[1]) {
+			t.Errorf("%s may render a literal null:\n%s", name, body[1])
+		}
+	}
+}
+
 func TestUIDemoServesLabeledSampleDataOnly(t *testing.T) {
 	demo := testHandler(t, Options{Demo: true, Version: "v"})
 	var lab LabView
@@ -610,7 +734,7 @@ func TestUIDemoServesLabeledSampleDataOnly(t *testing.T) {
 	}
 	var d Detail
 	decode(t, do(t, demo, authed("/api/molecules/demo-101")), &d)
-	if !d.Sample || len(d.Atoms) != 6 {
+	if !d.Sample || len(d.Atoms) != 6 || d.Next.Title == "" || d.Gate.State != GateNone || strings.Contains(d.Next.Copy, "Gates and decisions") {
 		t.Fatalf("demo detail %+v", d)
 	}
 	if w := do(t, demo, authed("/api/molecules/demo-9999")); w.Code != http.StatusNotFound {

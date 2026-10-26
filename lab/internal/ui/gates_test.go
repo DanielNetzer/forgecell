@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 )
 
 const testOrigin = "http://" + testHost
@@ -153,12 +155,24 @@ func jobOf(t *testing.T, w *httptest.ResponseRecorder, code int) GateJobView {
 	return v
 }
 
+// refusalOf checks a refusal: its category, its fixed message and its bounded,
+// actionable reason, with no local path or secret in the body.
 func refusalOf(t *testing.T, w *httptest.ResponseRecorder, code int, category string) {
 	t.Helper()
 	var v gateRefusal
 	if w.Code != code || json.Unmarshal(w.Body.Bytes(), &v) != nil || v.Category != category || v.Error == "" {
 		t.Fatalf("status %d, want %d %s: %s", w.Code, code, category, w.Body)
 	}
+	if v.Reason != categoryReasons[category] || !boundedReason(v.Reason) {
+		t.Fatalf("%s reason %q, want %q", category, v.Reason, categoryReasons[category])
+	}
+	noLeak(t, w.Body.String())
+}
+
+// boundedReason reports one non-empty line of at most maxReasonRunes runes
+// without control characters.
+func boundedReason(s string) bool {
+	return s != "" && utf8.RuneCountInString(s) <= maxReasonRunes && strings.IndexFunc(s, unicode.IsControl) < 0 && strings.TrimSpace(s) == s
 }
 
 // noLeak fails when a served body carries a local path or a secret.
@@ -259,8 +273,13 @@ func TestUIGateScopeApprovalCommitsOnlyAfterTheLedgerReadBack(t *testing.T) {
 	}})
 	path := "/api/molecules/" + r.ID
 	body := `{"digest":"` + digest + `"}`
-	if w := do(t, h, authed(path+"/job")); w.Code != http.StatusNotFound {
-		t.Fatalf("job before any submission: %d", w.Code)
+	// Before any submission the job is none, not a 404; an unknown id still is.
+	if w := do(t, h, authed(path+"/job")); w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"state":"none"}` {
+		t.Fatalf("job before any submission: %d %s", w.Code, w.Body)
+	}
+	refusalOf(t, do(t, h, authed("/api/molecules/mol-1-absent/job")), http.StatusNotFound, "missing")
+	if w := do(t, h, authed("/api/molecules/a.b/job")); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid id job: %d", w.Code)
 	}
 	v := jobOf(t, do(t, h, gatePost(path+"/scope", body)), http.StatusAccepted)
 	if v.Kind != "scope" || v.Digest != digest || v.State != "running" || v.Committed || v.Canonical.Source != "ledger" || v.Canonical.Phase != "scope-waiting" {
@@ -355,13 +374,79 @@ func TestUIGateEngineRefusalsShowCategoriesAndNeverRetry(t *testing.T) {
 		waitJob(t, h, r.ID)
 		w := do(t, h, authed(path+"/job"))
 		v := jobOf(t, w, http.StatusOK)
-		if v.State != tc.state || v.Category != tc.category || v.Error == "" || v.Committed {
+		if v.State != tc.state || v.Category != tc.category || v.Error == "" || v.Committed || !boundedReason(v.Reason) {
 			t.Errorf("%q: %+v", tc.err, v)
 		}
 		noLeak(t, w.Body.String(), lab, "ledgers/", "file exists", "fatal")
 		if n := engine.calls(); n != 1 {
 			t.Errorf("%q: %d engine calls; a refusal must not be retried", tc.err, n)
 		}
+	}
+}
+
+// Every refusal category carries an actionable reason, and engine errors the UI
+// recognises name their exact next step. The reason is a fixed phrase: hostile
+// engine text with local paths, environment values and tokens never reaches it.
+func TestUIGateRefusalReasonsAreActionableAndNeverLeak(t *testing.T) {
+	lab := t.TempDir()
+	leaks := []string{lab, "/Users/", "/home/", "/tmp/", "ghp_", "sk-ant-", "hunter2", "ANTHROPIC_API_KEY", "file exists", "fatal", "exec", "evil"}
+	tail := ": mkdir " + filepath.Join(lab, "ledgers", "x.lock") + ": file exists; fatal: exec /home/someone/bin/gh ANTHROPIC_API_KEY=sk-ant-" + strings.Repeat("a", 30) + " token ghp_" + strings.Repeat("A", 36) + " password=hunter2\n\x1b[31mevil"
+	for _, tc := range []struct {
+		err             error
+		state, category string
+		reason          string
+	}{
+		{fmt.Errorf("run: %w", context.Canceled), "interrupted", "interrupted", categoryReasons["interrupted"]},
+		{fmt.Errorf("deliver: %w", delivery.ErrDemoLab), "refused", "demo", categoryReasons["demo"]},
+		{errors.New("PR reconciliation required: gh failed" + tail), "reconciliation-required", "reconciliation", categoryReasons["reconciliation"]},
+		{errors.New("PR reconciliation required: PR not found"), "reconciliation-required", "reconciliation", "The recorded pull request was not found on GitHub; check the delivery branch, then reconcile the receipt with forgecell deliver"},
+		{errors.New("PR reconciliation required: multiple PRs found"), "reconciliation-required", "reconciliation", "More than one pull request matches this delivery; close the extra ones on GitHub, then reconcile the receipt with forgecell deliver"},
+		{errors.New("PR reconciliation required: PR is CLOSED"), "reconciliation-required", "reconciliation", "The pull request is closed on GitHub; reopen it, then reconcile the receipt with forgecell deliver"},
+		{errors.New("Molecule is locked by a running loop or another command; wait for it to finish, then run this again" + tail), "refused", "locked", categoryReasons["locked"]},
+		{errors.New("Molecule is locked; inspect an interrupted attempt before recovery" + tail), "refused", "locked", "An interrupted attempt left the Molecule locked; inspect it with forgecell ledger and, once no Lab process runs, recover it with forgecell recover"},
+		{errors.New("delivery lock exists; verify no delivery process is active before recovering it" + tail), "refused", "locked", "A delivery lock exists; make sure no forgecell deliver is running, then recover the lock with the forgecell CLI"},
+		{errors.New("resume must match the recorded review content, title and file scope" + tail), "refused", "receipt-mismatch", categoryReasons["receipt-mismatch"]},
+		{errors.New("independent acceptance is unverified; explicit human review with --accept-unverified is required" + tail), "refused", "acceptance-unverified", categoryReasons["acceptance-unverified"]},
+		{errors.New("approval requires the exact pending plan digest" + tail), "refused", "stale", categoryReasons["stale"]},
+		{errors.New("source base changed; refresh intake" + tail), "refused", "stale", "The Issue, Formula, source base or workspace changed since the plan; refresh intake with forgecell run, then review the new plan"},
+		{errors.New("analysis harness failed: " + `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}` + tail), "refused", "refused", "Harness not authenticated: run its login command (claude auth login for Claude Code, codex login for Codex, agent login for Cursor), then start again"},
+		{errors.New("claude: Not logged in · Please run /login" + tail), "refused", "refused", "Harness not authenticated: run its login command (claude auth login for Claude Code, codex login for Codex, agent login for Cursor), then start again"},
+		{errors.New("issue repository does not match the approved Formula" + tail), "refused", "refused", "This Issue is not in the repository this Lab's Formula targets; give the number of an Issue in that repository"},
+		{errors.New("Issue is closed or does not match the requested repository and number." + tail), "refused", "refused", "Issue is closed or is not the requested Issue; reopen it on GitHub or choose an open Issue"},
+		{errors.New("approve a Formula with init before running"), "refused", "refused", "This Lab has no approved Formula; approve one with forgecell init, then start again"},
+		{errors.New("Git origin does not match the issue repository" + tail), "refused", "refused", "The source checkout's Git origin is not this Lab's repository; restart forgecell ui from a checkout of that repository"},
+		{errors.New("the approved Formula's intake.repo changed from o/r to acme/widgets during the run; restart the loop"), "refused", "refused", "This Lab's Formula now targets acme/widgets; restart the loop"},
+		// A repository that is not owner/name is never echoed.
+		{errors.New("the approved Formula's intake.repo changed from o/r to " + filepath.Join(lab, "x") + " during the run; restart the loop"), "refused", "refused", categoryReasons["refused"]},
+		{errors.New("the open Issue listing was truncated after 1000 Issues, so oldest cannot be applied"), "refused", "refused", "There are too many open Issues to apply the selector to; narrow it with label:NAME or milestone:TITLE"},
+		{errors.New("git rev-parse failed" + tail), "refused", "refused", categoryReasons["refused"]},
+		{errGatePanic, "refused", "refused", categoryReasons["refused"]},
+	} {
+		state, category, message, reason := classify(tc.err)
+		if state != tc.state || category != tc.category || message == "" || reason != tc.reason || !boundedReason(reason) {
+			t.Errorf("%q: %s %s %q, reason %q; want %s %s, reason %q", tc.err, state, category, message, reason, tc.state, tc.category, tc.reason)
+		}
+		for _, leak := range leaks {
+			if strings.Contains(message+reason, leak) {
+				t.Errorf("%q: served text carries %q: %q %q", tc.err, leak, message, reason)
+			}
+		}
+	}
+	// Every category the UI serves has a reason that redaction leaves intact.
+	for category, reason := range categoryReasons {
+		if got := refusalReason(category, ""); got != reason || !boundedReason(got) {
+			t.Errorf("%s reason %q, want %q", category, got, reason)
+		}
+	}
+	for _, e := range engineReasons {
+		if got := (redactor{}).reason(e.reason); got != e.reason || !boundedReason(got) {
+			t.Errorf("engine reason %q redacted to %q", e.reason, got)
+		}
+	}
+	// A hostile reason is still redacted and bounded at the last step.
+	got := newRedactor(lab, molecule.Record{}).reason("see " + filepath.Join(lab, "x") + " token=ghp_" + strings.Repeat("A", 36) + "\n" + strings.Repeat("y", 400))
+	if !boundedReason(got) || strings.Contains(got, lab) || strings.Contains(got, "ghp_") || !strings.Contains(got, "<lab>") {
+		t.Fatalf("redacted reason %q", got)
 	}
 }
 

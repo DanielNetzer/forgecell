@@ -1,15 +1,18 @@
 package ui
 
 // Lanes are the UI's Molecule filters. Each Molecule has exactly one, chosen in
-// this order (operator decision, 2026-10-24):
+// this order (operator decisions, 2026-10-24 and 2026-10-26):
 //
 //  1. blocked: ledger status blocked or failed, even when a receipt exists;
-//  2. decision: readiness phase scope-waiting or review-waiting;
+//  2. decision: readiness phase scope-waiting, or review-waiting without a
+//     published receipt;
 //  3. running: status running or allocating, or an active readiness phase;
 //  4. finished: a published delivery receipt whose lifecycle is not unresolved.
 //
-// Anything else is other: it appears under All only. There is no paused lane,
-// because the engine has no pause semantics.
+// A published draft outranks review-waiting (2026-10-26): forgecell deliver
+// publishes without moving the ledger phase, so a delivered Molecule is finished,
+// not waiting for a decision. Anything else is other: it appears under All only.
+// There is no paused lane, because the engine has no pause semantics.
 const (
 	LaneBlocked  = "blocked"
 	LaneDecision = "decision"
@@ -65,7 +68,7 @@ func Lane(status, phase string, delivery *DeliveryState) string {
 	switch {
 	case status == "blocked" || status == "failed":
 		return LaneBlocked
-	case phase == "scope-waiting" || phase == "review-waiting":
+	case phase == "scope-waiting" || phase == "review-waiting" && !delivery.Published():
 		return LaneDecision
 	case status == "running" || status == "allocating" || activePhases[phase]:
 		return LaneRunning
