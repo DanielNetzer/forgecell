@@ -269,6 +269,7 @@ func TestSyncRenderStartIntakeRefusedWhenTheIssueClosedMeanwhile(t *testing.T) {
 	}
 	// An open Issue starts.
 	viewOf[RunJobView](t, do(t, h, gatePost("/api/runs", `{"issue":9}`)), http.StatusAccepted)
+	waitJob(t, h, runKey(9))
 	if n := d.calls(); n != 1 {
 		t.Fatalf("an open Issue did not start: %d engine calls", n)
 	}
@@ -309,6 +310,7 @@ func TestSyncRenderStartIntakeEnforcesTheStartableRule(t *testing.T) {
 	}
 	// A row the Issues view shows startable starts.
 	viewOf[RunJobView](t, do(t, h, gatePost("/api/runs", `{"issue":5}`)), http.StatusAccepted)
+	waitJob(t, h, runKey(5))
 	if n := d.calls(); n != 1 {
 		t.Fatalf("row 5 did not start: %d engine calls", n)
 	}
@@ -380,6 +382,7 @@ func TestSyncRenderStartIntakeNeedsASnapshotFromAfterItBegan(t *testing.T) {
 	// Same clock: the forced read is from after the start and Issue 1 starts.
 	h.(*handler).forge.now = clk.now
 	viewOf[RunJobView](t, do(t, h, gatePost("/api/runs", `{"issue":1}`)), http.StatusAccepted)
+	waitJob(t, h, runKey(1))
 	if n := d.calls(); n != 1 {
 		t.Fatalf("a current read did not start: %d engine calls", n)
 	}
