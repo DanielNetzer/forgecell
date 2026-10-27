@@ -28,8 +28,9 @@ type Observation struct {
 	// FailedTests is the observed failing set of a protected regression check with
 	// declared deltas. It survives the compact ledger projection that drops captured
 	// streams, so delivery can re-check coverage against the approved plan. A failing
-	// protected go test -json check without deltas records its set when it parses
-	// cleanly, as evidence for a reviewer; that never changes the verdict.
+	// protected go test -json check without deltas, including one the protected view
+	// added -json to, records its set when it parses cleanly, as evidence for a
+	// reviewer and for --accept-protected-failures; that never changes the verdict.
 	FailedTests []TestID `json:"failedTests,omitempty"`
 	// AcceptedDeltas are the declared deltas that failed as expected.
 	AcceptedDeltas []readiness.ProtectedDelta `json:"acceptedDeltas,omitempty"`
@@ -50,9 +51,9 @@ type Observation struct {
 	// full suite and why. Command keeps the approved argv.
 	Selection *Selection `json:"selection,omitempty"`
 	// JSONAdded means the protected view ran this direct go test check with -json
-	// inserted after go test, because deltas are declared and its approved argv lacks
-	// -json. The events were parsed as a stream and Result.Stdout keeps only a bounded
-	// plain summary; Command keeps the approved argv.
+	// inserted after go test, because its approved argv lacks -json; this holds whether
+	// or not deltas are declared. The events were parsed as a stream and Result.Stdout
+	// keeps only a bounded plain summary; Command keeps the approved argv.
 	JSONAdded bool `json:"jsonAdded,omitempty"`
 }
 
@@ -690,19 +691,22 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			}
 		}
 		// In the protected view only, a direct go test check that lacks -json runs with
-		// -json inserted after go test, so its declared deltas can be matched. The
-		// approved argv, recorded as Command, is unchanged.
-		jsonAdded := identity && len(declared) > 0 && !readiness.RequestsGoTestJSON(command.Argv)
+		// -json inserted after go test, whether or not deltas are declared, so declared
+		// deltas can be matched and a first by-design failure records its failing set
+		// for --accept-protected-failures. The approved argv, recorded as Command, is
+		// unchanged.
+		jsonAdded := identity && !readiness.RequestsGoTestJSON(command.Argv)
 		if jsonAdded {
 			argv = readiness.WithGoTestJSON(argv)
 		}
 		options := process.Options{Argv: argv, Dir: dir, Env: commandEnv, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
 		// A required regression check with declared deltas asks for go test -json, which
-		// is read as a stream so a large suite is not cut off by the capture cap. Every
-		// other check keeps the cap, and exceeding it still fails the check.
+		// is read as a stream so a large suite is not cut off by the capture cap; so is
+		// every protected check the engine added -json to. Every other check keeps the
+		// cap, and exceeding it still fails the check.
 		var parser *failedTestParser
 		candidateStream := false
-		if i >= len(p.Setup) && command.Required && command.Category == "regression" && len(declared) > 0 && (readiness.RequestsGoTestJSON(command.Argv) || jsonAdded) {
+		if jsonAdded || (i >= len(p.Setup) && command.Required && command.Category == "regression" && len(declared) > 0 && readiness.RequestsGoTestJSON(command.Argv)) {
 			options.StdoutLines = &process.LineSink{Line: func([]byte) error { return nil }}
 			if protected {
 				parser = newFailedTestParser()
@@ -712,14 +716,22 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			}
 		}
 		result := process.Run(ctx, options)
+		packageOutput := result.Stdout
 		if jsonAdded {
 			// The stream was parsed while it ran; the retained copy is replaced by a
-			// bounded plain summary, never the raw -json stream or a prefix of it.
+			// bounded plain summary, never the raw -json stream or a prefix of it. A
+			// failing run whose stream was refused also keeps its bounded build and
+			// package diagnostics, so a reviewer sees what a plain run would show.
 			var failed []TestID
+			var refused error
 			if !result.OK {
-				failed, _ = parser.Finish()
+				failed, refused = parser.Finish()
 			}
 			result.Stdout = parser.Summary(failed)
+			packageOutput = result.Stdout
+			if refused != nil {
+				result.Stdout += parser.Diagnostics(refused)
+			}
 			result.RawStdout, result.Truncated = result.Stdout, false
 		}
 		// The no-op sink above lifts the capture cap, so only this check keeps the
@@ -740,7 +752,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if command.Category == "independent-acceptance" {
 			cacheState = AcceptanceCacheStatus(cache)
 		}
-		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets), Cache: cacheState, Packages: CountGoTestPackages(result.Stdout), GoEnvForwarded: forwarded, Selection: selection, JSONAdded: jsonAdded}
+		observation := Observation{ID: command.ID, Category: category, SourceTree: c.Tree, Command: command, Result: scrub(result, secrets), Cache: cacheState, Packages: CountGoTestPackages(packageOutput), GoEnvForwarded: forwarded, Selection: selection, JSONAdded: jsonAdded}
 		if cache && !result.OK {
 			observation.Note = resources.CacheSettingsNote(observation.Result.Stdout+"\n"+observation.Result.Stderr, forwarded)
 		}

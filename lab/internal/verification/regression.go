@@ -283,6 +283,36 @@ const (
 	maxTailSummaryBytes = 128_000
 )
 
+// Bounds of the diagnostics an engine-streamed check keeps when its stream is refused
+// (a build failure, a line that is not an event, an abort): the build output and the
+// package-level output each within maxDiagnosticBytes, and the first maxRawHeadLines
+// lines within maxRawHeadBytes plus the last maxTailLines lines within maxTailBytes of
+// the raw stdout. Past a bound the diagnostics say what they dropped.
+const (
+	maxDiagnosticBytes = 16 << 10
+	maxRawHeadLines    = 40
+	maxRawHeadBytes    = 4 << 10
+	maxRawLineBytes    = 512
+	// maxStreamDiagnosticsBytes bounds everything Diagnostics renders, headers included.
+	maxStreamDiagnosticsBytes = 2*maxDiagnosticBytes + maxRawHeadBytes + maxTailBytes + 4<<10
+)
+
+// boundedText keeps text up to max bytes and counts the lines it dropped past it.
+type boundedText struct {
+	b       strings.Builder
+	max     int
+	dropped int
+}
+
+func (t *boundedText) add(line string) {
+	if t.dropped > 0 || t.b.Len()+len(line)+1 > t.max {
+		t.dropped++
+		return
+	}
+	t.b.WriteString(line)
+	t.b.WriteByte('\n')
+}
+
 // testTail is the bounded last output of one test.
 type testTail struct {
 	lines   []string
@@ -321,10 +351,103 @@ type failedTestParser struct {
 	summaryCut     bool
 	events         int
 	err            error
+	// Diagnostics kept for a refused stream: build output, package-level output that
+	// is not a summary line, and a bounded head and tail of the raw lines.
+	buildOutput   boundedText
+	packageOutput boundedText
+	rawHead       boundedText
+	rawHeadLines  int
+	rawTail       testTail
 }
 
 func newFailedTestParser() *failedTestParser {
-	return &failedTestParser{failed: map[TestID]bool{}, failedPackages: map[string]bool{}, started: map[TestID]bool{}, aborted: map[string]string{}, packages: map[string]bool{}, tails: map[TestID]*testTail{}}
+	return &failedTestParser{failed: map[TestID]bool{}, failedPackages: map[string]bool{}, started: map[TestID]bool{}, aborted: map[string]string{}, packages: map[string]bool{}, tails: map[TestID]*testTail{},
+		buildOutput: boundedText{max: maxDiagnosticBytes}, packageOutput: boundedText{max: maxDiagnosticBytes}, rawHead: boundedText{max: maxRawHeadBytes}}
+}
+
+// keepRaw adds one raw stdout line to the head, or once the head is full to the tail,
+// each line cut to maxRawLineBytes.
+func (p *failedTestParser) keepRaw(line []byte) {
+	text := string(line)
+	if len(line) > maxRawLineBytes {
+		text = string(line[:maxRawLineBytes]) + " [forgecell: line cut]"
+	}
+	if p.rawHeadLines < maxRawHeadLines && p.rawHead.dropped == 0 && p.rawHead.b.Len()+len(text)+1 <= p.rawHead.max {
+		p.rawHead.add(text)
+		p.rawHeadLines++
+		return
+	}
+	p.rawHeadLines = maxRawHeadLines
+	p.rawTail.add(text)
+}
+
+// keepDiagnostic adds the build output and the package-level output of one event; its
+// ok and FAIL package lines go to the summary instead.
+func (p *failedTestParser) keepDiagnostic(ev goTestEvent) {
+	var into *boundedText
+	switch {
+	case ev.Action == "build-output":
+		into = &p.buildOutput
+	case ev.Action == "output" && ev.Test == "":
+		into = &p.packageOutput
+	default:
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(ev.Output, "\n"), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if into == &p.packageOutput {
+			if goTestPackageLine.MatchString(line) {
+				p.keepSummaryLine(line)
+				continue
+			}
+			if line == "" || line == "PASS" || line == "FAIL" {
+				continue
+			}
+		}
+		if len(line) > maxRawLineBytes {
+			line = line[:maxRawLineBytes] + " [forgecell: line cut]"
+		}
+		into.add(line)
+	}
+}
+
+// Diagnostics renders what a refused stream kept, so a reviewer sees the compiler and
+// package errors a plain run would show: why the stream was refused, the build output,
+// the package-level output and the head and tail of the raw stdout, each bounded and
+// redacted, within maxStreamDiagnosticsBytes. It never yields a failing set.
+func (p *failedTestParser) Diagnostics(refused error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[forgecell: the go test -json stream was refused (%s); its diagnostics follow and no failing test can be declared from it]\n", refused)
+	section := func(title string, t *boundedText) {
+		if t.b.Len() == 0 && t.dropped == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "=== %s\n", title)
+		for _, line := range strings.Split(strings.TrimSuffix(t.b.String(), "\n"), "\n") {
+			b.WriteString("    " + line + "\n")
+		}
+		if t.dropped > 0 {
+			fmt.Fprintf(&b, "[forgecell: %s cut at its %d byte bound, %d later line(s) dropped]\n", title, t.max, t.dropped)
+		}
+	}
+	section("build output", &p.buildOutput)
+	section("package output", &p.packageOutput)
+	section("raw stdout head", &p.rawHead)
+	if len(p.rawTail.lines) > 0 {
+		fmt.Fprintf(&b, "=== raw stdout tail: last %d line(s)", len(p.rawTail.lines))
+		if p.rawTail.dropped > 0 {
+			fmt.Fprintf(&b, ", %d line(s) between head and tail dropped", p.rawTail.dropped)
+		}
+		b.WriteString("\n")
+		for _, line := range p.rawTail.lines {
+			b.WriteString("    " + line + "\n")
+		}
+	}
+	out := harness.RedactSecrets(b.String())
+	if len(out) > maxStreamDiagnosticsBytes {
+		out = out[:maxStreamDiagnosticsBytes] + "\n[forgecell: diagnostics cut]\n"
+	}
+	return out
 }
 
 // keepTestOutput adds the lines of one output event to its test's tail. A test that
@@ -424,12 +547,21 @@ func (p *failedTestParser) tailSummary() string {
 
 // Line consumes one output line. It never returns an error, so a sink built on it
 // cannot stop a run that exits zero; the first refusal is reported by Finish.
+// After a refusal it only keeps the bounded diagnostics, decoding a line only while
+// there is room for its build or package output.
 func (p *failedTestParser) Line(raw []byte) error {
-	if p.err != nil {
-		return nil
-	}
 	line := bytes.TrimSpace(raw)
 	if len(line) == 0 {
+		return nil
+	}
+	p.keepRaw(line)
+	if p.err != nil {
+		if p.buildOutput.dropped == 0 || p.packageOutput.dropped == 0 {
+			var ev goTestEvent
+			if json.Unmarshal(line, &ev) == nil {
+				p.keepDiagnostic(ev)
+			}
+		}
 		return nil
 	}
 	var ev goTestEvent
@@ -445,6 +577,7 @@ func (p *failedTestParser) Line(raw []byte) error {
 		}
 		p.packages[ev.Package] = true
 	}
+	p.keepDiagnostic(ev)
 	if ev.Action == "output" {
 		if marker, ok := abortMarker(ev.Test, ev.Output); ok {
 			p.aborted[ev.Package] = marker
@@ -452,13 +585,7 @@ func (p *failedTestParser) Line(raw []byte) error {
 		if marker, ok := abnormalExitMarker(ev.Output); ok {
 			p.aborted[ev.Package] = marker
 		}
-		if ev.Test == "" {
-			for _, line := range strings.Split(ev.Output, "\n") {
-				if line = strings.TrimRight(line, "\r"); goTestPackageLine.MatchString(line) {
-					p.keepSummaryLine(line)
-				}
-			}
-		} else {
+		if ev.Test != "" {
 			p.keepTestOutput(TestID{Package: ev.Package, Test: ev.Test}, ev.Output)
 		}
 	}

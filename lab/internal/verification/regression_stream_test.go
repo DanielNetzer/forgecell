@@ -312,6 +312,220 @@ func TestCapAndOverflowAreUnchangedWithoutDeclaredDeltasOrJSON(t *testing.T) {
 	}
 }
 
+// plainFirstRunFixture is baselineFixture with no declared deltas and a single
+// required regression check, the plain go test -timeout 20m ./... unless argv is
+// given: a Molecule's first protected run. pass makes the fake go pass in both views.
+func plainFirstRunFixture(t *testing.T, mode string, pass bool, argv ...string) (string, string, readiness.Plan, CaptureResult) {
+	t.Helper()
+	bin, dir, p, c := baselineFixture(t, mode)
+	if pass {
+		fake := strings.Replace(baselineFakeGo, "if grep -q new pkg/pin_test.go; then", "if true; then", 1)
+		if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fake), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := p.Analysis.Checks[1]
+	check.ID = "plain"
+	if len(argv) > 0 {
+		check.Argv = argv
+	}
+	p.Analysis.Checks, p.FormulaBaseline = []readiness.Check{check}, nil
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return bin, dir, p, c
+}
+
+// A first protected run declares no deltas, yet the protected view streams a plain
+// direct go test check with -json, so --accept-protected-failures has a trustworthy
+// failing set to declare; the verdict and the candidate view are unchanged.
+func TestFirstProtectedRunWithoutDeltasStreamsAPlainGoTestCheck(t *testing.T) {
+	bin, dir, p, c := plainFirstRunFixture(t, "by-design", false)
+	approved := append([]string{}, p.Analysis.Checks[0].Argv...)
+	digest, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := runDelta(t, dir, p, c)
+	if v.RequiredChecksPassed || v.Protected == nil || v.Protected.RequiredChecksPassed || !strings.Contains(v.Error, "required command plain did not pass") || len(v.AcceptedDeltas) != 0 || len(v.Warnings) != 0 {
+		t.Fatalf("recording the failing set must not change the verdict: %q %+v", v.Error, v.Protected)
+	}
+	if got, want := argvLog(t, bin), []string{"test -timeout 20m ./...", "test -json -timeout 20m ./..."}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+	if after, err := p.Digest(); err != nil || after != digest || !reflect.DeepEqual(p.Analysis.Checks[0].Argv, approved) {
+		t.Fatalf("the plan changed: digest %s -> %s", digest, after)
+	}
+	candidate := v.Checks[0]
+	if candidate.JSONAdded || !candidate.Result.OK || !reflect.DeepEqual(candidate.Command, p.Analysis.Checks[0]) || strings.Contains(candidate.Result.Stdout, `"Action"`) {
+		t.Fatalf("the candidate view was changed: %+v", candidate)
+	}
+	obs := v.Protected.Checks[0]
+	if !obs.JSONAdded || obs.Result.OK || !reflect.DeepEqual(obs.Command.Argv, approved) || len(obs.AcceptedDeltas) != 0 {
+		t.Fatalf("protected observation: %+v", obs)
+	}
+	want := []TestID{{baselinePkg, "TestA"}}
+	if !reflect.DeepEqual(obs.FailedTests, want) {
+		t.Fatalf("failing tests = %v, want %v", obs.FailedTests, want)
+	}
+	if out := obs.Result.Stdout; strings.Contains(out, `"Action"`) || !strings.Contains(out, "--- FAIL: TestA ("+baselinePkg+")") || obs.Result.Truncated || len(out) > maxStreamSummaryBytes+200 {
+		t.Fatalf("protected stdout %q", out)
+	}
+	if got, err := ProtectedFailuresForDeltas(obs); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("accept helper on a first-run engine-streamed check: %v %v", got, err)
+	}
+	if MatchesCheckObservation(p, p.Analysis.Checks[0], obs, v.Protected.SourceTree, true) {
+		t.Fatal("a recorded failing set without declared deltas must never match")
+	}
+}
+
+func TestFirstProtectedRunWithoutDeltasKeepsAPassingVerdict(t *testing.T) {
+	bin, dir, p, c := plainFirstRunFixture(t, "by-design", true)
+	v := runDelta(t, dir, p, c)
+	if !v.RequiredChecksPassed || v.Error != "" || v.Protected == nil || !v.Protected.RequiredChecksPassed || len(v.AcceptedDeltas) != 0 || len(v.Warnings) != 0 {
+		t.Fatalf("a passing no-delta run changed verdict: %q %+v", v.Error, v.Protected)
+	}
+	if got := argvLog(t, bin); !reflect.DeepEqual(got, []string{"test -timeout 20m ./...", "test -json -timeout 20m ./..."}) {
+		t.Fatalf("argv = %q", got)
+	}
+	obs := v.Protected.Checks[0]
+	if !obs.JSONAdded || !obs.Result.OK || len(obs.FailedTests) != 0 || strings.Contains(obs.Result.Stdout, `"Action"`) {
+		t.Fatalf("protected observation: %+v", obs)
+	}
+	if obs.Packages == nil || obs.Packages.Run != 2 {
+		t.Fatalf("package counts from the summary: %+v", obs.Packages)
+	}
+	if v.Checks[0].JSONAdded || !v.Checks[0].Result.OK {
+		t.Fatalf("the candidate view was changed: %+v", v.Checks[0])
+	}
+}
+
+// A refused stream, including a build failure under engine-added -json and a package
+// that fails without a failing test (a TestMain exit), fails closed with nothing
+// declarable, yet keeps the build and package diagnostics a plain run would show.
+func TestFirstProtectedRunWithoutDeltasFailsClosedOnAnUntrustedStream(t *testing.T) {
+	for mode, wants := range map[string][]string{
+		"panic":     {"panic: boom"},
+		"timeout":   {"test timed out after"},
+		"truncate":  nil,
+		"unparsed":  {"=== raw stdout head", "    not-json"},
+		"buildfail": {"build failure in", "=== build output\n    # " + baselinePkg + "\n    pkg/pin_test.go:3:9: undefined: pinnedOld\n", "FAIL\t" + baselinePkg + " [build failed]"},
+		"testmain":  {"failed without a failing test", "=== package output\n    TestMain: fixture setup refused\n", "FAIL\t" + baselinePkg + "\t0.01s"},
+	} {
+		t.Run(mode, func(t *testing.T) {
+			_, dir, p, c := plainFirstRunFixture(t, mode, false)
+			v := runDelta(t, dir, p, c)
+			if v.RequiredChecksPassed || v.Protected == nil || v.Protected.RequiredChecksPassed || len(v.AcceptedDeltas) != 0 {
+				t.Fatalf("an untrusted stream passed: %q", v.Error)
+			}
+			obs := v.Protected.Checks[0]
+			if !obs.JSONAdded || obs.Result.OK || len(obs.FailedTests) != 0 || len(obs.Result.Stdout) > maxStreamSummaryBytes+maxStreamDiagnosticsBytes+200 {
+				t.Fatalf("a refused stream recorded evidence it cannot support: %+v", obs)
+			}
+			out := obs.Result.Stdout
+			if !strings.Contains(out, "go test -json stream was refused") || strings.Contains(out, dir) {
+				t.Fatalf("refused stream diagnostics: %q", out)
+			}
+			for _, want := range wants {
+				if !strings.Contains(out, want) {
+					t.Fatalf("diagnostics lack %q: %q", want, out)
+				}
+			}
+			if _, err := ProtectedFailuresForDeltas(obs); err == nil {
+				t.Fatal("a refused first-run stream was turned into a failing set")
+			}
+		})
+	}
+}
+
+// Argv the engine must not trust as a stream: -json=false after the inserted -json
+// turns it back into plain output, which the parser refuses; -json after -args reaches
+// the test binary, not go test, so the check is not streamed and its plain output never
+// parses. Either fails closed with nothing declarable.
+func TestFirstProtectedRunRefusesArgvThatDefeatsTheStream(t *testing.T) {
+	for name, c := range map[string]struct {
+		argv      []string
+		jsonAdded bool
+		protected string
+	}{
+		"json=false":       {[]string{"go", "test", "-json=false", "-timeout", "20m", "./..."}, true, "test -json -json=false -timeout 20m ./..."},
+		"json after -args": {[]string{"go", "test", "-timeout", "20m", "./...", "-args", "-json"}, false, "test -timeout 20m ./... -args -json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin, dir, p, capture := plainFirstRunFixture(t, "by-design", false, c.argv...)
+			v := runDelta(t, dir, p, capture)
+			if v.RequiredChecksPassed || v.Protected == nil || v.Protected.RequiredChecksPassed || len(v.AcceptedDeltas) != 0 {
+				t.Fatalf("verdict: %q", v.Error)
+			}
+			if got := argvLog(t, bin); len(got) != 2 || got[1] != c.protected {
+				t.Fatalf("argv = %q, want protected %q", got, c.protected)
+			}
+			obs := v.Protected.Checks[0]
+			if obs.JSONAdded != c.jsonAdded || obs.Result.OK || len(obs.FailedTests) != 0 || !reflect.DeepEqual(obs.Command.Argv, c.argv) {
+				t.Fatalf("protected observation: %+v", obs)
+			}
+			if c.jsonAdded && (!strings.Contains(obs.Result.Stdout, "stream was refused") || !strings.Contains(obs.Result.Stdout, "--- FAIL: TestA")) {
+				t.Fatalf("the refused plain output was not kept as diagnostics: %q", obs.Result.Stdout)
+			}
+			if _, err := ProtectedFailuresForDeltas(obs); err == nil {
+				t.Fatalf("a %s check was turned into a failing set", name)
+			}
+		})
+	}
+}
+
+// GOFLAGS=-failfast in the env the check runs with could let one failure hide others,
+// so the protected view does not add -json to it and nothing becomes declarable.
+func TestFirstProtectedRunDoesNotStreamUnderGoflagsFailfast(t *testing.T) {
+	bin, dir, p, c := plainFirstRunFixture(t, "by-design", false)
+	p.Policy.Environment = append(append([]string{}, p.Policy.Environment...), "GOFLAGS")
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOFLAGS", "-failfast")
+	v := runDelta(t, dir, p, c)
+	if v.RequiredChecksPassed || v.Protected == nil || len(v.AcceptedDeltas) != 0 {
+		t.Fatalf("verdict: %q", v.Error)
+	}
+	if got := argvLog(t, bin); !reflect.DeepEqual(got, []string{"test -timeout 20m ./...", "test -timeout 20m ./..."}) {
+		t.Fatalf("a GOFLAGS=-failfast check was streamed: %q", got)
+	}
+	obs := v.Protected.Checks[0]
+	if obs.JSONAdded || len(obs.FailedTests) != 0 {
+		t.Fatalf("protected observation: %+v", obs)
+	}
+	if _, err := ProtectedFailuresForDeltas(obs); err == nil {
+		t.Fatal("a GOFLAGS=-failfast check was turned into a failing set")
+	}
+}
+
+func TestFirstProtectedRunDoesNotStreamWrappersOrFailfast(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"failfast": {"go", "test", "-failfast", "-timeout", "20m", "./..."},
+		"wrapper":  {"/bin/sh", "-c", "go test -timeout 20m ./..."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin, dir, p, c := plainFirstRunFixture(t, "by-design", false, argv...)
+			v := runDelta(t, dir, p, c)
+			if v.RequiredChecksPassed || v.Protected == nil || len(v.AcceptedDeltas) != 0 {
+				t.Fatalf("verdict: %q", v.Error)
+			}
+			for _, line := range argvLog(t, bin) {
+				if strings.Contains(line, "-json") {
+					t.Fatalf("a %s check was streamed: %q", name, line)
+				}
+			}
+			obs := v.Protected.Checks[0]
+			if obs.JSONAdded || len(obs.FailedTests) != 0 || !reflect.DeepEqual(obs.Command.Argv, argv) {
+				t.Fatalf("protected observation: %+v", obs)
+			}
+			if _, err := ProtectedFailuresForDeltas(obs); err == nil {
+				t.Fatalf("a %s check's plain output was turned into a failing set", name)
+			}
+		})
+	}
+}
+
 func TestProtectedFailureWithoutDeltasRecordsTheFailingTests(t *testing.T) {
 	dir, p, c := deltaFixture(t, passingBody(deltaPkg, "TestPinned"), failingBody(deltaPkg, "TestPinned", "TestOther"))
 	v := runDelta(t, dir, p, c)

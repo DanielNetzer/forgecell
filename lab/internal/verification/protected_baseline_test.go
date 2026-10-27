@@ -34,7 +34,9 @@ json=no
 scope=targeted
 for a in "$@"; do
 	case "$a" in
+	-args) break ;;
 	-json) json=yes ;;
+	-json=false) json=no ;;
 	./...) scope=baseline ;;
 	esac
 done
@@ -64,6 +66,25 @@ if [ $scope = baseline ]; then
 	timeout) [ $json = yes ] && printf '{"Action":"output","Package":"%s","Output":"panic: test timed out after 20m0s\\n"}\n' $pkg ;;
 	truncate) head -c 1200000 /dev/zero | tr '\0' x; echo; exit 1 ;;
 	unparsed) echo not-json ;;
+	buildfail)
+		if [ $json = yes ]; then
+			printf '{"ImportPath":"%s [%s.test]","Action":"build-output","Output":"# %s\\n"}\n' $pkg $pkg $pkg
+			printf '{"ImportPath":"%s [%s.test]","Action":"build-output","Output":"pkg/pin_test.go:3:9: undefined: pinnedOld\\n"}\n' $pkg $pkg
+			printf '{"ImportPath":"%s [%s.test]","Action":"build-fail"}\n' $pkg $pkg
+			printf '{"Action":"output","Package":"%s","Output":"FAIL\\t%s [build failed]\\n"}\n' $pkg $pkg
+			pk fail $pkg
+		else
+			printf '# %s\npkg/pin_test.go:3:9: undefined: pinnedOld\nFAIL\t%s [build failed]\n' $pkg $pkg
+		fi
+		exit 1 ;;
+	testmain)
+		if [ $json = yes ]; then
+			printf '{"Action":"output","Package":"%s","Output":"TestMain: fixture setup refused\\n"}\n' $pkg
+			summ FAIL $pkg; pk fail $pkg
+		else
+			printf 'TestMain: fixture setup refused\nFAIL\t%s\t0.01s\n' $pkg
+		fi
+		exit 1 ;;
 	esac
 fi
 if [ $json = yes ]; then
@@ -357,11 +378,13 @@ func TestProtectedDeltaIdentityScopeIsAnExplicitOptIn(t *testing.T) {
 	if v.RequiredChecksPassed || v.Protected == nil || len(v.Protected.Checks) != 2 || !strings.Contains(v.Error, "required command "+baselineCheck+" did not pass") {
 		t.Fatalf("a CheckID-bound delta excused the baseline: %q", v.Error)
 	}
-	if targeted, baseline := v.Protected.Checks[0], v.Protected.Checks[1]; len(targeted.AcceptedDeltas) != 1 || baseline.JSONAdded || len(baseline.AcceptedDeltas) != 0 {
+	// The protected view streams the plain baseline with -json even without applicable
+	// deltas (#257), which records its failing set but never excuses it.
+	if targeted, baseline := v.Protected.Checks[0], v.Protected.Checks[1]; len(targeted.AcceptedDeltas) != 1 || !baseline.JSONAdded || len(baseline.AcceptedDeltas) != 0 {
 		t.Fatalf("targeted %+v baseline %+v", targeted, baseline)
 	}
-	if got := argvLog(t, bin); got[3] != "test -timeout 20m ./..." {
-		t.Fatalf("the baseline without applicable deltas did not run as approved: %q", got)
+	if got := argvLog(t, bin); got[3] != "test -json -timeout 20m ./..." {
+		t.Fatalf("the baseline without applicable deltas was not streamed: %q", got)
 	}
 
 	_, dir, p, c = baselineFixture(t, "by-design", baselineDelta("targeted", "TestA"))
