@@ -9,6 +9,9 @@ const FILTERS = [
   ['blocked', 'Blocked'], ['finished', 'Finished · Draft published'], ['other', 'Other'], ['retired', 'Retired'],
 ];
 
+// AXIS_COLUMNS is the narrowest grid, in columns, whose width fits the axis labels.
+const AXIS_COLUMNS = 8;
+
 function statusLabel(m) {
   return laneLabel(m) + ' · ' + notRecorded(m.status) + (m.phase ? ' · ' + m.phase : '');
 }
@@ -68,6 +71,8 @@ function renderNote(list) {
 // Retired sits last, after a hairline divider.
 function renderFilters() {
   const counts = (state.list && state.list.counts) || {};
+  const bar = $('#run-filters');
+  const left = bar.scrollLeft;
   fill($('#run-filters'), FILTERS.flatMap(([id, label]) => [
     id === RETIRED ? el('span', { class: 'lane-divider', 'aria-hidden': 'true' }) : null,
     el('button', {
@@ -77,6 +82,19 @@ function renderFilters() {
     el('span', { class: 'lane-name' }, label),
     el('span', { class: 'lane-count' }, String(id === 'all' ? counts.all || 0 : counts[id] || 0))),
   ]));
+  keepLaneStart(bar, left);
+}
+
+// keepLaneStart restores the bar's scroll after a rebuild, then scrolls only as
+// far as needed to show the pressed segment whole, so the bar never opens on a
+// clipped first segment.
+function keepLaneStart(bar, left) {
+  bar.scrollLeft = left;
+  const on = bar.querySelector('[aria-pressed="true"]');
+  if (!on) return;
+  const box = bar.getBoundingClientRect(), seg = on.getBoundingClientRect(), pad = 4;
+  if (seg.left < box.left + pad) bar.scrollLeft -= box.left + pad - seg.left;
+  else if (seg.right > box.right - pad) bar.scrollLeft += seg.right - (box.right - pad);
 }
 
 function applyFilter() {
@@ -86,6 +104,10 @@ function applyFilter() {
   const shown = all.filter((b) => !b.hidden);
   const chosen = shown.find((b) => b.dataset.id === state.selectedId) || shown[0];
   if (chosen) chosen.tabIndex = 0;
+  // The grid has as many rows as it shows cells, up to seven, and the axis labels
+  // show only once the grid is wide enough to carry them.
+  $('#cubes').style.setProperty('--rows', String(Math.max(1, Math.min(7, shown.length))));
+  $('.grid-axis').hidden = Math.ceil(shown.length / 7) < AXIS_COLUMNS;
   const empty = $('#filter-empty');
   empty.hidden = shown.length > 0;
   empty.textContent = molecules().length === 0 ? 'No Molecules are recorded in this Lab yet.' : state.query.trim() ? 'No matching Molecules in this filter. Clear search or choose All.' : 'No Molecules in this lane.';

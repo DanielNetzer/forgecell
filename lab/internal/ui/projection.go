@@ -1188,6 +1188,9 @@ func planningCost(r molecule.Record) *PlanningCostView {
 // racyWindow, changes the tag on every call rather than hiding a change.
 func ledgerETag(lab string) string {
 	h := sha256.New()
+	// The Insights "this week" tiles change when the week turns, so the week is
+	// part of the tag and a 304 never serves last week's totals.
+	fmt.Fprintf(h, "week %d\x00", weekStart(analyticsNow().UnixMilli()))
 	for _, sub := range []string{"ledgers", "deliveries"} {
 		fmt.Fprintf(h, "%s\x00", sub)
 		dir := filepath.Join(lab, sub)

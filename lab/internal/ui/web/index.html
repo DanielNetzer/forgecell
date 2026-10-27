@@ -205,12 +205,8 @@
 <section id="aggregate" class="view glass aggregate" data-view-panel="insights" aria-labelledby="aggregate-title" hidden>
   <div class="panel-head"><span class="mono">LAB OVERVIEW</span><span id="aggregate-count"></span></div>
   <h1 id="aggregate-title">Lab overview</h1>
-  <p class="aggregate-intro">Select a Molecule to inspect it under Work. Published, merged and production-verified are separate outcomes.</p>
-  <div class="metrics">
-    <article id="analytics" class="card"><span class="label">ANALYTICS</span><strong>Loading…</strong></article>
-    <article class="card"><span class="label">COST PER MERGED PR</span><strong>Unavailable</strong><p>Needs verified merge attribution. A draft publication receipt does not qualify.</p></article>
-    <article class="card"><span class="label">FORMULA SUGGESTIONS</span><strong>Unavailable</strong><p>Suggestion review is not connected in this slice.</p></article>
-  </div>
+  <p class="aggregate-intro">How your Lab spends time and money, and how each model performs, from this Lab's ledgers. Select a Molecule to inspect it under Work.</p>
+  <article id="analytics" class="card"><span class="label">ANALYTICS</span><strong>Loading…</strong></article>
   <div class="approval-queue">
     <div class="section-label"><span class="mono">NEEDS YOUR DECISION</span><span>Open one and click its button</span></div>
     <div id="review-queue"></div>
@@ -218,6 +214,13 @@
   <div class="outcome-chart">
     <div class="section-label"><span class="mono">MOLECULES BY LANE</span><span>Counts from the ledger inventory</span></div>
     <div id="outcome-bars"></div>
+  </div>
+  <div class="not-yet">
+    <p class="not-yet-title">Not yet available</p>
+    <dl class="insight-facts">
+      <div><dt><span class="label">COST PER MERGED PR</span></dt><dd>Unavailable · Needs verified merge attribution. A draft publication receipt does not qualify.</dd></div>
+      <div><dt><span class="label">FORMULA SUGGESTIONS</span></dt><dd>Unavailable · Suggestion review is not connected in this slice.</dd></div>
+    </dl>
   </div>
 </section>
 
