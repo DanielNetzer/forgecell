@@ -194,6 +194,9 @@ type handler struct {
 	// and tree. Tests may replace numstat.
 	numstat func(ctx context.Context, lab, workspace, base, tree string) (molecule.DiffStat, error)
 	diffs   *diffCache
+	// forge is the read-only GitHub sync behind /api/issues and /api/sync; tests
+	// replace its fetcher and clock.
+	forge *issueSync
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -300,7 +303,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache()}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil)}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -384,6 +387,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.molecules(w, r)
 	case path == "/api/analytics":
 		h.analytics(w, r)
+	case path == "/api/issues":
+		h.issues(w, r)
+	case path == "/api/sync":
+		h.syncStates(w, r)
 	case strings.HasPrefix(path, "/api/molecules/"):
 		h.molecule(w, r, strings.TrimPrefix(path, "/api/molecules/"))
 	case staticFiles[path] != "":

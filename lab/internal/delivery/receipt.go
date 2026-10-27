@@ -18,6 +18,8 @@ type ReceiptStatus struct {
 	Lifecycle  string
 	URL        string
 	MoleculeID string
+	// Commit is the commit Forgecell published, or "" before publication.
+	Commit string
 }
 
 // ReadReceiptStatus reads deliveries/<id>.json for display without locking,
@@ -25,7 +27,7 @@ type ReceiptStatus struct {
 // symlinked deliveries directory, a symlink, a non-regular or oversized file, a
 // receipt for another Molecule and a state other than prepared, committed or
 // published. The receipt state is reported exactly; publication is never
-// inferred. Only the state, lifecycle state, URL and Molecule id are kept: the
+// inferred. Only the state, lifecycle state, URL, commit and Molecule id are kept: the
 // JSON is streamed token by token, so the reviewed diff and every other field
 // are validated as JSON and discarded rather than decoded.
 func ReadReceiptStatus(lab, id string) (s ReceiptStatus, found bool, err error) {
@@ -48,7 +50,7 @@ func ReadReceiptStatus(lab, id string) (s ReceiptStatus, found bool, err error) 
 	return s, true, nil
 }
 
-// decodeStatus walks one top-level object, keeping state, url, lifecycle.state
+// decodeStatus walks one top-level object, keeping state, url, commit, lifecycle.state
 // and preview.moleculeId, and requires nothing but whitespace after it.
 func decodeStatus(dec *json.Decoder) (ReceiptStatus, error) {
 	var s ReceiptStatus
@@ -58,6 +60,8 @@ func decodeStatus(dec *json.Decoder) (ReceiptStatus, error) {
 			return dec.Decode(&s.State)
 		case "url":
 			return dec.Decode(&s.URL)
+		case "commit":
+			return dec.Decode(&s.Commit)
 		case "lifecycle":
 			return nullableObject(dec, func(key string) error {
 				if key == "state" {
