@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode"
 	"unicode/utf8"
 
@@ -638,7 +639,137 @@ func splitReleaseLauncher(p string) (root, version string) {
 func launcherUpgrade(previous, next string) bool {
 	oldRoot, oldVersion := splitReleaseLauncher(previous)
 	newRoot, newVersion := splitReleaseLauncher(next)
-	return oldRoot == newRoot && compareReleaseVersions(newVersion, oldVersion) > 0
+	if oldRoot != newRoot {
+		return false
+	}
+	c, ordered := releaseOrder(newVersion, oldVersion, func() (int64, int64) { return devCommitTime(next), devCommitTime(previous) })
+	return ordered && c > 0
+}
+
+// isDevBuild reports a dev build's pre-release (dev.<rev>[.dirty.<digest>]).
+func isDevBuild(pre string) bool { return strings.HasPrefix(pre, "dev.") }
+
+// sameVersionDevBuilds reports two different dev builds of one major.minor.patch,
+// whose identifiers are commit hashes that sort alphabetically, not by time.
+func sameVersionDevBuilds(a, b string) bool {
+	aCore, aPre, _ := strings.Cut(a, "-")
+	bCore, bPre, _ := strings.Cut(b, "-")
+	return aCore == bCore && aPre != bPre && isDevBuild(aPre) && isDevBuild(bPre)
+}
+
+// releaseOrder is compareReleaseVersions, except for two dev builds of the same
+// major.minor.patch from different builds: those are ordered by the commit times
+// their installs recorded (times reads them, a then b, only then), and only when
+// both carry a time and the times differ. Otherwise they are unordered, and a
+// rebind between them is never treated as an upgrade.
+func releaseOrder(a, b string, times func() (aTime, bTime int64)) (int, bool) {
+	if !sameVersionDevBuilds(a, b) {
+		return compareReleaseVersions(a, b), true
+	}
+	aTime, bTime := times()
+	switch {
+	case aTime <= 0 || bTime <= 0 || aTime == bTime:
+		return 0, false
+	case aTime > bTime:
+		return 1, true
+	}
+	return -1, true
+}
+
+// DevBuildFile is the record forgecell dev install writes beside a dev build's
+// manifest.json: the release version and the Unix committer time of the source
+// commit it was built from, as git log -1 --format=%ct reported it.
+const DevBuildFile = "dev-build.json"
+
+// DevBuild is the content of DevBuildFile.
+type DevBuild struct {
+	Version    string `json:"version"`
+	CommitTime int64  `json:"commitTime"`
+}
+
+// maxDevBuildBytes bounds DevBuildFile; maxCommitTime (year 3000) bounds the time.
+const (
+	maxDevBuildBytes = 1024
+	maxCommitTime    = 32503680000
+)
+
+// devCommitTime is the commit time the dev build at launcher recorded, or 0 when
+// it records none or the record is not trustworthy: the release directory must
+// be a real directory and the record a small regular file owned by this user,
+// opened without following a symlink, that decodes strictly and names the
+// directory's own version. Tests replace it.
+var devCommitTime = func(launcher string) int64 {
+	dir := filepath.Dir(launcher)
+	if st, err := os.Lstat(dir); err != nil || !st.IsDir() {
+		return 0
+	}
+	f, err := os.OpenFile(filepath.Join(dir, DevBuildFile), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxDevBuildBytes {
+		return 0
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); !ok || int(sys.Uid) != os.Getuid() {
+		return 0
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxDevBuildBytes+1))
+	if err != nil || len(raw) > maxDevBuildBytes {
+		return 0
+	}
+	var record DevBuild
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&record) != nil || dec.More() || record.Version != filepath.Base(dir) || record.CommitTime <= 0 || record.CommitTime > maxCommitTime {
+		return 0
+	}
+	return record.CommitTime
+}
+
+// Launcher orders, from CompareLaunchers.
+const (
+	LauncherNewer     = "newer"
+	LauncherSame      = "same"
+	LauncherOlder     = "older"
+	LauncherUnordered = "unordered"
+	LauncherUnrelated = "unrelated"
+)
+
+// CompareLaunchers orders the build of next against the build of current for a
+// rebind: newer, same, older, unordered (two dev builds of one version whose
+// recorded commit times do not order them) or unrelated (not both release launchers of one
+// installation, so there is no version order). reason is a plain sentence that
+// names versions only, never a path.
+func CompareLaunchers(current, next string) (order, reason string) {
+	if current == next {
+		return LauncherSame, "This build is already the Formula's launcher."
+	}
+	if !IsReleaseLauncher(current) || !IsReleaseLauncher(next) {
+		return LauncherUnrelated, "The Formula's launcher and this build are not both installed releases, so Forgecell cannot order them."
+	}
+	oldRoot, oldVersion := splitReleaseLauncher(current)
+	newRoot, newVersion := splitReleaseLauncher(next)
+	if oldRoot != newRoot {
+		return LauncherUnrelated, "This build belongs to another Forgecell installation than the Formula's launcher."
+	}
+	var newTime, oldTime int64
+	c, ordered := releaseOrder(newVersion, oldVersion, func() (int64, int64) {
+		newTime, oldTime = devCommitTime(next), devCommitTime(current)
+		return newTime, oldTime
+	})
+	switch {
+	case !ordered && newTime > 0 && newTime == oldTime:
+		return LauncherUnordered, fmt.Sprintf("This build (%s) and the Formula's launcher (%s) are dev builds of the same version with the same recorded commit time, so Forgecell cannot tell which is newer.", newVersion, oldVersion)
+	case !ordered:
+		return LauncherUnordered, fmt.Sprintf("This build (%s) and the Formula's launcher (%s) are dev builds of the same version, and at least one records no commit time, so Forgecell cannot tell which is newer.", newVersion, oldVersion)
+	case c > 0:
+		return LauncherNewer, fmt.Sprintf("This build (%s) is newer than the Formula's launcher (%s).", newVersion, oldVersion)
+	case c < 0:
+		return LauncherOlder, fmt.Sprintf("This build (%s) is older than the Formula's launcher (%s).", newVersion, oldVersion)
+	}
+	return LauncherSame, fmt.Sprintf("This build (%s) is the same version as the Formula's launcher.", newVersion)
 }
 
 // compareReleaseVersions orders X.Y.Z[-pre] versions by semantic-version

@@ -222,6 +222,17 @@
 <section id="view-formula" class="view glass formula-view" data-view-panel="formula" aria-labelledby="formula-title" hidden>
   <h1 id="formula-title">Formula</h1>
   <div id="active-formula" class="active-formula"></div>
+  <div class="formula-proposals" role="group" aria-labelledby="formula-proposals-title">
+    <h2 id="formula-proposals-title">Proposals</h2>
+    <p id="formula-live" class="sr-only" role="status" aria-live="polite"></p>
+    <p id="formula-error" class="formula-error" role="alert" tabindex="-1" hidden></p>
+    <div id="formula-pending"></div>
+    <div id="formula-create" class="formula-create card"></div>
+  </div>
+  <div id="formula-suggestions" class="formula-suggestions" role="group" aria-labelledby="formula-suggestions-title">
+    <h2 id="formula-suggestions-title">Suggestions</h2>
+    <p class="unavailable-tag">Learned Formula suggestions are not connected in this slice</p>
+  </div>
 </section>
 
 <footer><span>Atom → Molecule · arranged by a Formula · inside your Lab</span><span id="footer-version"></span></footer>

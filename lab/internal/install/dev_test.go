@@ -2,6 +2,7 @@ package install
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,9 +10,11 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 )
 
@@ -577,6 +580,88 @@ func TestDevInstallDoesNotRunTheCheckoutsFsmonitor(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("the checkout's fsmonitor command ran")
+	}
+}
+
+func readDevBuild(t *testing.T, release string) (formula.DevBuild, bool) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(release), formula.DevBuildFile))
+	if os.IsNotExist(err) {
+		return formula.DevBuild{}, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record formula.DevBuild
+	if err = json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	return record, true
+}
+
+func TestDevInstallRecordsTheSourceCommitTime(t *testing.T) {
+	checkout := devCheckout(t)
+	o := devOptions(t, checkout)
+	want, err := strconv.ParseInt(gitRun(t, checkout, "log", "-1", "--format=%ct", "HEAD"), 10, 64)
+	if err != nil || want <= 0 {
+		t.Fatalf("fixture commit time: %v", err)
+	}
+	r, err := DevInstall(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, found := readDevBuild(t, r.Path)
+	if !found || record.Version != r.Version || record.CommitTime != want {
+		t.Fatalf("dev build record %+v (found %v), want %s at %d", record, found, r.Version, want)
+	}
+	if st, err := os.Lstat(filepath.Join(filepath.Dir(r.Path), formula.DevBuildFile)); err != nil || st.Mode().Perm() != 0600 {
+		t.Fatalf("record mode: %v %v", st, err)
+	}
+	// The manifest the harness reads strictly is unchanged by the record.
+	if m := harness.ReadManifest(filepath.Dir(r.Path)); !m.Found || m.Digest != r.ManifestSHA256 {
+		t.Fatalf("%+v", m)
+	}
+	entries, err := os.ReadDir(filepath.Dir(r.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Fatalf("recording left %s behind", e.Name())
+		}
+	}
+	assertNoInstallLeftovers(t, o.Home)
+}
+
+func TestDevInstallRecordsAMissingCommitTimeAsAbsent(t *testing.T) {
+	previous := headCommitTime
+	headCommitTime = func(context.Context, string) int64 { return 0 }
+	t.Cleanup(func() { headCommitTime = previous })
+	o := devOptions(t, devCheckout(t))
+	r, err := DevInstall(context.Background(), o)
+	if err != nil {
+		t.Fatalf("a missing commit time must not fail the install: %v", err)
+	}
+	if record, found := readDevBuild(t, r.Path); found {
+		t.Fatalf("a missing commit time was recorded: %+v", record)
+	}
+	for _, out := range []string{"", "\n", "abc", "-5", "0", "12.5", "1700000000 1", "99999999999999", "32503680001"} {
+		if got := parseCommitTime(out); got != 0 {
+			t.Errorf("parseCommitTime(%q) = %d, want absent", out, got)
+		}
+	}
+	if got := parseCommitTime("1700000000\n"); got != 1700000000 {
+		t.Errorf("parseCommitTime = %d", got)
+	}
+}
+
+func TestDevInstallRefusesAnUnmanagedDevBuildRecord(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, formula.DevBuildFile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordDevBuild(dir, "0.2.0-dev.abcd", 1700000000); err == nil {
+		t.Fatal("a directory in the record's place was replaced")
 	}
 }
 
