@@ -3,7 +3,8 @@
 // writes are the human gates in gates.go (scope approval and draft publication),
 // Request changes on a waiting plan (amend.go, which records a revision and never
 // approves it), the drive actions in drive.go (start intake, start or stop the
-// loop, stop a Molecule this UI runs) and retiring one Molecule (retire.go), each
+// loop, stop a Molecule this UI runs), retiring one Molecule (retire.go) and,
+// in a checkout with no ready Lab, Set up your Lab (setup.go), each
 // a POST that needs the session cookie, the exact Origin and the per-tab session
 // header, and each performed by the engine, which validates digests, locks and
 // receipts. The one read that runs a process is a Molecule's diff size
@@ -62,6 +63,9 @@ type Options struct {
 	// Operator is the source checkout's git config user.name, as the CLI read it.
 	// It is untrusted: GET /api/lab serves it only through operatorView.
 	Operator string
+	// Setup, when set, serves Set up your Lab (setup.go) until the Lab has an
+	// approved Formula; every other API route is refused until then.
+	Setup *SetupOptions
 }
 
 // Server is a UI listening on 127.0.0.1.
@@ -89,6 +93,16 @@ func Listen(o Options) (*Server, error) {
 			return nil, err
 		}
 		o.LabDir = abs
+		if o.Setup != nil {
+			setup := *o.Setup
+			setup.Labs = make([]string, len(o.Setup.Labs))
+			for i, dir := range o.Setup.Labs {
+				if setup.Labs[i], err = filepath.Abs(dir); err != nil {
+					return nil, err
+				}
+			}
+			o.Setup = &setup
+		}
 	}
 	token, err := newToken()
 	if err != nil {
@@ -197,6 +211,8 @@ type handler struct {
 	// forge is the read-only GitHub sync behind /api/issues and /api/sync; tests
 	// replace its fetcher and clock.
 	forge *issueSync
+	// setup is this launch's Set up your Lab progress, or nil (setup.go).
+	setup *setupState
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -219,6 +235,7 @@ var staticFiles = map[string]string{
 	"/js/insights.js":          "js/insights.js",
 	"/js/formula.js":           "js/formula.js",
 	"/js/loop.js":              "js/loop.js",
+	"/js/setup.js":             "js/setup.js",
 	// The stylesheets index.html links, in its order: tokens, base, then views.
 	"/css/tokens.css":   "css/tokens.css",
 	"/css/base.css":     "css/base.css",
@@ -229,6 +246,7 @@ var staticFiles = map[string]string{
 	"/css/insights.css": "css/insights.css",
 	"/css/formula.css":  "css/formula.css",
 	"/css/loop.css":     "css/loop.css",
+	"/css/setup.css":    "css/setup.css",
 	// session.js only copies the exchange page's value into sessionStorage; it
 	// holds no secret, so it is served without the cookie.
 	"/session.js": "session.js",
@@ -303,7 +321,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil)}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir)}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -333,16 +351,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusForbidden, "cross-site request refused")
 		return
 	}
-	// GET serves every read; POST is served only on the gate and drive routes.
+	// GET serves every read; POST is served only on the gate, drive and setup
+	// routes.
 	gateID, gateAction, gate := gateRoute(r.URL.Path)
 	driveID, driveAction, drive := driveRoute(r.URL.Path)
-	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive)) {
-		if gate || drive {
+	setupAction, setup := setupRoute(r.URL.Path)
+	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive || setup)) {
+		if gate || drive || setup {
 			header.Set("Allow", http.MethodPost)
 		} else {
 			header.Set("Allow", http.MethodGet)
 		}
-		h.refuse(w, http.StatusMethodNotAllowed, "only GET is served here; the only writes are the gate and drive POST routes")
+		h.refuse(w, http.StatusMethodNotAllowed, "only GET is served here; the only writes are the gate, drive and setup POST routes")
 		return
 	}
 	if launch {
@@ -361,9 +381,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusForbidden, "this tab has no Lab UI session; open a new launch link from forgecell ui")
 		return
 	}
+	// Until the Lab is set up, only setup and the static files are served.
+	if h.setupActive() && strings.HasPrefix(r.URL.Path, "/api/") && !setup && r.URL.Path != "/api/setup" {
+		h.refuseWith(w, http.StatusConflict, "setup", "set up your Lab first; nothing was read or written", "Finish Set up your Lab")
+		return
+	}
 	if r.Method == http.MethodPost {
 		if !h.writeAllowed(r) {
 			h.refuse(w, http.StatusForbidden, "a write needs this server's exact Origin from the same site; nothing was written")
+			return
+		}
+		if setup {
+			h.setupPost(w, r, setupAction)
 			return
 		}
 		if drive {
@@ -377,6 +406,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch path := r.URL.Path; {
+	case path == "/api/setup":
+		h.setupStatus(w)
 	case path == "/api/lab":
 		h.lab(w)
 	case path == "/api/loop":

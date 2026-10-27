@@ -64,6 +64,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		return demo.ServeStub(args[1:], in, out, stderr)
 	}
 	defaultLab := ""
+	// labChoices are the Labs forgecell ui offers when several match the
+	// repository, where every other command asks for --lab DIR.
+	var labChoices []string
 	if labCommands[args[0]] || args[0] == "loop" || args[0] == "ui" || args[0] == "retire" {
 		rest, name, explicitLab, err := labArgs(args)
 		if err != nil {
@@ -72,6 +75,11 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		args = rest
 		if !explicitLab && !(args[0] == "ui" && demoRequested(args[1:])) {
 			resolved, err := resolveLab(ctx, name)
+			if err != nil && args[0] == "ui" {
+				if labChoices = uiLabChoices(ctx, name); labChoices != nil {
+					err = nil
+				}
+			}
 			if err != nil {
 				return fail(err)
 			}
@@ -94,7 +102,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	}
 
 	if args[0] == "ui" {
-		return runUI(ctx, args[1:], defaultLab, version, out, stderr)
+		return runUIChoosing(ctx, args[1:], defaultLab, labChoices, version, out, stderr)
 	}
 
 	if args[0] == "learn" || args[0] == "suggestion" {
