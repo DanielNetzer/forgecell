@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // V1 protects conventional test suites plus every explicitly cited checker.
@@ -96,8 +97,12 @@ func Run(ctx context.Context, source, destination string, p readiness.Plan, c Ca
 func RunObserved(ctx context.Context, source, destination string, p readiness.Plan, c CaptureResult, observe func(Observation) error) Result {
 	persistenceFailed := false
 	if observe != nil {
+		// Concurrent views observe one at a time, so the caller's ledger writes never race.
 		original := observe
+		var mu sync.Mutex
 		observe = func(o Observation) error {
+			mu.Lock()
+			defer mu.Unlock()
 			err := original(o)
 			if err != nil {
 				persistenceFailed = true
@@ -109,22 +114,18 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 	// both views run fresh for it; on a git error each view decides, and fails, itself.
 	// Only validated object ids reach git here; runViewDeltas refuses anything else.
 	objectID := regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
-	if objectID.MatchString(c.Tree) && objectID.MatchString(p.Inputs.BaseCommit) {
+	validIDs := objectID.MatchString(c.Tree) && objectID.MatchString(p.Inputs.BaseCommit)
+	if validIDs {
+		endPhase := beginPhase(ctx, "", PhaseModuleCheck)
 		if nonModule, err := treeChangesOutsideModules(ctx, source, p.Inputs.BaseCommit, c.Tree); err == nil {
 			ctx = context.WithValue(ctx, nonModuleKey{}, nonModule)
 		}
+		endPhase()
 	}
 	// The candidate view computes each selecting check's package set once from the
 	// captured change against BaseCommit; the protected view runs that same set.
 	ctx = withSelectionMemo(ctx)
-	// Always retain the candidate result separately, even when old tests fail.
-	candidate := runViewObserved(ctx, source, destination, p, c, observe)
-	if persistenceFailed {
-		return candidate
-	}
-	if err := p.Validate(); err != nil {
-		return candidate
-	}
+	memo, _ := ctx.Value(selectionKey{}).(*selectionMemo)
 	regression := []readiness.Check{}
 	for _, check := range p.Analysis.Checks {
 		if check.Category == "regression" {
@@ -134,11 +135,56 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 			regression = append(regression, check)
 		}
 	}
-	if len(regression) == 0 {
+	// The protected tree is prepared before either view, so the protected view can run
+	// beside the candidate view when resources allow.
+	valid := p.Validate() == nil
+	tree, treeErr := "", error(nil)
+	if valid && validIDs && len(regression) > 0 {
+		endPhase := beginPhase(ctx, "protected", PhaseProtectedTree)
+		tree, treeErr = ProtectedTree(ctx, source, p, c.Tree)
+		endPhase()
+	}
+	plan := p
+	plan.Analysis.Checks = regression
+	copy := c
+	copy.Tree = tree
+	var preserved *Result
+	var candidate Result
+	concurrent, refusal := false, ""
+	if valid && validIDs && len(regression) > 0 && treeErr == nil && tree != c.Tree {
+		concurrent, refusal = resources.ViewConcurrency(ctx)
+	}
+	if concurrent {
+		// Each view has its own workspace and GOTMPDIR. A required candidate failure
+		// stops the protected view at once, and its remaining checks are not run.
+		protectedCtx, cancelProtected := context.WithCancelCause(ctx)
+		defer cancelProtected(nil)
+		candidateDone := make(chan struct{})
+		memo.concurrent(candidateDone)
+		got := make(chan Result, 1)
+		go func() {
+			got <- runViewDeltas(protectedCtx, source, destination+"-protected", plan, copy, observe, true)
+		}()
+		candidate = runViewObserved(ctx, source, destination, p, c, observe)
+		if !candidate.RequiredChecksPassed {
+			cancelProtected(errCandidateFailed)
+		}
+		close(candidateDone)
+		r := <-got
+		preserved = &r
+		candidate.Notes = append(candidate.Notes, "The candidate and protected views ran concurrently.")
+	} else {
+		candidate = runViewObserved(ctx, source, destination, p, c, observe)
+		if refusal != "" {
+			candidate.Notes = append(candidate.Notes, refusal+".")
+		}
+	}
+	// An invalid tree or base identity already failed the candidate view; it never
+	// reaches git here.
+	if persistenceFailed || !valid || !validIDs || len(regression) == 0 {
 		return candidate
 	}
-	tree, err := ProtectedTree(ctx, source, p, c.Tree)
-	if err != nil {
+	if err := treeErr; err != nil {
 		keepCandidateError(&candidate)
 		candidate.Error = err.Error()
 		candidate.RequiredChecksPassed = false
@@ -153,12 +199,23 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 		}
 		return candidate
 	}
-	plan := p
-	plan.Analysis.Checks = regression
-	copy := c
-	copy.Tree = tree
-	preserved := runViewDeltas(ctx, source, destination+"-protected", plan, copy, observe, true)
-	candidate.Protected = &preserved
+	// Fail fast: after a required candidate check failed, the protected view (its full
+	// suite included) is not started, and every check of it is recorded as not run.
+	// Its own error stays the candidate view's.
+	if !candidate.RequiredChecksPassed {
+		if preserved == nil {
+			r := notRunView(plan, copy, NotRunCandidateFailure)
+			preserved = &r
+		}
+		candidate.Protected = preserved
+		keepCandidateError(&candidate)
+		return candidate
+	}
+	if preserved == nil {
+		r := runViewDeltas(ctx, source, destination+"-protected", plan, copy, observe, true)
+		preserved = &r
+	}
+	candidate.Protected = preserved
 	if !preserved.RequiredChecksPassed {
 		keepCandidateError(&candidate)
 		candidate.RequiredChecksPassed = false
@@ -171,6 +228,18 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 		candidate.Warnings = append(candidate.Warnings, preserved.Warnings...)
 	}
 	return candidate
+}
+
+// notRunView is the protected view a failed candidate view never started: every setup
+// command and regression check is recorded as not run, in the order the view would
+// have run them.
+func notRunView(p readiness.Plan, c CaptureResult, reason string) Result {
+	v := Result{SchemaVersion: "v1", SourceTree: c.Tree, Setup: []Observation{}, Checks: []Observation{}, Containment: "No command executed.", Error: "protected regression view " + reason}
+	commands := append(append([]readiness.Check{}, p.Setup...), p.Analysis.Checks...)
+	for _, i := range executionOrder(commands, len(p.Setup), true) {
+		v.NotRun = append(v.NotRun, notRunObservation(commands[i], commands[i].Category, c.Tree, reason))
+	}
+	return v
 }
 
 // keepCandidateError records the candidate view's own failure on CandidateError

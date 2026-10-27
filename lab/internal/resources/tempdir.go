@@ -390,12 +390,22 @@ func ownedLabTemp(dir string) (bool, error) {
 // pruned instead.
 const LabGoTempName = "gotmp"
 
+// LabGoTempViews name the per-view GOTMPDIRs a verification view gets under
+// LabGoTempName, so views that run concurrently never share one. The prune never lists
+// them, whatever their age, since a running verification uses them; it prunes their
+// own old children instead.
+var LabGoTempViews = []string{"candidate", "protected"}
+
+// labGoTempView reports a per-view GOTMPDIR name.
+func labGoTempView(name string) bool { return slices.Contains(LabGoTempViews, name) }
+
 // StaleLabTempEntries lists the entries directly under dir, a Lab's stable check TMPDIR,
 // that belong to the current user and were last modified more than StaleAge before now:
 // what tests and killed runs leaked. The shared GOTMPDIR dir/LabGoTempName is never
 // listed itself, whatever its age; when it is a real directory of the user, its direct
 // children (go-build* work directories and test temp directories) are listed by the same
-// rules. Only a dir LabTempDir created (it holds LabTempMarker, which is never listed, as
+// rules, except the per-view LabGoTempViews, which are kept and whose own children are
+// listed the same way. Only a dir LabTempDir created (it holds LabTempMarker, which is never listed, as
 // LabTempLabFile is not) has
 // entries; a missing dir or one without the marker has none, and a symbolic link is
 // refused.
@@ -415,11 +425,24 @@ func StaleLabTempEntries(dir string, now time.Time) ([]string, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ownedByUser(gotmp, info) {
 		return stale, nil
 	}
-	children, err := staleChildren(gotmp, now, func(string) bool { return false })
+	children, err := staleChildren(gotmp, now, labGoTempView)
 	if err != nil {
 		return nil, err
 	}
-	return append(stale, children...), nil
+	stale = append(stale, children...)
+	for _, view := range LabGoTempViews {
+		dir := filepath.Join(gotmp, view)
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ownedByUser(dir, info) {
+			continue
+		}
+		children, err := staleChildren(dir, now, func(string) bool { return false })
+		if err != nil {
+			return nil, err
+		}
+		stale = append(stale, children...)
+	}
+	return stale, nil
 }
 
 // staleChildren lists the entries directly under dir, except those skip names, that

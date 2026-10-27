@@ -17,6 +17,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 )
 
@@ -33,6 +34,14 @@ func driveSlotTicker(t *testing.T) (queued <-chan struct{}, tick chan<- time.Tim
 		return ticks, func() {}
 	}
 	return started, ticks
+}
+
+// limitSlots makes the Lab allow n verification slots for the test.
+func limitSlots(t *testing.T, n int) {
+	t.Helper()
+	original := verificationSlotLimit
+	t.Cleanup(func() { verificationSlotLimit = original })
+	verificationSlotLimit = func(Options) (int, string) { return n, "" }
 }
 
 // slotHeld reports whether some holder other than the caller has the Lab's slot.
@@ -63,6 +72,7 @@ func eventKinds(r Record) []string {
 // replaces the verifier and ticker seams.
 func TestVerificationSlotSerializesMolecules(t *testing.T) {
 	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
+	limitSlots(t, 1)
 	queued, tick := driveSlotTicker(t)
 	original := runVerification
 	t.Cleanup(func() { runVerification = original })
@@ -246,6 +256,7 @@ func TestVerificationSlotFreeDuringReview(t *testing.T) {
 // it replaces the verifier and ticker seams.
 func TestVerificationSlotCancelWhileQueued(t *testing.T) {
 	o, _ := fixture(t)
+	limitSlots(t, 1)
 	release, err := flockLedgerFile(o.LabDir, verificationSlotFile)
 	if err != nil {
 		t.Fatal(err)
@@ -302,6 +313,9 @@ func TestVerificationSlotCancelWhileQueued(t *testing.T) {
 		}
 		if len(rec.VerificationAttempts) != 0 || rec.Atoms[3].Status != "blocked" || !strings.Contains(rec.Atoms[3].Detail, "queued for checks") {
 			t.Fatalf("attempts %+v check atom %+v", rec.VerificationAttempts, rec.Atoms[3])
+		}
+		if !slices.Contains(rec.Notes, "Queued for checks at position 1 of 1: every verification slot of this Lab is in use (1 slot(s)).") {
+			t.Fatalf("the queue position is not in the ledger: %v", rec.Notes)
 		}
 	}
 	if calls != 0 {
@@ -407,6 +421,190 @@ func TestVerificationSlotSurvivesKilledHolder(t *testing.T) {
 	defer o.release()
 	if _, err = os.Lstat(filepath.Join(lab, "ledgers", verificationSlotFile)); err != nil {
 		t.Fatalf("the slot file was removed: %v", err)
+	}
+}
+
+// TestVerificationSlotsRunTwoMoleculesConcurrently: with two slots, two Molecules of
+// one Lab are inside their checks at the same time, neither queues, and each records
+// the slot it ran in. Serial: it replaces the verifier and ticker seams.
+func TestVerificationSlotsRunTwoMoleculesConcurrently(t *testing.T) {
+	o, _ := loopFixture(t, policyScopeAtom, defaultReviewAtom, "")
+	// The Lab sets two slots explicitly (an unset Lab keeps one); the seam keeps the
+	// guard's live sample out of the test.
+	if err := os.WriteFile(filepath.Join(o.LabDir, resources.ConfigFile), []byte(`{"verificationSlots": 2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	limitSlots(t, 2)
+	queued, tick := driveSlotTicker(t)
+	original := runVerification
+	t.Cleanup(func() { runVerification = original })
+	var mu sync.Mutex
+	entered, most, active := 0, 0, 0
+	both := make(chan struct{})
+	runVerification = func(ctx context.Context, source, destination string, p readiness.Plan, c verification.CaptureResult, observe func(verification.Observation) error) verification.Result {
+		mu.Lock()
+		entered++
+		active++
+		most = max(most, active)
+		if entered == 2 {
+			close(both)
+		}
+		mu.Unlock()
+		// Each waits until the other is inside its checks too; a Molecule that queued
+		// instead is the defect under test.
+		select {
+		case <-both:
+		case <-queued:
+			t.Errorf("%s queued although a second slot was free", p.MoleculeID)
+		}
+		result := original(ctx, source, destination, p, c, observe)
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return result
+	}
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case tick <- time.Time{}:
+			case <-done:
+				return
+			}
+		}
+	}()
+	_, err := RunLoop(context.Background(), LoopOptions{Template: o, MaxConcurrent: 2, Once: true, ListIssues: loopFixedList(loopOpen(11, 0), loopOpen(12, 1))})
+	close(done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if most != 2 {
+		t.Fatalf("the two verifications did not overlap: most=%d", most)
+	}
+	slots := []int{}
+	for _, number := range []int64{11, 12} {
+		records := loopRecords(t, o.LabDir)[number]
+		if len(records) != 1 {
+			t.Fatalf("Issue %d: %d Molecules", number, len(records))
+		}
+		r := records[0]
+		if statePhase(r) != "review-waiting" || slices.Contains(eventKinds(r), readiness.VerificationQueued) {
+			t.Fatalf("%s: phase %s events %v", r.ID, statePhase(r), eventKinds(r))
+		}
+		a := r.VerificationAttempts[len(r.VerificationAttempts)-1]
+		if a.Slot == nil || a.Slots != 2 {
+			t.Fatalf("%s attempt slot %v of %d", r.ID, a.Slot, a.Slots)
+		}
+		slots = append(slots, *a.Slot)
+	}
+	slices.Sort(slots)
+	if !slices.Equal(slots, []int{0, 1}) {
+		t.Fatalf("slots %v, want 0 and 1", slots)
+	}
+}
+
+// TestVerificationSlotsAcquireInOrderAndQueue: slots are taken lowest first up to the
+// limit, which is asked again before every try; once every allowed slot is held a
+// waiter queues, even while a slot beyond the current limit is free.
+func TestVerificationSlotsAcquireInOrderAndQueue(t *testing.T) {
+	t.Parallel()
+	lab := resolvedTempDir(t)
+	two := func() int { return 2 }
+	free := func() error { return fmt.Errorf("queued while a slot was free") }
+	first, slot, err := acquireVerificationSlots(context.Background(), lab, two, free)
+	if err != nil || slot != 0 {
+		t.Fatalf("first: slot %d %v", slot, err)
+	}
+	second, slot, err := acquireVerificationSlots(context.Background(), lab, two, free)
+	if err != nil || slot != 1 {
+		t.Fatalf("second: slot %d %v", slot, err)
+	}
+	for _, name := range []string{verificationSlotFile, verificationSlotName(1)} {
+		if _, err := os.Lstat(filepath.Join(lab, "ledgers", name)); err != nil {
+			t.Fatalf("slot file %s: %v", name, err)
+		}
+	}
+	waitQueued := func(limit func() int) bool {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		queued := false
+		_, _, err := acquireVerificationSlots(ctx, lab, limit, func() error { queued = true; cancel(); return nil })
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("a waiter took a held slot: %v", err)
+		}
+		return queued
+	}
+	if !waitQueued(two) {
+		t.Fatal("a third Molecule did not queue behind two held slots")
+	}
+	second()
+	// Slot 1 is free, but the guard now allows one slot, which slot 0 holds.
+	if !waitQueued(func() int { return 1 }) {
+		t.Fatal("a waiter took a slot beyond the current limit")
+	}
+	first()
+	again, slot, err := acquireVerificationSlots(context.Background(), lab, func() int { return 1 }, free)
+	if err != nil || slot != 0 {
+		t.Fatalf("after release: slot %d %v", slot, err)
+	}
+	again()
+	bounded, slot, err := acquireVerificationSlots(context.Background(), lab, func() int { return 99 }, free)
+	if err != nil || slot != 0 {
+		t.Fatalf("an oversized limit: slot %d %v", slot, err)
+	}
+	bounded()
+}
+
+// TestVerificationSlotLimitRefusedUnderLowResources: the Lab's limit (default 1, or
+// resources.json) is cut to one slot below a soft floor or without memory for the
+// extra slot, and a config that cannot be used falls back to one slot without naming
+// the Lab's path.
+func TestVerificationSlotLimitRefusedUnderLowResources(t *testing.T) {
+	t.Parallel()
+	lab := resolvedTempDir(t)
+	guard := func(freeDisk, memory uint64) *resources.Guard {
+		return &resources.Guard{Floors: resources.DefaultFloors().Clamp(), Reader: resources.ReaderFunc(func() resources.Readings {
+			return resources.Readings{Volumes: []resources.Volume{{Path: "/lab", Free: freeDisk, Total: 100 * resources.GiB}}, Memory: memory, MemoryKnown: true}
+		})}
+	}
+	// A Lab without the setting keeps one slot, even with plenty of resources.
+	if n, reason := labVerificationSlots(Options{LabDir: lab, Resources: guard(50*resources.GiB, 16*resources.GiB)}); n != 1 || reason != "" {
+		t.Fatalf("default: %d %q", n, reason)
+	}
+	if err := os.WriteFile(filepath.Join(lab, resources.ConfigFile), []byte(`{"verificationSlots": 2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		guard  *resources.Guard
+		want   int
+		reason string
+	}{
+		{"plenty", guard(50*resources.GiB, 16*resources.GiB), 2, ""},
+		{"low disk", guard(10*resources.GiB, 16*resources.GiB), 1, "extra verification slots are refused"},
+		{"low memory", guard(50*resources.GiB, 2*resources.GiB), 1, "extra verification slots are refused"},
+		{"memory for one", guard(50*resources.GiB, 5*resources.GiB), 1, "allows 1 verification slot(s)"},
+	}
+	for _, c := range cases {
+		n, reason := labVerificationSlots(Options{LabDir: lab, Resources: c.guard})
+		if n != c.want || (c.reason == "") != (reason == "") || !strings.Contains(reason, c.reason) {
+			t.Errorf("%s: %d %q", c.name, n, reason)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(lab, resources.ConfigFile), []byte(`{"verificationSlots": 3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := labVerificationSlots(Options{LabDir: lab, Resources: guard(50*resources.GiB, 16*resources.GiB)}); n != 3 {
+		t.Fatalf("configured: %d", n)
+	}
+	if err := os.WriteFile(filepath.Join(lab, resources.ConfigFile), []byte(`{"verificationSlots": 100}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, reason := labVerificationSlots(Options{LabDir: lab}); n != 1 || !strings.Contains(reason, "one verification slot is used") || strings.Contains(reason, lab) {
+		t.Fatalf("invalid config: %d %q", n, reason)
+	}
+	if note := queueNote(2, 3, 1, "resources: low memory"); note != "Queued for checks at position 2 of 3: every verification slot of this Lab is in use (1 slot(s)). resources: low memory." {
+		t.Fatalf("queue note %q", note)
 	}
 }
 

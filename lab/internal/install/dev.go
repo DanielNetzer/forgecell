@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,9 +13,11 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -223,6 +226,65 @@ func inspectCheckout(ctx context.Context, root string) (c checkout, err error) {
 	return c, nil
 }
 
+// parseCommitTime reads git log --format=%ct output: a positive Unix time no later
+// than year 3000, or 0 (absent) for anything else.
+func parseCommitTime(out string) int64 {
+	text := strings.TrimSpace(out)
+	if text == "" || len(text) > 12 || strings.Trim(text, "0123456789") != "" {
+		return 0
+	}
+	at, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || at <= 0 || at > 32503680000 {
+		return 0
+	}
+	return at
+}
+
+// headCommitTime is the committer time of the checkout's HEAD, which the build
+// cannot edit (never a file mtime), or 0 when git cannot report it. Tests
+// replace it.
+var headCommitTime = func(ctx context.Context, root string) int64 {
+	out, err := runGit(ctx, root, "log", "-1", "--format=%ct", "HEAD")
+	if err != nil {
+		return 0
+	}
+	return parseCommitTime(out)
+}
+
+// recordDevBuild writes formula.DevBuildFile beside a dev build's manifest, so a
+// Formula rebind can order two dev builds of one version by commit time. A
+// missing time is recorded as absent: no file is written, and an existing record
+// is left alone. The record replaces any earlier one atomically.
+func recordDevBuild(dir, version string, commitTime int64) error {
+	if commitTime <= 0 {
+		return nil
+	}
+	raw, err := json.Marshal(formula.DevBuild{Version: version, CommitTime: commitTime})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, formula.DevBuildFile)
+	if st, e := os.Lstat(path); e == nil && !st.Mode().IsRegular() {
+		return fmt.Errorf("refusing unmanaged dev build record: %s", path)
+	}
+	tmp, err := os.CreateTemp(dir, ".dev-build-")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err = tmp.Write(raw); err == nil {
+		err = tmp.Chmod(0600)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
 // buildEnv is the only environment go build sees: nothing ambient (GOFLAGS such as
 // -toolexec, GOEXPERIMENT, credentials) reaches the compiler of an install.
 func buildEnv(environ []string) []string {
@@ -327,6 +389,9 @@ func DevInstall(ctx context.Context, o DevOptions) (r DevRelease, err error) {
 	meta := harness.ReadManifest(dir)
 	if !meta.Found {
 		return r, fmt.Errorf("staged release has no readable manifest: %s", dir)
+	}
+	if err = recordDevBuild(dir, version, headCommitTime(ctx, root)); err != nil {
+		return r, err
 	}
 	return DevRelease{Version: version, Path: filepath.Join(dir, "forgecell"), ManifestSHA256: meta.Digest, Activated: o.Activate}, nil
 }

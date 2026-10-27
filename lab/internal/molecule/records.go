@@ -131,10 +131,11 @@ func ReadRecord(lab, id string) (Record, error) {
 // protected regression check the protected view ran with engine-added -json: the
 // jsonAdded marker, the failing tests it recorded and each accepted delta with the
 // check it was observed on. Every name comes from the record, so it is bounded and
-// stripped of control characters. Checks without jsonAdded render nothing.
+// stripped of control characters. Checks without jsonAdded render nothing. The
+// check state lines of both views follow (checkStateLines).
 func protectedJSONAddedLines(v verification.Result) string {
 	if v.Protected == nil {
-		return ""
+		return checkStateLines(v)
 	}
 	var b strings.Builder
 	for _, o := range v.Protected.Checks {
@@ -145,6 +146,73 @@ func protectedJSONAddedLines(v verification.Result) string {
 		for _, d := range o.AcceptedDeltas {
 			fmt.Fprintf(&b, "- accepted `%s` `%s` · observed on check `%s` · %s\n", oneLine(d.Package), oneLine(d.Test), oneLine(d.CheckID), oneLine(d.ScopeText()))
 		}
+	}
+	b.WriteString(checkStateLines(v))
+	return b.String()
+}
+
+// Bounds of the failing output the Markdown ledger shows per check, from the end of
+// each kept excerpt.
+const (
+	ledgerStdoutLines = 20
+	ledgerStderrLines = 10
+)
+
+// checkStateLines renders, for the Markdown ledger, the checks of both views that did
+// not simply run: not run, covered by a baseline check, or stopped as stalled, and the
+// failing tests and last output lines of each failing check. Every value comes from the
+// record and is kept to one bounded line without control characters; the output was
+// redacted and stripped of local paths when it was recorded.
+func checkStateLines(v verification.Result) string {
+	var b strings.Builder
+	render := func(view string, checks []verification.Observation) {
+		for _, o := range checks {
+			id := oneLine(o.ID)
+			switch {
+			case o.NotRun != "":
+				fmt.Fprintf(&b, "Check `%s` (%s view): %s\n", id, view, oneLine(o.NotRun))
+				continue
+			case o.CoveredBy != "":
+				fmt.Fprintf(&b, "Check `%s` (%s view): covered by `%s` (not run on its own; passed: %t)\n", id, view, oneLine(o.CoveredBy), o.Result.OK)
+				continue
+			case o.Result.Stalled:
+				fmt.Fprintf(&b, "Check `%s` (%s view): %s\n", id, view, oneLine(o.Result.Error))
+			}
+			if o.Result.OK || o.Output == nil {
+				continue
+			}
+			fmt.Fprintf(&b, "Check `%s` (%s view) failed", id, view)
+			if len(o.Output.FailedTests) > 0 {
+				names := []string{}
+				for _, name := range o.Output.FailedTests {
+					names = append(names, oneLine(name))
+				}
+				fmt.Fprintf(&b, "; failing tests: %s", strings.Join(names, ", "))
+				if o.Output.FailedTestsCut {
+					b.WriteString(" (list cut)")
+				}
+			}
+			b.WriteString("\n")
+			tail := func(label, text string, limit int) {
+				lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+				if strings.TrimSpace(text) == "" {
+					return
+				}
+				if len(lines) > limit {
+					lines = lines[len(lines)-limit:]
+				}
+				fmt.Fprintf(&b, "  last %s lines:\n", label)
+				for _, line := range lines {
+					b.WriteString("    " + oneLine(line) + "\n")
+				}
+			}
+			tail("stdout", o.Output.Stdout, ledgerStdoutLines)
+			tail("stderr", o.Output.Stderr, ledgerStderrLines)
+		}
+	}
+	render("candidate", append(append([]verification.Observation{}, v.Checks...), v.NotRun...))
+	if v.Protected != nil {
+		render("protected", append(append([]verification.Observation{}, v.Protected.Checks...), v.Protected.NotRun...))
 	}
 	return b.String()
 }

@@ -127,6 +127,14 @@ func identName(ident string) string {
 // human gates (exact scope approval and draft PR publication), starting intake
 // or the loop, and stopping work it started. It never merges or deploys.
 func runUI(ctx context.Context, args []string, defaultLab, version string, out, stderr io.Writer) int {
+	return runUIChoosing(ctx, args, defaultLab, nil, version, out, stderr)
+}
+
+// runUIChoosing is runUI with the Labs to choose from when more than one
+// matches the checkout's repository. A Lab with no approved Formula yet, or a
+// chooser, is served as Set up your Lab (#263), whose every step is an engine
+// call; the resource guard opens only once the Lab is ready.
+func runUIChoosing(ctx context.Context, args []string, defaultLab string, choices []string, version string, out, stderr io.Writer) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	flags := flag.NewFlagSet("ui", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -140,10 +148,16 @@ func runUI(ctx context.Context, args []string, defaultLab, version string, out, 
 	if flags.NArg() != 0 {
 		return fail(fmt.Errorf("ui accepts only --lab, --lab-name, --port, --no-open and --demo"))
 	}
-	if !*demo && *lab == "" {
+	explicitLab := false
+	flags.Visit(func(f *flag.Flag) { explicitLab = explicitLab || f.Name == "lab" })
+	if explicitLab {
+		choices = nil
+	}
+	if !*demo && *lab == "" && len(choices) == 0 {
 		return fail(fmt.Errorf("no Lab selected; use --lab DIR"))
 	}
 	options := ui.Options{LabDir: *lab, Version: version, Demo: *demo, Port: *port}
+	setup := false
 	if !*demo {
 		// Work started from the UI runs from this checkout under the Lab's resource
 		// guard, as forgecell run and loop do.
@@ -151,11 +165,37 @@ func runUI(ctx context.Context, args []string, defaultLab, version string, out, 
 		if err != nil {
 			return fail(err)
 		}
-		guard, err := newResourceGuard(*lab, stderr)
-		if err != nil {
-			return fail(err)
+		setup = len(choices) > 1 || ui.NeedsSetup(*lab)
+		if setup && !explicitLab && os.Getenv("FORGECELL_LAB") == "" {
+			// As forgecell init does, a Lab kept in the checkout is continued
+			// explicitly, never set up again beside it.
+			if legacy := existingCheckoutLab(); legacy != "" {
+				return fail(fmt.Errorf("existing checkout Lab at %s; use --lab %s to continue it, or move its contents to the home Lab before retrying", safeText(legacy), shellWord(legacy)))
+			}
 		}
-		options.SourceRoot, options.Resources = cwd, guard
+		if setup {
+			options.Setup = uiSetupOptions(choices, stderr)
+		} else {
+			guard, err := newResourceGuard(*lab, stderr)
+			if err != nil {
+				return fail(err)
+			}
+			options.Resources = guard
+		}
+		options.SourceRoot = cwd
+		// A Formula rebind from the UI saves the launcher init --rebind would, and
+		// only one that resolves to a build this user owns under the managed
+		// Forgecell home; otherwise the Formula view says the launcher is unknown.
+		launcher := initLauncher()
+		if launcher == "" {
+			launcher, _ = os.Executable()
+		}
+		if root, e := resolvedCheckoutRoot(); e == nil {
+			if home, e := forgecellHome(root); e == nil {
+				options.Home = home
+				options.Launcher = ui.ValidateLauncher(home, launcher)
+			}
+		}
 		// The avatar's name; demo mode never reads git.
 		options.Operator = operatorName(ctx, cwd)
 	}
@@ -163,9 +203,16 @@ func runUI(ctx context.Context, args []string, defaultLab, version string, out, 
 	if err != nil {
 		return fail(err)
 	}
-	if *demo {
+	switch {
+	case *demo:
 		fmt.Fprintln(out, "Forgecell Lab UI · Sample data (synthetic; no Lab is read)")
-	} else {
+	case len(choices) > 1:
+		fmt.Fprintf(out, "Forgecell Lab UI · Choose a Lab: %d Labs match this repository\n", len(choices))
+		fmt.Fprintln(out, "Writes only through the engine, the same paths as forgecell init: creating the Lab and approving its first Formula only when you click Approve Formula. It never merges or deploys.")
+	case setup:
+		fmt.Fprintf(out, "Forgecell Lab UI · Set up your Lab %s\n", safeText(*lab))
+		fmt.Fprintln(out, "Writes only through the engine, the same paths as forgecell init: creating the Lab and approving its first Formula only when you click Approve Formula. It never merges or deploys.")
+	default:
 		fmt.Fprintf(out, "Forgecell Lab UI · Lab %s\n", safeText(*lab))
 		fmt.Fprintln(out, "Writes only through the engine: exact scope approval, draft PR publication, starting intake or the loop from this checkout, and stopping work it started. It never merges or deploys.")
 	}

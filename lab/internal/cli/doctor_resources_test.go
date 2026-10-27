@@ -375,6 +375,52 @@ func TestDoctorResourcesSectionReportsFloorsAndSizes(t *testing.T) {
 	}
 }
 
+// TestDoctorReportsVerificationSlots: the Resources section shows the configured slot
+// limit and how many the guard allows, in text and JSON, and a config it cannot use
+// says so without the Lab's path.
+func TestDoctorReportsVerificationSlots(t *testing.T) {
+	lab, home := t.TempDir(), t.TempDir()
+	// Unset: one slot, shown as the default with how to enable a second.
+	d := sampleResources(lab, home)
+	if d.VerificationSlots != 1 || !d.VerificationSlotsDefault {
+		t.Fatalf("unset: slots %d default %v", d.VerificationSlots, d.VerificationSlotsDefault)
+	}
+	if raw, err := json.Marshal(d); err != nil || !strings.Contains(string(raw), `"verificationSlots":1`) || !strings.Contains(string(raw), `"verificationSlotsDefault":true`) {
+		t.Fatalf("unset json %s %v", raw, err)
+	}
+	var unset bytes.Buffer
+	renderResources(&unset, d)
+	if !strings.Contains(unset.String(), "verification slots: 1 (default; set 2 in resources.json to verify two Molecules at once)") {
+		t.Fatalf("unset Resources section:\n%s", unset.String())
+	}
+	if err := os.WriteFile(filepath.Join(lab, resources.ConfigFile), []byte(`{"verificationSlots": 3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d = sampleResources(lab, home)
+	if d.VerificationSlotsDefault {
+		t.Fatal("a configured limit was shown as the default")
+	}
+	if d.VerificationSlots != 3 || d.VerificationSlotsAllowed < 1 || d.VerificationSlotsAllowed > 3 || (d.VerificationSlotsAllowed < 3) != (d.VerificationSlotsReason != "") || len(d.QueuedForChecks) != 0 {
+		t.Fatalf("slots %d allowed %d reason %q queued %v", d.VerificationSlots, d.VerificationSlotsAllowed, d.VerificationSlotsReason, d.QueuedForChecks)
+	}
+	raw, err := json.Marshal(d)
+	if err != nil || !strings.Contains(string(raw), `"verificationSlots":3`) || !strings.Contains(string(raw), `"verificationSlotsAllowed":`) || !strings.Contains(string(raw), `"queuedForChecks":[]`) {
+		t.Fatalf("json %s %v", raw, err)
+	}
+	var out bytes.Buffer
+	renderResources(&out, d)
+	if !strings.Contains(out.String(), "Verification slots: 3 configured, ") || !strings.Contains(out.String(), "Queued for checks: none") {
+		t.Fatalf("Resources section:\n%s", out.String())
+	}
+	if err := os.WriteFile(filepath.Join(lab, resources.ConfigFile), []byte(`{"verificationSlots": 0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d = sampleResources(lab, home)
+	if d.VerificationSlots != 1 || d.VerificationSlotsAllowed != 1 || !strings.Contains(d.VerificationSlotsReason, "one verification slot is used") || strings.Contains(d.VerificationSlotsReason, lab) {
+		t.Fatalf("invalid config: slots %d allowed %d reason %q", d.VerificationSlots, d.VerificationSlotsAllowed, d.VerificationSlotsReason)
+	}
+}
+
 // TestDoctorWarnsAboutLargeGoCacheWithoutCleaningIt measures the shared cache checks use
 // (resources.GoCacheDir), presented here as 25 GiB without walking it.
 func TestDoctorWarnsAboutLargeGoCacheWithoutCleaningIt(t *testing.T) {

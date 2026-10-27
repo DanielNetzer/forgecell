@@ -296,6 +296,24 @@ func TestLabGoTempDirRefusesWhatIsNotItsOwn(t *testing.T) {
 	if dir, err := labGoTempDir(tmp); err != nil || dir != gotmp {
 		t.Fatalf("own gotmp: %s %v", dir, err)
 	}
+	// The protected view's own GOTMPDIR sits under the shared one and is refused the
+	// same way.
+	view := filepath.Join(gotmp, "protected")
+	if dir, err := labViewGoTempDir(tmp, "protected"); err != nil || dir != view {
+		t.Fatalf("protected gotmp: %s %v", dir, err)
+	}
+	if info, err := os.Lstat(view); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("protected gotmp mode: %v %v", info, err)
+	}
+	if err := os.Remove(view); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, view); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := labViewGoTempDir(tmp, "protected"); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("a symbolic link was accepted as the protected GOTMPDIR: %v", err)
+	}
 }
 
 // TestVendoredModuleIsNotForcedReadonly: no -mod is added, so a module with
@@ -629,8 +647,15 @@ func TestReviewedRepairRejectsReboundBaselineHashBeforeCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := Run(context.Background(), dir, filepath.Join(t.TempDir(), "verify"), p, c)
-	if v.RequiredChecksPassed || v.IndependentAcceptanceVerified || len(v.Checks) != 0 || v.Protected == nil || len(v.Protected.Checks) != 0 {
+	// The failed candidate view starts no protected view: its checks are recorded as
+	// not run.
+	if v.RequiredChecksPassed || v.IndependentAcceptanceVerified || len(v.Checks) != 0 || v.Protected == nil || v.Protected.Workspace != "" || len(v.Protected.Checks) != 0 || len(v.Protected.NotRun) != 1 {
 		t.Fatalf("rebound baseline hash executed commands: %+v", v)
+	}
+	for _, o := range v.Protected.NotRun {
+		if o.NotRun != NotRunCandidateFailure || o.Result.OK {
+			t.Fatalf("protected record %+v", o)
+		}
 	}
 }
 func TestExternalAcceptanceMutationStopsBeforeNextCommand(t *testing.T) {

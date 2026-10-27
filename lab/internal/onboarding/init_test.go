@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"go.yaml.in/yaml/v4"
 	"os"
 	"os/exec"
@@ -70,6 +71,30 @@ func TestInitProposesRepositoryBoundRecipeWithoutExecuting(t *testing.T) {
 		t.Fatalf("%+v %v", second, err)
 	}
 }
+
+// TestFirstInitWritesRecommendedVerificationSlots: a fresh init leaves the new Lab
+// with resources.json at the recommended 2 slots; a rerun keeps an existing file.
+func TestFirstInitWritesRecommendedVerificationSlots(t *testing.T) {
+	root, runner := repoFixture(t)
+	dir := filepath.Join(t.TempDir(), "lab")
+	options := InitOptions{Cwd: root, LabDir: dir, Launcher: "/cli", Candidates: []Candidate{{ID: "codex", Executable: "/codex", Readiness: "ready"}}, Runner: runner}
+	if _, err := Prepare(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if n, set, err := resources.LoadVerificationSlotsSetting(dir); err != nil || n != resources.RecommendedVerificationSlots || !set {
+		t.Fatalf("fresh init: slots %d set %v: %v", n, set, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, resources.ConfigFile), []byte(`{"verificationSlots": 1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if n, set, err := resources.LoadVerificationSlotsSetting(dir); err != nil || n != 1 || !set {
+		t.Fatalf("rerun replaced an existing resources.json: slots %d set %v: %v", n, set, err)
+	}
+}
+
 func TestAmbiguousInitCannotProposeExecution(t *testing.T) {
 	root, runner := repoFixture(t)
 	out, err := Prepare(context.Background(), InitOptions{Cwd: root, LabDir: t.TempDir(), Launcher: "/cli", Candidates: []Candidate{{ID: "codex", Readiness: "ready"}, {ID: "cursor", Readiness: "ready"}}, Runner: runner})

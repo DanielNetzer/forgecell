@@ -168,10 +168,13 @@ func nextAction(lane, activity, status, phase, current string, g GateView, deliv
 	}
 	switch lane {
 	case LaneDecision:
-		if g.State == GateScope || g.State == GateDelivery {
-			return NextView{"Needs your decision" + at, "This Molecule waits at a human gate (phase " + recorded(phase) + "). Review it and decide under Gates and decisions, or with the forgecell CLI. The engine checks every decision again."}
+		if g.State == GateScope {
+			return NextView{"Needs your decision" + at, "This Molecule waits at a human gate (phase " + recorded(phase) + "). Review the plan, then click Approve plan & start coding below; decide under Gates and decisions. The engine checks every decision again."}
 		}
-		return NextView{"Waiting at a human gate" + at, "This Molecule waits at a human gate (phase " + recorded(phase) + ") that this Lab UI does not perform. Inspect it with forgecell ledger and decide with the forgecell CLI. The engine checks every decision again."}
+		if g.State == GateDelivery {
+			return NextView{"Needs your decision" + at, "This Molecule waits at a human gate (phase " + recorded(phase) + "). Click Preview delivery below, then Publish draft PR; decide under Gates and decisions. The engine checks every decision again."}
+		}
+		return NextView{"Waiting at a human gate" + at, "This Molecule waits at a human gate (phase " + recorded(phase) + "). What you can do lists the actions the engine accepts now. The engine checks every decision again."}
 	case LaneRunning:
 		if activity == ActivityQueued {
 			return NextView{"Queued for checks" + at, "Another Molecule in this Lab holds the verification slot. Checks start, and their time budgets begin, when the slot is free. This view updates from the ledger."}
@@ -185,7 +188,7 @@ func nextAction(lane, activity, status, phase, current string, g GateView, deliv
 		return NextView{"Retired", "This Molecule was retired: it is finished history and every record is kept. The loop never resumes it and may start a fresh Molecule for its Issue."}
 	}
 	if g.State == GateDelivery {
-		return NextView{"Ready for a draft PR" + at, strings.TrimSpace("This Molecule finished with status " + recorded(status) + ". Preview and publish a draft PR under Gates and decisions, or with the forgecell CLI. " + label)}
+		return NextView{"Ready for a draft PR" + at, strings.TrimSpace("This Molecule finished with status " + recorded(status) + ". Click Preview delivery below, then Publish draft PR under Gates and decisions. " + label)}
 	}
 	if label == "" {
 		label = "No published delivery receipt. This Molecule is in no lane; it appears under All and Other."
@@ -1118,7 +1121,7 @@ func decisionView(r molecule.Record, lane, activity string, g GateView, plan *Pl
 			d.Copy = harness.ReviewDisplayText(hint, maxReasonRunes) + ", then start this Issue again."
 		}
 	case LaneDecision:
-		d.Title, d.Copy = "Waiting at a gate", "This page does not perform this gate. Decide with the forgecell CLI; the engine checks every decision again."
+		d.Title, d.Copy = "Waiting at a gate", "Choose a button under What you can do when one is offered; the engine checks every decision again."
 	case LaneRetired:
 		d.Title, d.Copy = "Retired", "Every record is kept. The loop never resumes it and may start a fresh Molecule for its Issue."
 	}
@@ -1185,6 +1188,9 @@ func planningCost(r molecule.Record) *PlanningCostView {
 // racyWindow, changes the tag on every call rather than hiding a change.
 func ledgerETag(lab string) string {
 	h := sha256.New()
+	// The Insights "this week" tiles change when the week turns, so the week is
+	// part of the tag and a 304 never serves last week's totals.
+	fmt.Fprintf(h, "week %d\x00", weekStart(analyticsNow().UnixMilli()))
 	for _, sub := range []string{"ledgers", "deliveries"} {
 		fmt.Fprintf(h, "%s\x00", sub)
 		dir := filepath.Join(lab, sub)

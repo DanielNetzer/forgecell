@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,141 @@ func (s *scripted) Read() Readings {
 
 func reading(freeDisk, memory uint64) Readings {
 	return Readings{Volumes: []Volume{{Path: "/lab", Free: freeDisk, Total: 100 * GiB}}, Memory: memory, MemoryKnown: true}
+}
+
+// TestVerificationSlotsGuarded: extra verification slots are allowed above every
+// soft floor, bounded by memory per slot, and refused under low disk or memory; the
+// first slot is never refused here.
+func TestVerificationSlotsGuarded(t *testing.T) {
+	t.Parallel()
+	f := DefaultFloors().Clamp()
+	cases := []struct {
+		name       string
+		configured int
+		r          Readings
+		want       int
+		reason     string
+	}{
+		{"plenty", 2, reading(50*GiB, 16*GiB), 2, ""},
+		{"memory unknown", 3, Readings{Volumes: []Volume{{Path: "/lab", Free: 50 * GiB, Total: 100 * GiB}}}, 3, ""},
+		{"low disk", 2, reading(10*GiB, 16*GiB), 1, "low disk"},
+		{"low memory", 2, reading(50*GiB, 2*GiB), 1, "low memory"},
+		{"memory per slot", 4, reading(50*GiB, 9*GiB), 2, "allows 2 verification slot(s)"},
+		{"one configured", 1, reading(10*GiB, 2*GiB), 1, ""},
+		{"over the maximum", 99, reading(50*GiB, 1024*GiB), MaxVerificationSlots, ""},
+	}
+	for _, c := range cases {
+		got, reason := f.SlotsAllowed(c.configured, c.r)
+		if got != c.want || (c.reason == "") != (reason == "") || !strings.Contains(reason, c.reason) {
+			t.Errorf("%s: %d %q, want %d %q", c.name, got, reason, c.want, c.reason)
+		}
+	}
+	g := &Guard{Floors: f, Reader: ReaderFunc(func() Readings { return reading(10*GiB, 16*GiB) })}
+	if n, reason := g.VerificationSlots(2); n != 1 || !strings.Contains(reason, "extra verification slots are refused") {
+		t.Fatalf("guard: %d %q", n, reason)
+	}
+}
+
+// TestConcurrentViewsGuarded: two views run at once only above every soft floor with
+// memory for both; the context decision defaults to one after the other.
+func TestConcurrentViewsGuarded(t *testing.T) {
+	t.Parallel()
+	f := DefaultFloors().Clamp()
+	if ok, reason := f.ConcurrentViews(reading(50*GiB, 16*GiB)); !ok || reason != "" {
+		t.Fatalf("plenty: %v %q", ok, reason)
+	}
+	for _, r := range []Readings{reading(10*GiB, 16*GiB), reading(50*GiB, 2*GiB), reading(50*GiB, 6*GiB)} {
+		if ok, reason := f.ConcurrentViews(r); ok || !strings.Contains(reason, "one after the other") {
+			t.Fatalf("%+v: %v %q", r, ok, reason)
+		}
+	}
+	if ok, _ := ViewConcurrency(context.Background()); ok {
+		t.Fatal("views run concurrently without a decision")
+	}
+	ctx := WithViewConcurrency(context.Background(), func() (bool, string) { return true, "" })
+	if ok, _ := ViewConcurrency(ctx); !ok {
+		t.Fatal("the carried decision was ignored")
+	}
+}
+
+// TestLoadVerificationSlots: the default, a configured value, and refusals that name
+// only the config's base name.
+func TestLoadVerificationSlots(t *testing.T) {
+	t.Parallel()
+	lab := t.TempDir()
+	// A Lab without the setting keeps today's single slot.
+	if n, set, err := LoadVerificationSlotsSetting(lab); err != nil || n != 1 || set {
+		t.Fatalf("default: %d %v %v", n, set, err)
+	}
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(lab, ConfigFile), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"diskSoftFloorGiB": 20}`)
+	if n, set, err := LoadVerificationSlotsSetting(lab); err != nil || n != 1 || set {
+		t.Fatalf("floors only: %d %v %v", n, set, err)
+	}
+	write(`{"verificationSlots": 3, "diskSoftFloorGiB": 20}`)
+	if n, set, err := LoadVerificationSlotsSetting(lab); err != nil || n != 3 || !set {
+		t.Fatalf("configured: %d %v %v", n, set, err)
+	}
+	if _, err := LoadFloors(lab); err != nil {
+		t.Fatalf("the floors reader refused the slot field: %v", err)
+	}
+	for _, body := range []string{`{"verificationSlots": 0}`, `{"verificationSlots": 9}`, `{"verificationSlots": "2"}`, `{"slots": 2}`} {
+		write(body)
+		n, err := LoadVerificationSlots(lab)
+		if err == nil || n != 1 || strings.Contains(err.Error(), lab) {
+			t.Fatalf("%s: %d %v", body, n, err)
+		}
+	}
+	link := t.TempDir()
+	if err := os.Symlink(filepath.Join(lab, ConfigFile), filepath.Join(link, ConfigFile)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := LoadVerificationSlots(link); err == nil || n != 1 {
+		t.Fatalf("a symbolic link config was read: %d %v", n, err)
+	}
+}
+
+// TestWriteInitialConfig: a new Lab gets RecommendedVerificationSlots; an existing
+// config or a symbolic link in its place is never overwritten or followed.
+func TestWriteInitialConfig(t *testing.T) {
+	t.Parallel()
+	lab := t.TempDir()
+	if err := WriteInitialConfig(lab); err != nil {
+		t.Fatal(err)
+	}
+	if n, set, err := LoadVerificationSlotsSetting(lab); err != nil || n != 2 || !set {
+		t.Fatalf("new Lab: %d %v %v", n, set, err)
+	}
+	if _, err := LoadFloors(lab); err != nil {
+		t.Fatalf("the floors reader refused the initial config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(lab, ConfigFile), []byte(`{"verificationSlots": 1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteInitialConfig(lab); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := LoadVerificationSlots(lab); n != 1 {
+		t.Fatalf("an existing config was overwritten: %d", n)
+	}
+	link, target := t.TempDir(), filepath.Join(t.TempDir(), "target.json")
+	if err := os.Symlink(target, filepath.Join(link, ConfigFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteInitialConfig(link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("a symbolic link config was followed: %v", err)
+	}
+	if err := WriteInitialConfig(""); err == nil {
+		t.Fatal("an empty Lab directory was accepted")
+	}
 }
 
 func TestDefaultFloorsAndDiskPercentages(t *testing.T) {
@@ -197,5 +333,67 @@ func TestMonitorStopsCleanlyAboveFloors(t *testing.T) {
 	stop()
 	if _, exhausted := Exhausted(ctx); exhausted {
 		t.Fatal("stopping a monitor above the floors must not record exhaustion")
+	}
+}
+
+// TestPruneLabTempKeepsPerViewGoTempDirs: the named per-view GOTMPDIRs under gotmp are
+// never listed, however old, since a running verification uses them; their own old
+// children are pruned like gotmp's.
+func TestPruneLabTempKeepsPerViewGoTempDirs(t *testing.T) {
+	isolateSystemTemp(t)
+	tmp, err := LabTempDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-25 * time.Hour)
+	gotmp := mkdir(t, filepath.Join(tmp, LabGoTempName))
+	leaked := mkdir(t, filepath.Join(gotmp, "go-build123"))
+	views := []string{}
+	viewLeaks := []string{}
+	for _, view := range []string{"candidate", "protected"} {
+		dir := mkdir(t, filepath.Join(gotmp, view))
+		leak := mkdir(t, filepath.Join(dir, "TestOld1"))
+		recent := mkdir(t, filepath.Join(dir, "TestRunning2"))
+		for _, p := range []string{leak, dir} {
+			if err := os.Chtimes(p, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+		views = append(views, dir, recent)
+		viewLeaks = append(viewLeaks, leak)
+	}
+	for _, p := range []string{leaked, gotmp} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := append([]string{leaked}, viewLeaks...)
+	stale, err := StaleLabTempEntries(tmp, now)
+	if err != nil || !slices.Equal(stale, want) {
+		t.Fatalf("stale %v %v, want %v", stale, err, want)
+	}
+	if removed, err := PruneLabTemp(tmp, now); err != nil || !slices.Equal(removed, want) {
+		t.Fatalf("removed %v %v", removed, err)
+	}
+	for _, p := range append([]string{gotmp}, views...) {
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("%s must be kept: %v", p, err)
+		}
+	}
+	// A per-view name that is a symbolic link is neither listed nor followed.
+	if err := os.RemoveAll(filepath.Join(gotmp, "protected")); err != nil {
+		t.Fatal(err)
+	}
+	target := mkdir(t, filepath.Join(t.TempDir(), "elsewhere"))
+	victim := mkdir(t, filepath.Join(target, "TestVictim"))
+	if err := os.Chtimes(victim, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(gotmp, "protected")); err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := StaleLabTempEntries(tmp, now); err != nil || len(stale) != 0 {
+		t.Fatalf("through a linked view: %v %v", stale, err)
 	}
 }

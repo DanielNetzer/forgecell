@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/css/insights.css">
 <link rel="stylesheet" href="/css/formula.css">
 <link rel="stylesheet" href="/css/loop.css">
+<link rel="stylesheet" href="/css/setup.css">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -220,6 +221,7 @@
     </div>
     <aside id="mv-aside" class="mv-aside" aria-label="Your decision">
       <section id="mv-decision" class="decision-card" aria-labelledby="mv-decision-title"></section>
+      <section id="mv-actions" class="decision-card mv-actions" aria-labelledby="mv-actions-title" hidden></section>
       <dl id="mv-roles" class="mv-roles"></dl>
       <div id="mv-danger-slot"></div>
     </aside>
@@ -230,25 +232,49 @@
 <section id="aggregate" class="view glass aggregate" data-view-panel="insights" aria-labelledby="aggregate-title" hidden>
   <div class="panel-head"><span class="mono">LAB OVERVIEW</span><span id="aggregate-count"></span></div>
   <h1 id="aggregate-title">Lab overview</h1>
-  <p class="aggregate-intro">Select a Molecule to inspect it under Work. Published, merged and production-verified are separate outcomes.</p>
-  <div class="metrics">
-    <article id="analytics" class="card"><span class="label">ANALYTICS</span><strong>Loading…</strong></article>
-    <article class="card"><span class="label">COST PER MERGED PR</span><strong>Unavailable</strong><p>Needs verified merge attribution. A draft publication receipt does not qualify.</p></article>
-    <article class="card"><span class="label">FORMULA SUGGESTIONS</span><strong>Unavailable</strong><p>Suggestion review is not connected in this slice.</p></article>
-  </div>
+  <p class="aggregate-intro">How your Lab spends time and money, and how each model performs, from this Lab's ledgers. Select a Molecule to inspect it under Work.</p>
+  <article id="analytics" class="card"><span class="label">ANALYTICS</span><strong>Loading…</strong></article>
   <div class="approval-queue">
-    <div class="section-label"><span class="mono">NEEDS YOUR DECISION</span><span>Decide with the forgecell CLI</span></div>
+    <div class="section-label"><span class="mono">NEEDS YOUR DECISION</span><span>Open one and click its button</span></div>
     <div id="review-queue"></div>
   </div>
   <div class="outcome-chart">
     <div class="section-label"><span class="mono">MOLECULES BY LANE</span><span>Counts from the ledger inventory</span></div>
     <div id="outcome-bars"></div>
   </div>
+  <div class="not-yet">
+    <p class="not-yet-title">Not yet available</p>
+    <dl class="insight-facts">
+      <div><dt><span class="label">COST PER MERGED PR</span></dt><dd>Unavailable · Needs verified merge attribution. A draft publication receipt does not qualify.</dd></div>
+      <div><dt><span class="label">FORMULA SUGGESTIONS</span></dt><dd>Unavailable · Suggestion review is not connected in this slice.</dd></div>
+    </dl>
+  </div>
 </section>
 
 <section id="view-formula" class="view glass formula-view" data-view-panel="formula" aria-labelledby="formula-title" hidden>
   <h1 id="formula-title">Formula</h1>
   <div id="active-formula" class="active-formula"></div>
+  <div class="formula-proposals" role="group" aria-labelledby="formula-proposals-title">
+    <h2 id="formula-proposals-title">Proposals</h2>
+    <p id="formula-live" class="sr-only" role="status" aria-live="polite"></p>
+    <p id="formula-error" class="formula-error" role="alert" tabindex="-1" hidden></p>
+    <div id="formula-pending"></div>
+    <div id="formula-create" class="formula-create card"></div>
+  </div>
+  <div id="formula-suggestions" class="formula-suggestions" role="group" aria-labelledby="formula-suggestions-title">
+    <h2 id="formula-suggestions-title">Suggestions</h2>
+    <p class="unavailable-tag">Learned Formula suggestions are not connected in this slice</p>
+  </div>
+</section>
+
+<section id="view-setup" class="view setup" data-view-panel="setup" aria-labelledby="setup-title" hidden>
+  <div class="glass setup-head">
+    <h1 id="setup-title">Set up your Lab</h1>
+    <p class="setup-intro">Five short steps, each the same engine path as forgecell init. Nothing is approved until you click Approve Formula.</p>
+    <ol id="setup-steps" class="setup-steps" aria-label="Setup progress"></ol>
+  </div>
+  <p id="setup-live" class="sr-only" role="status" aria-live="polite"></p>
+  <div id="setup-body" class="setup-body"></div>
 </section>
 
 <footer><span>Atom → Molecule · arranged by a Formula · inside your Lab</span><span id="footer-version"></span></footer>

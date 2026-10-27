@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -157,6 +158,67 @@ func (g *Guard) Monitor(parent context.Context) (ctx context.Context, stop func(
 		<-finished
 		cancel(nil)
 	}
+}
+
+// SlotsAllowed returns how many of the configured verification slots may be in use
+// under readings r. The first slot is the existing guard's (WaitForCapacity) to
+// refuse; every slot past it is refused below any soft floor, and each slot is
+// budgeted MemoryPerAttempt of available memory when memory is known. reason says why
+// fewer than configured are allowed, and is empty otherwise.
+func (f Floors) SlotsAllowed(configured int, r Readings) (int, string) {
+	configured = max(1, min(configured, MaxVerificationSlots))
+	if configured == 1 {
+		return 1, ""
+	}
+	if level, reason := f.Evaluate(r); level != OK {
+		return 1, reason + "; extra verification slots are refused"
+	}
+	if r.MemoryKnown {
+		if n := max(1, min(configured, int(r.Memory/MemoryPerAttempt))); n < configured {
+			return n, fmt.Sprintf("resources: %s of available memory allows %d verification slot(s) at %s each", Format(r.Memory), n, Format(MemoryPerAttempt))
+		}
+	}
+	return configured, ""
+}
+
+// VerificationSlots is SlotsAllowed for one fresh sample.
+func (g *Guard) VerificationSlots(configured int) (int, string) {
+	return g.Floors.SlotsAllowed(configured, g.Read())
+}
+
+// ConcurrentViews reports whether a Molecule's candidate and protected views may run
+// at the same time under readings r: every reading must be at or above its soft floor
+// and, when memory is known, it must hold MemoryPerAttempt for each of the two views.
+// reason says why they may not.
+func (f Floors) ConcurrentViews(r Readings) (bool, string) {
+	if level, reason := f.Evaluate(r); level != OK {
+		return false, reason + "; the views run one after the other"
+	}
+	if r.MemoryKnown && r.Memory < 2*MemoryPerAttempt {
+		return false, fmt.Sprintf("resources: %s of available memory is below %s for two concurrent views; the views run one after the other", Format(r.Memory), Format(2*MemoryPerAttempt))
+	}
+	return true, ""
+}
+
+// ConcurrentViews is Floors.ConcurrentViews for one fresh sample.
+func (g *Guard) ConcurrentViews() (bool, string) { return g.Floors.ConcurrentViews(g.Read()) }
+
+type viewConcurrencyKey struct{}
+
+// WithViewConcurrency carries the decision of whether a verification's two views may
+// run concurrently; allow is called once, just before the views start.
+func WithViewConcurrency(ctx context.Context, allow func() (bool, string)) context.Context {
+	return context.WithValue(ctx, viewConcurrencyKey{}, allow)
+}
+
+// ViewConcurrency asks the decision WithViewConcurrency carries. Without one the views
+// run one after the other and the reason is empty.
+func ViewConcurrency(ctx context.Context) (bool, string) {
+	allow, _ := ctx.Value(viewConcurrencyKey{}).(func() (bool, string))
+	if allow == nil {
+		return false, ""
+	}
+	return allow()
 }
 
 // Exhausted reports the hard-floor reason when ctx was cancelled by a Monitor.

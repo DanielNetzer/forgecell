@@ -65,6 +65,17 @@ type doctorResources struct {
 	Warnings       []string         `json:"warnings,omitempty"`
 	StaleTempDirs  int              `json:"staleTempDirs"`
 	StaleTempError string           `json:"staleTempError,omitempty"`
+	// VerificationSlots is the Lab's configured verification slot limit and
+	// VerificationSlotsAllowed how many the resource guard allows now; the reason says
+	// why fewer are allowed or why the config was not used.
+	// VerificationSlotsDefault is true when the Lab does not set verificationSlots.
+	VerificationSlots        int    `json:"verificationSlots"`
+	VerificationSlotsDefault bool   `json:"verificationSlotsDefault,omitempty"`
+	VerificationSlotsAllowed int    `json:"verificationSlotsAllowed"`
+	VerificationSlotsReason  string `json:"verificationSlotsReason,omitempty"`
+	// QueuedForChecks lists the Molecules waiting for a slot, in queue order.
+	QueuedForChecks          []string `json:"queuedForChecks"`
+	QueuedForChecksTruncated bool     `json:"queuedForChecksTruncated,omitempty"`
 }
 
 // goCacheSizes memoizes the GOCACHE walk per process: it is the slow one, and the
@@ -165,6 +176,13 @@ func sampleResources(labDir, home string) doctorResources {
 		d.StaleTempError = flatten(err.Error())
 	}
 	d.StaleTempDirs = len(stale)
+	configured, set, err := resources.LoadVerificationSlotsSetting(labDir)
+	d.VerificationSlots, d.VerificationSlotsDefault = configured, !set && err == nil
+	d.VerificationSlotsAllowed, d.VerificationSlotsReason = floors.SlotsAllowed(configured, reading)
+	if err != nil {
+		d.VerificationSlotsReason = flatten(err.Error()) + "; one verification slot is used"
+	}
+	d.QueuedForChecks, d.QueuedForChecksTruncated = molecule.QueuedMolecules(labDir)
 	return d
 }
 
@@ -187,6 +205,25 @@ func renderResources(out io.Writer, d doctorResources) {
 	}
 	if d.GoCache != nil {
 		fmt.Fprintf(out, "  GOCACHE: %s (%s)\n", d.GoCache.Size, d.GoCache.Path)
+	}
+	if d.VerificationSlotsDefault {
+		fmt.Fprintf(out, "  verification slots: %d (default; set %d in %s to verify two Molecules at once)\n", d.VerificationSlots, resources.RecommendedVerificationSlots, resources.ConfigFile)
+	} else {
+		fmt.Fprintf(out, "  Verification slots: %d configured, %d allowed now\n", d.VerificationSlots, d.VerificationSlotsAllowed)
+	}
+	if d.VerificationSlotsReason != "" {
+		fmt.Fprintf(out, "    %s\n", d.VerificationSlotsReason)
+	}
+	if len(d.QueuedForChecks) == 0 {
+		fmt.Fprintln(out, "  Queued for checks: none")
+	} else {
+		fmt.Fprintf(out, "  Queued for checks: %d\n", len(d.QueuedForChecks))
+		for i, id := range d.QueuedForChecks {
+			fmt.Fprintf(out, "    %d. %s\n", i+1, id)
+		}
+		if d.QueuedForChecksTruncated {
+			fmt.Fprintln(out, "    (more running Molecules were not read)")
+		}
 	}
 	fmt.Fprintf(out, "  Stale temp directories: %d\n", d.StaleTempDirs)
 	if d.StaleTempError != "" {

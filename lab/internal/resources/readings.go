@@ -97,13 +97,98 @@ func (f Floors) DiskFloors(total uint64) (soft, hard uint64) {
 // ConfigFile is the optional Lab config that overrides floors, at <lab>/resources.json:
 // {"diskSoftFloorGiB": 20, "diskHardFloorGiB": 8, "memorySoftFloorGiB": 4, "memoryHardFloorGiB": 2}.
 // Every field is optional; values below the minimums (2 GiB disk, 1 GiB memory) are raised.
+// "verificationSlots" (1 to MaxVerificationSlots, default DefaultVerificationSlots) is how
+// many Molecules of the Lab may run their checks at once. A Lab without the setting keeps
+// one slot; new Labs are written RecommendedVerificationSlots by WriteInitialConfig.
 const ConfigFile = "resources.json"
+
+// Bounds of the Lab's verification slot limit.
+const (
+	DefaultVerificationSlots     = 1
+	RecommendedVerificationSlots = 2
+	MaxVerificationSlots         = 8
+)
 
 type config struct {
 	DiskSoftFloorGiB   *float64 `json:"diskSoftFloorGiB,omitempty"`
 	DiskHardFloorGiB   *float64 `json:"diskHardFloorGiB,omitempty"`
 	MemorySoftFloorGiB *float64 `json:"memorySoftFloorGiB,omitempty"`
 	MemoryHardFloorGiB *float64 `json:"memoryHardFloorGiB,omitempty"`
+	VerificationSlots  *int     `json:"verificationSlots,omitempty"`
+}
+
+// maxConfigBytes bounds the Lab config a reader accepts.
+const maxConfigBytes = 64 << 10
+
+// LoadVerificationSlots reads the Lab's configured verification slot limit:
+// DefaultVerificationSlots, or <lab>/resources.json's verificationSlots. A malformed
+// file, a value outside 1..MaxVerificationSlots, a symbolic link or an oversized file
+// is an error naming only the file's base name, and the caller then uses one slot.
+func LoadVerificationSlots(labDir string) (int, error) {
+	n, _, err := LoadVerificationSlotsSetting(labDir)
+	return n, err
+}
+
+// LoadVerificationSlotsSetting is LoadVerificationSlots that also reports whether the
+// Lab sets verificationSlots at all (false means DefaultVerificationSlots applies).
+func LoadVerificationSlotsSetting(labDir string) (int, bool, error) {
+	if labDir == "" {
+		return DefaultVerificationSlots, false, nil
+	}
+	file := filepath.Join(labDir, ConfigFile)
+	info, err := os.Lstat(file)
+	if os.IsNotExist(err) {
+		return DefaultVerificationSlots, false, nil
+	}
+	if err != nil {
+		return 1, false, fmt.Errorf("%s cannot be read", ConfigFile)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxConfigBytes {
+		return 1, false, fmt.Errorf("%s is not a bounded regular file", ConfigFile)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil || len(raw) > maxConfigBytes {
+		return 1, false, fmt.Errorf("%s cannot be read", ConfigFile)
+	}
+	var c config
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return 1, false, fmt.Errorf("invalid %s", ConfigFile)
+	}
+	if c.VerificationSlots == nil {
+		return DefaultVerificationSlots, false, nil
+	}
+	if n := *c.VerificationSlots; n < 1 || n > MaxVerificationSlots {
+		return 1, true, fmt.Errorf("%s verificationSlots must be between 1 and %d", ConfigFile, MaxVerificationSlots)
+	}
+	return *c.VerificationSlots, true, nil
+}
+
+// WriteInitialConfig creates <lab>/resources.json for a new Lab with
+// RecommendedVerificationSlots. An existing file (or a symbolic link in its place) is
+// never touched: the create is exclusive, so a Lab's own settings always win.
+func WriteInitialConfig(labDir string) error {
+	if labDir == "" {
+		return fmt.Errorf("no Lab directory")
+	}
+	file := filepath.Join(labDir, ConfigFile)
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s cannot be created", ConfigFile)
+	}
+	_, werr := fmt.Fprintf(f, "{\"verificationSlots\": %d}\n", RecommendedVerificationSlots)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(file)
+		return fmt.Errorf("%s cannot be written", ConfigFile)
+	}
+	return nil
 }
 
 // LoadFloors reads the Lab's floors: the defaults, overridden by <lab>/resources.json

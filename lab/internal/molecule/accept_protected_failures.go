@@ -303,8 +303,12 @@ func failingProtectedChecks(p readiness.Plan, result verification.Result) ([]fai
 	if err != nil {
 		return nil, err
 	}
+	ran, _, err := protectedRanChecks(p, result.Protected)
+	if err != nil {
+		return nil, err
+	}
 	var out []failingProtectedGoCheck
-	for _, earlier := range result.Protected.Checks[:len(result.Protected.Checks)-1] {
+	for _, earlier := range ran[:len(ran)-1] {
 		// failingProtectedCheck has checked that each one is a required Go stream the
 		// view accepted; a failing optional check never gated the run.
 		if !earlier.Result.OK && earlier.Command.Required {
@@ -329,14 +333,11 @@ func failingProtectedCheck(p readiness.Plan, result verification.Result) (readin
 	if v.SourceTree == result.SourceTree || !reviewRevision.MatchString(v.SourceTree) {
 		return readiness.Check{}, verification.Observation{}, fmt.Errorf("the protected regression run did not run a derived protected tree")
 	}
-	var regression []readiness.Check
-	for _, c := range p.Analysis.Checks {
-		if c.Category == "regression" {
-			c.ReviewedAcceptance = ""
-			regression = append(regression, c)
-		}
+	ran, regression, err := protectedRanChecks(p, v)
+	if err != nil {
+		return readiness.Check{}, verification.Observation{}, err
 	}
-	if len(v.Setup) != len(p.Setup) || len(v.Checks) == 0 || len(v.Checks) > len(regression) {
+	if len(v.Setup) != len(p.Setup) || len(ran) == 0 || len(ran) > len(regression) {
 		return readiness.Check{}, verification.Observation{}, fmt.Errorf("the protected regression run did not fail on a regression check")
 	}
 	for _, obs := range v.Setup {
@@ -344,8 +345,8 @@ func failingProtectedCheck(p readiness.Plan, result verification.Result) (readin
 			return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression setup %s did not pass", obs.ID)
 		}
 	}
-	last := len(v.Checks) - 1
-	for i, obs := range v.Checks {
+	last := len(ran) - 1
+	for i, obs := range ran {
 		c := regression[i]
 		if obs.ID != c.ID || obs.SourceTree != v.SourceTree || obs.Category != "regression" || !reflect.DeepEqual(obs.Command, c) {
 			return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression observation %d does not match the approved check", i+1)
@@ -354,7 +355,7 @@ func failingProtectedCheck(p readiness.Plan, result verification.Result) (readin
 			return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression check %s failed before the last one recorded", c.ID)
 		}
 	}
-	c, obs := regression[last], v.Checks[last]
+	c, obs := regression[last], ran[last]
 	stopped := "required command " + c.ID + " did not pass"
 	if !c.Required || obs.Result.OK || (v.Error != stopped && !strings.HasPrefix(v.Error, stopped+": ")) {
 		return readiness.Check{}, verification.Observation{}, fmt.Errorf("the protected regression run did not stop on a failing required check")
@@ -363,6 +364,54 @@ func failingProtectedCheck(p readiness.Plan, result verification.Result) (readin
 		return readiness.Check{}, verification.Observation{}, fmt.Errorf("protected regression check %s is not a direct go test -json command and its protected run did not add -json, so its failing tests cannot be declared", c.ID)
 	}
 	return c, obs, nil
+}
+
+// protectedRanChecks returns the observations of protected view v that ran on their own,
+// in plan order, and the plan's regression checks they are matched against. A targeted
+// check the view recorded as covered by a baseline check (a CoveredBy observation in
+// Checks, or a not-run record when that baseline failed) never ran, so it is left out of
+// both; each such record must name the covering check the plan itself gives it.
+func protectedRanChecks(p readiness.Plan, v *verification.Result) ([]verification.Observation, []readiness.Check, error) {
+	planned := map[string]readiness.Check{}
+	for _, c := range p.Analysis.Checks {
+		if c.Category == "regression" {
+			planned[c.ID] = c
+		}
+	}
+	covered := map[string]bool{}
+	note := func(obs verification.Observation) error {
+		if obs.CoveredBy == "" {
+			return nil
+		}
+		c, ok := planned[obs.ID]
+		if id, covers := verification.CoveringCheckID(p, c); !ok || !covers || id != obs.CoveredBy {
+			return fmt.Errorf("protected regression check %s is recorded as covered by %s, which the approved plan does not cover it with", obs.ID, obs.CoveredBy)
+		}
+		covered[obs.ID] = true
+		return nil
+	}
+	var ran []verification.Observation
+	for _, obs := range v.Checks {
+		if err := note(obs); err != nil {
+			return nil, nil, err
+		}
+		if obs.CoveredBy == "" {
+			ran = append(ran, obs)
+		}
+	}
+	for _, obs := range v.NotRun {
+		if err := note(obs); err != nil {
+			return nil, nil, err
+		}
+	}
+	var regression []readiness.Check
+	for _, c := range p.Analysis.Checks {
+		if c.Category == "regression" && !covered[c.ID] {
+			c.ReviewedAcceptance = ""
+			regression = append(regression, c)
+		}
+	}
+	return ran, regression, nil
 }
 
 // protectedGoStream reports whether the protected run of c was read as a go test

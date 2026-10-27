@@ -340,6 +340,27 @@ export function minutesText(ms) {
   if (min < 60) return min + ' min';
   return Math.floor(min / 60) + ' h' + (min % 60 ? ' ' + (min % 60) + ' min' : '');
 }
+// hoursText is a measured duration in hours and minutes only ("303 h 28 min"),
+// or '' when it is not a recorded, non-negative number.
+export function hoursText(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
+  return ms === 0 ? '0 min' : minutesText(ms);
+}
+
+// ---- Query state ------------------------------------------------------------
+// queryParam reads one URL parameter, kept only when allowed accepts it;
+// setQueryParam writes it with history.pushState, so Back, reload and copied
+// links restore it. The view stays as it is.
+export function queryParam(name, allowed) {
+  const value = new URLSearchParams(location.search).get(name);
+  return value !== null && allowed(value) ? value : null;
+}
+export function setQueryParam(name, value) {
+  const params = new URLSearchParams(location.search);
+  if (value === null) params.delete(name); else params.set(name, value);
+  const next = '?' + params.toString();
+  if (next !== location.search) history.pushState({ view: state.view }, '', next);
+}
 
 // The seven steps of a Molecule, shown in the Inbox rows and the Molecule view.
 export const STEPS = ['Plan', 'Your approval', 'Coding', 'Checks', 'Review', 'Draft PR', 'Merged'];

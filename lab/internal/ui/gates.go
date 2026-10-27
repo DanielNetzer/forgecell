@@ -34,6 +34,11 @@ import (
 //	POST /api/molecules/{id}/amend  {"digest","addAcceptance","addScope"}
 //	                                → molecule.AmendFromLatest (no --run); the new revision is approved separately
 //
+// The next actions of a blocked Molecule (actions.go) are the same kind of POST
+// and never approve either:
+//
+//	POST /api/molecules/{id}/actions/{accept-failures|scope-change|rerun-checks|recover}
+//
 // The engine validates every digest, lock and receipt; the UI only refuses
 // early what the engine would refuse anyway. There is no merge, deployment or
 // permission route. A job's own outcome never shows a decision as committed:
@@ -399,6 +404,10 @@ var categoryReasons = map[string]string{
 	"duplicate":             "Add a path or an acceptance note the plan does not list yet, or approve the plan as it is",
 	"scope-refused":         "Choose an exact path inside a component the plan's evidence covers, or run forgecell amend to see the engine's own reason",
 	"checkout":              "Refresh intake with forgecell run so the Molecule has a coding checkout, then review the new plan",
+	"not-offered":           "Reload this Molecule and choose one of the actions it offers now; the engine would refuse this one",
+	"confirm-stopped":       "Tick I confirm it is stopped once no Lab process works on this Molecule, then submit again",
+	"issue-state":           "Refresh the Issues view so GitHub Issue state is current, then list the closed Issues again",
+	"recovered-not-amended": "Reload this Molecule: it is recovered now, and What you can do lists the actions the engine accepts next",
 }
 
 // engineReasons are exact next steps for engine errors the UI recognises,
