@@ -14,39 +14,117 @@ Packages: macOS and Linux, arm64 and amd64. The bootstrap needs curl, standard s
 
 ## First run
 
-Ensure `~/.local/bin` is on PATH. The installer does not edit shell profiles. Then run
-the demo first:
+The four words you will see everywhere:
 
-```sh
-forgecell demo
-```
+- **Lab**: the runtime on your machine and its records for one repository.
+- **Formula**: the YAML recipe you approve. It names the steps and the coding agent.
+- **Molecule**: one Issue's unit of work and its ledger.
+- **Atom**: one step of a Molecule, such as the plan, coding, checks or review.
+
+You need Git, the GitHub CLI signed in (`gh auth login`), and one coding agent signed in
+with its own CLI: Claude Code, Codex or Cursor. Forgecell never asks for those
+credentials. GitLab and Jira are not supported yet (post-v1, #259).
+
+1. **Install.** Run the command above. Make sure `~/.local/bin` is on your PATH; the
+   installer does not edit shell profiles.
+2. **Open the UI.** `cd` into the repository you want Forgecell to work on and run:
+
+   ```sh
+   forgecell ui
+   ```
+
+   Your browser opens on the Lab UI. Everything below happens there.
+3. **Set up your Lab.** When the checkout has no ready Lab, the UI opens on Set up your
+   Lab and walks you through five steps, one at a time. If more than one Lab already
+   matches the repository, it first shows **Choose a Lab**: pick one and press Open Lab;
+   the others stay as they are.
+   1. **Repository**: the GitHub repository, its default branch and your `gh` sign-in
+      status. This step only reads; sign-in stays in `gh`.
+   2. **Coding agent**: pick claude-code, codex or cursor. Each one shows whether it is
+      ready and signed in. An agent that is not ready can't be picked: install it, sign
+      in with its own CLI, then press Check Again.
+   3. **Create the Lab**: press Create Lab. Forgecell saves the Lab and proposes its
+      first Formula, as `forgecell init --harness` does. Nothing is approved yet.
+   4. **Approve the Formula**: review the Atoms in order, the baseline checks taken from
+      your pull-request CI and the gate policy. Open Details to see the proposal's
+      digest (Copy Digest copies it). Then press Approve Formula. Approval binds that
+      exact proposal and digest; if it changes before you click, nothing is approved.
+      The review Atom is optional: tick the box to propose it after this approval (or
+      press Propose Review Atom when setup is done). It adds a second agent that
+      reviews each change before you do, and it is a separate Formula change that you
+      approve separately.
+   5. **Done**: your Lab is ready and the UI opens on it.
+4. **Issues.** The UI's views are Inbox, Issues, Work, Insights and Formula. The Issues
+   view lists the repository's open Issues with their Forgecell state; Search finds one
+   by number or title, and Refresh reads GitHub again. Press Start intake on one Issue
+   to start a Molecule for it. Or filter by label or milestone and press Run the loop on
+   these: it fills the loop selector (for example `milestone:<name>`), and Start loop
+   starts the loop. The loop starts intake for matching Issues and stops each Molecule
+   at every human gate. The loop panel shows the running loop, and Stop loop stops it.
+   Inbox shows what needs you, and Work lists every Molecule.
+5. **Molecule view.** Open a Molecule to see its plan: what Forgecell will do, the files
+   it may change, the checks it must pass and what counts as done. Press Approve plan &
+   start coding to approve exactly the plan shown, or Request changes. Then watch coding
+   and the checks, which run independently in a fresh checkout. At the review gate,
+   press Preview delivery to see the diff and PR body, then Publish draft PR. Merging
+   stays on GitHub: Forgecell never merges, deploys or closes Issues.
+6. **When something needs you.**
+   - **Unblock**: unblocking is not a separate view. Inside the Molecule view, a blocked
+     Molecule shows the Why it's blocked · What you can do panel, with the next actions
+     the engine offers, such as accepting failures that happen by design, approving a
+     requested scope change, re-running checks or recovering. Each one records a
+     revision or an interruption and never approves a gate for you. Under Not needed
+     anymore? you can stop or retire a Molecule. Retire attempts for closed Issues lists
+     the Molecules of closed Issues and retires them after you confirm.
+   - **Formula**: the active Formula and its proposals. Rebind to This Build after an
+     upgrade, Refresh Baseline from CI when your pull-request checks change, Enable
+     In-Loop Review to add the review Atom, and Propose Model Pin to pin the model an
+     agent role runs. Each button creates a proposal that you review and approve.
+   - **Insights**: the Lab overview, with the live Molecules by lane and the ones that
+     need your decision, then cost, tokens and time By model, for each Atom role, with a
+     weekly chart. A value the agent did not report reads "not reported", never 0.
+
+Learning is not driven from the UI yet: proposing and approving Formula suggestions from
+finished ledgers still uses `forgecell learn` and `forgecell suggestion`. Outside
+reviewers are not supported yet (post-v1, #260).
+
+### Try the demo first
 
 `forgecell demo` runs one complete Molecule against a built-in sample repository with a
-deterministic stub harness, printing each stage as it runs: intake and the plan, scope
-approval (auto-approved by the demo Formula's policy and labelled as such), coding, the
-independent checks and the protected regression, review, and a local delivery preview
-with the diff and the PR body that would be opened. It needs only Git and Go on PATH: no
-API key, no GitHub token, no `gh`, no network and no repository of your own, and it
-publishes nothing. The Lab is a temporary directory that is removed afterwards; add
-`--keep DIR` (an absent path or an empty directory you own) to keep it, then inspect the
-Molecule with `forgecell ledger MOLECULE_ID --lab DIR`.
+deterministic stub harness, printing each stage as it runs. It needs only Git and Go on
+PATH: no API key, no GitHub token, no `gh`, no network and no repository of your own, and
+it publishes nothing. Add `--keep DIR` (an absent path or an empty directory you own) to
+keep its Lab, then inspect the Molecule with `forgecell ledger MOLECULE_ID --lab DIR`.
+`forgecell ui --demo` shows sample data in the UI without reading any Lab.
 
-To work on a real repository, open it. Inside the
-repository you want Forgecell to work on, you may choose an explicit local Lab name
-and use the same path for every command:
+### Prefer the terminal?
+
+Every step above has a CLI command. Run them inside the repository; each picks the
+same default Lab as the UI, or the one you give with `--lab DIR` or, for a named Lab of
+the repository, `--lab-name NAME`. `forgecell labs` lists every Lab, read-only.
 
 ```sh
-lab_dir="$HOME/.forgecell/labs/YOUR_REPOSITORY"
-forgecell doctor --lab "$lab_dir"
-forgecell init --lab "$lab_dir"
-# Read the saved Formula, then use the actual proposal ID:
-forgecell init --lab "$lab_dir" --approve PROPOSAL_ID
-forgecell run ISSUE_NUMBER --lab "$lab_dir"
+forgecell doctor                          # check Git, gh and the coding agents
+forgecell init --harness claude-code      # create the Lab and propose its Formula
+forgecell init --approve PROPOSAL_ID      # approve the Formula you reviewed
+forgecell run ISSUE_NUMBER                # start a Molecule; approve with --approve DIGEST
+forgecell loop --select milestone:NAME    # or oldest, or label:NAME
+forgecell amend MOLECULE_ID ...           # change scope or continue a blocked Molecule
+forgecell deliver MOLECULE_ID --lab DIR --base BRANCH -- FILE...   # preview, then --approve DIGEST --title TITLE
 ```
 
-Running tickets requires Git, authenticated GitHub CLI (`gh auth login`), and an authenticated supported harness (Codex, Claude Code or Cursor). Doctor performs read-only capability/authentication checks. It does not prove model access or repository policy readiness. `doctor --lab DIR` checks that Lab's saved native binding; stale bindings require a reviewed rebind.
+`loop --max-concurrent N` sets how many Molecules it advances at once (default 1) and `--once` makes a
+single pass; `loop --watch` repeats a pass every `--interval` (default 5m), and
+`--learn` also runs the pending learn requests after each pass, like
+`learn --pending`. `retire MOLECULE_ID --reason TEXT` retires a stale Molecule and
+keeps every record; `recover MOLECULE_ID --plan DIGEST --confirm-stopped` recovers an
+interrupted one; `checks` reads a pull request's required CI checks at an exact commit for
+a Molecule's delivery and exits nonzero unless they passed.
 
-Init chooses a default harness deterministically and preserves existing approved Formulas. Approve the saved YAML before running. A Molecule uses an isolated checkout and stops at human review. This preview does not automatically merge, deploy or close issues. Learning uses a separately bound meta harness and requires explicit approval of Formula changes.
+`init --rebind ID`, `init --refresh-baseline`, `init --enable-review` and
+`init --model ID` are the Formula view's buttons. `doctor` performs read-only capability
+and authentication checks; it does not prove model access or repository policy
+readiness. `forgecell --help` lists every command and flag.
 
 The `0.2.0-preview.2` prerelease uses a distinct directory under `~/.forgecell/labs/`
 for each checkout by default; `forgecell doctor --json` reports the exact location.
@@ -62,6 +140,13 @@ The command above pins `0.2.0-preview.2`. Repeating it safely reinstalls that ve
 
 `forgecell rollback` restores the previous verified installation when one exists. Installation preserves Formulas and ledgers, stores versioned executables under `~/.forgecell/releases`, and refuses conflicting unmanaged launchers.
 
+After upgrading, rebind your Lab to the new build: open the Formula view, press Rebind to
+This Build, review the proposal and approve it. From the terminal, `forgecell init --rebind ID`
+proposes the same binding-only change. `forgecell doctor` checks the Lab's saved
+binding; a stale binding needs a reviewed rebind before runs use it.
+Developer builds made with `forgecell dev install` record their checkout's commit time,
+so a rebind can tell which of two dev builds of the same version is newer.
+
 `FORGECELL_HOME` and `FORGECELL_BIN` customize paths. Set these variables before the opening `sh -c` so they reach the downloaded installer, not only curl.
 
 ## Resources and cleanup
@@ -71,6 +156,7 @@ Forgecell runs full test suites, parallel cohort attempts and worktrees on your 
 - **Floors.** Free disk is checked on the volumes holding `TMPDIR`, the Lab and `GOCACHE`: the soft floor is the larger of 15 GiB and 10% of the volume, capped at 30 GiB, and the hard floor the larger of 5 GiB and 3%, capped at 10 GiB, so a large disk never demands an unreasonable amount of free space (on a 2 TB disk the floors are 30 and 10 GiB). `forgecell doctor` shows the effective floors for each volume. Available memory (on macOS the kernel's memory-status level times physical memory, from `sysctl kern.memorystatus_level hw.memsize`, which is the figure `memory_pressure` reports, with free plus inactive pages from `vm_stat` only as a fallback; on Linux `MemAvailable` from `/proc/meminfo`) has a soft floor of 3 GiB and a hard floor of 1.5 GiB. Override them in `<lab>/resources.json`, for example `{"diskSoftFloorGiB": 20, "diskHardFloorGiB": 8, "memorySoftFloorGiB": 4, "memoryHardFloorGiB": 2}`. A configured disk floor replaces the percentage. No floor goes below 2 GiB of disk or 1 GiB of memory. For `evaluate --cohort` the file is read from `--out`.
 - **Below a soft floor**, a Molecule's verification stage or a cohort attempt is not started. Forgecell re-checks every 30 s for up to 10 min, then stops cleanly with the reason `resources: low disk` or `resources: low memory`. Work already running keeps running. `loop --watch` skips the pass and prints the reason in its pass report.
 - **Below a hard floor while work runs** (sampled every 10 s), the running check processes are killed through their process group and the reason `resources-exhausted` is recorded. A cohort attempt cancelled this way is discarded, not recorded, so resuming the cohort re-runs it.
+- **Verification slots, stalls and fail-fast checks.** `verificationSlots` in `<lab>/resources.json` (1 to 8) sets how many Molecules may verify at the same time. When it is unset the limit is 1; a new Lab is written with `{"verificationSlots": 2}`. The resource guard grants the first slot as usual, refuses every extra slot while any reading is below its soft floor, and allows one slot per 4 GiB of available memory, so you may get fewer than you configured. A wall-clock watchdog ends a verification check that runs past its time budget as interrupted (stalled), even when the machine slept in between, so a stuck check never runs for hours. It never judges a check by silence or CPU use. Within a view, the checks run cheapest first (formatting and vet, then builds, then targeted tests, then the full suite), and setup commands always run first; once a required check fails, the remaining checks are recorded as not run, never as passed.
 - **Parallelism.** `evaluate --cohort --parallel N` runs at most one attempt per 4 GiB of available memory and prints the reduced level. Each attempt's `go` commands get `GOFLAGS=-p=<CPUs / attempts>`.
 - **Temporary directories.** Every Forgecell temp directory holds a `.forgecell-owner` file (pid and start time) and is removed on exit and on SIGINT or SIGTERM. It is removed even when it contains a read-only Go module cache. At every start, Forgecell removes your own `$TMPDIR/forgecell-*` directories whose owner process is gone, or that have no owner file and are over 24 h old. It never touches anything else.
 - **Check temp files.** A Molecule's check views share one stable `TMPDIR` per Lab, outside the Lab and so outside your home: `<temp root>/forgecell-lab-<16 hex digits>`, where the digits start the SHA-256 of the Lab's resolved path. The temp root, with symbolic links resolved, is the first of: `$FORGECELL_LAB_TMP_ROOT`, then `$TMPDIR`, each only when set, an existing directory and not inside your home (`$HOME`); otherwise the per-user default, which on macOS is your per-user temp dir (`getconf DARWIN_USER_TEMP_DIR`, under `/var/folders`), on Linux `/tmp` and elsewhere the system temp dir. A disk-backed `$TMPDIR` is therefore kept, and a nested run inside a check view stays under that view's `TMPDIR`. A set root that is passed over, or a per-user temp dir macOS cannot report, is recorded as a note on the Molecule. Go's `GOTMPDIR` is its `gotmp` subdirectory. It is created at 0700 with a `.forgecell-check-tmp` marker and a `lab` file naming its Lab; reusing your own directory at that path makes it 0700 and writes either file again if it is missing. A symbolic link, a non-directory or another user's directory at that path is refused, and so is a per-user default that lies inside your home; the views then use a private `TMPDIR` and the Molecule records a note. If the directory vanishes during a verification (an OS temp cleaner), the remaining views use a private `TMPDIR` and the Molecule records a note. It is kept, never swept as leaked while its Lab exists; each verification first removes your entries in it older than 24 h. A marked `forgecell-lab-*` directory older than 24 h whose `lab` file names a path that no longer exists, or that has no `lab` file, is an orphan: the start sweep (in `$TMPDIR`) and each verification (in its temp root) remove it. Forgecell versions before this one used `<lab>/tmp`, which is no longer used or pruned automatically.
@@ -91,16 +177,21 @@ Ledgers, history and evidence files are never removed. A removed workspace stays
 ## Local UI
 
 ```sh
-forgecell ui [--lab DIR] [--port N] [--no-open] [--demo]
+forgecell ui [--lab DIR] [--lab-name NAME] [--port N] [--no-open] [--demo]
 ```
 
-`forgecell ui` serves a read-only view of a Lab in your browser: the Molecule grid with filters and search, the selected Molecule (intake, Formula snapshot SHA-256 and YAML, readiness revisions and events, harness attempts with model and usage as recorded) and each Atom's status, provenance and evidence list. It picks the Lab the same way as the other Lab commands (`--lab DIR`, `--lab-name NAME`, `FORGECELL_LAB` or the default Lab for the checkout).
+`forgecell ui` is where you drive the Lab from your browser: Set up your Lab, Inbox, Issues, Work and each Molecule view, Insights and Formula (see [First run](#first-run)). It picks the Lab the same way as the other Lab commands (`--lab DIR`, `--lab-name NAME`, `FORGECELL_LAB` or the default Lab for the checkout).
 
+What it does and doesn't do:
+
+- **Every write goes through the engine.** Each write is a POST that the engine performs with the same checks as the CLI: digests, locks and receipts. Approvals are bound to the exact plan, proposal or preview digest you saw; if it changed before you clicked, nothing is approved. The writes are: Set up your Lab, creating, approving or dismissing Formula proposals, starting intake, starting and stopping the loop, stopping a Molecule this UI runs, approving a plan, requesting changes, the next actions of a blocked Molecule, retiring Molecules and publishing a draft PR.
+- **It never merges or deploys,** and it never changes permissions. A blocked Molecule's next actions record a revision or an interruption and never approve a gate; recovery runs only after you confirm it.
+- **Until setup is done, it refuses every other API route** with "set up your Lab first; nothing was read or written".
 - It listens on `127.0.0.1` only, on a free port unless `--port N` is given, prints a `http://127.0.0.1:<port>/?t=<token>` URL and, unless `--no-open` is given, opens it through a private (0600) launch page in a Forgecell temp directory, so the token never appears in a process's arguments; the page is deleted at the first exchange, or when the UI stops. The URL is always printed too, for a browser that cannot read the page (such as a snap-confined one). Press Ctrl-C (SIGINT or SIGTERM) to stop it.
 - The token is new for every launch and single-use: the first visit exchanges it for an HttpOnly, SameSite=Strict cookie holding a separate random session secret, plus a second random value that the page keeps in that tab's `sessionStorage` and sends as an `X-Forgecell-Session` header on every API request (browsers send `127.0.0.1` cookies to every port, so the cookie alone is not enough). Any later visit to the URL gets 403; a new tab has no session and says so; restart `forgecell ui` for a new link. Requests without that cookie, with another `Host`, or from another origin get 403. Do not share the URL.
-- The UI only serves GET requests and only reads the Lab: it never writes, recovers, approves or takes locks. It never returns credentials, the environment, the Lab or workspace directory, or other absolute local paths: in free text the Lab, workspace, source and home directories become `<lab>`, `<workspace>`, `<source>` and `~`, any other path under a local root (`/Users`, `/home`, `/root`, `/private`, `/var`, `/tmp`, `/Volumes`, `/opt`, `/etc`, `/mnt`, `/srv`, `/System`, `/Library`, also as `file://`) becomes `[local path]`, and evidence paths are shown relative to the Lab.
+- Every write also needs the exact `Origin`. The UI never returns credentials, the environment, the Lab or workspace directory, or other absolute local paths: in free text the Lab, workspace, source and home directories become `<lab>`, `<workspace>`, `<source>` and `~`, any other path under a local root (`/Users`, `/home`, `/root`, `/private`, `/var`, `/tmp`, `/Volumes`, `/opt`, `/etc`, `/mnt`, `/srv`, `/System`, `/Library`, also as `file://`) becomes `[local path]`, and evidence paths are shown relative to the Lab.
 - Lanes: **Blocked** (status blocked or failed, even with a receipt), then **Needs my decision** (phase `scope-waiting` or `review-waiting`), then **Running** (status running or allocating, or an active phase), then **Finished · Draft published** (a `published` delivery receipt whose lifecycle is not CLOSED, UNKNOWN, MISSING or AMBIGUOUS). Anything else counts as **Other**, so the lane counts always add up to All. A prepared or committed receipt is shown as "Delivery in progress" with its exact state. Draft published never means merged.
-- Not wired in this version, and shown as Unavailable: analytics, cost per merged PR, logs, gates and approvals, Formula suggestions, evaluation and pause. Use the CLI for every decision.
+- Not wired in this version, and shown as Unavailable: cost per merged PR, Formula suggestions, evaluation and pause. Learning and evaluation stay in the CLI (`learn`, `suggestion`, `evaluate`); there is no pause.
 - `--demo` serves the design prototype's synthetic Molecules, labeled Sample data, and reads no Lab; it does not resolve the default Lab. The real mode never shows synthetic values.
 
 ## Contributors
