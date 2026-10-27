@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/css/insights.css">
 <link rel="stylesheet" href="/css/formula.css">
 <link rel="stylesheet" href="/css/loop.css">
+<link rel="stylesheet" href="/css/setup.css">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -223,6 +224,16 @@
 <section id="view-formula" class="view glass formula-view" data-view-panel="formula" aria-labelledby="formula-title" hidden>
   <h1 id="formula-title">Formula</h1>
   <div id="active-formula" class="active-formula"></div>
+</section>
+
+<section id="view-setup" class="view setup" data-view-panel="setup" aria-labelledby="setup-title" hidden>
+  <div class="glass setup-head">
+    <h1 id="setup-title">Set up your Lab</h1>
+    <p class="setup-intro">Five short steps, each the same engine path as forgecell init. Nothing is approved until you click Approve Formula.</p>
+    <ol id="setup-steps" class="setup-steps" aria-label="Setup progress"></ol>
+  </div>
+  <p id="setup-live" class="sr-only" role="status" aria-live="polite"></p>
+  <div id="setup-body" class="setup-body"></div>
 </section>
 
 <footer><span>Atom → Molecule · arranged by a Formula · inside your Lab</span><span id="footer-version"></span></footer>

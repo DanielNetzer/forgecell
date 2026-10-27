@@ -1,0 +1,61 @@
+/* Set up your Lab: the first-run view (js/setup.js). While it shows, the Lab
+   navigation, the tab bar and the side panel are hidden: there is no Lab yet. */
+body.setup-mode .app-nav, body.setup-mode .tab-bar, body.setup-mode .side-panel, body.setup-mode #loop-pill, body.setup-mode .readonly-badge { display: none; }
+
+.setup { display: grid; gap: 16px; max-width: 760px; min-width: 0; }
+.setup-head { padding: 22px 24px; border-radius: var(--radius-panel); }
+.setup-head h1 { margin: 0; font-size: 26px; font-weight: 500; letter-spacing: 0; }
+.setup-intro { margin: 6px 0 0; color: var(--muted); }
+.setup-steps { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 16px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--soft); font-variant-numeric: tabular-nums; }
+.setup-step[data-status=current] { color: var(--ink); font-weight: 600; }
+.setup-step[data-status=done] { color: var(--teal); }
+.setup-body { display: grid; gap: 16px; min-width: 0; }
+
+.setup-card { display: grid; gap: 10px; padding: 20px 22px; border-radius: var(--radius-panel); min-width: 0; overflow-wrap: anywhere; }
+.setup-card-title { margin: 0; font-size: 17px; font-weight: 500; letter-spacing: 0; }
+.setup-sub { margin: 6px 0 0; font-size: 14px; font-weight: 600; }
+.setup-count { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.setup-note { margin: 0; }
+.setup-hint { margin: 0; color: var(--muted); font-size: 13px; }
+.setup-warn { color: var(--needs-ink); }
+.setup-error { margin: 0; padding: 8px 12px; border: 1px solid var(--danger-edge); border-radius: var(--radius-control); color: var(--danger-ink); background: var(--paper); }
+.setup-error:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.setup-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; }
+.setup-facts dt { color: var(--muted); }
+.setup-facts dd { margin: 0; min-width: 0; }
+.setup-formula { margin: 0; color: var(--muted); }
+
+.setup-form { display: grid; gap: 12px; min-width: 0; }
+.setup-options { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.setup-option { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; padding: 10px 12px; border: 1px solid var(--card-edge); border-radius: var(--radius-card); background: var(--paper); cursor: pointer; touch-action: manipulation; }
+.setup-option:has(input:checked) { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal); }
+.setup-option[data-ready=no] { cursor: default; color: var(--muted); }
+.setup-option input { margin-top: 3px; }
+.setup-option input:focus-visible, .setup-toggle input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.setup-option-text { display: grid; gap: 2px; min-width: 0; }
+.setup-option-text small { color: var(--muted); }
+.setup-toggle { display: flex; align-items: flex-start; gap: 8px; min-height: 44px; touch-action: manipulation; }
+.setup-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.setup-actions .btn { touch-action: manipulation; }
+.setup-atoms, .setup-checks, .setup-gates { display: grid; gap: 4px; margin: 0; padding-left: 22px; min-width: 0; }
+.setup-atoms small { color: var(--muted); }
+.setup-checks code { overflow-wrap: anywhere; }
+.setup-details summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+.setup-details summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+@media (max-width: 720px) {
+  .setup-head, .setup-card { padding: 16px; }
+  .setup-facts { grid-template-columns: minmax(0, 1fr); }
+  .setup-actions .btn { flex: 1 1 auto; min-height: 44px; }
+}
+@media (pointer: coarse) {
+  .setup-actions .btn, .setup-option, .setup-toggle { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .setup-option { transition: none; }
+}
+@media (forced-colors: active) {
+  .setup-card, .setup-head, .setup-option { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
+  .setup-option:has(input:checked) { border-color: Highlight; }
+  .setup-error { border: 1px solid CanvasText; }
+}
