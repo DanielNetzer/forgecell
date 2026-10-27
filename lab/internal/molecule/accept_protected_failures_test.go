@@ -91,7 +91,19 @@ exit 3
 // is therefore not parallel.
 func acceptFixture(t *testing.T, mode string) (Options, Record) {
 	t.Helper()
-	return acceptFixtureFiles(t, mode, map[string]string{acceptTest: "package pin\n\n// pinned: old\n"}, false)
+	return acceptFixtureFiles(t, mode, map[string]string{acceptTest: "package pin\n\n// pinned: old\n"}, false, acceptJSONArgv)
+}
+
+var (
+	acceptJSONArgv  = []string{"go", "test", "-json", "./..."}
+	acceptPlainArgv = []string{"go", "test", "./..."}
+)
+
+// acceptPlainFixture is acceptFixture with a plain `go test ./...` required
+// regression check, as intake plans write it: the protected view adds -json itself.
+func acceptPlainFixture(t *testing.T, mode string) (Options, Record) {
+	t.Helper()
+	return acceptFixtureFiles(t, mode, map[string]string{acceptTest: acceptPinnedBase}, false, acceptPlainArgv)
 }
 
 const (
@@ -105,10 +117,10 @@ const (
 // the package that sorts first and declares TestY, not TestX.
 func acceptBaselineFixture(t *testing.T, mode string) (Options, Record) {
 	t.Helper()
-	return acceptFixtureFiles(t, mode, map[string]string{acceptTest: acceptPinnedBase, acceptOtherTest: "package pin\n\nimport \"testing\"\n\nfunc TestY(t *testing.T) {}\n"}, true)
+	return acceptFixtureFiles(t, mode, map[string]string{acceptTest: acceptPinnedBase, acceptOtherTest: "package pin\n\nimport \"testing\"\n\nfunc TestY(t *testing.T) {}\n"}, true, acceptJSONArgv)
 }
 
-func acceptFixtureFiles(t *testing.T, mode string, tests map[string]string, baseline bool) (Options, Record) {
+func acceptFixtureFiles(t *testing.T, mode string, tests map[string]string, baseline bool, argv []string) (Options, Record) {
 	t.Helper()
 	bin := resolvedTempDir(t)
 	if err := writeStub(filepath.Join(bin, "go"), []byte(acceptFakeGo), 0700); err != nil {
@@ -145,7 +157,7 @@ func acceptFixtureFiles(t *testing.T, mode string, tests map[string]string, base
 			}
 		}
 		a.Scope = append(a.Scope, readiness.ScopedPath{Path: acceptTest, Reason: "The pinned behaviour changes by design", Evidence: []string{"issue"}})
-		a.Checks = append(a.Checks, readiness.Check{ID: acceptCheck, Category: "regression", Argv: []string{"go", "test", "-json", "./..."}, Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: "Module tests", Evidence: []string{"issue", manifest}})
+		a.Checks = append(a.Checks, readiness.Check{ID: acceptCheck, Category: "regression", Argv: append([]string{}, argv...), Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: "Module tests", Evidence: []string{"issue", manifest}})
 		if baseline {
 			a.Scope = append(a.Scope, readiness.ScopedPath{Path: acceptOtherTest, Reason: "Another test of the package", Evidence: []string{"issue"}})
 			a.Checks = append(a.Checks, readiness.Check{ID: acceptBaseline, Category: "regression", Argv: []string{"go", "test", "-timeout", "20m", "./..."}, Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: "Formula baseline", Evidence: []string{"issue", manifest}})
@@ -229,6 +241,71 @@ func TestAcceptProtectedFailuresDeclaresTheByDesignFailureAndReachesReview(t *te
 	}
 	if !bytes.Equal(before, ledgerBytes(t, r)) {
 		t.Fatal("a refused amend changed the ledger")
+	}
+}
+
+// The #257 flow: a plain go test check's first protected run has no deltas, yet the
+// protected view streams it with -json, so the by-design failure is recorded without
+// changing the verdict, --accept-protected-failures declares it from that run, and the
+// approved checks-only run accepts it.
+func TestAcceptProtectedFailuresWorksOnTheFirstPlainGoTestFailure(t *testing.T) {
+	o, r := acceptPlainFixture(t, "by-design")
+	v := r.Verification
+	if statePhase(r) != "failed" || v.RequiredChecksPassed || v.Protected == nil || v.Protected.RequiredChecksPassed || len(v.AcceptedDeltas) != 0 || len(v.Protected.Checks) != 1 {
+		t.Fatalf("the first protected run must still fail: %s %+v", statePhase(r), v)
+	}
+	found := false
+	for _, c := range v.Checks {
+		if c.ID != acceptCheck {
+			continue
+		}
+		found = true
+		if c.JSONAdded || !c.Result.OK || !reflect.DeepEqual(c.Command.Argv, acceptPlainArgv) || strings.Contains(c.Result.Stdout, `"Action"`) {
+			t.Fatalf("the candidate view was changed: %+v", c)
+		}
+	}
+	if !found {
+		t.Fatalf("the candidate view did not run %s", acceptCheck)
+	}
+	obs := v.Protected.Checks[0]
+	if !obs.JSONAdded || obs.Result.OK || !reflect.DeepEqual(obs.Command.Argv, acceptPlainArgv) || len(obs.AcceptedDeltas) != 0 {
+		t.Fatalf("protected observation: %+v", obs)
+	}
+	if want := []verification.TestID{{Package: acceptPackage, Test: "TestX"}}; !reflect.DeepEqual(obs.FailedTests, want) {
+		t.Fatalf("failed tests %v, want %v", obs.FailedTests, want)
+	}
+	parent := latestPlan(r)
+	tree := r.Capture.Tree
+	r, err := AmendFromLatest(context.Background(), o.LabDir, r.ID, AmendRequest{AcceptProtectedFailures: true})
+	if err != nil {
+		t.Fatalf("the first by-design failure could not be accepted: %v", err)
+	}
+	got := latestPlan(r)
+	if !reflect.DeepEqual(got.Plan.Analysis.Checks, parent.Plan.Analysis.Checks) || got.Plan.Continuation != "checks-only" {
+		t.Fatalf("the amendment changed the checks: %+v", got.Plan.Analysis.Checks)
+	}
+	deltas := got.Plan.ExpectedProtectedDeltas
+	if len(deltas) != 1 || deltas[0].Test != "TestX" || deltas[0].Package != acceptPackage || deltas[0].CheckID != acceptCheck || deltas[0].ScopePath != acceptTest || deltas[0].DeltaScope != readiness.DeltaScopeIdentity {
+		t.Fatalf("deltas %+v", deltas)
+	}
+	for _, e := range r.Readiness.Events {
+		if e.Kind == "approved" && e.Digest == got.Digest {
+			t.Fatal("the amendment approved its own digest")
+		}
+	}
+	o.Approve = got.Digest
+	if r, err = Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	v = r.Verification
+	if r.Readiness.Phase != "review-waiting" || v == nil || !v.RequiredChecksPassed || len(r.HarnessAttempts) != 1 || r.Capture.Tree != tree {
+		t.Fatalf("checks-only did not accept the declared failure: phase %s attempts %d %+v", r.Readiness.Phase, len(r.HarnessAttempts), v)
+	}
+	if len(v.AcceptedDeltas) != 1 || v.AcceptedDeltas[0].Test != "TestX" || !v.Protected.Checks[0].JSONAdded {
+		t.Fatalf("accepted deltas %+v", v.AcceptedDeltas)
+	}
+	if strings.Contains(string(ledgerBytes(t, r)), o.LabDir+"/verification-history") {
+		t.Fatal("the ledger recorded a local evidence path")
 	}
 }
 

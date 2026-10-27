@@ -105,7 +105,16 @@ func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, 
 	if err != nil {
 		return fail(err)
 	}
-	options := molecule.LoopOptions{Template: molecule.Options{LabDir: *lab, SourceRoot: cwd, Resources: guard}, Select: selector, MaxConcurrent: *concurrent, Once: *once}
+	// The Lab's loop marker is taken by the first pass, once the approved Formula
+	// has loaded, and held until the command ends, across every --watch pass. A
+	// loop that finds another holding it exits 1 before listing any Issue.
+	watchInterval := time.Duration(0)
+	if *watch {
+		watchInterval = *interval
+	}
+	marker := molecule.NewLoopMarker(molecule.LoopStarterCLI, watchInterval)
+	defer marker.Release()
+	options := molecule.LoopOptions{Template: molecule.Options{LabDir: *lab, SourceRoot: cwd, Resources: guard}, Select: selector, MaxConcurrent: *concurrent, Once: *once, Marker: marker}
 	if *watch {
 		return watchLoop(ctx, options, *interval, *learn, *lab, out, stderr)
 	}
@@ -125,8 +134,9 @@ func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, 
 // reaches only the Issue listing and the waits: Molecules already in flight run
 // on a context the request does not cancel, and no further Issue or pass is
 // started. A transient pass error (listing, ledger inventory) is reported and
-// retried with exponential backoff capped at four intervals; any other error
-// ends the watch. After a stop the exit code is the final completed pass's, or 1
+// retried with exponential backoff capped at four intervals; any other error,
+// including another loop holding the Lab's marker, ends the watch. Every pass
+// shares options.Marker, so the marker stays held between passes. After a stop the exit code is the final completed pass's, or 1
 // when the last pass ended in an error.
 func watchLoop(ctx context.Context, options molecule.LoopOptions, interval time.Duration, learn bool, lab string, out, stderr io.Writer) int {
 	options.Once = true
