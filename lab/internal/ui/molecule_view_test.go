@@ -340,8 +340,8 @@ func TestMoleculeViewServedPage(t *testing.T) {
 // the Molecule and apart from any primary, routes ?m= and Back through
 // history, and never rewrites the Publish title while polling.
 func TestMoleculeViewServedJS(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
-	build := jsFunction(t, js, "ensureMoleculeView")
+	js := servedJS(t)
+	build := moduleFunction(t, js, "ensureMoleculeView")
 	decision := between(t, build, "fill($('#mv-decision'),", ");")
 	danger := between(t, build, "c.stopOpen =", "fill($('#mv-danger-slot'), c.runnerNote, c.danger);")
 	if strings.Contains(decision, "stop") || strings.Contains(decision, "retire") || strings.Contains(decision, "danger") {
@@ -399,7 +399,7 @@ func TestMoleculeViewServedJS(t *testing.T) {
 		"viewFromURL":       {"if (!view && moleculeFromURL()) return 'work';"},
 		"restoreSelection":  {"else if (!id && state.selectedId) overview();", "if (VIEWS.includes(from)) mv.from = from;"},
 		"openMolecule":      {"rememberFrom(from);"},
-		"navigate":          {"if (moleculeFromURL()) history.pushState({ view: view }, '', '?view=' + view);", "restoreSelection();"},
+		"navigate":          {"if (moleculeFromURL()) history.pushState({ view: view }, '', '?view=' + view);", "ctx.restoreSelection();"},
 		"renderHeader":      {"whenText(plan.plannedAt)", "dateTitle(plan.plannedAt)"},
 		"renderPlanDetails": {"el('code', null, digest.slice(0, 7))", "setText($('#mv-digest-short'), digest ? short(digest) : 'Not recorded');"},
 		"renderTimeline":    {"if (panel.contains(document.activeElement) && mv.timelineId === d.id) { mv.timelineDirty = true; return; }"},
@@ -408,7 +408,7 @@ func TestMoleculeViewServedJS(t *testing.T) {
 		"showMoleculeView":  {"$('.shelf').hidden = open;"},
 		"renderPlan":        {"if (key === mv.planKey) return;"},
 	} {
-		body := jsFunction(t, js, name)
+		body := moduleFunction(t, js, name)
 		for _, want := range wants {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s lacks %q", name, want)
@@ -416,7 +416,7 @@ func TestMoleculeViewServedJS(t *testing.T) {
 		}
 	}
 	// A poll never rewrites a typed value or rebuilds the card.
-	render := jsFunction(t, js, "renderDecision")
+	render := moduleFunction(t, js, "renderDecision")
 	for _, gone := range []string{"title.value", "reasonInput.value", "acceptance.value", "fill($('#mv-decision')", "short(", "innerHTML"} {
 		if strings.Contains(render, gone) {
 			t.Errorf("renderDecision has %q", gone)
@@ -424,7 +424,7 @@ func TestMoleculeViewServedJS(t *testing.T) {
 	}
 	// No raw digest or timestamp text is set outside Plan details.
 	for _, name := range []string{"renderHeader", "renderDecision", "renderPlan", "fileItem", "groupItem", "renderRoles"} {
-		body := jsFunction(t, js, name)
+		body := moduleFunction(t, js, name)
 		if regexp.MustCompile(`(setText|el)\([^;]*(\.digest\b[^)]*\)|plannedAt\))`).MatchString(strings.ReplaceAll(strings.ReplaceAll(body, "whenText(plan.plannedAt)", ""), "dateTitle(plan.plannedAt)", "")) {
 			t.Errorf("%s renders a digest or a raw time", name)
 		}
@@ -441,7 +441,7 @@ func TestMoleculeViewServedJS(t *testing.T) {
 // sticky, stacks the view on narrow screens and keeps 44px targets and forced
 // colors for its controls.
 func TestMoleculeViewServedCSS(t *testing.T) {
-	css := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/style.css")).Body.String()
+	css := servedCSS(t)
 	rules := cssRules(css)
 	wantDecls(t, rules, ".btn-decision", "height: 48px;", "border-radius: 14px;")
 	wantDecls(t, rules, ".mv-aside", "position: sticky;")
@@ -450,12 +450,12 @@ func TestMoleculeViewServedCSS(t *testing.T) {
 	wantDecls(t, rules, ".danger-zone", "border: 1px solid #eccfc6;")
 	wantDecls(t, rules, ".state-pill[data-tone=needs]", "background: var(--needs-bg);")
 	wantDecls(t, rules, ".shell.has-molecule .side-panel", "display: none;")
-	wantDecls(t, cssRules(mediaBlock(t, css, "@media (max-width: 1199px)")), ".mv-layout", "grid-template-columns: minmax(0, 1fr);")
-	mobile := cssRules(mediaBlock(t, css, "@media (max-width: 720px)"))
+	wantDecls(t, cssRules(mediaBlocks(t, css, "@media (max-width: 1199px)")), ".mv-layout", "grid-template-columns: minmax(0, 1fr);")
+	mobile := cssRules(mediaBlocks(t, css, "@media (max-width: 720px)"))
 	wantDecls(t, mobile, ".check-grid", "grid-template-columns: minmax(0, 1fr);")
 	wantDecls(t, mobile, ".file", "grid-template-columns: minmax(0, 1fr);")
-	wantDecls(t, cssRules(mediaBlock(t, css, "@media (pointer: coarse)")), ".mv-tab, .btn-small, .breadcrumb a, .accept-label, .preview-info .text-button", "min-height: 44px;")
-	forced := cssRules(mediaBlock(t, css, "@media (forced-colors: active)"))
+	wantDecls(t, cssRules(mediaBlocks(t, css, "@media (pointer: coarse)")), ".mv-tab, .btn-small, .breadcrumb a, .accept-label, .preview-info .text-button", "min-height: 44px;")
+	forced := cssRules(mediaBlocks(t, css, "@media (forced-colors: active)"))
 	wantDecls(t, forced, ".mv-tab[aria-selected=true]", "background: Highlight;")
 	wantDecls(t, forced, ".mv-step.is-done .step-bar, .mv-step.is-current .step-bar, .mv-step.is-blocked .step-bar", "background: Highlight;")
 	if bad := uncoveredOutlineResets(css); len(bad) != 0 {

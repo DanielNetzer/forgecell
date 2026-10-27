@@ -1,0 +1,45 @@
+/* Forgecell local Lab UI. Consolidated from the forest-glass prototype
+   (docs/design/ui/forest-glass/style.css): its final light palette with the
+   appended overrides merged into one set of rules. The app shell follows the
+   approved redesign mockup (docs/design/ui/redesign-2026-10-26). Nothing is
+   fetched from a network: the font and art are served from the embedded
+   /assets/, and the font falls back to the system stack. The server replaces
+   __ASSET_VERSION__ with the binary's version, so the long asset cache never
+   outlives an upgrade.
+
+   index.html links the sheets in a fixed order: these tokens, base.css (the
+   shell and the shared controls), then one sheet per view. Each view's
+   responsive, coarse-pointer, reduced-motion and forced-colors rules sit at
+   the end of its own sheet, after the rules they override. */
+
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("/assets/instrument-sans-400.woff2?v=__ASSET_VERSION__") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 500 600; font-display: swap; src: url("/assets/instrument-sans-500.woff2?v=__ASSET_VERSION__") format("woff2"); }
+
+:root {
+  color-scheme: light;
+  --base: #faf7ec;
+  --forest: #183e32;
+  --teal: #239f89;
+  --mint: #b4e3ce;
+  --paper: #fffef9;
+  --ink: #183e32;
+  --muted: #576e62;
+  --soft: #627966;
+  --line: #254d3224;
+  --edge: #b9ccba;
+  --edge-strong: #7f9f89;
+  --card-edge: #c9d8c8;
+  --glass: #fbfcf6e6;
+  --glass-solid: #fbfcf6;
+  --focus: #14523c;
+  --radius-panel: 20px;
+  --radius-card: 14px;
+  --radius-control: 12px;
+  --shadow-glass: inset 0 1px 0 #ffffffcc, 0 1px 2px #1a3a2a14, 0 12px 32px #1a3a2a12;
+  --shadow-card: 0 1px 2px #1a3a2a0f, 0 4px 12px #1a3a2a08;
+  --shell-edge: #d9e3d6;
+  --needs-ink: #7a5410;
+  --needs-bg: #f6e7c8;
+  --danger-ink: #8a3322;
+  --danger-edge: #e2b9ad;
+}

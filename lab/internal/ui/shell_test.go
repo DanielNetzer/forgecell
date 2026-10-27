@@ -54,22 +54,23 @@ func TestUIAssetsServedWithTypesCacheAndSecurityHeaders(t *testing.T) {
 			t.Errorf("%s: %d %q", path, w.Code, w.Header().Get("Cache-Control"))
 		}
 	}
-	for _, path := range []string{"/", "/app.js", "/style.css", "/api/lab"} {
+	for _, path := range []string{"/", "/app.js", "/js/core.js", "/css/base.css", "/api/lab"} {
 		if got := do(t, h, authed(path)).Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("%s Cache-Control %q", path, got)
 		}
 	}
 }
 
-// Every asset the served page, script and stylesheet reference carries the
-// binary's version as ?v=, so the year-long immutable cache never serves stale
-// art or fonts after an upgrade; the versioned URL is served, and the version is
-// URL-safe and bounded.
+// Every asset the served page, script modules and stylesheets reference carries
+// the binary's version as ?v=, so the year-long immutable cache never serves
+// stale art or fonts after an upgrade; the versioned URL is served, and the
+// version is URL-safe and bounded.
 func TestUIAssetsReferencedWithVersionQuery(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir(), Version: "v1.4.0-rc.1"})
 	ref := regexp.MustCompile(`/assets/[A-Za-z0-9._-]+\.(?:webp|woff2)[^"'\s)]*`)
 	seen := map[string]bool{}
-	for _, file := range []string{"/", "/app.js", "/style.css"} {
+	files := append([]string{"/"}, servedModules...)
+	for _, file := range append(files, servedStylesheets...) {
 		body := do(t, h, authed(file)).Body.String()
 		if strings.Contains(body, assetVersionMark) {
 			t.Errorf("%s leaks the version placeholder", file)
@@ -193,13 +194,13 @@ func between(t *testing.T, s, start, end string) string {
 // needs-you count, maps Lab state to the resident's pose, renders the loop
 // pill through the existing stop call and the avatar as text.
 func TestUIShellServedJSRoutesViewsBadgePillAvatarAndPose(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"const VIEWS = ['inbox', 'issues', 'work', 'insights', 'formula'];",
 		"const view = new URLSearchParams(location.search).get('view');",
 		"return VIEWS.includes(view) ? view : 'inbox';",
 		"if (view !== viewFromURL()) history.pushState({ view: view }, '', '?view=' + view);",
-		"window.addEventListener('popstate', () => { showView(viewFromURL()); restoreSelection(); });",
+		"window.addEventListener('popstate', () => { showView(viewFromURL()); ctx.restoreSelection(); });",
 		"const link = e.target.closest('a[data-view]');",
 		"if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;",
 		"panel.hidden = panel.dataset.viewPanel !== view;",
@@ -239,7 +240,7 @@ func TestUIShellServedJSRoutesViewsBadgePillAvatarAndPose(t *testing.T) {
 	if regexp.MustCompile(`operator-glyph'\)\.hidden\s*=`).MatchString(js) {
 		t.Error("app.js still sets the hidden property on the SVG operator glyph")
 	}
-	pose := jsFunction(t, js, "residentPose")
+	pose := moduleFunction(t, js, "residentPose")
 	waving := strings.Index(pose, "if (waiting > 0) return 'waving';")
 	studying := strings.Index(pose, "if ((counts.running || 0) > 0) return 'studying';")
 	reading := strings.Index(pose, "return 'reading';")
@@ -257,7 +258,7 @@ func TestUIShellServedJSRoutesViewsBadgePillAvatarAndPose(t *testing.T) {
 // pauses it, swaps the nav for the tab bar on phones and gives coarse pointers
 // 44px targets.
 func TestUIShellServedCSSFontArtPoseAndTabBar(t *testing.T) {
-	css := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/style.css")).Body.String()
+	css := servedCSS(t)
 	rules := cssRules(css)
 	wantDecls(t, rules, "@font-face", `font-family: "Instrument Sans";`, "font-weight: 400;", "font-weight: 500 600;", "font-display: swap;",
 		`src: url("/assets/instrument-sans-400.woff2?v=dev") format("woff2");`, `src: url("/assets/instrument-sans-500.woff2?v=dev") format("woff2");`)
@@ -278,17 +279,22 @@ func TestUIShellServedCSSFontArtPoseAndTabBar(t *testing.T) {
 		}
 	}
 	wantDecls(t, rules, ".motion-paused .resident-sprite, .page-hidden .resident-sprite, .resident-offscreen .resident-sprite", "animation-play-state: paused !important;")
-	wantDecls(t, cssRules(mediaBlock(t, css, "@media (prefers-reduced-motion: reduce)")), ".resident-sprite", "animation: none !important;")
-	wantDecls(t, cssRules(mediaBlock(t, css, "@media (max-width: 900px)")), ".art", "display: none;")
-	forced := cssRules(mediaBlock(t, css, "@media (forced-colors: active)"))
+	wantDecls(t, cssRules(mediaBlocks(t, css, "@media (prefers-reduced-motion: reduce)")), ".resident-sprite", "animation: none !important;")
+	wantDecls(t, cssRules(mediaBlocks(t, css, "@media (max-width: 900px)")), ".art", "display: none;")
+	forced := cssRules(mediaBlocks(t, css, "@media (forced-colors: active)"))
 	wantDecls(t, forced, ".art", "display: none;")
 	wantDecls(t, forced, ".nav-link[aria-current=page], .tab[aria-current=page]", "outline: 2px solid Highlight;")
-	mobile := cssRules(mediaBlock(t, css, "@media (max-width: 720px)"))
+	mobile := cssRules(mediaBlocks(t, css, "@media (max-width: 720px)"))
 	wantDecls(t, mobile, ".app-nav", "display: none;")
 	wantDecls(t, mobile, ".tab-bar", "position: fixed;", "display: flex;")
 	wantDecls(t, mobile, ".shell", "grid-template-columns: minmax(0, 1fr);")
 	wantDecls(t, rules, ".tab-bar", "display: none;")
-	wantDecls(t, cssRules(mediaBlock(t, css, "@media (pointer: coarse)")), ".nav-link, .tab, .btn, .loop-pill-action, .lane-segment, .text-button, summary, .motion-option", "min-height: 44px;")
+	// The shell's targets in base.css; the lane bar and the Motion option in
+	// work.css, after the rules they override.
+	coarse := cssRules(mediaBlocks(t, css, "@media (pointer: coarse)"))
+	wantDecls(t, coarse, ".nav-link, .tab, .btn, .loop-pill-action, .text-button, summary", "min-height: 44px;")
+	wantDecls(t, coarse, ".lane-segment, .motion-option", "min-height: 44px;")
+	wantDecls(t, cssRules(mediaBlocks(t, css, "@media (prefers-reduced-motion: reduce)")), ".motion-option", "display: none;")
 	wantDecls(t, rules, ".skip-link:focus", "top: 12px;")
 	wantDecls(t, rules, ".btn-danger", "color: var(--danger-ink);", "border-color: var(--danger-edge);")
 	wantDecls(t, rules, ".avatar", "border-radius: 50%;", "background: #1e4d3b;")

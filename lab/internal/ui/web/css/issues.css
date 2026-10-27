@@ -1,0 +1,10 @@
+/* Issues: the coming-next placeholder until the view is built. */
+.placeholder { padding: 28px; }
+.placeholder h1 { font-size: 28px; letter-spacing: -.02em; }
+.placeholder-summary { margin-top: 6px; font-size: 15px; color: var(--needs-ink); font-weight: 500; }
+.placeholder-note { margin-top: 12px; max-width: 62ch; font-size: 14px; color: #56695e; }
+
+@media (max-width: 720px) {
+  .placeholder { padding: 20px; }
+  .placeholder h1 { font-size: 22px; }
+}

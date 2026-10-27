@@ -668,7 +668,7 @@ func TestUIGateJobRegistryIsBoundedAndStops(t *testing.T) {
 // submissions, reads canonical state back instead of retrying, and builds
 // everything from text nodes.
 func TestUIGateServedJSSubmitsOnceAndReadsBack(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"method: 'POST'",
 		"'Content-Type': 'application/json'",
@@ -693,13 +693,13 @@ func TestUIGateServedJSSubmitsOnceAndReadsBack(t *testing.T) {
 		}
 	}
 	// An ambiguous response is read back and never resubmitted.
-	submit := jsFunction(t, js, "submitGate")
+	submit := moduleFunction(t, js, "submitGate")
 	for _, want := range []string{"if (!res || res.status >= 500) {", "readBack(gate);", "return null;"} {
 		if !strings.Contains(submit, want) {
 			t.Errorf("submitGate lacks %q", want)
 		}
 	}
-	if strings.Contains(submit, "gatePost(gate.id, action, payload);\n      res = await gatePost") {
+	if strings.Count(submit, "await gatePost(") != 1 {
 		t.Error("submitGate posts twice")
 	}
 	for _, gone := range []string{"approvals are not available in this UI", "/merge", "/deploy"} {

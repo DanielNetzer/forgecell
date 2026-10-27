@@ -186,8 +186,10 @@ func TestUIInboxTextHasNoRawCodes(t *testing.T) {
 	// The browser renders only those plain fields: the Inbox code never turns a
 	// phase, status, Atom, Formula or digest into text, and ids reach only
 	// links' href and dataset.
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
-	inbox := between(t, js, "// ---- Inbox ----", "showView(viewFromURL());\n  restoreSelection();")
+	inbox := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/js/inbox.js")).Body.String()
+	if !strings.Contains(inbox, "// ---- Inbox ----") || !strings.Contains(inbox, "function renderInbox(") {
+		t.Fatal("/js/inbox.js is not the Inbox module")
+	}
 	for _, forbidden := range []string{"m.phase", "m.status", "m.currentAtom", "m.formulaId", "m.lane", ".digest", "short("} {
 		if strings.Contains(inbox, forbidden) {
 			t.Errorf("the Inbox renders %s", forbidden)
@@ -369,14 +371,14 @@ func TestUIInboxSummaryScrubsOnlyRealIDs(t *testing.T) {
 // the resident all count it, so a Lab with only a blocked Molecule never reads
 // Nothing needs you or All quiet. The fixture's blocked Molecule is one of them.
 func TestUIInboxOneNeedsYouDefinition(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	js := servedJS(t)
 	if !strings.Contains(js, "const NEEDS_KINDS = ['scope', 'publish', 'blocked'];") {
 		t.Error("Needs you does not cover scope, publish and blocked")
 	}
-	if needs := jsFunction(t, js, "needsYou"); !strings.Contains(needs, "NEEDS_KINDS.includes(v.kind)") || !strings.Contains(needs, "live(m) && inboxOf(m)") {
+	if needs := moduleFunction(t, js, "needsYou"); !strings.Contains(needs, "NEEDS_KINDS.includes(v.kind)") || !strings.Contains(needs, "live(m) && inboxOf(m)") {
 		t.Errorf("needsYou does not list the Needs-you cards: %s", needs)
 	}
-	shell, inbox := jsFunction(t, js, "renderShell"), jsFunction(t, js, "renderInbox")
+	shell, inbox := moduleFunction(t, js, "renderShell"), moduleFunction(t, js, "renderInbox")
 	for body, wants := range map[string][]string{
 		shell: {"const waiting = needsYou().length;", "badge.hidden = waiting === 0;", "residentPose(waiting, counts)", "RESIDENT_TITLES[pose](waiting, counts)"},
 		inbox: {"const needs = needsYou();", "const waiting = needs.length,", "waiting ? needsYouText(waiting) : 'Nothing needs you'", "setText($('#inbox-live'), waiting ? needsYouText(waiting) + '.' : 'Nothing needs you right now.');"},
@@ -387,7 +389,7 @@ func TestUIInboxOneNeedsYouDefinition(t *testing.T) {
 			}
 		}
 	}
-	for name, body := range map[string]string{"renderShell": shell, "renderInbox": inbox, "residentPose": jsFunction(t, js, "residentPose")} {
+	for name, body := range map[string]string{"renderShell": shell, "renderInbox": inbox, "residentPose": moduleFunction(t, js, "residentPose")} {
 		if strings.Contains(body, "counts.decision") {
 			t.Errorf("%s counts the decision lane instead of Needs you", name)
 		}
@@ -453,7 +455,7 @@ func TestUIInboxEmptyStateAndIncompleteInventory(t *testing.T) {
 	if !strings.Contains(page, `<p id="resident-title" class="resident-title">All quiet</p>`) {
 		t.Error("the resident is not titled All quiet")
 	}
-	js := do(t, h, authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"$('#inbox-needs-empty').hidden = needs.length > 0;",
 		"setText($('#inbox-live'), waiting ? needsYouText(waiting) + '.' : 'Nothing needs you right now.');",
@@ -499,7 +501,7 @@ func loopBody(mode, value string, n int) string {
 // engine receives exactly that selector and bound; Start intake posts {issue}.
 // A selector the server refuses never reaches the engine.
 func TestUIInboxRunTheLoopFormSendsTheSameEngineRequest(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"function loopSelector(mode, value) { return mode === 'oldest' ? 'oldest' : mode + ':' + String(value).trim(); }",
 		"const loop = await submitDrive('/api/loop/start', JSON.stringify({ select: String(select).trim(), maxConcurrent: n }));",
@@ -512,13 +514,13 @@ func TestUIInboxRunTheLoopFormSendsTheSameEngineRequest(t *testing.T) {
 			t.Errorf("app.js lacks %q", want)
 		}
 	}
-	submit := jsFunction(t, js, "submitLoop")
+	submit := moduleFunction(t, js, "submitLoop")
 	for _, want := range []string{"e.preventDefault();", "startLoop(loopSelector(drive.mode, c.value.value), c.max.value);", "driveMessage('Enter a ' + LOOP_MODES[drive.mode].field.toLowerCase() + ', or choose Oldest.');"} {
 		if !strings.Contains(submit, want) {
 			t.Errorf("submitLoop lacks %q", want)
 		}
 	}
-	if run := jsFunction(t, js, "submitRun"); !strings.Contains(run, "e.preventDefault();") || !strings.Contains(run, "startRun(drive.controls.issue.value);") {
+	if run := moduleFunction(t, js, "submitRun"); !strings.Contains(run, "e.preventDefault();") || !strings.Contains(run, "startRun(drive.controls.issue.value);") {
 		t.Errorf("submitRun does not post the typed Issue: %s", run)
 	}
 	// The forms submit on Enter through a submit button; the CSP's form-action
@@ -570,8 +572,8 @@ func TestUIInboxRunTheLoopFormSendsTheSameEngineRequest(t *testing.T) {
 // never refilled, and links are real ?view=work&m= links opened through
 // history.pushState.
 func TestUIInboxPollingPatchesCardsInPlace(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
-	patch := jsFunction(t, js, "patchList")
+	js := servedJS(t)
+	patch := moduleFunction(t, js, "patchList")
 	for _, want := range []string{
 		"const existing = new Map([...container.children].map((node) => [node.dataset.inboxId, node]));",
 		"let node = existing.get(m.id);",
@@ -585,12 +587,12 @@ func TestUIInboxPollingPatchesCardsInPlace(t *testing.T) {
 			t.Errorf("patchList lacks %q", want)
 		}
 	}
-	for _, gone := range []string{"fill(", "replaceChildren", "create();\n      update"} {
+	for _, gone := range []string{"fill(", "replaceChildren", "create();\n    update"} {
 		if strings.Contains(patch, gone) {
 			t.Errorf("patchList rebuilds with %q", gone)
 		}
 	}
-	render := jsFunction(t, js, "renderInbox")
+	render := moduleFunction(t, js, "renderInbox")
 	for _, want := range []string{
 		"patchList($('#inbox-needs'), needs.slice(0, MAX_ENTRIES), createCard, updateCard);",
 		"patchList($('#inbox-progress'), running.slice(0, MAX_ENTRIES), createRow, updateRow);",
@@ -609,7 +611,7 @@ func TestUIInboxPollingPatchesCardsInPlace(t *testing.T) {
 		"setLink":    {"setAttr(a, 'href', moleculeHref(m.id));", "if (a.dataset.molecule !== m.id) a.dataset.molecule = m.id;"},
 		"setAttr":    {"if (node.getAttribute(name) !== value) node.setAttribute(name, value);"},
 	} {
-		body := jsFunction(t, js, name)
+		body := moduleFunction(t, js, name)
 		for _, want := range wants {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s lacks %q", name, want)
@@ -621,13 +623,15 @@ func TestUIInboxPollingPatchesCardsInPlace(t *testing.T) {
 	}
 	for _, want := range []string{
 		"keepFocus(renderList)",
-		"renderInbox();\n  }",
+		// The list fans out to the Inbox last, and the Inbox module renders it.
+		"inbox.update(state);\n}",
+		"export function update(state) { renderInbox(); }",
 		"function moleculeHref(id) { return '?view=work&m=' + encodeURIComponent(id); }",
 		"if (location.search !== moleculeHref(id)) history.pushState({ view: 'work', m: id }, '', moleculeHref(id));",
 		"const link = e.target.closest('a[data-molecule]');",
 		"if (moleculeFromURL() !== id) history.replaceState({ view: 'work', m: id }, '', moleculeHref(id));",
 		"const MOLECULE_ID = /^[A-Za-z0-9_-]{1,200}$/;",
-		"setInterval(() => { if (!document.hidden && state.list) renderInbox(); }, 30000);",
+		"setInterval(() => { if (!document.hidden && state.list) inbox.update(state); }, 30000);",
 		"el('ol', { class: 'inbox-steps', 'aria-label': 'Progress' }, STEPS.map(",
 		"const STEPS = ['Plan', 'Your approval', 'Coding', 'Checks', 'Review', 'Draft PR', 'Merged'];",
 		"el('a', { class: 'btn btn-primary inbox-action', dataset: { slot: 'action' } })",
@@ -637,7 +641,7 @@ func TestUIInboxPollingPatchesCardsInPlace(t *testing.T) {
 		}
 	}
 	// One primary action per card: createCard builds exactly one .btn.
-	if card := jsFunction(t, js, "createCard"); strings.Count(card, "btn") != 2 || strings.Count(card, "btn-primary") != 1 || strings.Contains(card, "btn-danger") {
+	if card := moduleFunction(t, js, "createCard"); strings.Count(card, "btn") != 2 || strings.Count(card, "btn-primary") != 1 || strings.Contains(card, "btn-danger") {
 		t.Errorf("a card does not have exactly one primary action: %s", card)
 	}
 }
@@ -645,19 +649,25 @@ func TestUIInboxPollingPatchesCardsInPlace(t *testing.T) {
 // The Inbox CSS stacks cards with full-width primary buttons on phones, gives
 // coarse pointers 44px targets and honours forced colors.
 func TestUIInboxServedCSS(t *testing.T) {
-	css := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/style.css")).Body.String()
+	css := servedCSS(t)
 	rules := cssRules(css)
 	wantDecls(t, rules, ".inbox-card", "display: flex;", "gap: 20px;")
 	wantDecls(t, rules, ".inbox-steps", "grid-template-columns: repeat(7, minmax(0, 1fr));")
 	wantDecls(t, rules, ".inbox-steps li.is-current .step-bar", "background: linear-gradient(")
 	wantDecls(t, rules, ".seg[aria-pressed=true]", "background: var(--paper);")
 	wantDecls(t, rules, ".inbox-counts", "font-variant-numeric: tabular-nums;")
-	mobile := cssRules(mediaBlock(t, css, "@media (max-width: 720px)"))
+	mobile := cssRules(mediaBlocks(t, css, "@media (max-width: 720px)"))
 	wantDecls(t, mobile, ".inbox-card", "flex-direction: column;")
 	wantDecls(t, mobile, ".inbox-action", "width: 100%;", "min-height: 48px;")
 	wantDecls(t, mobile, ".inbox-greeting > .btn", "width: 100%;")
-	wantDecls(t, cssRules(mediaBlock(t, css, "@media (pointer: coarse)")), ".seg, .stepper-button, .inbox-watch, .inbox-recent-row", "min-height: 44px;")
-	forced := cssRules(mediaBlock(t, css, "@media (forced-colors: active)"))
+	coarse := cssRules(mediaBlocks(t, css, "@media (pointer: coarse)"))
+	wantDecls(t, coarse, ".seg, .stepper-button", "min-height: 44px;")
+	wantDecls(t, coarse, ".inbox-watch, .inbox-recent-row", "min-height: 44px;")
+	// The Watch link keeps the .btn height it always had; base.css sets it.
+	if strings.Contains(rules[".inbox-watch"], "height") {
+		t.Errorf(".inbox-watch overrides the .btn height: %s", rules[".inbox-watch"])
+	}
+	forced := cssRules(mediaBlocks(t, css, "@media (forced-colors: active)"))
 	wantDecls(t, forced, ".seg[aria-pressed=true]", "background: Highlight;")
 	wantDecls(t, forced, ".inbox-steps li.is-done .step-bar, .inbox-steps li.is-current .step-bar", "background: Highlight;")
 }

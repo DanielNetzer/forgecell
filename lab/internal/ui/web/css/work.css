@@ -1,0 +1,92 @@
+/* Shelf: the contribution-style Molecule grid. One cell is one Molecule. */
+.shelf { position: relative; margin-top: 0; padding: 20px 26px; background: linear-gradient(130deg, #fffffff2, #edf5e9e8); overflow: hidden; }
+.shelf::before { content: ''; position: absolute; inset: 90px 0 0; background-image: linear-gradient(#235f3a08 1px, transparent 1px), linear-gradient(90deg, #235f3a08 1px, transparent 1px); background-size: 26px 26px; pointer-events: none; mask-image: linear-gradient(transparent, #000); }
+.shelf > * { position: relative; }
+.shelf-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.shelf-count { font-size: 13px; color: var(--muted); margin-top: 5px; }
+
+/* Lane bar: one pill of segments; the active segment is a raised paper thumb. */
+.grid-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 13px; }
+.lane-bar { display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; flex: 0 1 auto; min-width: 0; max-width: 100%; padding: 4px; border: 1px solid var(--edge); border-radius: 999px; background: #ffffffa6; box-shadow: inset 0 1px 2px #1a3a2a0d; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; }
+.lane-bar::-webkit-scrollbar { display: none; }
+.lane-segment { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 4px 5px 4px 12px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: #345642; font-size: 12px; white-space: nowrap; scroll-snap-align: start; transition: background .15s, box-shadow .15s, color .15s; }
+.lane-segment:hover { background: #e4efe3; }
+.lane-segment:focus-visible { outline-offset: -2px; }
+.lane-segment[aria-pressed=true] { background: var(--paper); color: var(--forest); border-color: #d2dfd1; font-weight: 500; box-shadow: 0 1px 2px #1a3a2a1f, 0 3px 8px #1a3a2a14; }
+.lane-count { min-width: 22px; padding: 3px 7px; border-radius: 999px; background: #e3ebe1; color: #3a5847; font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; text-align: center; }
+.lane-segment[aria-pressed=true] .lane-count { background: var(--mint); color: var(--forest); }
+.lane-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; border: 1px solid transparent; }
+.lane-dot-running { background: #27a98e; border-color: #1c896f; }
+.lane-dot-decision { background: #416c50; border-color: #2b5a3b; }
+.lane-dot-blocked { background: transparent; border: 1.5px dashed #5d8268; }
+.lane-dot-finished { background: #83b59c; border-color: #5f9277; }
+.lane-dot-other, .lane-dot-retired { background: #eef2e8; border-color: #94ab98; }
+.lane-divider { flex: none; align-self: stretch; width: 1px; margin: 6px 4px; background: var(--line); }
+.grid-search { margin-left: auto; display: flex; align-items: center; gap: 7px; min-height: 44px; border: 1px solid var(--edge); border-radius: 999px; background: #ffffffa6; padding: 0 14px; width: 236px; color: #53715e; }
+.grid-search:focus-within { outline: 2px solid #24684d; outline-offset: 2px; }
+.grid-search input { min-width: 0; width: 100%; border: 0; outline: 0; background: none; color: var(--ink); font-size: 12px; padding: 7px 0; }
+.grid-search input::placeholder { color: #637a6b; }
+.grid-search input::-webkit-search-cancel-button { display: none; }
+.grid-search button { min-height: 28px; min-width: 24px; padding: 0; border: 0; background: none; color: #365b45; font-size: 18px; }
+.search-status { display: block; font-size: 11px; color: var(--muted); margin-top: 7px; }
+.search-status:empty { display: none; }
+.outside-filter { margin-top: 7px; font-size: 11px; color: #315b43; }
+
+.culture-scroll { margin-top: 16px; min-width: 0; max-width: 100%; overflow-x: auto; padding: 4px 4px 10px; scrollbar-width: thin; scrollbar-color: #8bad97 #e8f0e3; }
+.grid-axis { display: flex; justify-content: space-between; gap: 12px; font-size: 10px; color: var(--muted); margin: 0 0 11px; min-width: 260px; }
+.cubes { display: grid; grid-template-rows: repeat(7, 26px); grid-auto-flow: column; grid-auto-columns: 26px; gap: 6px; width: max-content; min-height: 218px; align-content: start; }
+.cube-button { position: relative; display: grid; place-items: center; width: 26px; height: 26px; min-height: 26px; padding: 1px; border-radius: 3px; border: 1px solid transparent; background: transparent; }
+.cube-button:hover { background: #bcecd718; border-color: #bcecd780; }
+.cube-button[aria-pressed=true] { outline: 2px solid #155a43; outline-offset: 1px; background: #d4e9da; }
+.cube-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.micro-cube { display: grid; place-items: center; width: 100%; height: 100%; border-radius: 3px; border: 1px solid #83ac90; background: #c7dfcd; color: #365a45; font: 9px ui-monospace, monospace; box-shadow: inset 0 1px 0 #ffffff66, 0 1px 1px #1f493519; }
+.cube-button.working .micro-cube { background: #27a98e; border-color: #1c896f; animation: micro-work 3.8s ease-in-out infinite; animation-delay: var(--delay, 0s); }
+.cube-button.decision .micro-cube { background: #416c50; border-color: #2b5a3b; color: #fff; }
+.cube-button.failed .micro-cube { background: transparent; border-style: dashed; border-color: #72977c; color: #375b45; }
+.cube-button.finished .micro-cube { background: #83b59c; border-color: #5f9277; color: #173c2f; }
+.cube-button.other .micro-cube { background: #eef2e8; border-color: #b7c9b8; color: #6a7f6e; }
+.filter-empty { padding: 24px 4px; font-size: 12px; color: var(--muted); }
+.cubes:has(+ .filter-empty:not([hidden])) { display: none; }
+@keyframes micro-work { 0%, 100% { opacity: .52; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-1px); } }
+
+.shelf-caption { border-top: 1px solid #254d3220; margin-top: 10px; padding-top: 11px; display: flex; justify-content: space-between; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; flex-wrap: wrap; }
+.shelf-caption > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+.motion-option { display: inline-flex; gap: 5px; align-items: center; margin-left: 12px; min-height: 24px; cursor: pointer; }
+.motion-option input { accent-color: #1d5943; width: 13px; height: 13px; }
+
+#cube-tooltip { position: fixed; z-index: 100; width: 270px; max-width: calc(100vw - 24px); padding: 16px; background: #fffef7; color: var(--ink); border: 1px solid #9dbba8; border-radius: 12px; box-shadow: 0 12px 35px #183e3229; font-size: 12px; overflow-wrap: anywhere; }
+#cube-tooltip strong { display: block; font-size: 14px; line-height: 1.4; margin: 6px 0 12px; font-weight: 500; }
+#cube-tooltip dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
+#cube-tooltip dt { color: var(--muted); }
+#cube-tooltip dd { margin: 0; font-family: ui-monospace, monospace; font-size: 11px; text-align: right; }
+
+@media (max-width: 720px) {
+  .shelf { padding: 16px; border-radius: 16px; }
+  .grid-tools { gap: 10px; }
+  .lane-bar { flex: 1 1 100%; }
+  .lane-segment { min-height: 44px; }
+  .grid-search { width: 100%; min-height: 44px; margin-left: 0; }
+  .grid-search input { font-size: 16px; }
+  .grid-search button { min-height: 32px; min-width: 32px; }
+  .cubes { grid-template-rows: repeat(7, 24px); grid-auto-columns: 24px; gap: 4px; min-height: 192px; }
+  .cube-button { width: 24px; height: 24px; min-height: 24px; padding: 2px; }
+  .shelf-caption { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .shelf-caption > span:first-child { white-space: normal; max-width: 100%; font-size: 10px; }
+  .shelf-caption > span:last-child { font-size: 10px; line-height: 1.6; }
+}
+@media (pointer: coarse) {
+  .lane-segment, .motion-option { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .motion-option { display: none; }
+}
+@media (forced-colors: active) {
+  .shelf { background: Canvas; }
+  .cube-button, .micro-cube { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
+  .lane-segment, .grid-search, .lane-bar { border: 1px solid ButtonText; box-shadow: none; }
+  .lane-segment[aria-pressed=true] { background: Highlight; color: HighlightText; border-color: Highlight; }
+  .lane-segment[aria-pressed=true] .lane-count { background: Canvas; color: CanvasText; }
+  .lane-dot { border: 1px solid CanvasText; }
+  .lane-divider { background: CanvasText; }
+  .cube-button[aria-pressed=true], .lane-segment[aria-pressed=true] { outline: 2px solid Highlight; }
+}

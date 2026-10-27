@@ -1,0 +1,20 @@
+/* Formula: the view and the active-Formula card. */
+.formula-view h1 { font-size: 28px; letter-spacing: -.02em; }
+.formula-view { padding: 24px; }
+.active-formula { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; margin-top: 13px; border: 1px solid var(--card-edge); border-radius: var(--radius-card); background: var(--paper); box-shadow: var(--shadow-card); }
+.active-formula > div:first-child { min-width: 0; }
+.active-formula strong { display: block; font-size: 12px; font-weight: 500; margin: 3px 0; overflow-wrap: anywhere; }
+.active-formula small { display: block; font-size: 10px; color: var(--muted); }
+.version-tag { display: inline-block; padding: 1px 6px; margin-left: 5px; background: #d4e8d6; border-radius: 4px; font: 10px ui-monospace, monospace; color: #22573c; }
+.formula-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
+.unavailable-tag { font-size: 10px; padding: 3px 7px; border: 1px dashed #9fb7a3; border-radius: 5px; color: var(--muted); }
+.unavailable { font-size: 18px; font-weight: 500; margin: 6px 0 0; }
+
+@media (max-width: 720px) {
+  .formula-view h1 { font-size: 22px; }
+  .formula-view { padding: 18px; }
+  .active-formula { align-items: flex-start; flex-direction: column; gap: 6px; }
+}
+@media (forced-colors: active) {
+  .active-formula { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
+}
