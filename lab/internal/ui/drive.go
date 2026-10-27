@@ -332,22 +332,133 @@ func (h *handler) stopMolecule(w http.ResponseWriter, id string) {
 		h.refuseGate(w, http.StatusConflict, "not-running", "the ledger does not show this Molecule running; nothing was signalled")
 		return
 	}
-	stopped := h.jobs.cancelRunning(id, []string{"scope"}, func(time.Time) bool { return true })
-	if !stopped && record.Issue.Number >= 1 && record.Issue.Number <= maxIssueNumber {
-		key := runKey(record.Issue.Number)
-		if j, ok := h.jobs.get(key); ok && j.state == "running" {
-			if owned, found, _ := h.runMolecule(record.Issue.Number, j.started); found && owned == id {
-				stopped = h.jobs.cancelRunning(key, []string{"run"}, j.started.Equal)
-			}
-		}
-	}
-	if !stopped {
+	if runner := h.runner(record, true); runner != RunnerScope && runner != RunnerRun {
 		h.refuseGate(w, http.StatusConflict, "not-owned", "this Lab UI does not run this Molecule's engine call (a loop, another process or the CLI does); nothing was signalled")
 		return
 	}
 	v := StopView{MoleculeID: id, Requested: true, Canonical: h.moleculeState(id)}
 	v.Committed = !v.Canonical.Unreadable && !active(v.Canonical.Status)
 	h.json(w, http.StatusAccepted, v)
+}
+
+// Runners of a running Molecule's engine call, as the Molecule view names them.
+const (
+	// RunnerScope is a scope approval job of this Lab UI; Stop cancels it.
+	RunnerScope = "scope"
+	// RunnerRun is a run job of this Lab UI whose ledger this is; Stop cancels it.
+	RunnerRun = "run"
+	// RunnerLoop is this Lab UI's loop, whose current pass works on the Molecule
+	// (driveLoop.works). One Molecule of a loop is not stopped on its own: the
+	// loop is.
+	RunnerLoop = "loop"
+	// RunnerOther is the command line, another Lab UI or another process.
+	RunnerOther = "other"
+)
+
+// runner names who runs a running Molecule's engine call. It is the ownership
+// check of stopMolecule: with cancel it also cancels the job this Lab UI owns,
+// under the same lock as the check; without it, it only reads.
+func (h *handler) runner(record molecule.Record, cancel bool) string {
+	owned := func(key string, kinds []string, owns func(time.Time) bool) bool {
+		if cancel {
+			return h.jobs.cancelRunning(key, kinds, owns)
+		}
+		return h.jobs.ownsRunning(key, kinds, owns)
+	}
+	if owned(record.ID, []string{"scope"}, func(time.Time) bool { return true }) {
+		return RunnerScope
+	}
+	if record.Issue.Number >= 1 && record.Issue.Number <= maxIssueNumber {
+		key := runKey(record.Issue.Number)
+		if j, ok := h.jobs.get(key); ok && j.state == "running" {
+			if id, found, _ := h.runMolecule(record.Issue.Number, j.started); found && id == record.ID && owned(key, []string{"run"}, j.started.Equal) {
+				return RunnerRun
+			}
+		}
+	}
+	if h.loop.works(record) {
+		return RunnerLoop
+	}
+	return RunnerOther
+}
+
+// loopPass is what this UI's loop pass works on: for each Issue the pass
+// dispatches, keyed by issueKey, the Molecules it leaves alone. The engine starts
+// a Molecule only for an Issue with none and advances only one waiting at the
+// scope gate; every other Molecule of a dispatched Issue it only reports.
+type loopPass map[string]map[string]bool
+
+func issueKey(repo string, number int64) string {
+	return strings.ToLower(repo) + "#" + strconv.FormatInt(number, 10)
+}
+
+// observePass records the pass about to dispatch eligible. Ledgers that existed
+// when it listed and were not at the scope gate are left alone. An incomplete
+// ledger inventory records no pass, so no Molecule is named the loop's.
+func (h *handler) observePass(eligible []intake.OpenIssue) {
+	list := h.list(ledgerETag(h.opts.LabDir))
+	var pass loopPass
+	if list.Complete && !list.Truncated {
+		pass = loopPass{}
+		for _, issue := range eligible {
+			pass[issueKey(issue.Repository, issue.Number)] = map[string]bool{}
+		}
+		for _, m := range list.Molecules {
+			if alone, ok := pass[issueKey(m.Repository, m.Number)]; ok && m.Phase != "scope-waiting" {
+				alone[m.ID] = true
+			}
+		}
+	}
+	h.loop.mu.Lock()
+	h.loop.pass = pass
+	h.loop.mu.Unlock()
+}
+
+// works reports whether this UI's loop is running and its current pass works on
+// record: a Molecule it started for a dispatched Issue, or one it found waiting
+// at the scope gate. A running loop alone never makes a Molecule its own.
+func (l *driveLoop) works(record molecule.Record) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.running {
+		return false
+	}
+	alone, ok := l.pass[issueKey(record.Issue.Repo, record.Issue.Number)]
+	return ok && !alone[record.ID]
+}
+
+// ControlView is what the Molecule view may do with a running Molecule.
+// Stoppable is true only when this Lab UI runs its engine call; otherwise Text
+// names the runner in plain words and the view offers no Stop.
+type ControlView struct {
+	Stoppable bool   `json:"stoppable"`
+	Runner    string `json:"runner"`
+	Text      string `json:"text,omitempty"`
+}
+
+// runningWork is the plain words of what a running Molecule is doing at step.
+var runningWork = map[int]string{StepPlan: "Its plan is being written", StepCoding: "Its coding is running", StepChecks: "Its checks are running", StepReview: "Its review is running", StepDraft: "Its draft PR is being prepared"}
+
+// control is the stop control of a running Molecule at step, or nil when the
+// ledger does not show it running. It only reads.
+func (h *handler) control(record molecule.Record, step int) *ControlView {
+	if !active(record.Status) {
+		return nil
+	}
+	c := &ControlView{Runner: h.runner(record, false)}
+	work, ok := runningWork[step]
+	if !ok {
+		work = "It is running"
+	}
+	switch c.Runner {
+	case RunnerScope, RunnerRun:
+		c.Stoppable = true
+	case RunnerLoop:
+		c.Text = "Run by this Lab's loop. " + work + "; stop the loop to stop it. Nothing needs you."
+	default:
+		c.Text = "Started from the command line or another Lab UI. " + work + "; nothing needs you."
+	}
+	return c
 }
 
 var (
@@ -386,6 +497,8 @@ type driveLoop struct {
 	// freed, a test seam, runs once a loop's slot reads as free, before done
 	// closes; the Lab's marker must already be released by then.
 	freed func()
+	// pass is what the running loop's current pass works on (observePass).
+	pass loopPass
 }
 
 // start refuses while runsBusy reports a UI run job running; the check and the
@@ -417,7 +530,7 @@ func (l *driveLoop) start(o molecule.LoopOptions, runsBusy func() bool, run func
 	// The stop request closes Drain only; Work is cancelled only with the server.
 	o.Drain, o.Work, o.Marker = drained, ctx, marker
 	l.running, l.drain, l.drained, l.cancel, l.done = true, false, drained, cancel, done
-	l.selector, l.max, l.report, l.token = o.Select.String(), o.MaxConcurrent, nil, marker.Token()
+	l.selector, l.max, l.report, l.token, l.pass = o.Select.String(), o.MaxConcurrent, nil, marker.Token(), nil
 	l.state, l.category, l.message, l.reason = "running", "", "", ""
 	freed := l.freed
 	go func() {
@@ -433,7 +546,7 @@ func (l *driveLoop) start(o molecule.LoopOptions, runsBusy func() bool, run func
 		// never meets this loop's own marker.
 		marker.Release()
 		l.mu.Lock()
-		l.running, l.report = false, &report
+		l.running, l.report, l.pass = false, &report, nil
 		l.state, l.category, l.message, l.reason = state, category, message, reason
 		l.mu.Unlock()
 		if freed != nil {
@@ -508,6 +621,17 @@ func (h *handler) startLoop(w http.ResponseWriter, req loopRequest) {
 		return
 	}
 	o := molecule.LoopOptions{Template: molecule.Options{LabDir: h.opts.LabDir, SourceRoot: h.opts.SourceRoot, Resources: h.opts.Resources}, Select: selector, MaxConcurrent: req.MaxConcurrent}
+	// Each pass lists first, so the listing marks which Molecules it works on. A
+	// failed or refused listing dispatches nothing, and records an empty pass.
+	o.ListIssues = func(ctx context.Context, repository string) (intake.OpenIssues, error) {
+		listed, err := h.listIssues(ctx, repository, selector)
+		var eligible []intake.OpenIssue
+		if err == nil && (!listed.Truncated || selector.Kind == "" || selector.Kind == intake.SelectOldest) {
+			eligible = selector.Apply(listed.Issues)
+		}
+		h.observePass(eligible)
+		return listed, err
+	}
 	switch err := h.loop.start(o, func() bool { return h.jobs.running("run") }, h.runLoop); {
 	case errors.Is(err, errLoopBusy):
 		h.refuseGate(w, http.StatusConflict, "busy", "a loop is already running in this Lab UI; this submission was not started")

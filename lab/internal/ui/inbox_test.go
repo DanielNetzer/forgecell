@@ -68,7 +68,10 @@ func inboxLab(t *testing.T) string {
 	writeRecord(t, lab, blocked)
 
 	running := inboxRecord(base, "mol-4-running", 4, "running", "coding", inboxAtoms("done", "done", "active"))
-	running.Atoms[2].StartedAt = "2026-10-26T10:00:00.123+02:00"
+	// The Atom started earlier; the duration counts from the coding attempt.
+	running.Atoms[2].StartedAt = "2026-10-26T05:00:00Z"
+	running.Atoms[2].Provenance = &molecule.AtomProvenance{Actions: []molecule.AtomAction{{AttemptID: "attempt-1", StartedAt: "2026-10-26T10:00:00.123+02:00"}}}
+	running.HarnessAttempts = []molecule.HarnessAttempt{{ID: "attempt-1", PlanDigest: digest64}}
 	writeRecord(t, lab, running)
 
 	queued := inboxRecord(base, "mol-5-queued", 5, "running", "check-pending", inboxAtoms("done", "done", "done", "active"))
@@ -204,10 +207,14 @@ func TestUIInboxProgressStepsFromAtoms(t *testing.T) {
 	published := &DeliveryState{State: "published", Lifecycle: "OPEN"}
 	mergedReceipt := &DeliveryState{State: "published", Lifecycle: "MERGED"}
 	at := func(statuses ...string) []molecule.Atom { return inboxAtoms(statuses...) }
+	// With no attempt recorded yet the Atom's own start is the duration; with
+	// attempts it never is (TestUIProgressCountsFromTheCurrentAttempt).
 	since := at("done", "done", "active")
 	since[2].StartedAt = "2026-10-26T10:00:00Z"
 	bad := at("done", "done", "active")
 	bad[2].StartedAt = "<script>yesterday"
+	plan := at("active")
+	plan[0].StartedAt = "2026-10-26T09:00:00Z"
 	demo := []molecule.Atom{{Type: "intake", Status: "done"}, {Type: "harness", Status: "done"}, {Type: "check", Status: "done"}, {Type: "gate", Status: "waiting"}}
 	for name, c := range map[string]struct {
 		atoms    []molecule.Atom
@@ -220,9 +227,9 @@ func TestUIInboxProgressStepsFromAtoms(t *testing.T) {
 	}{
 		"no atoms, scope phase": {nil, "scope-waiting", "", nil, StepApproval, "Your approval", ""},
 		"no atoms, no phase":    {nil, "", "", nil, StepPlan, "Plan", ""},
-		"planning":              {at("active"), "", "", nil, StepPlan, "Plan", ""},
+		"planning":              {plan, "", "", nil, StepPlan, "Plan", "2026-10-26T09:00:00Z"},
 		"scope gate":            {at("done", "waiting"), "scope-waiting", "", nil, StepApproval, "Your approval", ""},
-		"coding":                {since, "coding", "", nil, StepCoding, "Coding", "2026-10-26T10:00:00Z"},
+		"coding, no attempt":    {since, "coding", "", nil, StepCoding, "Coding", "2026-10-26T10:00:00Z"},
 		"coding, bad time":      {bad, "coding", "", nil, StepCoding, "Coding", ""},
 		"checks":                {at("done", "done", "done", "running"), "check-pending", "", nil, StepChecks, "Checks", ""},
 		"queued":                {at("done", "done", "done", "active"), "check-pending", ActivityQueued, nil, StepChecks, "Queued for checks", ""},
@@ -236,9 +243,12 @@ func TestUIInboxProgressStepsFromAtoms(t *testing.T) {
 		"merged":                {nil, "review-waiting", "", mergedReceipt, StepMerged, "Merged", ""},
 	} {
 		r := molecule.Record{Atoms: c.atoms, Readiness: &readiness.State{Phase: c.phase}}
-		step, label, got := progress(r, "", c.activity, c.d)
-		if step != c.step || label != c.label || got != c.since {
-			t.Errorf("%s: step %d %q since %q, want %d %q %q", name, step, label, got, c.step, c.label, c.since)
+		step, label, got, note := stepProgress(r, "", c.activity, c.d)
+		if s, l, g := progress(r, "", c.activity, c.d); s != step || l != label || g != got {
+			t.Errorf("%s: progress %d %q %q differs from stepProgress", name, s, l, g)
+		}
+		if step != c.step || label != c.label || got != c.since || note != "" {
+			t.Errorf("%s: step %d %q since %q note %q, want %d %q %q", name, step, label, got, note, c.step, c.label, c.since)
 		}
 		if step < 0 || step >= len(StepLabels) {
 			t.Errorf("%s: step %d out of range", name, step)
@@ -246,6 +256,68 @@ func TestUIInboxProgressStepsFromAtoms(t *testing.T) {
 	}
 	if len(StepLabels) != 7 || StepLabels[StepApproval] != "Your approval" || StepLabels[StepMerged] != "Merged" {
 		t.Errorf("step labels %q", StepLabels)
+	}
+}
+
+// The shown duration counts from the current attempt: the latest verification
+// attempt for Checks and the latest harness attempt for Coding, never from the
+// Atom's first start. A rerun is labelled, after a plan revision when the latest
+// attempt ran another plan digest, and a latest attempt without a recorded start
+// shows no duration.
+func TestUIProgressCountsFromTheCurrentAttempt(t *testing.T) {
+	first, second := strings.Repeat("1a", 32), strings.Repeat("2b", 32)
+	checks := func(attempts ...molecule.VerificationAttempt) molecule.Record {
+		atoms := inboxAtoms("done", "done", "done", "active")
+		atoms[3].StartedAt = "2026-10-26T08:00:00Z"
+		return molecule.Record{Atoms: atoms, Readiness: &readiness.State{Phase: "check-pending"}, VerificationAttempts: attempts}
+	}
+	coding := func(starts map[string]string, attempts ...molecule.HarnessAttempt) molecule.Record {
+		atoms := inboxAtoms("done", "done", "active")
+		atoms[2].StartedAt = "2026-10-26T08:00:00Z"
+		atoms[2].Provenance = &molecule.AtomProvenance{}
+		for _, a := range attempts {
+			atoms[2].Provenance.Actions = append(atoms[2].Provenance.Actions, molecule.AtomAction{AttemptID: a.ID, StartedAt: starts[a.ID]})
+		}
+		return molecule.Record{Atoms: atoms, Readiness: &readiness.State{Phase: "coding"}, HarnessAttempts: attempts}
+	}
+	for name, c := range map[string]struct {
+		r           molecule.Record
+		step        int
+		since, note string
+	}{
+		"checks, one attempt": {checks(molecule.VerificationAttempt{PlanDigest: first, StartedAt: "2026-10-26T09:00:00Z", Status: "started"}),
+			StepChecks, "2026-10-26T09:00:00Z", ""},
+		"checks, rerun after a revision": {checks(
+			molecule.VerificationAttempt{PlanDigest: first, StartedAt: "2026-10-26T09:00:00Z", FinishedAt: "2026-10-26T09:20:00Z", Status: "failed"},
+			molecule.VerificationAttempt{PlanDigest: second, StartedAt: "2026-10-26T11:00:00Z", Status: "started"}),
+			StepChecks, "2026-10-26T11:00:00Z", rerunRevisionNote},
+		"checks, rerun of the same plan": {checks(
+			molecule.VerificationAttempt{PlanDigest: first, StartedAt: "2026-10-26T09:00:00Z", Status: "interrupted"},
+			molecule.VerificationAttempt{PlanDigest: first, StartedAt: "2026-10-26T10:00:00Z", Status: "started"}),
+			StepChecks, "2026-10-26T10:00:00Z", rerunNote},
+		"checks, latest start missing": {checks(
+			molecule.VerificationAttempt{PlanDigest: first, StartedAt: "2026-10-26T09:00:00Z", Status: "failed"},
+			molecule.VerificationAttempt{PlanDigest: second, Status: "started"}),
+			StepChecks, "", rerunRevisionNote},
+		"coding, rerun after a revision": {coding(map[string]string{"h1": "2026-10-26T09:00:00Z", "h2": "2026-10-26T12:00:00Z"},
+			molecule.HarnessAttempt{ID: "h1", PlanDigest: first}, molecule.HarnessAttempt{ID: "h2", PlanDigest: second}),
+			StepCoding, "2026-10-26T12:00:00Z", rerunRevisionNote},
+		"coding, latest start missing": {coding(map[string]string{"h1": "2026-10-26T09:00:00Z"},
+			molecule.HarnessAttempt{ID: "h1", PlanDigest: first}, molecule.HarnessAttempt{ID: "h2", PlanDigest: first}),
+			StepCoding, "", rerunNote},
+	} {
+		step, _, since, note := stepProgress(c.r, LaneRunning, "", nil)
+		if step != c.step || since != c.since || note != c.note {
+			t.Errorf("%s: step %d since %q note %q, want %d %q %q", name, step, since, note, c.step, c.since, c.note)
+		}
+		if since == "2026-10-26T08:00:00Z" {
+			t.Errorf("%s: the duration counts from the Atom's first start", name)
+		}
+		// The Molecule view's pill carries the same attempt start and note.
+		v := moleculeView(redactor{}, c.r, LaneRunning, "", GateView{}, nil)
+		if v.State.Since != c.since || v.State.Note != c.note {
+			t.Errorf("%s: pill %+v", name, v.State)
+		}
 	}
 }
 

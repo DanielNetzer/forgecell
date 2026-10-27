@@ -29,6 +29,11 @@ import (
 //	                                                        → delivery.Publish (draft PR) as a job
 //	GET  /api/molecules/{id}/job                            → the job and its canonical read-back
 //
+// Request changes (amend.go) is the same kind of POST and never approves:
+//
+//	POST /api/molecules/{id}/amend  {"digest","addAcceptance","addScope"}
+//	                                → molecule.AmendFromLatest (no --run); the new revision is approved separately
+//
 // The engine validates every digest, lock and receipt; the UI only refuses
 // early what the engine would refuse anyway. There is no merge, deployment or
 // permission route. A job's own outcome never shows a decision as committed:
@@ -60,7 +65,7 @@ func gateRoute(path string) (id, action string, ok bool) {
 	}
 	id, action, _ = strings.Cut(rest, "/")
 	switch action {
-	case "scope", "delivery/preview", "delivery/publish":
+	case "scope", "amend", "delivery/preview", "delivery/publish":
 		return id, action, true
 	}
 	return "", "", false
@@ -149,11 +154,14 @@ func (h *handler) gate(w http.ResponseWriter, r *http.Request, id, action string
 		return
 	}
 	var scope scopeRequest
+	var amend amendRequest
 	var publish publishRequest
 	var body any = &previewRequest{}
 	switch action {
 	case "scope":
 		body = &scope
+	case "amend":
+		body = &amend
 	case "delivery/publish":
 		body = &publish
 	}
@@ -174,6 +182,8 @@ func (h *handler) gate(w http.ResponseWriter, r *http.Request, id, action string
 	switch action {
 	case "scope":
 		h.approveScope(w, record, scope)
+	case "amend":
+		h.amendPlan(w, record, amend)
 	case "delivery/preview":
 		h.previewDelivery(w, record)
 	default:
@@ -386,6 +396,9 @@ var categoryReasons = map[string]string{
 	"reconciliation":        "Check the pull request on GitHub, then reconcile the receipt with forgecell deliver; this page never retries a publication",
 	"demo":                  "This demo Lab never contacts GitHub; run forgecell init in a Lab of your own repository to publish",
 	"interrupted":           "Read the state back here; if the Molecule stays locked, inspect it with forgecell ledger and recover it with forgecell recover",
+	"duplicate":             "Add a path or an acceptance note the plan does not list yet, or approve the plan as it is",
+	"scope-refused":         "Choose an exact path inside a component the plan's evidence covers, or run forgecell amend to see the engine's own reason",
+	"checkout":              "Refresh intake with forgecell run so the Molecule has a coding checkout, then review the new plan",
 }
 
 // engineReasons are exact next steps for engine errors the UI recognises,
@@ -655,6 +668,15 @@ func (g *gateJobs) cancelRunning(id string, kinds []string, owns func(time.Time)
 	}
 	j.cancel()
 	return true
+}
+
+// ownsRunning is cancelRunning's check alone: it reports a running job under id
+// whose kind is one of kinds and for which owns(started) holds, and cancels nothing.
+func (g *gateJobs) ownsRunning(id string, kinds []string, owns func(time.Time) bool) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	j := g.jobs[id]
+	return j != nil && j.state == "running" && slices.Contains(kinds, j.kind) && owns(j.started)
 }
 
 func (g *gateJobs) busy(id string) bool {

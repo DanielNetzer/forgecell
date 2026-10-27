@@ -1,6 +1,7 @@
 // Forgecell local Lab UI. It reads the Lab, and writes only through the engine:
-// the two human gates (exact scope approval and draft PR publication), starting
-// intake or the loop, and stopping work this UI started. Every value
+// the two human gates (exact scope approval and draft PR publication), Request
+// changes on a waiting plan (a new version, approved separately), starting
+// intake or the loop, and stopping or retiring a Molecule. Every value
 // from the API is untrusted and reaches the page only as a text node or a
 // validated attribute: this file never parses data as markup.
 'use strict';
@@ -70,7 +71,7 @@
 
   // gate is the selected Molecule's gate state: one request in flight at most,
   // the last preview shown, and the last job read back from the server.
-  function newGate(id) { return { id: id, pending: false, preview: null, job: null, stop: null, retire: null, reason: '', message: '', title: '', accept: false, timer: null }; }
+  function newGate(id) { return { id: id, pending: false, preview: null, job: null, stop: null, retire: null, amend: null, reason: '', message: '', where: 'decision', announce: false, title: '', accept: false, timer: null }; }
 
   function notRecorded(value) { return value === undefined || value === null || value === '' ? 'Not recorded' : String(value); }
   function short(digest) { return typeof digest === 'string' && digest.length > 12 ? digest.slice(0, 12) + '…' : notRecorded(digest); }
@@ -441,7 +442,7 @@
       el('strong', null, 'Intake · Issue #' + notRecorded(run.issue) + ' · ' + notRecorded(run.state)),
       el('p', { class: 'scope-note' }, status),
       run.error ? el('p', { class: 'scope-note' }, (run.category ? run.category + ': ' : '') + run.error + '.' + reasonText(run)) : null,
-      run.committed && c.moleculeId ? el('button', { type: 'button', class: 'text-button', dataset: { drive: 'open' }, onclick: () => select(c.moleculeId) }, 'Open Molecule') : null);
+      run.committed && c.moleculeId ? el('button', { type: 'button', class: 'text-button', dataset: { drive: 'open' }, onclick: () => openMolecule(c.moleculeId) }, 'Open Molecule') : null);
   }
 
   function loopText(loop) {
@@ -595,7 +596,9 @@
   const cubes = $('#cubes');
   cubes.addEventListener('click', (e) => {
     const button = e.target.closest('[data-id]');
-    if (button) { hideTip(); select(button.dataset.id); }
+    // A cell opens the Molecule view through history.pushState, so Back returns
+    // to the grid.
+    if (button) { hideTip(); openMolecule(button.dataset.id); }
   });
   // Seven-row, column-major movement among visible cells, as in the prototype.
   cubes.addEventListener('keydown', (e) => {
@@ -649,6 +652,8 @@
   document.addEventListener('scroll', hideTip, true);
 
   // ---- Selection --------------------------------------------------------------
+  // The selected Molecule opens as the Molecule view, which replaces the grid
+  // under Work until the user goes back.
   function select(id) {
     // A Molecule opens under Work, from any view (the Insights queue, Start Work).
     const elsewhere = state.view !== 'work';
@@ -660,7 +665,7 @@
     // The selection lives in the URL (?view=work&m=…), so reload and copied links
     // restore it.
     if (moleculeFromURL() !== id) history.replaceState({ view: 'work', m: id }, '', moleculeHref(id));
-    $('#selected').hidden = false;
+    showMoleculeView(true);
     cells().forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
     const m = molecules().find((x) => x.id === id);
     $('#selection-label').textContent = m ? 'Selected #' + m.number + ' · ' + (m.title || m.id) : 'Selected ' + id;
@@ -676,22 +681,43 @@
     clearTimeout(state.gate.timer);
     state.gate = newGate(null);
     if (moleculeFromURL()) history.replaceState({ view: state.view }, '', '?view=' + state.view);
-    $('#selected').hidden = true;
+    showMoleculeView(false);
     cells().forEach((b) => b.setAttribute('aria-pressed', 'false'));
     $('#selection-label').textContent = 'All Molecules · select a cell to inspect';
     applyFilter();
   }
 
+  // showMoleculeView swaps the grid for the Molecule view, or back. The shell's
+  // side panel steps aside while a Molecule is open, as in the mockup.
+  function showMoleculeView(open) {
+    $('#selected').hidden = !open;
+    $('.shelf').hidden = open;
+    $('.shell').classList.toggle('has-molecule', open);
+    if (!open) { mv.planKey = null; mv.statsKey = null; mv.stats = null; mv.lastDigest = null; chooseTab('plan', false); }
+  }
+
   function renderLoadingDetail(id) {
-    $('#run-id').textContent = id;
-    $('#run-title').textContent = 'Loading…';
-    $('#run-state').textContent = '';
+    setText($('#mv-title'), 'Loading…');
+    setText($('#mv-state-text'), 'Loading');
+    setAttr($('#mv-state'), 'data-tone', 'neutral');
+    setText($('#mv-crumb'), 'Molecule');
+    renderBack();
+    mv.planKey = null;
+    // The previous Molecule's plan and decision card never show under this one's title.
+    $('#mv-aside').hidden = true;
+    $('#mv-plan-sections').hidden = true;
+    $('#mv-no-plan').hidden = true;
+    $('#mv-steps').hidden = true;
+    $('#mv-planned').hidden = true;
     for (const s of ['#run-origin', '#molecule-totals', '#atoms', '#readiness', '#attempts']) fill($(s));
   }
 
   function renderMissingDetail(id, status) {
     renderLoadingDetail(id);
-    $('#run-title').textContent = status === 404 ? 'This Molecule is no longer in the Lab.' : 'This ledger was refused: it is invalid, unsafe, oversized or not this Lab\'s.';
+    $('#mv-plan-sections').hidden = true;
+    $('#mv-no-plan').hidden = false;
+    setText($('#mv-no-plan'), status === 404 ? 'This Molecule is no longer in the Lab.' : 'This ledger was refused: it is invalid, unsafe, oversized or not this Lab\'s.');
+    setText($('#mv-title'), status === 404 ? 'Molecule not found' : 'Ledger refused');
     add($('#run-origin'), el('button', { type: 'button', class: 'text-button', onclick: overview }, 'Clear selection'));
   }
 
@@ -703,13 +729,27 @@
     return '$' + usage.totalCostUsd.toFixed(4) + ' (' + basis + ')';
   }
 
+  // renderDetail patches the Molecule view: its header, plan, decision card and
+  // roles in place, and the Timeline tab, which keeps the Atoms, evidence and
+  // logs as before.
   function renderDetail() {
     const d = state.detail;
-    $('#run-id').textContent = d.id;
-    const pill = $('#run-state');
-    pill.textContent = statusLabel(d);
-    pill.className = 'pill' + (d.lane === 'decision' ? ' current' : '');
-    $('#run-title').textContent = (d.sample ? '[Sample] ' : '') + (d.issue.title || 'Untitled');
+    $('#mv-aside').hidden = false;
+    renderHeader(d);
+    renderPlan(d);
+    renderDecision(d);
+    renderRoles(d);
+    loadStats(d);
+    renderTimeline(d);
+  }
+
+  // renderTimeline is the Atom list, evidence and logs. While focus is inside it,
+  // a poll does not rebuild it; it is brought up to date once focus leaves.
+  function renderTimeline(d) {
+    const panel = $('#mv-timeline');
+    if (panel.contains(document.activeElement) && mv.timelineId === d.id) { mv.timelineDirty = true; return; }
+    mv.timelineDirty = false;
+    mv.timelineId = d.id;
     const issueLink = externalLink(d.issue.url, ISSUE_URL, 'Issue #' + d.issue.number + ' ↗');
     const pullLink = d.delivery ? externalLink(d.delivery.url, PULL_URL, 'Pull request ↗') : null;
     fill($('#run-origin'),
@@ -749,17 +789,6 @@
     const diagnostics = $('#run-diagnostics');
     fill(diagnostics, (d.diagnostics || []).map((text) => el('li', null, text)));
     diagnostics.hidden = !(d.diagnostics || []).length;
-    renderAction(d);
-  }
-
-  // NEXT ACTION and GATES AND DECISIONS render the server's one gate state:
-  // d.next is derived from d.gate, so it names Gates and decisions only while a
-  // gate there is open.
-  function renderAction(d) {
-    const next = d.next || {};
-    $('#action-title').textContent = typeof next.title === 'string' && next.title ? next.title : 'Recorded';
-    $('#action-copy').textContent = typeof next.copy === 'string' ? next.copy : '';
-    renderGate(d);
   }
 
   // ---- Human gates ---------------------------------------------------------------
@@ -768,10 +797,6 @@
   // response (no response, or a 5xx) the page reads the canonical state back
   // and never resubmits. A decision shows as committed only when the server's
   // read-back of the ledger or the receipt says so, never because a job ended.
-  const GATE_COPY = {
-    scope: 'Approving runs coding and verification for exactly this plan. It never publishes, merges or deploys.',
-    delivery: 'Publication creates a draft pull request only. It never merges, deploys or changes permissions.',
-  };
 
   async function gatePost(id, action, body) {
     const session = tabSession();
@@ -792,15 +817,21 @@
   }
 
   function rerenderGate(gate) {
-    if (state.gate === gate && state.detail && state.detail.id === gate.id) keepFocus(() => renderGate(state.detail));
+    if (state.gate === gate && state.detail && state.detail.id === gate.id) keepFocus(() => renderDecision(state.detail));
   }
 
+  // GATE_FORMS names the form whose inline error shows each action's outcome;
+  // every other action reports in the decision card.
+  const GATE_FORMS = { '/amend': 'amend', '/delivery/publish': 'publish', '/stop': 'stop', '/retire': 'retire' };
+
   // submitGate posts once. It returns the accepted body, or null after a refusal
-  // or an ambiguous response, which is read back instead of retried.
+  // or an ambiguous response, which is read back instead of retried. Focus moves
+  // to the inline error of the action's form.
   async function submitGate(action, payload) {
     if (state.gate.pending) return null;
     const gate = state.gate;
     gate.pending = true;
+    gate.where = GATE_FORMS[action] || 'decision';
     gate.message = '';
     rerenderGate(gate);
     let res = null, body = {};
@@ -815,11 +846,28 @@
     if (state.gate !== gate) return null;
     if (!res || res.status >= 500) {
       gate.message = 'The response was lost or ambiguous. The canonical state is read back; nothing is resubmitted.';
+      gate.announce = true;
       readBack(gate);
       return null;
     }
-    if (!res.ok) { gate.message = refusalText(body); rerenderGate(gate); return null; }
+    if (!res.ok && action === '/amend' && body && body.category === 'stale') {
+      // Someone recorded a newer plan after this one was shown: load it to review.
+      gate.message = 'A newer plan exists, so your changes were not recorded. The newer plan is loaded; review it before requesting changes again.';
+      gate.announce = true;
+      readBack(gate);
+      return null;
+    }
+    if (!res.ok) { gate.message = refusalText(body); gate.announce = true; rerenderGate(gate); return null; }
     return body;
+  }
+
+  // gateMessage shows a check this page makes before anything is sent.
+  function gateMessage(where, text) {
+    const gate = state.gate;
+    gate.where = where;
+    gate.message = text;
+    gate.announce = true;
+    rerenderGate(gate);
   }
 
   // fetchJob reads the job and its canonical read-back; while the job runs it
@@ -843,6 +891,8 @@
     loadDetail(gate.id, false);
   }
 
+  // approveScope posts the exact digest the plan shows; the approval shows as
+  // committed only once the ledger read back records it.
   async function approveScope(digest) {
     const job = await submitGate('/scope', JSON.stringify({ digest: digest }));
     if (job) { state.gate.job = job; readBack(state.gate); }
@@ -857,10 +907,25 @@
   async function publishDelivery() {
     const gate = state.gate;
     const preview = gate.preview, title = gate.title.trim(), accept = gate.accept;
-    if (!preview || !title) { gate.message = 'Enter a one-line title for the draft PR.'; rerenderGate(gate); return; }
-    if (preview.acceptanceUnverified && !accept) { gate.message = 'Independent acceptance is unverified: confirm your own acceptance review first.'; rerenderGate(gate); return; }
+    if (!preview || !title) { gateMessage('publish', 'Enter a one-line title for the draft PR, such as the change in a few words.'); return; }
+    if (preview.acceptanceUnverified && !accept) { gateMessage('publish', 'Tick the box once you have checked the acceptance criteria yourself.'); return; }
     const job = await submitGate('/delivery/publish', JSON.stringify({ digest: preview.digest, title: title, acceptUnverified: accept }));
     if (job && state.gate === gate) { gate.job = job; readBack(gate); }
+  }
+
+  // requestChanges posts the additions with the exact digest the plan shows. The
+  // engine records a new version of the plan and approves nothing: the new
+  // version waits for its own approval through Approve plan & start coding.
+  async function requestChanges(digest, acceptance, path, reason) {
+    const gate = state.gate;
+    const body = { digest: digest, addAcceptance: acceptance ? [acceptance] : [], addScope: path ? [{ path: path, reason: reason }] : [] };
+    const amended = await submitGate('/amend', JSON.stringify(body));
+    if (amended && state.gate === gate) {
+      gate.amend = amended;
+      if (amended.committed) clearChanges();
+      rerenderGate(gate);
+      loadDetail(gate.id, false);
+    }
   }
 
   // stopMolecule posts once; the stop shows as done only when the ledger read back
@@ -876,7 +941,7 @@
   async function retireMolecule() {
     const gate = state.gate;
     const reason = gate.reason.trim();
-    if (!reason || /[\r\n]/.test(reason) || [...reason].length > 200) { gate.message = 'Enter a one-line reason of at most 200 characters.'; rerenderGate(gate); return; }
+    if (!reason || /[\r\n]/.test(reason) || [...reason].length > 200) { gateMessage('retire', 'Enter a one-line reason of at most 200 characters, such as why the Molecule is no longer needed.'); return; }
     const retired = await submitGate('/retire', JSON.stringify({ reason: reason }));
     if (retired && state.gate === gate) { gate.retire = retired; rerenderGate(gate); loadDetail(gate.id, false); }
   }
@@ -884,9 +949,10 @@
   function retireText(d, gate) {
     const r = d.retired;
     if (d.lane === RETIRED && r) {
-      return el('p', { class: 'scope-note', role: gate.retire ? 'status' : null }, 'Retired at ' + notRecorded(r.at) + ' (was ' + notRecorded(r.priorStatus) + '). Reason: ' + notRecorded(r.reason) + '. Every record is kept.');
+      const when = whenText(r.at);
+      return el('p', { class: 'scope-note', title: dateTitle(r.at) }, 'Retired' + (when ? ' ' + when : '') + '. Reason: ' + notRecorded(r.reason) + '. Every record is kept.');
     }
-    if (gate.retire) return el('p', { class: 'scope-note', role: 'status' }, gate.retire.committed ? 'Committed: the ledger records the retirement.' : 'Not committed: the ledger read back does not record the retirement.');
+    if (gate.retire) return el('p', { class: 'scope-note' }, gate.retire.committed ? 'Committed: the ledger records the retirement.' : 'Not committed: the ledger read back does not record the retirement.');
     return null;
   }
 
@@ -904,85 +970,619 @@
     const kind = job.kind === 'scope' ? 'Scope approval' : 'Draft publication';
     let status;
     if (c.unreadable) status = 'The ' + (c.source || 'record') + ' could not be read back; nothing is shown as committed.';
-    else if (job.committed && job.kind === 'scope') status = 'Committed: the ledger records approval of plan ' + short(job.digest) + '.';
+    else if (job.committed && job.kind === 'scope') status = 'Committed: the ledger records your approval of this plan. Coding starts on its own.';
     else if (job.committed) status = 'Committed: receipt ' + notRecorded(c.receipt) + ', lifecycle ' + notRecorded(c.lifecycle) + (c.published ? '. Draft published; merge and production are not verified.' : '. Not published as a draft yet.');
     else if (job.state === 'running') status = 'Running. Not committed until the ' + (job.kind === 'scope' ? 'ledger records the approval.' : 'receipt records it.');
     else status = 'Not committed: the ' + (job.kind === 'scope' ? 'ledger does not record this approval' : 'receipt does not record a committed delivery') + (c.receipt ? ' (receipt ' + c.receipt + (c.lifecycle ? ', lifecycle ' + c.lifecycle : '') + ')' : '') + '.';
-    return el('div', { class: 'gate-job', role: 'status' },
+    // Not a live region itself: the view's one live region, #mv-live, carries it.
+    return el('div', { class: 'gate-job' },
       el('strong', null, kind + ' · ' + notRecorded(job.state)),
       el('p', { class: 'scope-note' }, status),
       job.error ? el('p', { class: 'scope-note' }, (job.category ? job.category + ': ' : '') + job.error + '.' + reasonText(job)) : null);
   }
 
-  function renderGate(d) {
-    const card = document.querySelector('.decision-panel .action-card');
-    if (!card) return;
+  // ---- Molecule view ---------------------------------------------------------------
+  // The Molecule view (?view=work&m=…) replaces the grid: a breadcrumb back, the
+  // state pill, the seven steps, the plan in plain words and a sticky decision
+  // card with one primary action, bound to the exact digest the plan shows.
+  // Retire and Stop sit apart, in the collapsed Not needed anymore? block, each
+  // behind a confirmation that names the Molecule. Every value is the server's
+  // plain MoleculeView: no phase code, id or full digest is turned into prose,
+  // and the plan's digest appears only short, inside Plan details. Controls are
+  // built once and patched in place, so a poll never rebuilds a form being
+  // typed in, and the one live region changes only when its text does.
+  const mv = { controls: null, steps: null, from: 'work', planKey: null, statsKey: null, statsToken: 0, stats: null, lastDigest: null, replaced: false, timelineId: null, timelineDirty: false };
+  const TONES = ['needs', 'running', 'blocked', 'merged', 'neutral'];
+  const STEP_STATES = ['done', 'current', 'blocked', 'todo'];
+  const VIEW_NAMES = { inbox: 'Inbox', issues: 'Issues', work: 'Work', insights: 'Insights', formula: 'Formula' };
+  const CHANGE_BADGES = { new: ['NEW', 'Not in the base tree: a new file'], edit: ['EDIT', 'In the base tree: an edit'] };
+  const timeOnly = new Intl.DateTimeFormat('en-US', { timeStyle: 'short' });
+  const dayOnly = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' });
+  const wholeNumber = new Intl.NumberFormat('en-US');
+  // One money rule: two decimals, and an amount under a cent says so instead of
+  // rounding to $0.00.
+  const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function money(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '';
+    return value > 0 && value < 0.01 ? 'under $0.01' : dollars.format(value);
+  }
+
+  // whenText is a recorded time in words: "today at 6:46 PM", "on Oct 24, 2026
+  // at 9:00 AM"; dateTitle gives the full date for a tooltip.
+  function whenText(iso) {
+    const t = Date.parse(iso || '');
+    if (!Number.isFinite(t)) return '';
+    const day = (ms) => new Date(ms).toDateString();
+    const time = timeOnly.format(t);
+    if (day(t) === day(Date.now())) return 'today at ' + time;
+    if (day(t) === day(Date.now() - 86400000)) return 'yesterday at ' + time;
+    return 'on ' + dayOnly.format(t) + ' at ' + time;
+  }
+
+  // submitButton is a form's submit button, so Enter submits the form.
+  function submitButton(props, ...children) {
+    const button = el('button', props, ...children);
+    button.type = 'submit';
+    return button;
+  }
+  function field(id, label, input) { return el('div', { class: 'drive-field' }, el('label', { class: 'field-label', for: id }, label), input); }
+  // fillKeyed rebuilds node only when key changes, so an unchanged status is
+  // neither rebuilt nor announced again.
+  function fillKeyed(node, key, build) {
+    if (node.dataset.key === key) return;
+    node.dataset.key = key;
+    fill(node, key ? build() : null);
+  }
+  function moleculeName(d) {
+    const title = plainText(d.issue && d.issue.title, 'Untitled');
+    const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number + ' · ' : '';
+    return number + ([...title].length > 80 ? [...title].slice(0, 79).join('') + '…' : title);
+  }
+
+  // ensureMoleculeView builds the decision card, the danger zone, the roles and
+  // the steps once.
+  function ensureMoleculeView() {
+    if (mv.controls) return mv.controls;
+    const c = {};
+    c.heading = el('h2', { class: 'decision-title', id: 'mv-decision-title', tabindex: '-1' });
+    c.copy = el('p', { class: 'decision-copy' });
+    c.changed = el('p', { class: 'decision-changed', hidden: true });
+    c.size = el('p', { class: 'decision-size', hidden: true });
+    // The scope gate: Approve is the card's one primary, bound through its form to
+    // the digest the plan shows; Request changes is secondary and approves nothing.
+    c.approve = submitButton({ class: 'btn btn-primary btn-decision', 'aria-describedby': 'mv-gate-error', dataset: { gate: 'scope' } }, 'Approve plan & start coding');
+    c.approveForm = el('form', { class: 'decision-form', id: 'mv-approve-form', novalidate: true, hidden: true, onsubmit: submitApprove }, c.approve);
+    c.changes = el('button', { type: 'button', class: 'btn btn-secondary btn-decision-secondary', 'aria-expanded': 'false', 'aria-controls': 'mv-amend-form', hidden: true, dataset: { gate: 'changes' }, onclick: toggleChanges }, 'Request changes…');
+    c.acceptance = el('input', { type: 'text', id: 'mv-amend-acceptance', name: 'acceptance', maxlength: '1000', autocomplete: 'off', placeholder: 'The help text names the new flag…', 'aria-describedby': 'mv-amend-error', dataset: { gate: 'acceptance' } });
+    c.path = el('input', { type: 'text', id: 'mv-amend-path', name: 'path', maxlength: '300', autocomplete: 'off', spellcheck: 'false', placeholder: 'lab/internal/ui/web/app.js…', 'aria-describedby': 'mv-amend-error', dataset: { gate: 'path' } });
+    c.reason = el('input', { type: 'text', id: 'mv-amend-reason', name: 'reason', maxlength: '1000', autocomplete: 'off', placeholder: 'Wire the new button…', 'aria-describedby': 'mv-amend-error', dataset: { gate: 'path-reason' } });
+    c.amendError = el('p', { class: 'drive-error', id: 'mv-amend-error', tabindex: '-1', hidden: true });
+    c.amendSubmit = submitButton({ class: 'btn btn-secondary', dataset: { gate: 'amend' } }, 'Record changes');
+    c.amendForm = el('form', { class: 'amend-form', id: 'mv-amend-form', 'aria-labelledby': 'mv-amend-title', novalidate: true, hidden: true, onsubmit: submitChanges },
+      el('h3', { class: 'amend-title', id: 'mv-amend-title' }, 'Request changes'),
+      el('p', { class: 'drive-help' }, 'Forgecell records your changes as a new version of this plan. Nothing is approved now: you review and approve the new version on its own.'),
+      field('mv-amend-acceptance', 'Add an acceptance note', c.acceptance),
+      el('fieldset', { class: 'amend-scope' }, el('legend', { class: 'field-label' }, 'Or let it change one more file'),
+        field('mv-amend-path', 'File path', c.path), field('mv-amend-reason', 'Why it needs to change', c.reason)),
+      c.amendError, c.amendSubmit);
+    c.amendStatus = el('div', { class: 'gate-status' });
+    // The review gate: Preview is the primary until a preview is shown; then
+    // Publish is, and Preview again turns secondary.
+    c.preview = el('button', { type: 'button', class: 'btn btn-primary btn-decision', 'aria-describedby': 'mv-gate-error', hidden: true, dataset: { gate: 'preview' }, onclick: previewDelivery }, 'Preview delivery');
+    c.previewInfo = el('div', { class: 'preview-info' });
+    c.title = el('input', { type: 'text', id: 'mv-publish-title', name: 'title', maxlength: '256', autocomplete: 'off', placeholder: 'Add the Molecule view to the Lab UI…', 'aria-describedby': 'mv-publish-error', dataset: { gate: 'title' }, oninput: (e) => { state.gate.title = e.target.value; } });
+    c.accept = el('input', { type: 'checkbox', id: 'mv-publish-accept', name: 'acceptUnverified', 'aria-describedby': 'mv-accept-help', dataset: { gate: 'accept' }, onchange: (e) => { state.gate.accept = e.target.checked; } });
+    c.acceptField = el('div', { class: 'accept-field', hidden: true },
+      el('label', { class: 'accept-label', for: 'mv-publish-accept' }, c.accept, el('span', null, 'I checked the acceptance criteria myself')),
+      el('p', { class: 'drive-help', id: 'mv-accept-help' }, 'No independent check confirmed that this change meets its acceptance criteria. Tick this only once you have reviewed them yourself; your confirmation is recorded with the draft PR.'));
+    c.publishError = el('p', { class: 'drive-error', id: 'mv-publish-error', tabindex: '-1', hidden: true });
+    c.publish = submitButton({ class: 'btn btn-primary btn-decision', dataset: { gate: 'publish' } }, 'Publish draft PR');
+    c.publishForm = el('form', { class: 'decision-form', id: 'mv-publish-form', novalidate: true, hidden: true, onsubmit: submitPublish },
+      field('mv-publish-title', 'Draft PR title', c.title), c.acceptField, c.publishError, c.publish);
+    c.pull = el('a', { class: 'btn btn-secondary decision-link', target: '_blank', rel: 'noopener noreferrer', hidden: true }, 'Open the pull request ↗');
+    c.error = el('p', { class: 'drive-error', id: 'mv-gate-error', tabindex: '-1', hidden: true });
+    c.job = el('div', { class: 'gate-status' });
+    c.estimate = el('p', { class: 'decision-estimate', hidden: true });
+    fill($('#mv-decision'), c.heading, c.copy, c.changed, c.size,
+      c.approveForm, c.changes, c.amendForm, c.amendStatus,
+      c.preview, c.previewInfo, c.publishForm, c.pull,
+      c.error, c.job, c.estimate);
+
+    // The danger zone: its own collapsed block, never beside a primary. Each
+    // action opens a confirmation that names the Molecule.
+    c.stopOpen = el('button', { type: 'button', class: 'btn btn-danger', 'aria-expanded': 'false', 'aria-controls': 'mv-stop-form', dataset: { gate: 'stop-open' }, onclick: () => openConfirm('stop') }, 'Stop this Molecule…');
+    c.stopQuestion = el('p', { class: 'confirm-question', id: 'mv-stop-question' });
+    c.stopError = el('p', { class: 'drive-error', id: 'mv-stop-error', tabindex: '-1', hidden: true });
+    c.stopSubmit = submitButton({ class: 'btn btn-danger', 'aria-describedby': 'mv-stop-error', dataset: { gate: 'stop' } }, 'Stop Molecule');
+    c.stopForm = el('form', { class: 'confirm-form', id: 'mv-stop-form', 'aria-labelledby': 'mv-stop-question', novalidate: true, hidden: true, onsubmit: submitStop },
+      c.stopQuestion,
+      el('p', { class: 'drive-help' }, 'Its process group is stopped and the ledger records the stop. Work a loop or the forgecell CLI runs is refused.'),
+      c.stopError,
+      el('div', { class: 'confirm-actions' }, c.stopSubmit, el('button', { type: 'button', class: 'btn btn-secondary', dataset: { gate: 'stop-cancel' }, onclick: () => closeConfirm('stop', true) }, 'Cancel')));
+    c.stopStatus = el('div', { class: 'gate-status' });
+    c.stopBlock = el('div', { class: 'danger-item' }, el('p', null, 'Stopping ends the work this Lab UI started for this Molecule.'), c.stopOpen, c.stopForm, c.stopStatus);
+    c.retireOpen = el('button', { type: 'button', class: 'btn btn-danger', 'aria-expanded': 'false', 'aria-controls': 'mv-retire-form', dataset: { gate: 'retire-open' }, onclick: () => openConfirm('retire') }, 'Retire this Molecule…');
+    c.retireQuestion = el('p', { class: 'confirm-question', id: 'mv-retire-question' });
+    c.reasonInput = el('input', { type: 'text', id: 'mv-retire-reason', name: 'reason', maxlength: '200', autocomplete: 'off', placeholder: 'Replaced by a fresh Molecule…', 'aria-describedby': 'mv-retire-error', dataset: { gate: 'reason' }, oninput: (e) => { state.gate.reason = e.target.value; } });
+    c.retireError = el('p', { class: 'drive-error', id: 'mv-retire-error', tabindex: '-1', hidden: true });
+    c.retireSubmit = submitButton({ class: 'btn btn-danger', dataset: { gate: 'retire' } }, 'Retire Molecule');
+    c.retireForm = el('form', { class: 'confirm-form', id: 'mv-retire-form', 'aria-labelledby': 'mv-retire-question', novalidate: true, hidden: true, onsubmit: submitRetire },
+      c.retireQuestion, field('mv-retire-reason', 'Reason', c.reasonInput), c.retireError,
+      el('div', { class: 'confirm-actions' }, c.retireSubmit, el('button', { type: 'button', class: 'btn btn-secondary', dataset: { gate: 'retire-cancel' }, onclick: () => closeConfirm('retire', true) }, 'Cancel')));
+    c.retireStatus = el('div', { class: 'gate-status' });
+    c.retireBlock = el('div', { class: 'danger-item' }, el('p', null, 'Retiring keeps every record, but this Molecule can’t be resumed. You can start a fresh one for the Issue later.'), c.retireOpen, c.retireForm, c.retireStatus);
+    c.danger = el('details', { class: 'danger-zone', id: 'mv-danger', hidden: true }, el('summary', null, 'Not needed anymore?'), el('div', { class: 'danger-body' }, c.stopBlock, c.retireBlock));
+    // runnerNote replaces Stop when this Lab UI does not run the engine call.
+    c.runnerNote = el('p', { class: 'drive-help runner-note', id: 'mv-runner-note', hidden: true });
+    fill($('#mv-danger-slot'), c.runnerNote, c.danger);
+
+    c.roles = { coding: el('dd'), reviewer: el('dd'), cost: el('dd', { class: 'num' }) };
+    fill($('#mv-roles'),
+      el('div', null, el('dt', null, 'Coding agent'), c.roles.coding),
+      el('div', null, el('dt', null, 'Reviewer'), c.roles.reviewer),
+      el('div', null, el('dt', null, 'Planning cost so far'), c.roles.cost));
+    c.issue = el('a', { class: 'mv-issue-link', target: '_blank', rel: 'noopener noreferrer', hidden: true });
+    c.issueText = el('span', { hidden: true });
+    fill($('#mv-issue'), c.issue, c.issueText);
+    mv.steps = STEPS.map((label) => el('li', { class: 'mv-step is-todo' }, el('span', { class: 'step-bar', 'aria-hidden': 'true' }), el('span', { class: 'mv-step-label' }, label)));
+    fill($('#mv-steps'), mv.steps);
+    mv.controls = c;
+    return c;
+  }
+
+  // resetDecision clears what was typed for the previous Molecule: a title, a
+  // reason or a requested change never carries over to another one.
+  function resetDecision(c) {
+    for (const input of [c.title, c.acceptance, c.path, c.reason, c.reasonInput]) input.value = '';
+    c.accept.checked = false;
+    c.amendForm.hidden = true;
+    c.changes.setAttribute('aria-expanded', 'false');
+    for (const kind of ['stop', 'retire']) { c[kind + 'Form'].hidden = true; c[kind + 'Open'].setAttribute('aria-expanded', 'false'); }
+    c.danger.open = false;
+    c.previewInfo.dataset.key = '';
+    mv.replaced = false;
+  }
+
+  function submitApprove(e) {
+    e.preventDefault();
+    const digest = mv.controls.approveForm.dataset.digest;
+    if (digest) approveScope(digest);
+  }
+  function submitChanges(e) {
+    e.preventDefault();
+    const c = mv.controls, digest = c.approveForm.dataset.digest;
+    const acceptance = c.acceptance.value.trim(), path = c.path.value.trim(), reason = c.reason.value.trim();
+    if (!digest) return;
+    if (!acceptance && !path && !reason) { gateMessage('amend', 'Add an acceptance note, or a file path with the reason it needs to change.'); return; }
+    if (path && !reason) { gateMessage('amend', 'Say why this file needs to change, such as the behaviour it adds.'); return; }
+    if (reason && !path) { gateMessage('amend', 'Add the file path this reason is for, such as lab/internal/ui/web/app.js.'); return; }
+    requestChanges(digest, acceptance, path, reason);
+  }
+  function submitPublish(e) { e.preventDefault(); publishDelivery(); }
+  function submitStop(e) { e.preventDefault(); stopMolecule(); }
+  function submitRetire(e) { e.preventDefault(); retireMolecule(); }
+
+  function toggleChanges() {
+    const c = mv.controls;
+    if (!c.amendForm.hidden) { closeChanges(true); return; }
+    c.amendForm.hidden = false;
+    c.changes.setAttribute('aria-expanded', 'true');
+    c.acceptance.focus();
+  }
+  function closeChanges(focus) {
+    const c = mv.controls, had = c.amendForm.contains(document.activeElement);
+    c.amendForm.hidden = true;
+    c.changes.setAttribute('aria-expanded', 'false');
+    if (focus || had) (c.changes.hidden ? $('#mv-decision-title') : c.changes).focus({ preventScroll: true });
+  }
+  function clearChanges() {
+    const c = mv.controls;
+    for (const input of [c.acceptance, c.path, c.reason]) input.value = '';
+    closeChanges(false);
+  }
+  function openConfirm(kind) {
+    const c = mv.controls;
+    c[kind + 'Form'].hidden = false;
+    c[kind + 'Open'].setAttribute('aria-expanded', 'true');
+    (kind === 'retire' ? c.reasonInput : c.stopSubmit).focus();
+  }
+  function closeConfirm(kind, focus) {
+    const c = mv.controls, form = c[kind + 'Form'], open = c[kind + 'Open'];
+    const had = form.contains(document.activeElement);
+    form.hidden = true;
+    open.setAttribute('aria-expanded', 'false');
+    if (focus || had) (open.hidden ? c.danger.querySelector('summary') : open).focus({ preventScroll: true });
+  }
+
+  // boundDigest is the digest the Approve form posts: the decision's primary
+  // digest, only when it is the plan's, the gate's and the latest plan's too.
+  function boundDigest(d) {
+    const v = d.view || {}, dec = v.decision || {}, primary = dec.primary || {}, plan = v.plan || {}, g = d.gate || {};
+    const digest = typeof primary.digest === 'string' && /^[0-9a-f]{64}$/.test(primary.digest) ? primary.digest : '';
+    return digest && primary.action === 'approve' && digest === plan.digest && digest === g.digest && digest === latestDigest(d) ? digest : '';
+  }
+
+  // renderDecision patches the decision card and the danger zone in place. It
+  // never sets the Publish title or any other typed value: only resetDecision,
+  // for another Molecule, clears them.
+  function renderDecision(d) {
+    const c = ensureMoleculeView();
     if (state.gate.id !== d.id) {
       clearTimeout(state.gate.timer);
       state.gate = newGate(d.id);
+      resetDecision(c);
       if (!d.sample) fetchJob(state.gate);
     }
     const gate = state.gate;
-    const label = el('span', { class: 'label' }, 'GATES AND DECISIONS');
-    if (d.sample || (state.lab && state.lab.readOnly)) {
-      fill(card, label, el('p', { class: 'unavailable' }, 'Unavailable'), el('p', { class: 'scope-note' }, 'Sample data has no gates. Nothing here writes.'));
-      return;
-    }
+    const v = d.view || {}, dec = v.decision || {};
+    const readOnly = Boolean(d.sample || (state.lab && state.lab.readOnly));
     const running = Boolean(gate.job && gate.job.state === 'running');
-    const parts = [label];
-    const g = d.gate || { state: 'none' };
-    const digest = typeof g.digest === 'string' && /^[0-9a-f]{64}$/.test(g.digest) && g.digest === latestDigest(d) ? g.digest : '';
-    if (g.state === 'scope' && digest) {
-      parts.push(el('div', { class: 'gate' },
-        el('strong', null, 'Approve exact scope'),
-        el('code', { title: digest }, 'plan ' + digest),
-        el('p', { class: 'scope-note' }, GATE_COPY.scope),
-        el('button', { type: 'button', class: 'text-button', dataset: { gate: 'scope' }, disabled: state.gate.pending || running, onclick: () => approveScope(digest) }, gate.pending ? 'Submitting…' : 'Approve this plan')));
+    const busy = gate.pending || running;
+    const digest = readOnly ? '' : boundDigest(d);
+    const scope = dec.kind === 'scope' && Boolean(digest);
+    const delivery = !readOnly && dec.kind === 'delivery' && Boolean(d.gate && d.gate.state === 'delivery');
+    setText(c.heading, readOnly ? 'Sample data' : plainText(dec.title, 'Nothing to do'));
+    setText(c.copy, readOnly ? 'Sample data has no gates. Nothing here writes.' : plainText(dec.copy, ''));
+
+    // A plan replaced while it is open says so before it can be approved.
+    if (scope) {
+      const own = gate.amend && gate.amend.digest === digest;
+      if (mv.lastDigest && mv.lastDigest.id === d.id && mv.lastDigest.digest !== digest && !own) mv.replaced = true;
+      mv.lastDigest = { id: d.id, digest: digest };
     }
-    if (g.state === 'published') {
-      parts.push(el('div', { class: 'gate' },
-        el('strong', null, 'Review gate · resolved by draft publication'),
-        el('p', { class: 'scope-note' }, 'Receipt ' + notRecorded(g.receipt) + (g.lifecycle ? ' · lifecycle ' + g.lifecycle : '') + '. Merge on GitHub; merge and production are not verified by Forgecell.'),
-        externalLink(g.url, PULL_URL, 'Pull request ↗') || el('span', { class: 'muted' }, 'PR link unavailable')));
-    }
-    if (g.state === 'delivery') {
-      const preview = gate.preview;
-      parts.push(el('div', { class: 'gate' },
-        el('strong', null, 'Publish a draft PR'),
-        el('p', { class: 'scope-note' }, GATE_COPY.delivery),
-        el('button', { type: 'button', class: 'text-button', dataset: { gate: 'preview' }, disabled: state.gate.pending || running, onclick: previewDelivery }, preview ? 'Preview again' : 'Preview delivery'),
-        preview ? [
-          el('code', { title: notRecorded(preview.digest) }, 'preview ' + notRecorded(preview.digest)),
-          el('p', { class: 'scope-note' }, 'Base ' + notRecorded(preview.baseBranch) + ' · branch ' + notRecorded(preview.branch) + ' · ' + (preview.files || []).length + ' files: ' + (preview.files || []).join(', ')),
-          el('button', { type: 'button', class: 'text-button', dataset: { gate: 'diff' }, onclick: () => show('Delivery diff · ' + d.id, typeof preview.diff === 'string' ? preview.diff : '', (preview.diffTruncated ? 'Truncated · showing the first part of ' + preview.diffBytes + ' bytes.' : 'Complete · ' + preview.diffBytes + ' bytes.') + ' Secrets and local paths are redacted; the CLI shows the full diff.') }, 'View diff ↗'),
-          el('label', null, 'Title ', el('input', { type: 'text', maxlength: '256', value: gate.title, dataset: { gate: 'title' }, oninput: (e) => { gate.title = e.target.value; } })),
-          preview.acceptanceUnverified ? el('label', null, el('input', { type: 'checkbox', checked: gate.accept, dataset: { gate: 'accept' }, onchange: (e) => { gate.accept = e.target.checked; } }), ' Independent acceptance is unverified; I reviewed acceptance myself') : null,
-          el('button', { type: 'button', class: 'text-button', dataset: { gate: 'publish' }, disabled: state.gate.pending || running, onclick: publishDelivery }, gate.pending ? 'Submitting…' : 'Publish draft PR'),
-        ] : null));
-    }
+    const replaced = scope && mv.replaced ? 'This plan was replaced by version ' + count(v.plan && v.plan.revision) + ' while it was open. Review it before you approve.' : '';
+    setText(c.changed, replaced);
+    c.changed.hidden = !replaced;
+
+    // The scope gate.
+    c.approveForm.hidden = !scope;
+    if (scope) c.approveForm.dataset.digest = digest;
+    else delete c.approveForm.dataset.digest;
+    c.approve.disabled = busy;
+    c.approve.setAttribute('aria-disabled', String(busy));
+    setText(c.approve, gate.pending && gate.where === 'decision' && scope ? 'Approving…' : 'Approve plan & start coding');
+    const amendable = scope && dec.requestChanges === true && hasAction('request plan changes');
+    c.changes.hidden = !amendable;
+    if (!amendable && !c.amendForm.hidden) closeChanges(false);
+    c.changes.disabled = busy;
+    c.amendSubmit.disabled = busy;
+    setText(c.amendSubmit, gate.pending && gate.where === 'amend' ? 'Recording…' : 'Record changes');
+    fillKeyed(c.amendStatus, gate.amend ? JSON.stringify(gate.amend) : '', () => amendText(gate.amend));
+
+    // The review gate: exactly one primary at a time.
+    const preview = delivery ? gate.preview : null;
+    c.preview.hidden = !delivery;
+    setAttr(c.preview, 'class', preview ? 'btn btn-secondary btn-decision-secondary' : 'btn btn-primary btn-decision');
+    setText(c.preview, gate.pending && gate.where === 'decision' && delivery ? 'Previewing…' : preview ? 'Preview again' : 'Preview delivery');
+    c.preview.disabled = busy;
+    c.publishForm.hidden = !preview;
+    c.acceptField.hidden = !(preview && preview.acceptanceUnverified);
+    c.publish.disabled = busy;
+    setText(c.publish, gate.pending && gate.where === 'publish' ? 'Publishing…' : 'Publish draft PR');
+    renderPreviewInfo(c, preview);
+
+    // A published or merged Molecule: nothing to do, and its pull request.
+    const pull = !readOnly && dec.kind === 'published' && typeof dec.pullUrl === 'string' && PULL_URL.test(dec.pullUrl) ? dec.pullUrl : '';
+    c.pull.hidden = !pull;
+    if (pull) setAttr(c.pull, 'href', pull);
+    else c.pull.removeAttribute('href');
+
+    // The diff size on both gates; the estimate before coding.
+    const stats = (scope || delivery) && mv.stats && mv.stats.id === d.id ? mv.stats.data : null;
+    const size = stats ? diffText(stats.diff) : '';
+    setText(c.size, size);
+    c.size.hidden = !size;
+    const estimate = stats && scope ? estimateText(stats.estimate) : '';
+    setText(c.estimate, estimate);
+    c.estimate.hidden = !estimate;
+    fillKeyed(c.job, gate.job ? JSON.stringify(gate.job) : '', () => jobText(gate.job));
+
+    // The danger zone.
     const live = d.status === 'running' || d.status === 'allocating';
-    if ((live || gate.stop) && hasAction('stop Molecule')) {
-      let note = 'Stops the engine call this Lab UI runs for this Molecule; its process group is killed and the ledger records the stop. Work run by a loop or the CLI is refused.';
-      if (gate.stop) note = live ? 'Stop requested. Not committed until the ledger no longer shows this Molecule running.' : 'Stopped: the ledger shows status ' + notRecorded(d.status) + (d.phase ? ' · phase ' + d.phase : '') + '. Inspect or re-run it with the forgecell CLI.';
-      parts.push(el('div', { class: 'gate' },
-        el('strong', null, 'Stop this Molecule'),
-        el('p', { class: 'scope-note', role: gate.stop ? 'status' : null }, note),
-        live ? el('button', { type: 'button', class: 'text-button', dataset: { gate: 'stop' }, disabled: gate.pending || Boolean(gate.stop), onclick: stopMolecule }, gate.pending ? 'Submitting…' : 'Stop Molecule') : null));
+    const retired = d.lane === RETIRED || Boolean(gate.retire);
+    // Stop is offered only when the server says this Lab UI runs the engine call.
+    const control = d.view && d.view.control;
+    const stoppable = live && Boolean(control && control.stoppable === true);
+    const canStop = !readOnly && (stoppable || Boolean(gate.stop)) && hasAction('stop Molecule');
+    const canRetire = !readOnly && !live && !retired && hasAction('retire Molecule');
+    const runner = live && !stoppable && !gate.stop && control && typeof control.text === 'string' ? plainText(control.text, '') : '';
+    setText(c.runnerNote, runner);
+    c.runnerNote.hidden = !runner;
+    c.stopBlock.hidden = !canStop;
+    c.stopOpen.hidden = !stoppable || Boolean(gate.stop);
+    if (c.stopOpen.hidden && !c.stopForm.hidden) closeConfirm('stop', false);
+    c.stopSubmit.disabled = gate.pending;
+    setText(c.stopSubmit, gate.pending && gate.where === 'stop' ? 'Stopping…' : 'Stop Molecule');
+    setText(c.stopQuestion, 'Stop ' + moleculeName(d) + '?');
+    fillKeyed(c.stopStatus, gate.stop ? JSON.stringify([gate.stop, live]) : '', () => stopText(gate, live));
+    c.retireBlock.hidden = !(canRetire || (!readOnly && retired));
+    c.retireOpen.hidden = !canRetire;
+    if (!canRetire && !c.retireForm.hidden) closeConfirm('retire', false);
+    c.retireSubmit.disabled = gate.pending || running;
+    setText(c.retireSubmit, gate.pending && gate.where === 'retire' ? 'Retiring…' : 'Retire Molecule');
+    setText(c.retireQuestion, 'Retire ' + moleculeName(d) + '?');
+    fillKeyed(c.retireStatus, JSON.stringify([d.lane, d.retired, gate.retire]), () => retireText(d, gate));
+    c.danger.hidden = c.stopBlock.hidden && c.retireBlock.hidden;
+    if (c.danger.hidden) c.danger.open = false;
+
+    // One inline error, in the form that sent the request; focus moves to it once.
+    const errors = { decision: c.error, amend: c.amendError, publish: c.publishError, stop: c.stopError, retire: c.retireError };
+    let target = errors[gate.where] || c.error;
+    if (target.parentElement.closest('[hidden]')) target = c.error;
+    for (const node of Object.values(errors)) {
+      const text = node === target ? gate.message : '';
+      setText(node, text);
+      node.hidden = !text;
     }
-    if (d.lane === RETIRED || gate.retire) {
-      parts.push(el('div', { class: 'gate' }, el('strong', null, 'Retired'), retireText(d, gate)));
-    } else if (!live && hasAction('retire Molecule')) {
-      parts.push(el('div', { class: 'gate' },
-        el('strong', null, 'Retire this Molecule'),
-        el('p', { class: 'scope-note' }, 'Marks a stale Molecule retired: it leaves All and Needs my decision, and every record is kept. The loop never resumes it and may start a fresh Molecule for its Issue. The engine refuses a running, locked or delivering Molecule.'),
-        el('label', null, 'Reason ', el('input', { type: 'text', maxlength: '200', value: gate.reason, dataset: { gate: 'reason' }, oninput: (e) => { gate.reason = e.target.value; } })),
-        el('button', { type: 'button', class: 'text-button', dataset: { gate: 'retire' }, disabled: gate.pending || running, onclick: retireMolecule }, gate.pending ? 'Submitting…' : 'Retire Molecule')));
-    }
-    if (parts.length === 1) parts.push(el('p', { class: 'scope-note' }, 'No human gate is open for this Molecule. This page updates from the ledger.'));
-    if (gate.message) parts.push(el('p', { class: 'scope-note', role: 'alert' }, gate.message));
-    parts.push(jobText(gate.job));
-    fill(card, parts);
+    if (gate.message && gate.announce) { gate.announce = false; target.focus(); }
+    // The one live region of the view carries the outcomes read back.
+    setText($('#mv-live'), [c.job, c.amendStatus, c.stopStatus, c.retireStatus].map((n) => n.textContent).filter(Boolean).join(' '));
   }
+
+  function amendText(a) {
+    return el('p', { class: 'scope-note' }, a.committed
+      ? 'Version ' + count(a.revision) + ' of the plan is recorded and waits for your approval. Nothing was approved.'
+      : 'Not committed: the ledger read back shows no new version of this plan.');
+  }
+  function stopText(gate, live) {
+    if (!gate.stop) return null;
+    return el('p', { class: 'scope-note' }, live ? 'Stop requested. Not committed until the ledger no longer shows this Molecule running.' : 'Stopped: the ledger no longer shows this Molecule running.');
+  }
+
+  // renderPreviewInfo shows the preview once per preview, so its View diff
+  // button is not rebuilt by a poll.
+  function renderPreviewInfo(c, preview) {
+    const key = preview && typeof preview.digest === 'string' ? preview.digest : '';
+    fillKeyed(c.previewInfo, key, () => {
+      const files = Array.isArray(preview.files) ? preview.files : [];
+      const bytes = count(preview.diffBytes);
+      return [
+        el('p', { class: 'preview-line' }, 'Branch ', el('code', null, notRecorded(preview.branch)), ' into ', el('code', null, notRecorded(preview.baseBranch)), ' · ' + counted(files.length, 'file', 'files')),
+        el('button', { type: 'button', class: 'text-button', dataset: { gate: 'diff' }, onclick: () => show('Delivery diff · ' + moleculeName(state.detail || {}), typeof preview.diff === 'string' ? preview.diff : '', (preview.diffTruncated ? 'Truncated · showing the first part of ' + wholeNumber.format(bytes) + ' bytes.' : 'Complete · ' + wholeNumber.format(bytes) + ' bytes.') + ' Secrets and local paths are redacted; the CLI shows the full diff.') }, 'View diff ↗'),
+      ];
+    });
+  }
+
+  // diffText is the measured size, "+412 −96 in 4 files"; a count stopped at a
+  // bound says it is a lower bound. Nothing measured shows nothing.
+  function diffText(diff) {
+    if (!diff || diff.state !== 'measured' || !Number.isInteger(diff.files) || diff.files < 1) return '';
+    const text = '+' + wholeNumber.format(count(diff.added)) + ' −' + wholeNumber.format(count(diff.removed)) + ' in ' + counted(diff.files, 'file', 'files') + (count(diff.binary) ? ' (' + counted(count(diff.binary), 'binary file', 'binary files') + ')' : '');
+    return diff.truncated ? 'At least ' + text + ' · the count stopped at a safety bound' : text;
+  }
+
+  // estimateText is the history-based estimate with its basis, or nothing when
+  // the server hides it.
+  function estimateText(e) {
+    if (!e || e.shown !== true || !e.time || typeof e.basis !== 'string' || !e.basis) return '';
+    let text = 'Usually ' + rangeText(count(e.time.lowMs), count(e.time.highMs));
+    const cost = e.cost && money(e.cost.medianUsd);
+    if (cost) text += ' · about ' + cost + (e.cost.partial ? ' (' + plainText(e.cost.coverage, 'partial cost') + ')' : '');
+    return text + ', ' + e.basis + '. ' + plainText(e.note, '');
+  }
+  function rangeText(low, high) {
+    const a = minutesText(low), b = minutesText(high);
+    if (a === b) return 'about ' + a;
+    if (/^\d+ min$/.test(a) && /^\d+ min$/.test(b)) return a.slice(0, -4) + '–' + b;
+    return a + '–' + b;
+  }
+
+  // ---- Molecule view: header, steps, plan, roles and stats --------------------------
+  function renderBack() {
+    const from = VIEW_NAMES[mv.from] ? mv.from : 'work';
+    const back = $('#mv-back');
+    setAttr(back, 'href', '?view=' + from);
+    if (back.dataset.view !== from) back.dataset.view = from;
+    setText(back, VIEW_NAMES[from]);
+  }
+  function crumbText(d) {
+    const kind = d.view && d.view.decision && d.view.decision.kind;
+    const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number + ' · ' : '';
+    return number + ({ scope: 'Review plan', delivery: 'Review & publish' }[kind] || 'Molecule');
+  }
+  // pillText is the state in plain words, with the minutes of a running step.
+  function pillText(d) {
+    const s = d.view && d.view.state;
+    if (!s || typeof s.label !== 'string' || !s.label) return laneLabel(d);
+    return withAttempt(s.label, s.since, s.note);
+  }
+
+  // RERUN_NOTES are the fixed rerun notes the server sends; nothing else shows.
+  const RERUN_NOTES = ['rerun', 'rerun after a plan revision'];
+  // withAttempt appends the current attempt's elapsed minutes, when its start is
+  // recorded, and its rerun note: "Checks · 10 min · rerun after a plan revision".
+  function withAttempt(label, since, note) {
+    const parts = [label];
+    const t = Date.parse(since || '');
+    if (Number.isFinite(t)) parts.push(minutesText(Math.max(0, Date.now() - t)));
+    if (RERUN_NOTES.includes(note)) parts.push(note);
+    return parts.join(' · ');
+  }
+
+  function renderHeader(d) {
+    const c = ensureMoleculeView();
+    const v = d.view || {}, s = v.state || {};
+    setText($('#mv-title'), (d.sample ? '[Sample] ' : '') + plainText(d.issue && d.issue.title, 'Untitled'));
+    setText($('#mv-crumb'), crumbText(d));
+    renderBack();
+    setAttr($('#mv-state'), 'data-tone', TONES.includes(s.tone) ? s.tone : 'neutral');
+    setText($('#mv-state-text'), pillText(d));
+    const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number : '';
+    const url = d.issue && typeof d.issue.url === 'string' && ISSUE_URL.test(d.issue.url) ? d.issue.url : '';
+    c.issue.hidden = !url;
+    c.issueText.hidden = Boolean(url) || !number;
+    if (url) setAttr(c.issue, 'href', url);
+    setText(c.issue, 'Issue ' + number + ' ↗');
+    setText(c.issueText, 'Issue ' + number);
+    const plan = v.plan;
+    const when = plan ? whenText(plan.plannedAt) : '';
+    const planned = $('#mv-planned');
+    setText(planned, when ? '· planned ' + when + ' from the Issue as written then' : '');
+    setAttr(planned, 'title', when ? dateTitle(plan.plannedAt) : '');
+    planned.hidden = !when;
+    renderSteps(v);
+  }
+
+  // renderSteps marks each of the seven steps from the server's states, with
+  // aria-current on the current one.
+  function renderSteps(v) {
+    const steps = Array.isArray(v.steps) && v.steps.length === STEPS.length ? v.steps : null;
+    $('#mv-steps').hidden = !steps;
+    if (!steps) return;
+    mv.steps.forEach((li, i) => {
+      const s = steps[i] && STEP_STATES.includes(steps[i].state) ? steps[i].state : 'todo';
+      const current = i === v.current;
+      setAttr(li, 'class', 'mv-step is-' + s + (current ? ' is-now' : ''));
+      if (current) setAttr(li, 'aria-current', 'step');
+      else if (li.hasAttribute('aria-current')) li.removeAttribute('aria-current');
+      setText(li.lastChild, STEPS[i] + (s === 'done' ? ' · done' : s === 'blocked' ? ' · stopped' : current ? ' · now' : ''));
+    });
+  }
+
+  // renderPlan rebuilds the plan sections only when the plan itself changes.
+  function renderPlan(d) {
+    const plan = d.view && d.view.plan;
+    const key = plan ? JSON.stringify(plan) : 'none';
+    if (key === mv.planKey) return;
+    mv.planKey = key;
+    $('#mv-plan-sections').hidden = !plan;
+    const none = $('#mv-no-plan');
+    none.hidden = Boolean(plan);
+    if (!plan) { setText(none, d.sample ? 'Sample data has no plan.' : 'No plan is recorded for this Molecule yet.'); return; }
+    setText($('#mv-summary'), plainText(plan.summary, 'No summary was recorded for this plan.'));
+    fill($('#mv-chips'), planChips(plan).map((text) => el('li', { class: 'chip' }, text)));
+    const note = $('#mv-note');
+    setText(note, plan.note ? 'Your note for this version: ' + plan.note : '');
+    note.hidden = !plan.note;
+    const files = Array.isArray(plan.files) ? plan.files : [];
+    setText($('#mv-files-count'), wholeNumber.format(count(plan.filesTotal)));
+    fill($('#mv-files'), files.map(fileItem));
+    moreLine($('#mv-files-more'), count(plan.filesTotal) - files.length, 'file', 'files');
+    const groups = Array.isArray(plan.checkGroups) ? plan.checkGroups : [];
+    setText($('#mv-checks-count'), wholeNumber.format(count(plan.checksTotal)));
+    fill($('#mv-checks'), groups.map(groupItem));
+    const acceptance = Array.isArray(plan.acceptance) ? plan.acceptance : [];
+    setText($('#mv-acceptance-count'), wholeNumber.format(count(plan.acceptanceTotal)));
+    fill($('#mv-acceptance'), acceptance.map((text) => el('li', null, plainText(text, ''))));
+    moreLine($('#mv-acceptance-more'), count(plan.acceptanceTotal) - acceptance.length, 'criterion', 'criteria');
+    $('#mv-acceptance-section').hidden = count(plan.acceptanceTotal) === 0;
+    renderPlanDetails(plan);
+  }
+
+  function planChips(plan) {
+    const chips = [];
+    const questions = count(plan.questions);
+    chips.push(questions ? counted(questions, 'open question', 'open questions') : 'No open questions');
+    const parts = Array.isArray(plan.components) ? plan.components.filter((p) => typeof p === 'string' && p) : [];
+    const extra = count(plan.componentsTotal) - parts.length;
+    if (parts.length) chips.push('Touches ' + parts.join(', ') + (extra > 0 ? ' and ' + counted(extra, 'more', 'more') : ''));
+    if (Number.isInteger(plan.budgetMs) && plan.budgetMs > 0) chips.push('Coding budget ' + minutesText(plan.budgetMs));
+    return chips;
+  }
+
+  // fileItem is one scope path with its NEW or EDIT badge, which the server
+  // derives from the frozen base tree; without that tree there is no badge.
+  function fileItem(f) {
+    const badge = CHANGE_BADGES[f.change];
+    return el('li', { class: 'file' },
+      badge ? el('span', { class: 'file-badge is-' + f.change, title: badge[1] }, badge[0]) : el('span', { class: 'file-badge is-unknown', title: 'The base tree is not recorded' }, '·'),
+      el('div', { class: 'file-text' }, el('code', null, plainText(f.path, '')), f.reason ? el('p', { class: 'file-reason' }, f.reason) : null));
+  }
+
+  function groupItem(g) {
+    const checks = Array.isArray(g.checks) ? g.checks : [];
+    return el('li', { class: 'check-group' + (g.baseline ? ' is-baseline' : '') },
+      el('h3', { class: 'check-name' }, plainText(g.name, 'Checks')),
+      el('ul', { class: 'check-commands' }, checks.map((x) => el('li', null, el('code', null, plainText(x.command, '')), x.dir ? el('span', { class: 'check-dir' }, ' in ' + x.dir) : null))));
+  }
+
+  function moreLine(node, extra, one, many) {
+    setText(node, extra > 0 ? counted(extra, 'more ' + one, 'more ' + many) + ' in the full plan, under Timeline · Ledger record.' : '');
+    node.hidden = extra <= 0;
+  }
+
+  // renderPlanDetails fills the collapsed Plan details: the version, the short
+  // digest with a copy button and the frozen evidence.
+  function renderPlanDetails(plan) {
+    const digest = typeof plan.digest === 'string' && /^[0-9a-f]{64}$/.test(plan.digest) ? plan.digest : '';
+    fill($('#mv-details-summary'), 'Plan details · version ' + count(plan.revision) + (digest ? ' · ' : ''), digest ? el('code', null, digest.slice(0, 7)) : null);
+    setText($('#mv-digest-short'), digest ? short(digest) : 'Not recorded');
+    const copy = $('#mv-copy-digest');
+    copy.hidden = !digest;
+    copy.dataset.digest = digest;
+    const evidence = Array.isArray(plan.evidence) ? plan.evidence : [];
+    fill($('#mv-evidence'), evidence.map((e) => el('li', null, el('code', null, plainText(e.path, '')))));
+    moreLine($('#mv-evidence-more'), count(plan.evidenceTotal) - evidence.length, 'evidence file', 'evidence files');
+  }
+
+  async function copyDigest() {
+    const button = $('#mv-copy-digest'), digest = button.dataset.digest || '';
+    if (!/^[0-9a-f]{64}$/.test(digest)) return;
+    try {
+      await navigator.clipboard.writeText(digest);
+      setText(button, 'Copied');
+    } catch (error) { setText(button, 'Copy unavailable'); }
+    setTimeout(() => setText(button, 'Copy full digest'), 2000);
+  }
+
+  function renderRoles(d) {
+    const c = ensureMoleculeView();
+    const v = d.view;
+    $('#mv-roles').hidden = !v;
+    if (!v) return;
+    const r = v.roles || {};
+    setText(c.roles.coding, [plainText(r.coding, ''), plainText(r.model, '')].filter(Boolean).join(' · ') || 'Not recorded');
+    setText(c.roles.reviewer, typeof r.reviewer === 'string' && r.reviewer ? r.reviewer + ', read-only' : 'No review step');
+    const p = v.planningCost, total = p && money(p.usd);
+    setText(c.roles.cost, !total ? 'Not recorded' : p.partial ? total + ' · reported for ' + count(p.reported) + ' of ' + counted(count(p.attempts), 'attempt', 'attempts') : total);
+  }
+
+  // loadStats reads the diff size and the estimate once per Molecule, gate and
+  // plan; a response for another selection is dropped.
+  async function loadStats(d) {
+    const v = d.view, kind = v && v.decision && v.decision.kind;
+    if (d.sample || (kind !== 'scope' && kind !== 'delivery')) { mv.statsKey = null; mv.stats = null; return; }
+    const key = d.id + ':' + kind + ':' + ((v.plan && v.plan.digest) || '');
+    if (key === mv.statsKey) return;
+    mv.statsKey = key;
+    mv.stats = null;
+    const token = ++mv.statsToken;
+    try {
+      const res = await api('/api/molecules/' + encodeURIComponent(d.id) + '/stats');
+      if (token !== mv.statsToken || !res.ok) return;
+      const data = await res.json();
+      if (token !== mv.statsToken) return;
+      mv.stats = { id: d.id, data: data };
+      if (state.detail && state.detail.id === d.id) renderDecision(state.detail);
+    } catch (error) { failed(error); }
+  }
+
+  // The Plan and Timeline tabs. The Timeline keeps the Atom list, evidence and
+  // logs unchanged.
+  function chooseTab(tab, focus) {
+    const plan = tab !== 'timeline';
+    for (const [tabId, panelId, on] of [['#mv-tab-plan', '#mv-plan', plan], ['#mv-tab-timeline', '#mv-timeline', !plan]]) {
+      const button = $(tabId);
+      button.setAttribute('aria-selected', String(on));
+      button.tabIndex = on ? 0 : -1;
+      $(panelId).hidden = !on;
+      if (on && focus) button.focus();
+    }
+    if (!plan && mv.timelineDirty && state.detail) renderTimeline(state.detail);
+  }
+  $('#mv-tabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) chooseTab(b.dataset.tab, false); });
+  $('#mv-tabs').addEventListener('keydown', (e) => {
+    const b = e.target.closest('[data-tab]');
+    if (!b || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    chooseTab(e.key === 'Home' ? 'plan' : e.key === 'End' ? 'timeline' : b.dataset.tab === 'plan' ? 'timeline' : 'plan', true);
+  });
+  $('#mv-timeline').addEventListener('focusout', (e) => {
+    if (mv.timelineDirty && state.detail && !$('#mv-timeline').contains(e.relatedTarget)) renderTimeline(state.detail);
+  });
+  $('#mv-copy-digest').addEventListener('click', copyDigest);
+  // A running step's minutes move on without a ledger change.
+  setInterval(() => { if (!document.hidden && state.detail && !$('#selected').hidden) setText($('#mv-state-text'), pillText(state.detail)); }, 30000);
 
   // Atom statuses the engine writes (done, failed, active, waiting, skipped,
   // blocked, pending) and the sample fixture's labels, mapped to a tab mark and
@@ -1164,7 +1764,7 @@
     $('#aggregate-count').textContent = 'All ' + all.length + ' Molecules';
     const waiting = all.filter((m) => m.lane === 'decision');
     fill($('#review-queue'), (waiting.length
-      ? waiting.slice(0, 5).map((m) => el('button', { type: 'button', class: 'review-row', dataset: { review: m.id }, onclick: () => select(m.id) },
+      ? waiting.slice(0, 5).map((m) => el('button', { type: 'button', class: 'review-row', dataset: { review: m.id }, onclick: () => openMolecule(m.id) },
         el('span', { class: 'review-id' }, '#' + m.number), el('strong', null, m.title || m.id), el('span', null, notRecorded(m.phase)), el('span', { 'aria-hidden': 'true' }, '→')))
       : [el('p', { class: 'scope-note' }, 'No Molecules wait at a human gate.')]));
     if (waiting.length > 5) add($('#review-queue'), el('p', { class: 'scope-note' }, (waiting.length - 5) + ' more under Needs my decision.'));
@@ -1234,6 +1834,8 @@
   const VIEWS = ['inbox', 'issues', 'work', 'insights', 'formula'];
   function viewFromURL() {
     const view = new URLSearchParams(location.search).get('view');
+    // A bare ?m=<id> link opens the Molecule view under Work.
+    if (!view && moleculeFromURL()) return 'work';
     return VIEWS.includes(view) ? view : 'inbox';
   }
   function showView(view) {
@@ -1249,8 +1851,11 @@
     hideTip();
   }
   function navigate(view, focus) {
-    if (view !== viewFromURL()) history.pushState({ view: view }, '', '?view=' + view);
+    // Leaving a Molecule view, even for Work, is a new entry, so Back reopens it.
+    if (moleculeFromURL()) history.pushState({ view: view }, '', '?view=' + view);
+    else if (view !== viewFromURL()) history.pushState({ view: view }, '', '?view=' + view);
     showView(view);
+    restoreSelection();
     if (focus) $('#main').focus({ preventScroll: true });
   }
   document.addEventListener('click', (e) => {
@@ -1269,15 +1874,30 @@
     const id = new URLSearchParams(location.search).get('m');
     return id && MOLECULE_ID.test(id) ? id : null;
   }
+  // restoreSelection follows the URL: ?m= opens that Molecule's view, and a URL
+  // without one closes it, so Back and Forward move between the two.
   function restoreSelection() {
     const id = moleculeFromURL();
+    const from = history.state && history.state.from;
+    if (VIEWS.includes(from)) mv.from = from;
     if (state.view === 'work' && id && id !== state.selectedId) select(id);
+    else if (!id && state.selectedId) overview();
   }
   function openMolecule(id) {
+    const from = state.view || 'work';
     if (location.search !== moleculeHref(id)) history.pushState({ view: 'work', m: id }, '', moleculeHref(id));
+    rememberFrom(from);
     showView('work');
     if (id !== state.selectedId || $('#selected').hidden) select(id);
-    $('#main').focus({ preventScroll: true });
+    window.scrollTo(0, 0);
+    $('#mv-title').focus({ preventScroll: true });
+  }
+  // rememberFrom keeps the view a Molecule was opened from in its history entry,
+  // so its breadcrumb leads back there after Back, Forward or a reload.
+  function rememberFrom(from) {
+    mv.from = VIEWS.includes(from) ? from : 'work';
+    renderBack();
+    try { history.replaceState(Object.assign({}, history.state, { from: mv.from }), ''); } catch (error) { /* the breadcrumb falls back to Work */ }
   }
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[data-molecule]');
@@ -1424,9 +2044,7 @@
   // stepText is the current step with its elapsed time: "Coding · 18 min".
   function stepText(v) {
     if (v.queued) return 'Queued for checks';
-    const label = plainText(v.stepLabel, STEPS[stepIndex(v)]);
-    const t = Date.parse(v.stepSince || '');
-    return Number.isFinite(t) ? label + ' · ' + minutesText(Math.max(0, Date.now() - t)) : label;
+    return withAttempt(plainText(v.stepLabel, STEPS[stepIndex(v)]), v.stepSince, v.stepNote);
   }
   function detailText(v) {
     const parts = [];
@@ -1496,8 +2114,7 @@
     const detail = slot(node, 'detail'), text = detailText(v);
     setText(detail, text);
     detail.hidden = !text;
-    // One primary action per card. Until the plan view (slice 3) exists, every
-    // action opens the Molecule's detail under Work.
+    // One primary action per card; each opens the Molecule view (?view=work&m=…).
     setLink(slot(node, 'action'), m, plainText(v.action, 'Open'));
   }
 
