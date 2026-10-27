@@ -55,6 +55,12 @@ type LoopOptions struct {
 	// Issue listing without interrupting Molecules already in flight. It defaults
 	// to ctx.
 	Work context.Context
+	// Marker is the Lab's loop marker (#254). RunLoop takes it once the approved
+	// Formula has loaded and before any Issue is listed, and keeps it across calls,
+	// so a --watch command or a UI holds it for the whole loop; the caller releases
+	// it. Without a Marker RunLoop takes none, but still refuses to run while
+	// another loop holds this Lab's marker.
+	Marker *LoopMarker
 }
 
 // TransientLoopError marks a pass failure that a later pass may not repeat: the
@@ -152,6 +158,7 @@ type loopRun struct {
 	lab    string
 	repo   string
 	loaded formula.Loaded
+	marker *LoopMarker
 }
 
 // RunLoop starts intake for eligible open Issues and advances a Molecule through
@@ -171,6 +178,15 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 	if err != nil {
 		return report, err
 	}
+	// One loop runs per Lab: a held marker refuses this loop before it lists an
+	// Issue or writes anything.
+	if lo.Marker != nil {
+		if err = lo.Marker.Acquire(lab, lo.Select, lo.MaxConcurrent); err != nil {
+			return report, err
+		}
+	} else if err = refuseWhileLoopMarkerHeld(lab); err != nil {
+		return report, err
+	}
 	if lo.ListIssues == nil {
 		selector := lo.Select
 		lo.ListIssues = func(ctx context.Context, repository string) (intake.OpenIssues, error) {
@@ -178,7 +194,7 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 		}
 	}
 	lo.Template.LabDir = lab
-	l := &loopRun{work: ctx, o: lo, lab: lab, repo: loaded.Formula.Intake.Repo, loaded: loaded}
+	l := &loopRun{work: ctx, o: lo, lab: lab, repo: loaded.Formula.Intake.Repo, loaded: loaded, marker: lo.Marker}
 	if lo.Work != nil {
 		l.work = lo.Work
 	}
@@ -231,6 +247,7 @@ func (l *loopRun) reloadFormula() error {
 
 func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 	var pass LoopPass
+	l.marker.beginPass()
 	listed, err := l.o.ListIssues(ctx, l.repo)
 	if err != nil {
 		return pass, TransientLoopError{err}
@@ -454,10 +471,10 @@ func interruptedApprovalReason(a QueueAttempt, timeout time.Duration) string {
 // created a Molecule since. The lock is held for intake alone and released
 // before the gate step, which takes the Molecule lock instead.
 func (l *loopRun) start(ctx context.Context, item LoopItem) LoopItem {
-	unlock, err := lockIssue(l.lab, item.Repository, item.Issue)
+	unlock, err := lockIssueAs(l.lab, item.Repository, item.Issue, issueOwnerLoop)
 	if errors.Is(err, errLocked) {
 		item.State = LoopLocked
-		item.Reason = "another loop holds this Issue's start lock, so no Molecule was started"
+		item.Reason = issueLockHolder(l.lab, item.Repository, item.Issue) + " holds this Issue's start lock, so no Molecule was started"
 		return item
 	}
 	if err != nil {
@@ -479,8 +496,20 @@ func (l *loopRun) start(ctx context.Context, item LoopItem) LoopItem {
 	}
 	o := l.o.Template
 	o.Issue, o.Approve = strconv.FormatInt(item.Issue, 10), ""
+	// The loop status lists the Issue in flight while intake runs, then its
+	// Molecule once Run names one. Both removals are deferred, so a recovered
+	// panic never leaves a stale entry; the Molecule is tracked before the
+	// Issue is dropped, so the status never shows neither.
+	l.marker.TrackIntake(item.Issue)
+	untrackIntake := sync.OnceFunc(func() { l.marker.UntrackIntake(item.Issue) })
+	defer untrackIntake()
 	r, err := Run(ctx, o)
 	release()
+	if r.ID != "" {
+		l.marker.Track(r.ID)
+		defer l.marker.Untrack(r.ID)
+	}
+	untrackIntake()
 	if r.ID == "" {
 		item.State, item.Failed = LoopStopped, true
 		item.Reason = "intake could not start: " + oneLine(fmt.Sprint(err))
@@ -560,7 +589,12 @@ func (l *loopRun) advance(ctx context.Context, item LoopItem) LoopItem {
 	o.Issue, o.Approve, o.Base = strconv.FormatInt(r.Issue.Number, 10), eval.PlanDigest, planBase
 	moved := l.sourceMovedNote(ctx, r)
 	decisions := len(r.PolicyDecisions)
-	_, applyErr := resumeByPolicy(ctx, o, l.loaded, r.Issue.Number, r.Issue.Repo)
+	applyErr := func() error {
+		l.marker.Track(r.ID)
+		defer l.marker.Untrack(r.ID)
+		_, err := resumeByPolicy(ctx, o, l.loaded, r.Issue.Number, r.Issue.Repo)
+		return err
+	}()
 	after, err := readMolecule(l.lab, item.MoleculeID)
 	if err != nil {
 		return unreadable(item, err, true)
@@ -736,13 +770,21 @@ func lockMolecule(lab, id string) (func(), error) {
 // the repository, not the repository itself: joining owner and repository with a
 // separator that GitHub names also contain would give a-b/c and a/b-c one lock.
 func lockIssue(lab, repository string, number int64) (func(), error) {
+	name, err := issueLockName(repository, number)
+	if err != nil {
+		return nil, err
+	}
+	return flockLedgerFile(lab, name)
+}
+
+func issueLockName(repository string, number int64) (string, error) {
 	lower := strings.ToLower(repository)
 	owner, repo, ok := strings.Cut(lower, "/")
 	if !ok || !safeLoopID(strings.ReplaceAll(owner, ".", "_")) || !safeLoopID(strings.ReplaceAll(repo, ".", "_")) {
-		return nil, fmt.Errorf("invalid Issue identity")
+		return "", fmt.Errorf("invalid Issue identity")
 	}
 	sum := sha256.Sum256([]byte(lower))
-	return flockLedgerFile(lab, "issue-"+hex.EncodeToString(sum[:16])+"-"+strconv.FormatInt(number, 10)+loopLockSuffix)
+	return "issue-" + hex.EncodeToString(sum[:16]) + "-" + strconv.FormatInt(number, 10) + loopLockSuffix, nil
 }
 
 // flockLedgerFile never blocks. The operating system drops the lock when the file
@@ -757,24 +799,31 @@ func lockIssue(lab, repository string, number int64) (func(), error) {
 // of relying on close: the shared lock would otherwise outlive release and
 // refuse the next holder.
 func flockLedgerFile(lab, name string) (func(), error) {
+	_, release, err := flockLedgerHandle(lab, name)
+	return release, err
+}
+
+// flockLedgerHandle is flockLedgerFile that also returns the locked file, so a
+// holder can record a short owner note in it. The file stays open until release.
+func flockLedgerHandle(lab, name string) (*os.File, func(), error) {
 	dir := filepath.Join(lab, "ledgers")
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	syscall.ForkLock.RLock()
 	defer syscall.ForkLock.RUnlock()
 	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		file.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errLocked
+			return nil, nil, errLocked
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	return func() {
+	return file, func() {
 		syscall.ForkLock.RLock()
 		defer syscall.ForkLock.RUnlock()
 		syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
