@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -27,6 +28,8 @@ type fakeDrive struct {
 	loops []molecule.LoopOptions
 	run   func(context.Context, molecule.Options) error
 	loop  func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error)
+	// issues is what the loop's open Issue listing returns.
+	issues []intake.OpenIssue
 }
 
 func (d *fakeDrive) calls() int {
@@ -37,6 +40,11 @@ func (d *fakeDrive) calls() int {
 
 func installDrive(h http.Handler, d *fakeDrive) *fakeDrive {
 	hh := h.(*handler)
+	hh.listIssues = func(context.Context, string, intake.Selector) (intake.OpenIssues, error) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return intake.OpenIssues{Issues: append([]intake.OpenIssue(nil), d.issues...)}, nil
+	}
 	hh.runIssue = func(ctx context.Context, o molecule.Options) (molecule.Record, error) {
 		d.mu.Lock()
 		d.runs = append(d.runs, o)
@@ -307,6 +315,82 @@ func TestUIDriveLoopStartsOnceAndStopsGracefully(t *testing.T) {
 	refusalOf(t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusConflict, "not-running")
 }
 
+// The slot releases the Lab's marker before it reads as free: as soon as
+// /api/loop reports the loop not running, with no waitLoop, a new start is
+// accepted. The freed seam holds the loop's goroutine just after the slot reads
+// free, so a marker released any later would still be held here.
+func TestUIDriveLoopReleasesTheMarkerBeforeItReadsNotRunning(t *testing.T) {
+	lab, _ := labFixture(t)
+	calls := 0
+	h, d := driveHandler(t, lab, guardWith(64<<30), &fakeDrive{loop: func(ctx context.Context, o molecule.LoopOptions) (molecule.LoopReport, error) {
+		<-o.Drain
+		return molecule.LoopReport{}, nil
+	}})
+	freed, proceed := make(chan struct{}), make(chan struct{})
+	h.(*handler).loop.freed = func() {
+		if calls++; calls == 1 {
+			close(freed)
+			<-proceed
+		}
+	}
+	defer func() {
+		select {
+		case <-proceed:
+		default:
+			close(proceed)
+		}
+	}()
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`)), http.StatusAccepted)
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusAccepted)
+	<-freed
+	if v := viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK); v.State != "finished" || v.LabLoop.Running || v.LabLoop.Held {
+		t.Fatalf("the loop is not reported not running, or its marker is still held: %+v", v)
+	}
+	w := do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`))
+	if w.Code != http.StatusAccepted || strings.Contains(w.Body.String(), "another loop") {
+		t.Fatalf("a start after the loop read not running was refused: %d %s", w.Code, w.Body)
+	}
+	close(proceed)
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusAccepted)
+	waitLoop(t, h)
+	if d.calls() != 2 {
+		t.Fatalf("engine calls %d", d.calls())
+	}
+}
+
+// While this UI's loop releases the Lab's marker its status is already removed
+// but the lock is still held; the slot, not that window, decides ownership.
+func TestUIDriveLoopStatusOwnLoopWhileReleasingMarker(t *testing.T) {
+	lab, _ := labFixture(t)
+	releasing, finish := make(chan struct{}), make(chan struct{})
+	h, _ := driveHandler(t, lab, guardWith(64<<30), &fakeDrive{loop: func(ctx context.Context, o molecule.LoopOptions) (molecule.LoopReport, error) {
+		<-o.Drain
+		// The window inside Release: the status is gone, the lock still held.
+		if err := os.Remove(filepath.Join(lab, "loop-status.json")); err != nil {
+			t.Error(err)
+		}
+		close(releasing)
+		<-finish
+		return molecule.LoopReport{}, nil
+	}})
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`)), http.StatusAccepted)
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusAccepted)
+	<-releasing
+	if lab := molecule.ReadLoopStatus(lab); !lab.Held || lab.Running {
+		t.Fatalf("the release window was not reproduced: %+v", lab)
+	}
+	refusalOf(t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusConflict, "not-running")
+	if v := viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK); v.State != "draining" || v.LabLoop.Owner != LoopOwnerThisUI || v.LabLoop.CanStop {
+		t.Fatalf("own releasing loop %+v", v)
+	}
+	close(finish)
+	waitLoop(t, h)
+	if v := viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK); v.LabLoop.Held || v.LabLoop.Running || v.LabLoop.Owner != "" {
+		t.Fatalf("a finished loop still holds the marker: %+v", v.LabLoop)
+	}
+	refusalOf(t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusConflict, "not-running")
+}
+
 func TestUIDriveStopsOnlyAMoleculeThisUIRuns(t *testing.T) {
 	lab, base := labFixture(t)
 	writeRecord(t, lab, intakeRecord(base, "mol-9-cli", 9, now(), "running", ""))
@@ -322,6 +406,11 @@ func TestUIDriveStopsOnlyAMoleculeThisUIRuns(t *testing.T) {
 		finished <- saveRecord(lab, r)
 		return nil
 	}})
+	// The CLI's running Molecule offers no Stop: the view names its runner.
+	wantControl(t, h, "mol-9-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	if d := detailOf(t, h, base.ID); d.View.Control != nil {
+		t.Fatalf("a Molecule that is not running has a stop control %+v", d.View.Control)
+	}
 	// The crash leftover and the CLI's ledger are refused before any job runs.
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-9-cli/stop", `{}`)), http.StatusConflict, "not-owned")
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-1-none/stop", `{}`)), http.StatusNotFound, "missing")
@@ -335,6 +424,10 @@ func TestUIDriveStopsOnlyAMoleculeThisUIRuns(t *testing.T) {
 	writeRecord(t, lab, intakeRecord(base, "mol-42-old", 42, "2000-01-01T00:00:00Z", "running", ""))
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-42-old/stop", `{}`)), http.StatusConflict, "not-owned")
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-9-cli/stop", `{}`)), http.StatusConflict, "not-owned")
+	// The view offers Stop for this UI's run only, and reading it signals nothing.
+	wantControl(t, h, "mol-42-live", true, RunnerRun, "")
+	wantControl(t, h, "mol-42-old", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	wantControl(t, h, "mol-9-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
 	select {
 	case <-cancelled:
 		t.Fatal("a refused stop signalled the run")
@@ -358,6 +451,101 @@ func TestUIDriveStopsOnlyAMoleculeThisUIRuns(t *testing.T) {
 	}
 }
 
+// wantControl checks the Molecule view's stop control for id.
+func wantControl(t *testing.T, h http.Handler, id string, stoppable bool, runner, textPrefix string) {
+	t.Helper()
+	c := detailOf(t, h, id).View.Control
+	if c == nil || c.Stoppable != stoppable || c.Runner != runner || !strings.HasPrefix(c.Text, textPrefix) || (stoppable && c.Text != "") || (!stoppable && !strings.HasSuffix(c.Text, "nothing needs you.") && !strings.HasSuffix(c.Text, "Nothing needs you.")) {
+		t.Fatalf("%s: control %+v, want stoppable=%t runner %q", id, c, stoppable, runner)
+	}
+}
+
+// A Molecule the UI loop's pass works on offers no Stop of its own: the view says
+// the loop runs it and that the loop is what to stop. A running loop alone never
+// makes a Molecule its own: one the command line runs, for an Issue the loop
+// listed or not, is named as run from the command line.
+func TestUIDriveLoopMoleculeOffersNoStop(t *testing.T) {
+	lab, base := labFixture(t)
+	running, release := make(chan struct{}), make(chan struct{})
+	gate := intakeRecord(base, "mol-6-gate", 6, now(), "waiting", "scope-waiting")
+	cli := intakeRecord(base, "mol-8-cli", 8, now(), "running", "coding")
+	other := intakeRecord(base, "mol-9-cli", 9, now(), "running", "coding")
+	issues := []intake.OpenIssue{{Repository: "O/R", Number: 5}, {Repository: "o/r", Number: 6}, {Repository: "o/r", Number: 8}}
+	h, _ := driveHandler(t, lab, guardWith(64<<30), &fakeDrive{issues: issues, loop: func(ctx context.Context, o molecule.LoopOptions) (molecule.LoopReport, error) {
+		_, err := o.ListIssues(ctx, "o/r")
+		// The pass starts a Molecule for Issue 5 and approves the one at the gate.
+		approved := gate
+		approved.Status, approved.Readiness = "running", &readiness.State{SchemaVersion: "v1", Phase: "coding"}
+		if err == nil {
+			err = saveRecord(lab, intakeRecord(base, "mol-5-loop", 5, now(), "running", "coding"))
+		}
+		if err == nil {
+			err = saveRecord(lab, approved)
+		}
+		close(running)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return molecule.LoopReport{}, err
+	}})
+	for _, r := range []molecule.Record{gate, cli, other} {
+		writeRecord(t, lab, r)
+	}
+	wantControl(t, h, "mol-8-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`)), http.StatusAccepted)
+	<-running
+	for _, id := range []string{"mol-5-loop", "mol-6-gate"} {
+		wantControl(t, h, id, false, RunnerLoop, "Run by this Lab's loop. ")
+		refusalOf(t, do(t, h, gatePost("/api/molecules/"+id+"/stop", `{}`)), http.StatusConflict, "not-owned")
+	}
+	// The loop runs, on other Molecules; the CLI's are still the command line's.
+	wantControl(t, h, "mol-8-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	wantControl(t, h, "mol-9-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	close(release)
+	waitLoop(t, h)
+	wantControl(t, h, "mol-5-loop", false, RunnerOther, "Started from the command line or another Lab UI. ")
+}
+
+// A pass whose ledger inventory or listing cannot say what it works on names no
+// Molecule the loop's, and a new pass replaces the last one.
+func TestUIDriveLoopPassFailsSafe(t *testing.T) {
+	lab, base := labFixture(t)
+	h, _ := driveHandler(t, lab, nil, &fakeDrive{})
+	hh := h.(*handler)
+	r := intakeRecord(base, "mol-5-loop", 5, now(), "running", "coding")
+	five := []intake.OpenIssue{{Repository: "o/r", Number: 5}}
+	hh.loop.running = true
+	hh.observePass(five)
+	writeRecord(t, lab, r)
+	if !hh.loop.works(r) {
+		t.Fatal("a Molecule new to a dispatched Issue is not the loop's")
+	}
+	hh.loop.running = false
+	if hh.loop.works(r) {
+		t.Fatal("a stopped loop still works on a Molecule")
+	}
+	hh.loop.running = true
+	hh.observePass(nil)
+	if hh.loop.works(r) {
+		t.Fatal("a Molecule of an earlier pass is still the loop's")
+	}
+	// A later pass finds it running and only reports it.
+	hh.observePass(five)
+	if hh.loop.works(r) {
+		t.Fatal("a running Molecule a pass found is the loop's")
+	}
+	// An incomplete inventory records no pass.
+	if err := os.WriteFile(filepath.Join(lab, "ledgers", "mol-4-bad.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hh.observePass(five)
+	if hh.loop.pass != nil || hh.loop.works(r) {
+		t.Fatalf("an incomplete inventory recorded pass %+v", hh.loop.pass)
+	}
+	hh.loop.running = false
+}
+
 func TestUIDriveStopsAScopeApprovalJob(t *testing.T) {
 	lab, r, digest := gateFixture(t)
 	h, _ := driveHandler(t, lab, nil, &fakeDrive{})
@@ -372,6 +560,10 @@ func TestUIDriveStopsAScopeApprovalJob(t *testing.T) {
 	// The approved Molecule is coding.
 	r.Status = "running"
 	writeRecord(t, lab, r)
+	wantControl(t, h, r.ID, true, RunnerScope, "")
+	if s, _ := h.(*handler).jobs.get(r.ID); s.state != "running" {
+		t.Fatalf("reading the stop control changed the scope job %+v", s)
+	}
 	if v := viewOf[StopView](t, do(t, h, gatePost("/api/molecules/"+r.ID+"/stop", `{}`)), http.StatusAccepted); !v.Requested || v.Committed || v.Canonical.Status != "running" {
 		t.Fatalf("stop %+v", v)
 	}
@@ -532,5 +724,105 @@ func TestUIDriveServerStopCancelsJobsAndDrainsTheLoop(t *testing.T) {
 	refusalOf(t, do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`)), http.StatusServiceUnavailable, "stopped")
 	if n := d.calls(); n != 2 {
 		t.Fatalf("engine calls %d", n)
+	}
+}
+
+// A loop started in a terminal holds the Lab's marker: GET /api/loop reports it,
+// a UI start is refused before any engine call, and a stop never signals it.
+func TestUIDriveLoopStatusReportsATerminalLoopAndRefusesStartAndStop(t *testing.T) {
+	lab, _ := labFixture(t)
+	h, d := driveHandler(t, lab, nil, &fakeDrive{})
+	selector, err := intake.ParseSelector("milestone:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := molecule.NewLoopMarker(molecule.LoopStarterCLI, 5*time.Minute)
+	if err = cli.Acquire(lab, selector, 3); err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Release()
+	cli.Track("mol-7-cli")
+	cli.TrackIntake(242)
+	v := viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK)
+	l := v.LabLoop
+	if v.State != "idle" || !l.Running || l.State != "running" || !l.Held || l.Owner != LoopOwnerTerminal || l.CanStop || l.Select != "milestone:v1" || l.MaxConcurrent != 3 || l.WatchIntervalSeconds != 300 || l.StartedAt == "" || len(l.InFlight) != 1 || l.InFlight[0] != "mol-7-cli" {
+		t.Fatalf("a terminal loop %+v", v)
+	}
+	if len(l.Intake) != 1 || l.Intake[0] != (LabLoopIntakeView{Issue: 242, Phase: "planning"}) {
+		t.Fatalf("intake in flight is not reported by Issue: %+v", l.Intake)
+	}
+	// Once Run names the Molecule, the Molecule replaces the Issue.
+	cli.Track("mol-242-a")
+	cli.UntrackIntake(242)
+	if l = viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK).LabLoop; len(l.Intake) != 0 || len(l.InFlight) != 2 || l.InFlight[0] != "mol-242-a" {
+		t.Fatalf("the Molecule did not replace its Issue: %+v", l)
+	}
+	w := do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`))
+	refusalOf(t, w, http.StatusConflict, "busy")
+	if !strings.Contains(w.Body.String(), "started in a terminal") {
+		t.Fatalf("the refusal does not name the terminal loop: %s", w.Body)
+	}
+	w = do(t, h, gatePost("/api/loop/stop", `{}`))
+	refusalOf(t, w, http.StatusConflict, "not-owned")
+	if !strings.Contains(w.Body.String(), "stop it there") {
+		t.Fatalf("the stop refusal does not say where to stop it: %s", w.Body)
+	}
+	if n := d.calls(); n != 0 {
+		t.Fatalf("a refused start reached the engine %d times", n)
+	}
+	if got := molecule.ReadLoopStatus(lab); !got.Running || got.Status.Token != cli.Token() {
+		t.Fatalf("a refused request changed the terminal loop's marker: %+v", got)
+	}
+	cli.Release()
+	if v = viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK); v.LabLoop.Running || v.LabLoop.State != "not-running" || v.LabLoop.Owner != "" || v.LabLoop.CanStop {
+		t.Fatalf("after the terminal loop ended %+v", v.LabLoop)
+	}
+}
+
+// This UI's own loop is the only one it offers to stop; another UI process on the
+// same Lab sees it as another UI's loop and can neither start beside it nor stop it.
+func TestUIDriveLoopStatusMarksOnlyThisUIsLoopStoppable(t *testing.T) {
+	lab, _ := labFixture(t)
+	running := make(chan struct{})
+	h, d := driveHandler(t, lab, nil, &fakeDrive{loop: func(ctx context.Context, o molecule.LoopOptions) (molecule.LoopReport, error) {
+		if o.Marker == nil || o.Marker.Token() == "" {
+			return molecule.LoopReport{}, errors.New("the loop was started without the Lab's marker")
+		}
+		close(running)
+		<-o.Drain
+		return molecule.LoopReport{}, nil
+	}})
+	other, od := driveHandler(t, lab, nil, &fakeDrive{})
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/start", `{"select":"label:ready","maxConcurrent":2}`)), http.StatusAccepted)
+	<-running
+	v := viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK)
+	if v.State != "running" || !v.LabLoop.Running || v.LabLoop.Owner != LoopOwnerThisUI || !v.LabLoop.CanStop || v.LabLoop.Select != "label:ready" || v.LabLoop.MaxConcurrent != 2 {
+		t.Fatalf("this UI's loop %+v", v)
+	}
+	ov := viewOf[LoopView](t, do(t, other, authed("/api/loop")), http.StatusOK)
+	if ov.State != "idle" || !ov.LabLoop.Running || ov.LabLoop.Owner != LoopOwnerAnotherUI || ov.LabLoop.CanStop {
+		t.Fatalf("another UI's view %+v", ov)
+	}
+	w := do(t, other, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`))
+	refusalOf(t, w, http.StatusConflict, "busy")
+	if !strings.Contains(w.Body.String(), "another Lab UI") {
+		t.Fatalf("the refusal does not name the other UI: %s", w.Body)
+	}
+	refusalOf(t, do(t, other, gatePost("/api/loop/stop", `{}`)), http.StatusConflict, "not-owned")
+	if od.calls() != 0 {
+		t.Fatal("the other UI reached the engine")
+	}
+	if v = viewOf[LoopView](t, do(t, h, gatePost("/api/loop/stop", `{}`)), http.StatusAccepted); v.State != "draining" || v.LabLoop.CanStop {
+		t.Fatalf("a draining loop is still offered a stop: %+v", v)
+	}
+	waitLoop(t, h)
+	if v = viewOf[LoopView](t, do(t, h, authed("/api/loop")), http.StatusOK); v.LabLoop.Running || v.LabLoop.State != "not-running" {
+		t.Fatalf("the finished loop kept the Lab's marker: %+v", v.LabLoop)
+	}
+	// With the marker free, the other UI may start a loop.
+	viewOf[LoopView](t, do(t, other, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`)), http.StatusAccepted)
+	waitLoop(t, other)
+	if d.calls() != 1 || od.calls() != 1 {
+		t.Fatalf("engine calls %d and %d", d.calls(), od.calls())
 	}
 }

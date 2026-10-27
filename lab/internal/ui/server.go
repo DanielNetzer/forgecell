@@ -1,11 +1,14 @@
 // Package ui serves the local Lab UI on the loopback interface. It reads the Lab
 // only through engine Go functions, never a shell. Every read is a GET; the only
 // writes are the human gates in gates.go (scope approval and draft publication),
-// the drive actions in drive.go (start intake, start or stop the loop, stop
-// a Molecule this UI runs) and retiring one Molecule (retire.go), each a POST that needs the session cookie, the exact
-// Origin and the per-tab session header, and each performed by the engine, which
-// validates digests, locks and receipts. It never merges, deploys, recovers or
-// changes permissions.
+// Request changes on a waiting plan (amend.go, which records a revision and never
+// approves it), the drive actions in drive.go (start intake, start or stop the
+// loop, stop a Molecule this UI runs) and retiring one Molecule (retire.go), each
+// a POST that needs the session cookie, the exact Origin and the per-tab session
+// header, and each performed by the engine, which validates digests, locks and
+// receipts. The one read that runs a process is a Molecule's diff size
+// (diffsize.go): git diff --numstat through the engine, bounded and cached by
+// tree. It never merges, deploys, recovers or changes permissions.
 package ui
 
 import (
@@ -20,6 +23,7 @@ import (
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"io"
@@ -31,6 +35,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -175,8 +180,20 @@ type handler struct {
 	runIssue func(context.Context, molecule.Options) (molecule.Record, error)
 	runLoop  func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error)
 	loop     *driveLoop
+	// listIssues is the loop's open Issue listing, the engine's default; the UI
+	// wraps it to learn which Molecules each loop pass works on. Tests replace it.
+	listIssues func(context.Context, string, intake.Selector) (intake.OpenIssues, error)
 	// retire is the engine call behind the retire route; tests may replace it.
 	retire func(lab, id, reason string) (molecule.Record, error)
+	// amend is the engine call behind Request changes, the path of forgecell amend
+	// without --run; amendMu keeps one amendment from this UI at a time. Tests may
+	// replace amend.
+	amend   func(context.Context, string, string, molecule.AmendRequest) (molecule.Record, error)
+	amendMu sync.Mutex
+	// numstat measures a captured tree's diff size; diffs keeps each size by base
+	// and tree. Tests may replace numstat.
+	numstat func(ctx context.Context, lab, workspace, base, tree string) (molecule.DiffStat, error)
+	diffs   *diffCache
 	// forge is the read-only GitHub sync behind /api/issues and /api/sync; tests
 	// replace its fetcher and clock.
 	forge *issueSync
@@ -260,7 +277,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.Run, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, forge: newIssueSync(nil, nil)}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil)}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -448,10 +465,10 @@ func (h *handler) lab(w http.ResponseWriter) {
 		return
 	}
 	id := formula.ActiveIdentity(h.opts.LabDir)
-	// Retiring needs no source checkout; starting work does.
-	actions := []string{RetireAction}
+	// Retiring and Request changes need no source checkout; starting work does.
+	actions := []string{RetireAction, AmendAction}
 	if h.opts.SourceRoot != "" {
-		actions = DriveActions
+		actions = append(append([]string{}, DriveActions...), AmendAction)
 	}
 	h.json(w, http.StatusOK, LabView{Gates: Gates, Actions: actions, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable, Operator: operatorView(h.opts.Operator)})
 }
@@ -489,7 +506,8 @@ func counts(ms []Summary) map[string]int {
 }
 
 // molecule serves GET /api/molecules/{id}, its read-only file views,
-// /evidence?path=… and /ledger, and its gate job status, /job.
+// /evidence?path=… and /ledger, its gate job status, /job, and its diff size
+// and estimate, /stats.
 func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) {
 	id, view, _ := strings.Cut(rest, "/")
 	withYAML := r.URL.Query().Get("yaml") == "1"
@@ -497,7 +515,7 @@ func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) 
 		h.refuse(w, http.StatusBadRequest, "invalid Molecule id")
 		return
 	}
-	if view != "" && view != "evidence" && view != "ledger" && view != "job" {
+	if view != "" && view != "evidence" && view != "ledger" && view != "job" && view != "stats" {
 		h.refuse(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -539,8 +557,14 @@ func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) 
 			return
 		}
 		h.json(w, http.StatusOK, text)
+	case "stats":
+		h.json(w, http.StatusOK, h.stats(record))
 	default:
-		h.json(w, http.StatusOK, project(h.opts.LabDir, record, h.receipts, withYAML))
+		d := project(h.opts.LabDir, record, h.receipts, withYAML)
+		if d.View != nil {
+			d.View.Control = h.control(record, d.View.Current)
+		}
+		h.json(w, http.StatusOK, d)
 	}
 }
 

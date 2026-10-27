@@ -110,43 +110,85 @@
   </div>
 </section>
 
-<section id="selected" class="workspace" aria-label="Selected Molecule" hidden>
-  <div class="glass run-panel">
-    <div class="panel-head"><span class="mono">MOLECULE / <span id="run-id"></span></span><span id="run-state" class="pill"></span></div>
-    <h2 id="run-title"></h2>
-    <div id="run-origin" class="origin"></div>
-    <div id="molecule-totals" class="molecule-totals"></div>
-    <div class="formula card">
-      <span class="icon-tile" aria-hidden="true">≡</span>
-      <div class="formula-text"><span class="label">FORMULA SNAPSHOT</span><strong id="formula-name"></strong><small id="formula-sha" class="mono-text"></small></div>
-      <button type="button" class="text-button" id="yaml">View YAML ↗</button>
+<section id="selected" class="molecule-view" aria-labelledby="mv-title" hidden>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a id="mv-back" href="?view=work" data-view="work">Work</a><span class="crumb-sep" aria-hidden="true">/</span><span id="mv-crumb" aria-current="page">Molecule</span></nav>
+  <div class="mv-head">
+    <div class="mv-meta">
+      <span id="mv-state" class="state-pill" data-tone="neutral"><span class="state-dot" aria-hidden="true"></span><span id="mv-state-text"></span></span>
+      <span id="mv-issue" class="mv-issue"></span>
+      <span id="mv-planned" class="mv-planned" hidden></span>
     </div>
-    <p id="run-delivery" class="delivery-line" hidden></p>
-    <div class="section-label"><span class="mono">ATOMS</span><span>Select a step to inspect its record</span></div>
-    <div id="atoms" class="atoms"></div>
-    <details class="ledger-inline"><summary>Readiness revisions and events</summary><div id="readiness"></div></details>
-    <details class="ledger-inline"><summary>Harness attempts · model and usage as recorded</summary><div id="attempts"></div></details>
-    <ul id="run-diagnostics" class="diagnostics" hidden></ul>
+    <h1 id="mv-title" class="mv-title" tabindex="-1"></h1>
   </div>
-  <aside class="glass decision-panel">
-    <div class="panel-head"><span class="mono">NEXT ACTION</span></div>
-    <h2 id="action-title"></h2>
-    <p id="action-copy" class="aside-copy"></p>
-    <div class="action-card card">
-      <span class="label">GATES AND DECISIONS</span>
-      <p class="unavailable">Unavailable</p>
-      <p class="scope-note">Approvals, pause and retries are not wired into this read-only UI. Use the forgecell CLI; this page updates from the ledger.</p>
+  <ol id="mv-steps" class="mv-steps" aria-label="Progress"></ol>
+  <p id="mv-live" class="sr-only" role="status" aria-live="polite"></p>
+  <div id="mv-tabs" class="mv-tabs" role="tablist" aria-label="Molecule sections">
+    <button type="button" role="tab" id="mv-tab-plan" class="mv-tab" aria-controls="mv-plan" aria-selected="true" data-tab="plan">Plan</button>
+    <button type="button" role="tab" id="mv-tab-timeline" class="mv-tab" aria-controls="mv-timeline" aria-selected="false" tabindex="-1" data-tab="timeline">Timeline</button>
+  </div>
+  <div class="mv-layout">
+    <div class="mv-main">
+      <div id="mv-plan" class="mv-plan" role="tabpanel" aria-labelledby="mv-tab-plan">
+        <p id="mv-no-plan" class="glass mv-card mv-empty" hidden></p>
+        <div id="mv-plan-sections" class="mv-sections">
+          <section class="glass mv-card" aria-labelledby="mv-do-title">
+            <h2 id="mv-do-title" class="mv-card-title">What Forgecell will do</h2>
+            <p id="mv-summary" class="mv-summary"></p>
+            <ul id="mv-chips" class="chips" aria-label="About this plan"></ul>
+            <p id="mv-note" class="mv-note" hidden></p>
+          </section>
+          <section class="glass mv-card mv-list-card" aria-labelledby="mv-files-title">
+            <div class="mv-card-head"><h2 id="mv-files-title" class="mv-card-title">Files it may change <span id="mv-files-count" class="mv-count"></span></h2><span class="mv-card-aside">Anything else needs your approval first</span></div>
+            <ul id="mv-files" class="file-list"></ul>
+            <p id="mv-files-more" class="mv-more" hidden></p>
+          </section>
+          <section class="glass mv-card mv-list-card" aria-labelledby="mv-checks-title">
+            <div class="mv-card-head"><h2 id="mv-checks-title" class="mv-card-title">Checks it must pass <span id="mv-checks-count" class="mv-count"></span></h2><span class="mv-card-aside">Run independently in a fresh checkout</span></div>
+            <ul id="mv-checks" class="check-grid"></ul>
+          </section>
+          <section id="mv-acceptance-section" class="glass mv-card mv-list-card" aria-labelledby="mv-acceptance-title">
+            <div class="mv-card-head"><h2 id="mv-acceptance-title" class="mv-card-title">What counts as done <span id="mv-acceptance-count" class="mv-count"></span></h2></div>
+            <ul id="mv-acceptance" class="acceptance-list"></ul>
+            <p id="mv-acceptance-more" class="mv-more" hidden></p>
+          </section>
+          <details id="mv-details" class="mv-details">
+            <summary id="mv-details-summary">Plan details</summary>
+            <div class="mv-details-body">
+              <p class="drive-help">Approval binds this exact plan. If the Issue or Formula changes before you approve, Forgecell asks you to review again. The full plan, evidence and ledger are in the Timeline.</p>
+              <div class="digest-row"><span class="field-label">Plan digest</span><code id="mv-digest-short"></code><button type="button" id="mv-copy-digest" class="btn btn-secondary btn-small" hidden>Copy full digest</button></div>
+              <p class="field-label">Evidence it was planned from</p>
+              <ul id="mv-evidence" class="evidence-names"></ul>
+              <p id="mv-evidence-more" class="mv-more" hidden></p>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div id="mv-timeline" class="glass run-panel mv-timeline" role="tabpanel" aria-labelledby="mv-tab-timeline" hidden>
+        <div id="run-origin" class="origin"></div>
+        <div id="molecule-totals" class="molecule-totals"></div>
+        <div class="formula card">
+          <span class="icon-tile" aria-hidden="true">≡</span>
+          <div class="formula-text"><span class="label">FORMULA SNAPSHOT</span><strong id="formula-name"></strong><small id="formula-sha" class="mono-text"></small></div>
+          <button type="button" class="text-button" id="yaml">View YAML ↗</button>
+        </div>
+        <p id="run-delivery" class="delivery-line" hidden></p>
+        <div class="section-label"><span class="mono">ATOMS</span><span>Select a step to inspect its record</span></div>
+        <div id="atoms" class="atoms"></div>
+        <details class="ledger-inline"><summary>Readiness revisions and events</summary><div id="readiness"></div></details>
+        <details class="ledger-inline"><summary>Harness attempts · model and usage as recorded</summary><div id="attempts"></div></details>
+        <ul id="run-diagnostics" class="diagnostics" hidden></ul>
+        <div class="action-card card">
+          <span class="label">LEDGER AND EVIDENCE · BOUNDED TEXT</span>
+          <p class="scope-note">Open the ledger record, or an evidence file from an Atom, as bounded text with secrets and local paths redacted. Only files the ledger lists with a matching SHA-256 are served; a longer file shows its first part and says so.</p>
+        </div>
+      </div>
     </div>
-    <div class="action-card card">
-      <span class="label">LEDGER AND EVIDENCE · BOUNDED TEXT</span>
-      <p class="scope-note">Open the ledger record, or an evidence file from an Atom, as bounded text with secrets and local paths redacted. Only files the ledger lists with a matching SHA-256 are served; a longer file shows its first part and says so.</p>
-    </div>
-    <div class="action-card card">
-      <span class="label">SUGGESTIONS · EVALUATION</span>
-      <p class="unavailable">Unavailable</p>
-      <p class="scope-note">Not connected in this slice. Nothing is inferred in their place.</p>
-    </div>
-  </aside>
+    <aside id="mv-aside" class="mv-aside" aria-label="Your decision">
+      <section id="mv-decision" class="decision-card" aria-labelledby="mv-decision-title"></section>
+      <dl id="mv-roles" class="mv-roles"></dl>
+      <div id="mv-danger-slot"></div>
+    </aside>
+  </div>
 </section>
 </div>
 
