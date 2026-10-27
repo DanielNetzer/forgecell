@@ -16,6 +16,7 @@ import * as issues from './js/issues.js';
 import * as insights from './js/insights.js';
 import * as formula from './js/formula.js';
 import * as loop from './js/loop.js';
+import * as setup from './js/setup.js';
 
 async function loadLab() {
   const token = ++state.labToken;
@@ -30,6 +31,8 @@ async function loadLab() {
 // One poll at a time; a response older than the newest request never
 // overwrites newer state.
 async function poll() {
+  // While the Lab is being set up there is no Lab to read yet.
+  if (state.setup) return;
   if (document.hidden || state.polling || state.sessionLost) return;
   state.polling = true;
   const token = ++state.pollToken;
@@ -154,6 +157,7 @@ for (const [view, root] of [
   [insights, $('[data-view-panel="insights"]')],
   [formula, $('[data-view-panel="formula"]')],
   [loop, $('#drive-slot')],
+  [setup, $('[data-view-panel="setup"]')],
 ]) view.mount(root, ctx);
 
 document.addEventListener('click', (e) => {
@@ -185,11 +189,13 @@ if ('IntersectionObserver' in window) {
   new IntersectionObserver(([entry]) => document.body.classList.toggle('resident-offscreen', !entry.isIntersecting)).observe($('#resident'));
 }
 
-loadLab().then(poll).catch(failed);
+// A launch with no ready Lab serves Set up your Lab (js/setup.js) and loads
+// nothing else; once set up, Go to Issues reloads into the Lab.
+setup.begin().then((settingUp) => { if (!settingUp) return loadLab().then(poll); }).catch(failed);
 setInterval(poll, 5000);
 // An unchanged list answers 304, so the Inbox's elapsed and relative times are
 // patched on their own interval.
 setInterval(() => { if (!document.hidden && state.list) inbox.update(state); }, 30000);
 // The Lab header also changes without a ledger change, as when a Formula is
 // activated, so it is refreshed on its own slower interval.
-setInterval(() => { if (!document.hidden && !state.sessionLost) loadLab().catch(failed); }, 30000);
+setInterval(() => { if (!document.hidden && !state.sessionLost && !state.setup) loadLab().catch(failed); }, 30000);
