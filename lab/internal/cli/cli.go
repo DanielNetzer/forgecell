@@ -730,6 +730,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		learnItems, learnErr := listPendingLearn(labDir)
 		proposals, proposalErr := molecule.ReadRecoveryProposals(labDir, molecule.AnalysisTimeout(active.Formula))
 		queued, queuedTruncated := molecule.QueuedMolecules(labDir)
+		// The loop status is informational and read-only, like the resources.
+		loopState := molecule.ReadLoopStatus(labDir)
 		// Resources are informational: a low reading or a large cache never changes
 		// doctor's readiness verdict.
 		machine := inspectResources(labDir, home)
@@ -761,11 +763,12 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if len(queued) > 0 || queuedTruncated {
 				report["queuedForChecks"] = map[string]any{"molecules": queued, "truncated": queuedTruncated}
 			}
+			report["loop"] = loopState
 			if err = json.NewEncoder(out).Encode(report); err != nil {
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr, Queued: queued, QueuedTruncated: queuedTruncated})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr, Queued: queued, QueuedTruncated: queuedTruncated, Loop: loopState})
 			renderResources(out, machine)
 		}
 		if !ready {
@@ -999,7 +1002,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	if err != nil {
 		return fail(err)
 	}
-	r, err := molecule.Run(ctx, molecule.Options{LabDir: *lab, SourceRoot: cwd, Issue: args[1], FormulaID: *formula, Base: *base, Approve: *approve, TargetBranch: *target, MandatoryConstraints: requirements, CheckInputs: supplied.CheckInputs, Checks: supplied.Checks, Setup: supplied.Setup, Artifacts: supplied.Artifacts, Policy: supplied.Policy, Resources: guard})
+	// Intake takes the Issue's start lock, as the loop and the UI do, so a run and a
+	// loop never create two Molecules for one Issue.
+	r, err := runIssue(ctx, molecule.Options{LabDir: *lab, SourceRoot: cwd, Issue: args[1], FormulaID: *formula, Base: *base, Approve: *approve, TargetBranch: *target, MandatoryConstraints: requirements, CheckInputs: supplied.CheckInputs, Checks: supplied.Checks, Setup: supplied.Setup, Artifacts: supplied.Artifacts, Policy: supplied.Policy, Resources: guard})
 	if err != nil {
 		return fail(err)
 	}
@@ -1576,6 +1581,9 @@ func selectedWorkflow(candidates []onboarding.Candidate, id string) harness.Capa
 	return harness.Capability{State: "unknown", Reason: "No binding selected."}
 }
 
+// runIssue is the engine call behind forgecell run; tests may replace it.
+var runIssue = molecule.RunIntake
+
 const doctorSchemaVersion = "v1"
 
 const notProbedUnapproved = "not probed (unapproved)"
@@ -1614,6 +1622,48 @@ type doctorView struct {
 	RecoveryError              error
 	Queued                     []string
 	QueuedTruncated            bool
+	// Loop is the Lab's loop marker as molecule.ReadLoopStatus read it; a zero
+	// value renders nothing.
+	Loop molecule.LoopMarkerState
+}
+
+// renderDoctorLoop prints the Lab's loop status. It never changes doctor's
+// readiness verdict.
+func renderDoctorLoop(out io.Writer, l molecule.LoopMarkerState) {
+	switch {
+	case l.State == "":
+		return
+	case l.Running:
+		s := l.Status
+		who := "in a terminal"
+		if s.Starter == molecule.LoopStarterUI {
+			who = "from a Lab UI"
+		}
+		fmt.Fprintf(out, "\nLoop: running · started %s at %s · select %s · max concurrent %d · %d in flight\n", who, s.StartedAt.UTC().Format(time.RFC3339), flatten(s.Selector), s.MaxConcurrent, len(s.InFlight)+len(s.Intake))
+		if s.WatchIntervalSeconds > 0 {
+			fmt.Fprintf(out, "  Watching every %s\n", time.Duration(s.WatchIntervalSeconds)*time.Second)
+		}
+		if !s.LastPassAt.IsZero() {
+			fmt.Fprintf(out, "  Last pass %d at %s\n", s.Passes, s.LastPassAt.UTC().Format(time.RFC3339))
+		}
+		for _, in := range s.Intake {
+			fmt.Fprintf(out, "  Issue #%d · %s\n", in.Issue, flatten(in.Phase))
+		}
+		for _, id := range s.InFlight {
+			fmt.Fprintf(out, "  Molecule %s · in flight\n", flatten(id))
+		}
+		if s.InFlightTruncated {
+			fmt.Fprintln(out, "  More Molecules are in flight; the list is incomplete.")
+		}
+	case l.Held:
+		fmt.Fprintln(out, "\nLoop: a loop holds this Lab's loop marker, but its status could not be read; no second loop can start until it ends")
+	case l.State == molecule.LoopMarkerStale:
+		fmt.Fprintln(out, "\nLoop: not running (a status left by a loop that has ended is stale and ignored)")
+	case l.State == molecule.LoopMarkerUnreadable:
+		fmt.Fprintln(out, "\nLoop: unknown; the Lab's loop marker could not be checked")
+	default:
+		fmt.Fprintln(out, "\nLoop: not running")
+	}
 }
 
 // doctorCommands chooses the one next command for a non-ready state, using only
@@ -1838,6 +1888,7 @@ func renderDoctor(out io.Writer, v doctorView) {
 			fmt.Fprintln(out, "  More running Molecules were not inspected; the list is incomplete.")
 		}
 	}
+	renderDoctorLoop(out, v.Loop)
 	if v.Next != "" {
 		fmt.Fprintf(out, "\nNext: %s\n", v.Next)
 	}
