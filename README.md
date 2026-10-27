@@ -29,7 +29,8 @@ proposed improvements to the durable recipe that guides the next run.
 > **Early preview.** The current Go source supports ticket analysis, approved execution,
 > verification and separately approved draft PRs, also available in the downloadable
 > `0.2.0-preview.2` prerelease. Merge, deployment and issue closure
-> remain manual. The Lab is terminal-first; there is no local GUI yet.
+> remain manual. GitHub is the only supported tracker; GitLab, Jira and outside
+> reviewers are post-v1.
 
 ## How it works
 
@@ -77,40 +78,44 @@ Checksums share the binaries’ GitHub HTTPS endpoint; they are not independent 
 
 </details>
 
-After installing, run the demo first. It needs only Git and Go on PATH, and no API key,
-GitHub token or repository of your own:
+Then drive everything from your browser:
 
 ```sh
-forgecell demo
+# 1. Install with the one-line installer above.
+cd YOUR_REPOSITORY   # 2. Open the repository you want Forgecell to work on.
+forgecell ui         # 3. Set up your Lab in the browser, then pick an Issue.
 ```
 
-It runs one complete Molecule against a built-in sample repository with a deterministic
-stub harness, printing each stage as it runs: intake and the plan, scope approval
-(auto-approved inside the demo and labelled as such), coding, the independent checks and
-the protected regression, review, and a local delivery preview with the diff and the PR
-body that would be opened. It makes no model calls, never runs `gh` or touches the
-network, and publishes nothing. Add `--keep DIR` to keep its Lab for
-`forgecell ledger MOLECULE_ID --lab DIR`.
+You need Git, the GitHub CLI signed in (`gh auth login`), and one coding agent signed in
+with its own CLI: Claude Code, Codex or Cursor. The UI walks you through the rest:
 
-Then open the repository you want Forgecell to work on. Ticket execution
-requires Git, authenticated GitHub CLI (`gh`), and an authenticated coding harness.
-You can choose an explicit Lab directory and use it throughout:
+- **Set up your Lab**: your repository and `gh` sign-in status, pick a coding agent,
+  create the Lab, then review and approve its first Formula, with or without the review
+  Atom.
+- **Inbox** and **Issues**: what needs you, and your open Issues with their Forgecell
+  state. Start intake on one Issue, or run the loop on a label or milestone.
+- **Work** and the **Molecule view**: approve the plan, watch coding and the checks, then
+  preview and publish a draft PR at the review gate. Merging stays on GitHub. A blocked
+  Molecule shows why it's blocked and what you can do.
+- **Formula**: rebind after an upgrade, refresh the baseline checks from CI, add the
+  review Atom or pin a model, each as a proposal you approve.
+- **Insights**: cost, tokens and time per model and Atom role.
 
-```sh
-lab_dir="$HOME/.forgecell/labs/YOUR_REPOSITORY"
-forgecell doctor --lab "$lab_dir"
-forgecell init --lab "$lab_dir"
+Every write goes through the engine and is bound to the digest you saw. The UI listens
+on `127.0.0.1` only, behind a one-time link. Prefer the terminal? Every step has a CLI
+command; see the [installation guide](docs/install.md).
 
-# Review the saved Formula, then replace PROPOSAL_ID with its actual ID.
-forgecell init --lab "$lab_dir" --approve PROPOSAL_ID
-forgecell run ISSUE_NUMBER --lab "$lab_dir"
-```
+Want to look first? `forgecell demo` runs one complete Molecule against a built-in
+sample repository with a deterministic stub harness. It needs only Git and Go on PATH:
+no API key, no GitHub token, no network and no repository of your own, and it publishes
+nothing.
 
 The `0.2.0-preview.2` prerelease defaults to a distinct private Lab for each checkout
 under `~/.forgecell/labs/`; `forgecell doctor --json` reports the exact location.
 Existing preview.1 checkout Labs remain intact: use the same `--lab .forgecell` path
 for every command to keep using one. Labs and saved bindings are not automatically
-migrated or rebound. See the **[CLI guide](lab/README.md)** for ticket readiness.
+migrated or rebound: after upgrading, rebind from the Formula view. See the
+**[CLI guide](lab/README.md)** for ticket readiness.
 
 ### Bring your harness
 
@@ -152,9 +157,9 @@ tests that run real Go builds or wait out long process deadlines. CI runs the
 full `go test ./...`.
 
 The target is **issue → production**. Current delivery stops at explicitly approved draft
-PRs; merge, deployment and production verification are not automated. Local UI work is
-still design exploration. Contributions should preserve clear ledgers, explicit gates
-and provider-neutral orchestration.
+PRs; merge, deployment and production verification are not automated. The local UI
+(`forgecell ui`) drives the same engine as the CLI. Contributions should preserve clear
+ledgers, explicit gates and provider-neutral orchestration.
 
 | Explore | Read |
 | :--- | :--- |
