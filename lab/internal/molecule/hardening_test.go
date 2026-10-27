@@ -158,8 +158,15 @@ func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Verification == nil || r.Verification.RequiredChecksPassed || r.Verification.Protected == nil || !r.Verification.Protected.RequiredChecksPassed {
-		t.Fatal("failed human acceptance lost distinct protected success")
+	// Fail fast (#264): the failed required candidate acceptance leaves the protected
+	// view recorded as not run, never as a protected success.
+	if r.Verification == nil || r.Verification.RequiredChecksPassed || r.Verification.Protected == nil || r.Verification.Protected.RequiredChecksPassed || r.Verification.Protected.Workspace != "" || len(r.Verification.Protected.Checks) != 0 || len(r.Verification.Protected.NotRun) == 0 {
+		t.Fatalf("failed human acceptance must leave the protected view not run: %+v", r.Verification)
+	}
+	for _, o := range r.Verification.Protected.NotRun {
+		if o.NotRun != verification.NotRunCandidateFailure || o.Result.OK {
+			t.Fatalf("protected check after a candidate failure must be not run: %+v", o)
+		}
 	}
 	tree := r.Capture.Tree
 	artifacts := artifactHash(*r.Capture)
@@ -205,6 +212,15 @@ func TestReviewedDefinitionRepairChecksOnlyPreservesExactSourceAndHistory(t *tes
 	}
 	if r.Verification == nil || !r.Verification.RequiredChecksPassed || !r.Verification.IndependentAcceptanceVerified || r.Verification.Protected == nil || !r.Verification.Protected.RequiredChecksPassed {
 		t.Fatal("safe repaired continuation failed")
+	}
+	// The repair must run the protected view fresh, never reuse the not-run result.
+	if len(r.Verification.Protected.Checks) == 0 || len(r.Verification.Protected.NotRun) != 0 {
+		t.Fatalf("checks-only repair reused a protected view that was not run: %+v", r.Verification.Protected)
+	}
+	for _, o := range r.Verification.Protected.Checks {
+		if o.NotRun != "" || !o.Result.OK {
+			t.Fatalf("protected check after repair was not freshly run: %+v", o)
+		}
 	}
 }
 

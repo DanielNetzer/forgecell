@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 )
@@ -445,6 +447,57 @@ func TestAcceptProtectedFailuresRefusesAProtectedViewOfTheCandidateTree(t *testi
 	}
 	if _, _, err := failingProtectedCheck(p, protected(tree)); err == nil || !strings.Contains(err.Error(), "did not run a derived protected tree") {
 		t.Fatalf("a protected view of the candidate tree was accepted: %v", err)
+	}
+}
+
+// TestAcceptProtectedFailuresSkipsCoveredTargetedChecks: a targeted check the protected
+// view skipped as covered by the full suite, whether it comes before or after that
+// baseline in plan order, is not the check the view stopped on: a not-run record
+// (the baseline failed) or a covered record (it passed) is ignored, and the failing
+// baseline is the one whose failures are declared. A covered record the plan does not
+// back is refused.
+func TestAcceptProtectedFailuresSkipsCoveredTargetedChecks(t *testing.T) {
+	t.Parallel()
+	tree, derived := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	targeted := readiness.Check{ID: acceptCheck, Category: "regression", Argv: []string{"go", "test", "./internal/..."}, Dir: "lab", Required: true}
+	baseline := readiness.Check{ID: acceptBaseline, Category: "regression", Argv: []string{"go", "test", "-timeout", "20m", "./..."}, Dir: "lab", Required: true}
+	failing := verification.Observation{ID: baseline.ID, Category: "regression", SourceTree: derived, Command: baseline, JSONAdded: true, Result: process.Result{Reconciled: true, Code: 1}}
+	stopped := "required command " + baseline.ID + " did not pass"
+	for name, checks := range map[string][]readiness.Check{
+		"targeted first": {targeted, baseline},
+		"baseline first": {baseline, targeted},
+	} {
+		p := readiness.Plan{FormulaBaseline: []string{baseline.ID}, Analysis: readiness.Analysis{Checks: checks}}
+		if id, ok := verification.CoveringCheckID(p, targeted); !ok || id != baseline.ID {
+			t.Fatalf("%s: the fixture's targeted check is not covered: %q %v", name, id, ok)
+		}
+		notRun := verification.Observation{ID: targeted.ID, Category: "regression", SourceTree: derived, Command: targeted, CoveredBy: baseline.ID, NotRun: "covered by " + baseline.ID + ", which failed", Result: process.Result{Reconciled: true, Code: -1}}
+		result := verification.Result{SourceTree: tree, Protected: &verification.Result{SourceTree: derived, Setup: []verification.Observation{}, Checks: []verification.Observation{failing}, NotRun: []verification.Observation{notRun}, Error: stopped}}
+		got, err := failingProtectedChecks(p, result)
+		if err != nil || len(got) != 1 || got[0].check.ID != baseline.ID {
+			t.Fatalf("%s: %v %+v", name, err, got)
+		}
+		// A covered record of a passing baseline among the checks is ignored as well.
+		passed := failing
+		passed.Result = process.Result{OK: true, Reconciled: true}
+		other := readiness.Check{ID: "later", Category: "regression", Argv: []string{"go", "test", "-json", "./cmd/..."}, Dir: "lab", Required: true}
+		p.Analysis.Checks = append(slices.Clone(checks), other)
+		covered := verification.Observation{ID: targeted.ID, Category: "regression", SourceTree: derived, Command: targeted, CoveredBy: baseline.ID, Result: passed.Result}
+		later := verification.Observation{ID: other.ID, Category: "regression", SourceTree: derived, Command: other, Result: process.Result{Reconciled: true, Code: 1}}
+		ran := []verification.Observation{covered, passed, later}
+		if name == "baseline first" {
+			ran = []verification.Observation{passed, covered, later}
+		}
+		result.Protected = &verification.Result{SourceTree: derived, Setup: []verification.Observation{}, Checks: ran, Error: "required command later did not pass"}
+		if c, _, err := failingProtectedCheck(p, result); err != nil || c.ID != other.ID {
+			t.Fatalf("%s: a passing covered record: %v %q", name, err, c.ID)
+		}
+		// Coverage the plan does not give is refused.
+		p.FormulaBaseline = nil
+		result.Protected = &verification.Result{SourceTree: derived, Setup: []verification.Observation{}, Checks: []verification.Observation{failing}, NotRun: []verification.Observation{notRun}, Error: stopped}
+		if _, err := failingProtectedChecks(p, result); err == nil || !strings.Contains(err.Error(), "does not cover it with") {
+			t.Fatalf("%s: forged coverage: %v", name, err)
+		}
 	}
 }
 

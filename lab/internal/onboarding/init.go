@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"go.yaml.in/yaml/v4"
 	"reflect"
 	"slices"
@@ -774,6 +775,13 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	p, err := saveWithEvidence(o.LabDir, string(encoded), evidence, out.Binding)
 	if err != nil {
 		return out, err
+	}
+	// A first-time init (no approved Formula yet) gives the new Lab the recommended
+	// verification slot limit; an existing resources.json is never touched.
+	if active.Formula.ID == "" {
+		if err = resources.WriteInitialConfig(o.LabDir); err != nil {
+			return out, err
+		}
 	}
 	out.Status = "pending"
 	out.Proposal = &p

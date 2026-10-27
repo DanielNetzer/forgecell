@@ -55,6 +55,53 @@ type Observation struct {
 	// or not deltas are declared. The events were parsed as a stream and Result.Stdout
 	// keeps only a bounded plain summary; Command keeps the approved argv.
 	JSONAdded bool `json:"jsonAdded,omitempty"`
+	// NotRun says why the view never started this check, such as NotRunEarlierFailure;
+	// its Result is a stopped non-run that never passed.
+	NotRun string `json:"notRun,omitempty"`
+	// CoveredBy names the protected baseline check that ran a superset of this targeted
+	// check's packages in the same view, so the check was not run again. Result is that
+	// check's outcome without streams; it is never a pass of its own.
+	CoveredBy string `json:"coveredBy,omitempty"`
+	// Output is the bounded, redacted head and tail of a failing check's stdout and
+	// stderr, with its failing test names; it survives the compact ledger projection.
+	Output *OutputExcerpt `json:"failureOutput,omitempty"`
+}
+
+// Phases a view times before its first check.
+const (
+	PhaseWorkspace     = "workspace prepare"
+	PhaseEnvironment   = "environment prepare"
+	PhaseCache         = "cache prepare"
+	PhaseModuleCheck   = "module check"
+	PhaseProtectedTree = "protected tree"
+)
+
+// PhaseObserver times named steps of a verification; Begin returns the function that
+// ends the step. Views may call it concurrently.
+type PhaseObserver interface {
+	Begin(view, phase string) func()
+}
+
+type phaseKey struct{}
+
+// WithPhaseObserver carries o to every view a verification runs.
+func WithPhaseObserver(ctx context.Context, o PhaseObserver) context.Context {
+	return context.WithValue(ctx, phaseKey{}, o)
+}
+
+func beginPhase(ctx context.Context, view, phase string) func() {
+	if o, ok := ctx.Value(phaseKey{}).(PhaseObserver); ok && o != nil {
+		return o.Begin(view, phase)
+	}
+	return func() {}
+}
+
+// checkWatchdog is the stall watchdog every verification check runs under: a wall
+// clock twice its timeout (as after the machine slept) ends it as interrupted:
+// stalled. A quiet check is never stopped for silence; its own timeout bounds it.
+// Tests replace it.
+var checkWatchdog = func(timeout time.Duration) *process.Watchdog {
+	return &process.Watchdog{Wall: 2 * timeout}
 }
 
 // MatchesCheckObservation binds delivery evidence to the approved command and
@@ -63,7 +110,12 @@ type Observation struct {
 // protected regression observation matches only when the approved plan's declared
 // deltas cover its entire failing set.
 func MatchesCheckObservation(p readiness.Plan, check readiness.Check, obs Observation, tree string, protected bool) bool {
-	if obs.ID != check.ID || obs.SourceTree != tree || obs.Result.Incomplete() {
+	if obs.ID != check.ID || obs.SourceTree != tree || obs.Result.Incomplete() || obs.NotRun != "" {
+		return false
+	}
+	// A covered check is satisfied only through the covering baseline check of the
+	// approved plan, and only when that check passed.
+	if obs.CoveredBy != "" && (!protected || !obs.Result.OK || !validCoverage(p, check, obs)) {
 		return false
 	}
 	if !obs.Result.OK && !(protected && acceptedProtectedFailure(p, check, obs)) {
@@ -117,6 +169,11 @@ type Result struct {
 	// Notes record how the view's environment departed from the usual one, such as a
 	// stable check TMPDIR that vanished and was replaced by a private one.
 	Notes []string `json:"notes,omitempty"`
+	// NotRun lists, in the order the view would have run them, the setup commands and
+	// checks it never started because an earlier required one failed (or, for the
+	// protected view, a required candidate check failed). None of them passed. Setup
+	// and Checks keep only what ran, in plan order.
+	NotRun []Observation `json:"notRun,omitempty"`
 }
 
 // removeTemp removes a registered temp directory and records a failure on v.
@@ -134,7 +191,21 @@ func removeTemp(v *Result, dir string) {
 // children. As for resources.LabTempDir, a symbolic link, a non-directory or another
 // user's directory at that path is refused.
 func labGoTempDir(tmp string) (string, error) {
-	dir := filepath.Join(tmp, resources.LabGoTempName)
+	return ownedGoTempDir(filepath.Join(tmp, resources.LabGoTempName))
+}
+
+// labViewGoTempDir returns labGoTempDir for the unnamed view. A named view (the protected
+// view) gets its own stable directory <tmp>/gotmp/<view> under it, checked the same way,
+// so views that run concurrently never share one.
+func labViewGoTempDir(tmp, view string) (string, error) {
+	dir, err := labGoTempDir(tmp)
+	if err != nil || view == "" {
+		return dir, err
+	}
+	return ownedGoTempDir(filepath.Join(dir, view))
+}
+
+func ownedGoTempDir(dir string) (string, error) {
 	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 		return "", err
 	}
@@ -393,7 +464,28 @@ func runViewObserved(ctx context.Context, source, destination string, p readines
 // never relaxes a failing check.
 func runViewDeltas(ctx context.Context, source, destination string, p readiness.Plan, c CaptureResult, observe func(Observation) error, protected bool) (v Result) {
 	v = Result{SchemaVersion: "v1", Workspace: destination, SourceTree: c.Tree, Setup: []Observation{}, Checks: []Observation{}, Containment: "Filtered environment and temporary HOME; no OS filesystem/network sandbox. Network access is unrestricted."}
+	// Checks run cheapest first but are kept in plan order, which readers such as
+	// --accept-protected-failures rely on; checkIndex is each record's plan index.
+	var checkIndex []int
+	inPlanOrder := func() {
+		if len(checkIndex) != len(v.Checks) {
+			return
+		}
+		type indexed struct {
+			at  int
+			obs Observation
+		}
+		pairs := make([]indexed, len(v.Checks))
+		for i, o := range v.Checks {
+			pairs[i] = indexed{checkIndex[i], o}
+		}
+		slices.SortStableFunc(pairs, func(a, b indexed) int { return a.at - b.at })
+		for i, p := range pairs {
+			v.Checks[i], checkIndex[i] = p.obs, p.at
+		}
+	}
 	fail := func(e error) Result {
+		inPlanOrder()
 		// A hard-floor cancellation names itself, so the record says why checks stopped.
 		if reason, ok := resources.Exhausted(ctx); ok {
 			e = fmt.Errorf("%s: %w", reason, e)
@@ -512,6 +604,11 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
 		return fail(err)
 	}
+	view := "candidate"
+	if protected {
+		view = "protected"
+	}
+	endPhase := beginPhase(ctx, view, PhaseWorkspace)
 	// --no-checkout avoids smudge filters. Materialize blobs ourselves, after mode
 	// and path validation, rather than running candidate-controlled Git filters.
 	release, err := resources.LockWorktrees(ctx, source)
@@ -555,6 +652,8 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	if _, err := git(ctx, destination, "", nil, "read-tree", c.Tree); err != nil {
 		return fail(err)
 	}
+	endPhase()
+	endPhase = beginPhase(ctx, view, PhaseEnvironment)
 	// Go writes the module cache under the private HOME read-only, so these are removed
 	// with resources.Remove, which makes the tree writable first; they are also registered
 	// so a signal still removes them. A removal failure is recorded, not ignored.
@@ -588,7 +687,13 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		return fail(err)
 	}
 	if ok {
-		gotmp, err := labGoTempDir(tmp)
+		// Each view has its own GOTMPDIR, so concurrent views never share go-build work
+		// directories; the candidate view keeps the Lab's stable one.
+		gotmpView := ""
+		if protected {
+			gotmpView = "protected"
+		}
+		gotmp, err := labViewGoTempDir(tmp, gotmpView)
 		if err != nil {
 			return fail(err)
 		}
@@ -607,6 +712,22 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		}
 		inputPaths[id] = file
 	}
+	endPhase()
+	// The shared Go cache is resolved once per process; timing it here shows when that
+	// first go env call is what delays the first check.
+	endPhase = beginPhase(ctx, view, PhaseCache)
+	resources.ResolveGoCache(ctx)
+	endPhase()
+	// Recorded failing output names the view's directories by placeholder, never by
+	// their local paths.
+	pathPairs := map[string]string{destination: "<workspace>", source: "<source>", home: "<check-home>", controls: "<reviewed-inputs>"}
+	if tmp != home {
+		pathPairs[tmp] = "<check-tmp>"
+	}
+	if userHome, err := os.UserHomeDir(); err == nil {
+		pathPairs[userHome] = "~"
+	}
+	localDirs := localPaths(pathPairs)
 	checkInputs := func() error {
 		for id, file := range inputPaths {
 			info, err := os.Lstat(file)
@@ -633,7 +754,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if protected {
 			ok := false
 			if memo != nil {
-				s, ok = memo.get(dir)
+				s, ok = memo.await(ctx, dir)
 			}
 			if !ok {
 				s = fullSuite("the candidate view recorded no selection for this check directory")
@@ -647,7 +768,45 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		selections[dir] = s
 		return s
 	}
-	for i, command := range commands {
+	// Checks run cheapest first, so a failing round ends before the full suite. In the
+	// protected view a targeted check a baseline covers is not run again; it is recorded
+	// as covered right after its baseline.
+	order := executionOrder(commands, len(p.Setup), protected)
+	covers, covered := map[int][]int{}, map[int]bool{}
+	if protected {
+		covers, covered = protectedCoverage(p, commands, len(p.Setup), destination)
+	}
+	categoryOf := func(i int) string {
+		if repaired[commands[i].ID] {
+			return "candidate"
+		}
+		return commands[i].Category
+	}
+	record := func(i int, o Observation) {
+		if i < len(p.Setup) {
+			v.Setup = append(v.Setup, o)
+		} else {
+			v.Checks = append(v.Checks, o)
+			checkIndex = append(checkIndex, i)
+		}
+	}
+	// notRun records every command in rest, and the checks those cover, as never run.
+	notRun := func(rest []int, reason string) {
+		for _, j := range rest {
+			if covered[j] {
+				continue
+			}
+			v.NotRun = append(v.NotRun, notRunObservation(commands[j], categoryOf(j), c.Tree, reason))
+			for _, k := range covers[j] {
+				v.NotRun = append(v.NotRun, notRunObservation(commands[k], categoryOf(k), c.Tree, reason))
+			}
+		}
+	}
+	for k, i := range order {
+		if covered[i] {
+			continue
+		}
+		command := commands[i]
 		if err := regularAncestors(destination, filepath.ToSlash(filepath.Join(command.Dir, "placeholder"))); err != nil {
 			return fail(err)
 		}
@@ -655,14 +814,14 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			return fail(err)
 		}
 		argv := append([]string{}, command.Argv...)
-		for i, arg := range argv {
+		for a, arg := range argv {
 			if strings.HasPrefix(arg, "{input:") && strings.HasSuffix(arg, "}") {
 				id := strings.TrimSuffix(strings.TrimPrefix(arg, "{input:"), "}")
 				file, ok := inputPaths[id]
 				if !ok {
 					return fail(fmt.Errorf("unknown reviewed input %s", id))
 				}
-				argv[i] = file
+				argv[a] = file
 			}
 		}
 		// Hidden acceptance is fresh by construction, whatever its argv runs.
@@ -699,7 +858,8 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if jsonAdded {
 			argv = readiness.WithGoTestJSON(argv)
 		}
-		options := process.Options{Argv: argv, Dir: dir, Env: commandEnv, Stdin: []byte{}, Timeout: time.Duration(command.TimeoutMS) * time.Millisecond, MaxOutputBytes: 256000}
+		timeout := time.Duration(command.TimeoutMS) * time.Millisecond
+		options := process.Options{Argv: argv, Dir: dir, Env: commandEnv, Stdin: []byte{}, Timeout: timeout, MaxOutputBytes: 256000, Watchdog: checkWatchdog(timeout)}
 		// A required regression check with declared deltas asks for go test -json, which
 		// is read as a stream so a large suite is not cut off by the capture cap; so is
 		// every protected check the engine added -json to. Every other check keeps the
@@ -731,6 +891,9 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			packageOutput = result.Stdout
 			if refused != nil {
 				result.Stdout += parser.Diagnostics(refused)
+			} else if !result.OK && len(failed) == 0 && result.Activity != nil && result.Activity.StdoutBytes > 0 {
+				// A failing run with no failing test to summarize still keeps its output.
+				result.Stdout += parser.Diagnostics(fmt.Errorf("the stream named no failing test"))
 			}
 			result.RawStdout, result.Truncated = result.Stdout, false
 		}
@@ -744,10 +907,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 				result.Error = truncatedErr.Error()
 			}
 		}
-		category := command.Category
-		if repaired[command.ID] {
-			category = "candidate"
-		}
+		category := categoryOf(i)
 		cacheState := CacheStatus(argv, commandEnv, cache, nonModule)
 		if command.Category == "independent-acceptance" {
 			cacheState = AcceptanceCacheStatus(cache)
@@ -814,11 +974,12 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 				}
 			}
 		}
-		if i < len(p.Setup) {
-			v.Setup = append(v.Setup, observation)
-		} else {
-			v.Checks = append(v.Checks, observation)
+		// A failing check always keeps a bounded, redacted head and tail of its output,
+		// which the compact ledger projection keeps when it drops the streams.
+		if !observation.Result.OK {
+			observation.Output = failureExcerpt(observation.Result, observation.FailedTests, localDirs, readiness.IsDirectGoTest(command.Argv))
 		}
+		record(i, observation)
 		if observe != nil {
 			if err := observe(observation); err != nil {
 				return fail(err)
@@ -845,7 +1006,28 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		if err != nil || strings.TrimSpace(staged) != c.Tree {
 			return fail(fmt.Errorf("verification changed staged content"))
 		}
+		if len(covers[i]) > 0 {
+			covering := v.Checks[len(v.Checks)-1]
+			for _, j := range covers[i] {
+				// A check covered by a failing baseline never ran; it is listed as not run.
+				// A baseline stopped because the candidate view failed says so instead.
+				if o := coveredObservation(commands[j], c.Tree, covering); o.IsNotRun() {
+					if candidateCancelled(ctx) {
+						o.NotRun, o.Result.Error = NotRunCandidateFailure, NotRunCandidateFailure
+					}
+					v.NotRun = append(v.NotRun, o)
+				} else {
+					record(j, o)
+				}
+			}
+		}
 		if !result.OK && (i < len(p.Setup) || command.Required) && !(evaluated && deltaErr == nil) {
+			// Every later command is recorded as never run, so none can be read as passed.
+			reason := NotRunEarlierFailure
+			if candidateCancelled(ctx) {
+				reason = NotRunCandidateFailure
+			}
+			notRun(order[k+1:], reason)
 			if deltaErr != nil {
 				return fail(fmt.Errorf("required command %s did not pass: %w", command.ID, deltaErr))
 			}
@@ -871,6 +1053,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			}
 		}
 	}
+	inPlanOrder()
 	v.RequiredChecksPassed = true
 	independent, allIndependent := false, true
 	for _, o := range v.Checks {

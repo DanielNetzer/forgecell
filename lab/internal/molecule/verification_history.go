@@ -30,6 +30,13 @@ type VerificationAttempt struct {
 	Status       string             `json:"status"`
 	Observations []VerificationFile `json:"observations,omitempty"`
 	Result       *VerificationFile  `json:"result,omitempty"`
+	// Slot is the 0-based verification slot the checks ran in, and Slots how many the
+	// Lab allowed when the slot was taken; both are absent on older ledgers.
+	Slot  *int `json:"slot,omitempty"`
+	Slots int  `json:"slots,omitempty"`
+	// Phases time the steps between coding capture and the first check.
+	Phases    []PhaseTiming `json:"phases,omitempty"`
+	PhasesCut bool          `json:"phasesCut,omitempty"`
 }
 
 func statePhase(r Record) string {
@@ -268,7 +275,9 @@ func archiveLegacyVerification(r *Record) error {
 }
 
 // The current projection retains commands, outcomes and artifact identities.
-// Captured streams remain complete in immutable history files, not duplicated here.
+// Captured streams remain complete in immutable history files, not duplicated here;
+// a failing check keeps its bounded, redacted output excerpt (Observation.Output),
+// and not-run and covered-by records keep their reasons.
 func compactVerification(v verification.Result) verification.Result {
 	raw, _ := json.Marshal(v)
 	var out verification.Result
