@@ -80,6 +80,10 @@ type selectionKey struct{}
 type selectionMemo struct {
 	mu    sync.Mutex
 	byDir map[string]Selection
+	// changed is closed and replaced on every put. final, set only while the views run
+	// concurrently, is closed once the candidate view has finished.
+	changed chan struct{}
+	final   <-chan struct{}
 }
 
 func (m *selectionMemo) get(dir string) (Selection, bool) {
@@ -93,10 +97,42 @@ func (m *selectionMemo) put(dir string, s Selection) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.byDir[dir] = s
+	close(m.changed)
+	m.changed = make(chan struct{})
+}
+
+// concurrent makes await wait for the candidate view, which closes done when it ends.
+func (m *selectionMemo) concurrent(done <-chan struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.final = done
+}
+
+// await returns the candidate view's selection for dir. Run one after the other, the
+// candidate view has already finished; run concurrently, it waits until the candidate
+// view records the selection or ends, or ctx ends. The protected view so never runs a
+// different package set, nor the full suite only because it started first.
+func (m *selectionMemo) await(ctx context.Context, dir string) (Selection, bool) {
+	for {
+		m.mu.Lock()
+		s, ok := m.byDir[dir]
+		changed, final := m.changed, m.final
+		m.mu.Unlock()
+		if ok || final == nil {
+			return s, ok
+		}
+		select {
+		case <-changed:
+		case <-final:
+			return m.get(dir)
+		case <-ctx.Done():
+			return Selection{}, false
+		}
+	}
 }
 
 func withSelectionMemo(ctx context.Context) context.Context {
-	return context.WithValue(ctx, selectionKey{}, &selectionMemo{byDir: map[string]Selection{}})
+	return context.WithValue(ctx, selectionKey{}, &selectionMemo{byDir: map[string]Selection{}, changed: make(chan struct{})})
 }
 
 // shownPath bounds and quotes a repository path for a selection reason.

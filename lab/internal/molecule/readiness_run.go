@@ -1072,7 +1072,8 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		if (p.Continuation == "checks-only" && !completedCoding(r)) || (p.Continuation == "adopt-failed-tree" && !FailedTreeAdopted(r)) || r.Capture == nil || r.Capture.Tree != captured.Tree {
 			return r, fmt.Errorf("missing retained completed coding output")
 		}
-		return verifyCaptured(ctx, o, r, p, captured)
+		// The retained tree was captured before approval, so no capture phase is timed.
+		return verifyCaptured(ctx, o, r, p, captured, -1)
 	}
 	if o.PrepareWorkspace != nil {
 		if err = o.PrepareWorkspace(ctx, r.Workspace); err != nil {
@@ -1091,6 +1092,7 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		ref                      VerificationFile
 		capture                  verification.CaptureResult
 		captureErr               error
+		captureTook              time.Duration
 		coding                   harness.CodingOutcome
 		attemptID, timeoutSource string
 		timeoutMS, resumes       int
@@ -1205,7 +1207,9 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 			return r, err
 		}
 		captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		captureStarted := phaseClock()
 		capture, captureErr = verification.Capture(captureCtx, r.Workspace.Path, p.Inputs.BaseCommit, allowed, p.Artifacts)
+		captureTook = phaseClock().Sub(captureStarted)
 		cancelCapture()
 		// Claude Code hot-reloads project settings, so a run that created, edited or
 		// removed anything under .claude (for example through repository code that an
@@ -1359,7 +1363,7 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 		return r, err
 	}
 	r.Readiness = &state
-	return verifyCaptured(ctx, o, r, p, capture)
+	return verifyCaptured(ctx, o, r, p, capture, captureTook)
 }
 
 // amendedPlanInstruction ends the coding instruction of an amended plan.
@@ -1446,18 +1450,37 @@ func finishNoChange(r Record, p readiness.Plan, capture verification.CaptureResu
 	return r, save(r)
 }
 
-func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, capture verification.CaptureResult) (Record, error) {
+func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, capture verification.CaptureResult, captureTook time.Duration) (Record, error) {
 	roles, roleErr := resolveExecutionRoles(r)
 	if roleErr != nil {
 		return r, roleErr
 	}
-	// One verification runs in a Lab at a time. A Molecule that finds the slot held
-	// records verification-queued and waits without a deadline of its own; it holds
-	// the slot from verification-started through both views, so every check budget
-	// starts only once the slot is taken. The review runs after the slot is released.
-	slot, slotErr := acquireVerificationSlot(ctx, o.LabDir, func() error {
-		return recordSlotEvent(&r, readiness.VerificationQueued)
+	// Every step between coding capture and the first check is timed for the ledger.
+	phases := &phaseLog{}
+	if captureTook >= 0 {
+		phases.add("", PhaseTreeCapture, captureTook)
+	}
+	// Up to the Lab's slot limit (resources.json verificationSlots, default 1) of
+	// verifications run in a Lab at once; the resource guard refuses extra slots below
+	// a soft floor. A Molecule that finds every slot held records verification-queued
+	// and its queue position, and waits without a deadline of its own; it holds its
+	// slot from verification-started through both views, so every check budget starts
+	// only once the slot is taken. The review runs after the slot is released.
+	slots, slotReason, asked := 1, "", false
+	endWait := phases.Begin("", PhaseSlotWait)
+	slot, slotIndex, slotErr := acquireVerificationSlots(ctx, o.LabDir, func() int {
+		slots, slotReason = verificationSlotLimit(o)
+		asked = true
+		return slots
+	}, func() error {
+		if err := recordSlotEvent(&r, readiness.VerificationQueued); err != nil {
+			return err
+		}
+		position, total := queuePosition(o.LabDir, r.ID)
+		r.Notes = append(r.Notes, queueNote(position, total, slots, slotReason))
+		return save(r)
 	})
+	endWait()
 	if slotErr != nil {
 		if ctx.Err() != nil {
 			return interruptQueuedVerification(r, ctx.Err())
@@ -1472,7 +1495,10 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	// The check-running stage does not start below a soft floor. The guard re-checks
 	// until readings recover or its wait ends; then the Molecule stops with the reason.
 	if o.Resources != nil {
-		if err := o.Resources.WaitForCapacity(ctx); err != nil {
+		endWait = phases.Begin("", PhaseResourceWait)
+		err := o.Resources.WaitForCapacity(ctx)
+		endWait()
+		if err != nil {
 			reason, low := resources.AsLow(err)
 			if !low {
 				return stopVerification(r, "Verification was not started: "+err.Error())
@@ -1483,6 +1509,15 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	}
 	if err := startVerification(&r, p, capture.Tree); err != nil {
 		return stopVerification(r, "Verification was not started: "+err.Error())
+	}
+	// An uncontended Molecule took the first slot without asking the guard; it
+	// records the Lab's configured limit.
+	if !asked {
+		slots, _ = resources.LoadVerificationSlots(o.LabDir)
+	}
+	if n := len(r.VerificationAttempts); n > 0 {
+		index := slotIndex
+		r.VerificationAttempts[n-1].Slot, r.VerificationAttempts[n-1].Slots = &index, slots
 	}
 	checkID := r.Atoms[roles.atoms[formula.Verification]].ID
 	attemptID := fmt.Sprintf("verification-%d", len(r.VerificationAttempts))
@@ -1508,6 +1543,7 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 	if note := resources.LabTempRootNote(); note != "" {
 		r.Notes = append(r.Notes, note)
 	}
+	endTemp := phases.Begin("", PhaseCheckTempDir)
 	if tmp, err := resources.LabTempDir(o.LabDir); err == nil {
 		checkCtx = resources.WithCheckTempDir(checkCtx, tmp)
 		// What tests leaked there more than 24h ago goes first, so the directory stays
@@ -1521,6 +1557,13 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 		}
 	} else {
 		r.Notes = append(r.Notes, "Stable check TMPDIR unavailable ("+err.Error()+"); views used a private TMPDIR, so tests that read it were not cacheable.")
+	}
+	endTemp()
+	checkCtx = verification.WithPhaseObserver(checkCtx, phases)
+	// The candidate and protected views run concurrently when the guard finds room for
+	// both; without a guard they run one after the other.
+	if o.Resources != nil {
+		checkCtx = resources.WithViewConcurrency(checkCtx, o.Resources.ConcurrentViews)
 	}
 	verified := runVerification(checkCtx, r.Workspace.SourceRoot, destination, p, capture, func(obs verification.Observation) error {
 		if err := recordObservation(&r, obs); err != nil {
@@ -1544,6 +1587,11 @@ func verifyCaptured(ctx context.Context, o Options, r Record, p readiness.Plan, 
 		r.Notes = append(r.Notes, reason+"; in-flight checks were cancelled.")
 	}
 	stopMonitor()
+	if timings, cut := phases.timings(); len(timings) > 0 {
+		a := &r.VerificationAttempts[len(r.VerificationAttempts)-1]
+		a.Phases, a.PhasesCut = timings, cut
+		r.Notes = append(r.Notes, phaseNote(timings, cut))
+	}
 	if err := completeVerification(&r, verified); err != nil {
 		return stopVerification(r, "Verification result could not be recorded: "+err.Error())
 	}

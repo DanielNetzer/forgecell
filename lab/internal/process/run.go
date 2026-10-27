@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"sync"
 	"time"
@@ -55,7 +56,76 @@ type Options struct {
 	MaxOutputBytes int
 	// StdoutLines is nil for every caller that keeps the capture cap and overflow.
 	StdoutLines *LineSink
+	// Watchdog is nil for every caller except verification checks, which end a stuck
+	// run as interrupted: stalled instead of letting it run for hours.
+	Watchdog *Watchdog
 }
+
+// DefaultWatchdogInterval paces a Watchdog's samples when it names none.
+const DefaultWatchdogInterval = 30 * time.Second
+
+// Watchdog ends a run as stalled when the wall clock has passed Wall since it
+// started. The process timeout runs on the monotonic clock, which does not advance
+// while the machine sleeps; the watchdog reads the wall clock, so a run that slept
+// far past its budget still ends. A zero Wall disables it. It never judges a run by
+// silence or CPU use: a quiet check whose work happens in short-lived child processes
+// is still working, and only its own timeout or the wall clock ends it.
+type Watchdog struct {
+	Wall     time.Duration
+	Interval time.Duration
+	// Seams for tests; nil uses the wall clock and a real ticker.
+	Now  func() time.Time
+	Tick func(interval time.Duration) (<-chan time.Time, func())
+}
+
+// StalledError is the cancellation cause of a run its Watchdog stopped. It unwraps to
+// context.Canceled, so the run is recorded as interrupted and therefore incomplete.
+type StalledError struct{ Reason string }
+
+func (e *StalledError) Error() string { return "stalled: " + e.Reason }
+func (e *StalledError) Unwrap() error { return context.Canceled }
+
+func wallNow() time.Time { return time.Now().Round(0) }
+
+func realTicker(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
+// watch samples the run until done is closed or it stops the run as stalled.
+func (w *Watchdog) watch(c *capture, done <-chan struct{}) {
+	now, tick := w.Now, w.Tick
+	if now == nil {
+		now = wallNow
+	}
+	if tick == nil {
+		tick = realTicker
+	}
+	interval := w.Interval
+	if interval <= 0 {
+		interval = DefaultWatchdogInterval
+	}
+	ticks, stop := tick(interval)
+	defer stop()
+	start := now()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticks:
+		}
+		at := now()
+		if w.Wall > 0 && at.Sub(start) >= w.Wall {
+			reason := fmt.Sprintf("the wall clock passed the %s budget (%s elapsed; the machine may have slept)", w.Wall, at.Sub(start).Round(time.Second))
+			c.Lock()
+			c.stalled = true
+			c.Unlock()
+			c.cancel(&StalledError{Reason: reason})
+			return
+		}
+	}
+}
+
 type Result struct {
 	Reconciled  bool   `json:"reconciled"`
 	Uncertainty string `json:"uncertainty,omitempty"`
@@ -66,7 +136,10 @@ type Result struct {
 	Code        int    `json:"code"`
 	TimedOut    bool   `json:"timedOut"`
 	Interrupted bool   `json:"interrupted"`
-	Overflow    bool   `json:"overflow"`
+	// Stalled means the run's Watchdog stopped it; Interrupted is then true too and
+	// Error starts with "interrupted: stalled:".
+	Stalled  bool `json:"stalled,omitempty"`
+	Overflow bool `json:"overflow"`
 	// ParentDeadline means the caller's context deadline expired before
 	// Options.Timeout could. It is exclusive with TimedOut, which is only the
 	// process's own timeout. A parent cancelled with a deadline cause but carrying
@@ -187,6 +260,7 @@ type capture struct {
 	partial        []byte
 	truncated      bool
 	sinkClosed     bool
+	stalled        bool
 }
 type stream struct {
 	capture *capture
@@ -336,7 +410,21 @@ func Run(parent context.Context, o Options) (result Result) {
 	cmd.Stderr = stream{capture: c, stderr: true}
 	cmd.WaitDelay = time.Second
 	configureProcess(cmd)
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		if o.Watchdog != nil {
+			done, finished := make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(finished)
+				o.Watchdog.watch(c, done)
+			}()
+			err = cmd.Wait()
+			close(done)
+			<-finished
+		} else {
+			err = cmd.Wait()
+		}
+	}
 	if cmd.Process != nil {
 		result.Reconciled, result.Uncertainty = reconcileProcess(cmd)
 	}
@@ -356,6 +444,7 @@ func Run(parent context.Context, o Options) (result Result) {
 	result.Stderr = c.stderr.String()
 	result.Overflow = c.overflow
 	result.Truncated = c.truncated
+	result.Stalled = c.stalled
 	if cmd.Process != nil {
 		result.Activity = &Activity{StdoutBytes: c.stdoutBytes, StderrBytes: c.stderrBytes}
 		if c.sawOutput {
@@ -378,6 +467,11 @@ func Run(parent context.Context, o Options) (result Result) {
 	}
 	if cause != nil {
 		result.Error = cause.Error()
+	}
+	var stalled *StalledError
+	if errors.As(cause, &stalled) {
+		result.Stalled = true
+		result.Error = "interrupted: " + stalled.Error()
 	}
 	return
 }

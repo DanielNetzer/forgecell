@@ -22,11 +22,15 @@ func TestHardening129CandidateViewFailsATruncatedStream(t *testing.T) {
 	if obs := v.Checks[0]; obs.Result.OK || !obs.Result.Truncated || obs.Result.Code != 0 {
 		t.Fatalf("the observation must record a failed, truncated run: %+v", obs.Result)
 	}
-	if v.Protected == nil || !v.Protected.RequiredChecksPassed || len(v.AcceptedDeltas) != 0 {
-		t.Fatalf("the protected view must still stream the large declared failure: %+v", v.Protected)
+	// Fail fast (#264): after a required candidate failure the protected view is the
+	// not-run view, so no protected delta is accepted from it.
+	if v.Protected == nil || v.Protected.RequiredChecksPassed || v.Protected.Workspace != "" || len(v.Protected.Checks) != 0 || len(v.Protected.NotRun) == 0 || len(v.AcceptedDeltas) != 0 {
+		t.Fatalf("the protected view must be recorded as not run: %+v", v.Protected)
 	}
-	if protected := v.Protected.Checks[0]; protected.Result.OK || !protected.Result.Truncated || len(protected.AcceptedDeltas) != 1 {
-		t.Fatalf("the protected observation must keep its accepted delta: %+v", protected)
+	for _, o := range v.Protected.NotRun {
+		if o.NotRun != NotRunCandidateFailure || o.Result.OK {
+			t.Fatalf("a protected check after a candidate failure must be not run and not OK: %+v", o)
+		}
 	}
 }
 
