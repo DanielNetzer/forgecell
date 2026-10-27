@@ -12,7 +12,9 @@ import (
 // synchronous: the engine only appends the retired event under the Molecule
 // lock. Committed comes only from the ledger read-back recording that event.
 // Engine error text is never served: each refusal maps to a fixed category,
-// message and reason. There is no bulk retire.
+// message and reason. The one bulk retire, of the attempts for closed Issues,
+// is bulk_retire.go: it calls the same engine retire for each Molecule and maps
+// each refusal through retireRefusals.
 
 // RetireAction is the action name /api/lab lists for the retire route.
 const RetireAction = "retire Molecule"

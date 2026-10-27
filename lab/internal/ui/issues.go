@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+
 	"github.com/DanielNetzer/forgecell/lab/internal/forgesync"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
@@ -24,13 +26,46 @@ type issueSync struct {
 	repository func(lab string) string
 	receiptsMu sync.Mutex
 	receipts   map[string]publishedEntry
+	// now is the cache's clock; last is the latest answer get returned, which
+	// the loop view reads without starting a sync.
+	now    func() time.Time
+	lastMu sync.Mutex
+	last   forgesync.Result
 }
 
 func newIssueSync(fetcher forgesync.Fetcher, now func() time.Time) *issueSync {
 	if fetcher == nil {
 		fetcher = forgesync.NewGH()
 	}
-	return &issueSync{cache: forgesync.NewCache(fetcher, now), repository: func(lab string) string { return formula.ActiveIdentity(lab).Repository }, receipts: map[string]publishedEntry{}}
+	if now == nil {
+		now = time.Now
+	}
+	return &issueSync{cache: forgesync.NewCache(fetcher, now), repository: func(lab string) string { return formula.ActiveIdentity(lab).Repository }, receipts: map[string]publishedEntry{}, now: now}
+}
+
+// get is the cache's answer for want, remembered for currentSnapshot.
+func (s *issueSync) get(ctx context.Context, want forgesync.Want, refresh bool) forgesync.Result {
+	res := s.cache.Get(ctx, want, refresh)
+	s.lastMu.Lock()
+	s.last = res
+	s.lastMu.Unlock()
+	return res
+}
+
+// currentSnapshot is the latest remembered sync of repo while it is still
+// current (a successful sync at most twice the TTL old), or nil. It never
+// starts a sync.
+func (s *issueSync) currentSnapshot(repo string) *forgesync.Snapshot {
+	s.lastMu.Lock()
+	res := s.last
+	s.lastMu.Unlock()
+	if res.Snapshot == nil || res.Reason != "" || repo == "" || !strings.EqualFold(res.Snapshot.Repository, repo) {
+		return nil
+	}
+	if s.now().Sub(res.Snapshot.FetchedAt) > 2*forgesync.TTL {
+		return nil
+	}
+	return res.Snapshot
 }
 
 // published is the pull request number and commit of one published receipt.
@@ -237,7 +272,7 @@ func (h *handler) issues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	work := h.syncWork(repo)
-	res := h.forge.cache.Get(r.Context(), work.want, refresh(r))
+	res := h.forge.get(r.Context(), work.want, refresh(r))
 	out.Freshness = freshness(res)
 	queue := molecule.ReadQueueInventory(h.opts.LabDir)
 	out.Complete = queue.Complete && work.list.Complete

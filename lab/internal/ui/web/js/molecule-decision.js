@@ -4,8 +4,8 @@
 // anymore? block, each behind a confirmation that names the Molecule. Controls
 // are built once and patched in place, so a poll never rebuilds a form being
 // typed in, and the one live region changes only when its text does.
-import { $, el, fill, state, ctx, newGate, RETIRED, PULL_URL, notRecorded, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show } from './core.js';
-import { submitGate, gateMessage, fetchJob, readBack, rerenderGate, jobText } from './core-gates.js';
+import { $, el, fill, state, ctx, newGate, RETIRED, PULL_URL, ISSUE_URL, notRecorded, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show, SessionError } from './core.js';
+import { submitGate, gateMessage, fetchJob, readBack, rerenderGate, jobText, refusalText, postJSON } from './core-gates.js';
 
 // mv is the Molecule view's state, shared by its sub-modules.
 export const mv = { controls: null, steps: null, from: 'work', planKey: null, statsKey: null, statsToken: 0, stats: null, lastDigest: null, replaced: false, timelineId: null, timelineDirty: false };
@@ -169,7 +169,7 @@ export function ensureMoleculeView() {
   c.retireQuestion = el('p', { class: 'confirm-question', id: 'mv-retire-question' });
   c.reasonInput = el('input', { type: 'text', id: 'mv-retire-reason', name: 'reason', maxlength: '200', autocomplete: 'off', placeholder: 'Replaced by a fresh Molecule…', 'aria-describedby': 'mv-retire-error', dataset: { gate: 'reason' }, oninput: (e) => { state.gate.reason = e.target.value; } });
   c.retireError = el('p', { class: 'drive-error', id: 'mv-retire-error', tabindex: '-1', hidden: true });
-  c.retireSubmit = submitButton({ class: 'btn btn-danger', dataset: { gate: 'retire' } }, 'Retire Molecule');
+  c.retireSubmit = submitButton({ class: 'btn btn-danger', dataset: { gate: 'retire' } }, 'Confirm retire');
   c.retireForm = el('form', { class: 'confirm-form', id: 'mv-retire-form', 'aria-labelledby': 'mv-retire-question', novalidate: true, hidden: true, onsubmit: submitRetire },
     c.retireQuestion, field('mv-retire-reason', 'Reason', c.reasonInput), c.retireError,
     el('div', { class: 'confirm-actions' }, c.retireSubmit, el('button', { type: 'button', class: 'btn btn-secondary', dataset: { gate: 'retire-cancel' }, onclick: () => closeConfirm('retire', true) }, 'Cancel')));
@@ -363,7 +363,7 @@ export function renderDecision(d) {
   c.retireOpen.hidden = !canRetire;
   if (!canRetire && !c.retireForm.hidden) closeConfirm('retire', false);
   c.retireSubmit.disabled = gate.pending || running;
-  setText(c.retireSubmit, gate.pending && gate.where === 'retire' ? 'Retiring…' : 'Retire Molecule');
+  setText(c.retireSubmit, gate.pending && gate.where === 'retire' ? 'Retiring…' : 'Confirm retire');
   setText(c.retireQuestion, 'Retire ' + moleculeName(d) + '?');
   fillKeyed(c.retireStatus, JSON.stringify([d.lane, d.retired, gate.retire]), () => retireText(d, gate));
   c.danger.hidden = c.stopBlock.hidden && c.retireBlock.hidden;
@@ -381,6 +381,140 @@ export function renderDecision(d) {
   if (gate.message && gate.announce) { gate.announce = false; target.focus(); }
   // The one live region of the view carries the outcomes read back.
   setText($('#mv-live'), [c.job, c.amendStatus, c.stopStatus, c.retireStatus].map((n) => n.textContent).filter(Boolean).join(' '));
+  loadActions(d);
+}
+
+// ---- Why it's blocked · What you can do (#243) ----------------------------------
+// The panel lists the actions the engine accepts now, from the server's
+// /actions read. Each is a primary button posting the exact plan digest it was
+// shown; none approves, and its outcome shows as committed only from the
+// server's ledger read-back. Retire stays in the Danger zone below.
+const acts = { id: null, key: null, token: 0, data: null, pending: false, message: '', result: null, reason: {}, confirm: {} };
+
+function actionsKey(d) { return [d.id, d.status, d.phase, d.lane, latestDigest(d)].join(':'); }
+
+export async function loadActions(d) {
+  if (acts.id !== d.id) { acts.id = d.id; acts.result = null; acts.message = ''; acts.reason = {}; acts.confirm = {}; }
+  if (d.sample || (state.lab && state.lab.readOnly) || !hasAction('unblock Molecule')) { acts.key = null; acts.data = null; renderActions(d); return; }
+  const key = actionsKey(d);
+  if (key === acts.key) { renderActions(d); return; }
+  acts.key = key;
+  const token = ++acts.token;
+  try {
+    const res = await api('/api/molecules/' + encodeURIComponent(d.id) + '/actions');
+    if (token !== acts.token) return;
+    const data = res.ok ? await res.json() : null;
+    if (token !== acts.token) return;
+    acts.data = data ? { id: d.id, view: data } : null;
+  } catch (error) { failed(error); }
+  if (state.detail && state.detail.id === d.id) renderActions(state.detail);
+}
+
+function renderActions(d) {
+  const node = $('#mv-actions');
+  const data = acts.data && acts.data.id === d.id ? acts.data.view : null;
+  const list = data && Array.isArray(data.actions) ? data.actions.filter((a) => a && typeof a.kind === 'string') : [];
+  const blocking = data ? plainText(data.blocking, '') : '';
+  // An action this page cannot offer exactly is named with its plain reason.
+  const notOffered = data && Array.isArray(data.notOffered) ? data.notOffered.filter((a) => a && typeof a.kind === 'string') : [];
+  const shown = Boolean(list.length || notOffered.length || blocking || acts.result || acts.message);
+  node.hidden = !shown;
+  fillKeyed(node, shown ? JSON.stringify([d.id, data, acts.result, acts.message, acts.pending]) : '', () => [
+    el('h2', { class: 'decision-title', id: 'mv-actions-title' }, 'Why it’s blocked · What you can do'),
+    blocking ? el('p', { class: 'decision-copy' }, blocking) : null,
+    list.length ? null : el('p', { class: 'drive-help' }, 'The engine accepts no action for this Molecule now.'),
+    ...list.map((a) => actionItem(d, a)),
+    ...notOffered.map((a) => el('p', { class: 'drive-help', dataset: { action: 'not-offered' } }, plainText(a.label, 'Action') + ' is not offered: ' + plainText(a.reason, ''))),
+    acts.message ? el('p', { class: 'drive-error', role: 'alert' }, acts.message) : null,
+    acts.result ? actionResultText(acts.result) : null,
+  ]);
+}
+
+// actionItem is one action: its plain words, what it shows, and a primary
+// button directly under them. Retire only points at the Danger zone.
+function actionItem(d, a) {
+  const label = plainText(a.label, 'Action'), copy = plainText(a.copy, '');
+  if (a.kind === 'retire') return el('p', { class: 'drive-help' }, label + ': ' + copy);
+  const parts = [el('h3', { class: 'amend-title' }, label), copy ? el('p', { class: 'drive-help' }, copy) : null];
+  if (a.kind === 'accept-failures') {
+    const deltas = Array.isArray(a.deltas) ? a.deltas : [];
+    parts.push(el('p', { class: 'scope-note' }, counted(deltas.length, 'test is', 'tests are') + ' declared as expected failures:'));
+    parts.push(el('ul', { class: 'diagnostics' }, deltas.slice(0, 64).map((x) => el('li', null, el('code', null, notRecorded(x.package) + ' ' + notRecorded(x.test)), ' · check ' + notRecorded(x.check) + ' · declared in ', el('code', null, notRecorded(x.file))))));
+  }
+  if (a.kind === 'scope-change') {
+    const paths = Array.isArray(a.paths) ? a.paths : [];
+    parts.push(el('ul', { class: 'diagnostics' }, paths.map((p) => el('li', null, el('code', null, notRecorded(p))))));
+    const id = 'mv-action-reason';
+    const input = el('input', { type: 'text', id: id, maxlength: '1000', autocomplete: 'off', dataset: { action: 'reason' }, oninput: (e) => { acts.reason[a.kind] = e.target.value; } });
+    input.value = acts.reason[a.kind] !== undefined ? acts.reason[a.kind] : plainText(a.reason, '');
+    parts.push(field(id, 'Why these files need to change (the coding agent’s reason; edit it if needed)', input));
+  }
+  if (a.kind === 'fresh-intake') {
+    const questions = Array.isArray(a.questions) ? a.questions : [];
+    if (questions.length) parts.push(el('ul', { class: 'diagnostics' }, questions.map((q) => el('li', null, plainText(q, '')))));
+    if (typeof a.issueUrl === 'string' && ISSUE_URL.test(a.issueUrl)) parts.push(el('a', { class: 'mv-issue-link', href: a.issueUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Edit the Issue on GitHub ↗'));
+  }
+  if (a.confirmStopped) {
+    const id = 'mv-action-confirm-' + a.kind;
+    const box = el('input', { type: 'checkbox', id: id, dataset: { action: 'confirm' }, onchange: (e) => { acts.confirm[a.kind] = e.target.checked; } });
+    box.checked = acts.confirm[a.kind] === true;
+    parts.push(el('label', { class: 'accept-label', for: id }, box, el('span', null, 'I confirm it is stopped: no Lab process works on this Molecule')));
+  }
+  const button = submitButton({ class: 'btn btn-primary btn-decision', dataset: { action: a.kind } }, acts.pending ? 'Working…' : label);
+  button.disabled = acts.pending;
+  parts.push(button);
+  return el('form', { class: 'decision-form mv-action', novalidate: true, onsubmit: (e) => { e.preventDefault(); submitAction(d, a); } }, ...parts);
+}
+
+// submitAction posts once with the shown digest; after an ambiguous response
+// it reads the Molecule back and never resubmits.
+async function submitAction(d, a) {
+  if (acts.pending) return;
+  let path = '/api/molecules/' + encodeURIComponent(d.id) + '/actions/' + encodeURIComponent(a.kind);
+  let body = { digest: a.digest };
+  if (a.kind === 'fresh-intake') { path = '/api/runs'; body = { issue: a.issue }; }
+  // Accept-failures binds the exact tests listed: the server derives them again.
+  if (a.kind === 'accept-failures') body.deltas = a.deltasDigest;
+  if (a.kind === 'scope-change') {
+    const reason = String(acts.reason[a.kind] !== undefined ? acts.reason[a.kind] : plainText(a.reason, '')).trim();
+    if (!reason || /[\r\n]/.test(reason)) { acts.message = 'Say in one line why these files need to change.'; renderActions(d); return; }
+    body.paths = a.paths;
+    body.reason = reason;
+  }
+  if (a.confirmStopped) {
+    if (acts.confirm[a.kind] !== true) { acts.message = 'Tick I confirm it is stopped once no Lab process works on this Molecule.'; renderActions(d); return; }
+    body.confirmStopped = true;
+  }
+  acts.pending = true;
+  acts.message = '';
+  renderActions(d);
+  let res = null, out = {};
+  try {
+    res = await postJSON(path, JSON.stringify(body));
+    out = await res.json().catch(() => ({}));
+  } catch (error) {
+    if (error instanceof SessionError) { acts.pending = false; failed(error); renderActions(d); return; }
+    res = null;
+  }
+  acts.pending = false;
+  if (!res || res.status >= 500) acts.message = 'The response was lost or ambiguous. The Molecule is read back; nothing is resubmitted.';
+  else if (!res.ok) acts.message = refusalText(out);
+  else acts.result = { kind: a.kind, body: out };
+  acts.key = null;
+  if (state.detail && state.detail.id === d.id) renderActions(state.detail);
+  ctx.loadDetail(d.id, false);
+}
+
+function actionResultText(r) {
+  const b = r.body || {};
+  if (r.kind === 'fresh-intake') return el('p', { class: 'scope-note' }, b.committed ? 'Started: the ledger records a fresh Molecule for this Issue.' : 'Intake was submitted. Not shown as started until a ledger for this Issue appears.');
+  if (r.kind === 'recover') return el('p', { class: 'scope-note' }, b.committed ? 'Recovered: the ledger records the interruption and keeps the work. Choose the next action above.' : 'Not committed: the ledger read back does not record the recovery.');
+  if (!b.committed) return el('p', { class: 'scope-note' }, (b.recovered ? 'Recovered, but ' : '') + 'Not committed: the ledger read back shows no new version of this plan. Nothing was approved.');
+  const digest = typeof b.digest === 'string' && /^[0-9a-f]{64}$/.test(b.digest) ? b.digest.slice(0, 12) : 'not recorded';
+  const deltas = Array.isArray(b.deltas) ? b.deltas : [];
+  return el('div', { class: 'gate-job' },
+    el('p', { class: 'scope-note' }, 'Version ' + count(b.revision) + ' of the plan is recorded (digest ', el('code', null, digest), '…' + (b.changes ? '; ' + plainText(b.changes, '') : '') + '). It waits for your approval: click Approve plan & start coding. Nothing was approved.'),
+    deltas.length ? el('ul', { class: 'diagnostics' }, deltas.slice(0, 64).map((x) => el('li', null, el('code', null, notRecorded(x.package) + ' ' + notRecorded(x.test)), ' · declared in ', el('code', null, notRecorded(x.file))))) : null);
 }
 
 function amendText(a) {
