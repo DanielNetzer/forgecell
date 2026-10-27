@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -27,6 +28,8 @@ type fakeDrive struct {
 	loops []molecule.LoopOptions
 	run   func(context.Context, molecule.Options) error
 	loop  func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error)
+	// issues is what the loop's open Issue listing returns.
+	issues []intake.OpenIssue
 }
 
 func (d *fakeDrive) calls() int {
@@ -37,6 +40,11 @@ func (d *fakeDrive) calls() int {
 
 func installDrive(h http.Handler, d *fakeDrive) *fakeDrive {
 	hh := h.(*handler)
+	hh.listIssues = func(context.Context, string, intake.Selector) (intake.OpenIssues, error) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return intake.OpenIssues{Issues: append([]intake.OpenIssue(nil), d.issues...)}, nil
+	}
 	hh.runIssue = func(ctx context.Context, o molecule.Options) (molecule.Record, error) {
 		d.mu.Lock()
 		d.runs = append(d.runs, o)
@@ -322,6 +330,11 @@ func TestUIDriveStopsOnlyAMoleculeThisUIRuns(t *testing.T) {
 		finished <- saveRecord(lab, r)
 		return nil
 	}})
+	// The CLI's running Molecule offers no Stop: the view names its runner.
+	wantControl(t, h, "mol-9-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	if d := detailOf(t, h, base.ID); d.View.Control != nil {
+		t.Fatalf("a Molecule that is not running has a stop control %+v", d.View.Control)
+	}
 	// The crash leftover and the CLI's ledger are refused before any job runs.
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-9-cli/stop", `{}`)), http.StatusConflict, "not-owned")
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-1-none/stop", `{}`)), http.StatusNotFound, "missing")
@@ -335,6 +348,10 @@ func TestUIDriveStopsOnlyAMoleculeThisUIRuns(t *testing.T) {
 	writeRecord(t, lab, intakeRecord(base, "mol-42-old", 42, "2000-01-01T00:00:00Z", "running", ""))
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-42-old/stop", `{}`)), http.StatusConflict, "not-owned")
 	refusalOf(t, do(t, h, gatePost("/api/molecules/mol-9-cli/stop", `{}`)), http.StatusConflict, "not-owned")
+	// The view offers Stop for this UI's run only, and reading it signals nothing.
+	wantControl(t, h, "mol-42-live", true, RunnerRun, "")
+	wantControl(t, h, "mol-42-old", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	wantControl(t, h, "mol-9-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
 	select {
 	case <-cancelled:
 		t.Fatal("a refused stop signalled the run")
@@ -358,6 +375,101 @@ func TestUIDriveStopsOnlyAMoleculeThisUIRuns(t *testing.T) {
 	}
 }
 
+// wantControl checks the Molecule view's stop control for id.
+func wantControl(t *testing.T, h http.Handler, id string, stoppable bool, runner, textPrefix string) {
+	t.Helper()
+	c := detailOf(t, h, id).View.Control
+	if c == nil || c.Stoppable != stoppable || c.Runner != runner || !strings.HasPrefix(c.Text, textPrefix) || (stoppable && c.Text != "") || (!stoppable && !strings.HasSuffix(c.Text, "nothing needs you.") && !strings.HasSuffix(c.Text, "Nothing needs you.")) {
+		t.Fatalf("%s: control %+v, want stoppable=%t runner %q", id, c, stoppable, runner)
+	}
+}
+
+// A Molecule the UI loop's pass works on offers no Stop of its own: the view says
+// the loop runs it and that the loop is what to stop. A running loop alone never
+// makes a Molecule its own: one the command line runs, for an Issue the loop
+// listed or not, is named as run from the command line.
+func TestUIDriveLoopMoleculeOffersNoStop(t *testing.T) {
+	lab, base := labFixture(t)
+	running, release := make(chan struct{}), make(chan struct{})
+	gate := intakeRecord(base, "mol-6-gate", 6, now(), "waiting", "scope-waiting")
+	cli := intakeRecord(base, "mol-8-cli", 8, now(), "running", "coding")
+	other := intakeRecord(base, "mol-9-cli", 9, now(), "running", "coding")
+	issues := []intake.OpenIssue{{Repository: "O/R", Number: 5}, {Repository: "o/r", Number: 6}, {Repository: "o/r", Number: 8}}
+	h, _ := driveHandler(t, lab, guardWith(64<<30), &fakeDrive{issues: issues, loop: func(ctx context.Context, o molecule.LoopOptions) (molecule.LoopReport, error) {
+		_, err := o.ListIssues(ctx, "o/r")
+		// The pass starts a Molecule for Issue 5 and approves the one at the gate.
+		approved := gate
+		approved.Status, approved.Readiness = "running", &readiness.State{SchemaVersion: "v1", Phase: "coding"}
+		if err == nil {
+			err = saveRecord(lab, intakeRecord(base, "mol-5-loop", 5, now(), "running", "coding"))
+		}
+		if err == nil {
+			err = saveRecord(lab, approved)
+		}
+		close(running)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return molecule.LoopReport{}, err
+	}})
+	for _, r := range []molecule.Record{gate, cli, other} {
+		writeRecord(t, lab, r)
+	}
+	wantControl(t, h, "mol-8-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	viewOf[LoopView](t, do(t, h, gatePost("/api/loop/start", `{"select":"oldest","maxConcurrent":1}`)), http.StatusAccepted)
+	<-running
+	for _, id := range []string{"mol-5-loop", "mol-6-gate"} {
+		wantControl(t, h, id, false, RunnerLoop, "Run by this Lab's loop. ")
+		refusalOf(t, do(t, h, gatePost("/api/molecules/"+id+"/stop", `{}`)), http.StatusConflict, "not-owned")
+	}
+	// The loop runs, on other Molecules; the CLI's are still the command line's.
+	wantControl(t, h, "mol-8-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	wantControl(t, h, "mol-9-cli", false, RunnerOther, "Started from the command line or another Lab UI. ")
+	close(release)
+	waitLoop(t, h)
+	wantControl(t, h, "mol-5-loop", false, RunnerOther, "Started from the command line or another Lab UI. ")
+}
+
+// A pass whose ledger inventory or listing cannot say what it works on names no
+// Molecule the loop's, and a new pass replaces the last one.
+func TestUIDriveLoopPassFailsSafe(t *testing.T) {
+	lab, base := labFixture(t)
+	h, _ := driveHandler(t, lab, nil, &fakeDrive{})
+	hh := h.(*handler)
+	r := intakeRecord(base, "mol-5-loop", 5, now(), "running", "coding")
+	five := []intake.OpenIssue{{Repository: "o/r", Number: 5}}
+	hh.loop.running = true
+	hh.observePass(five)
+	writeRecord(t, lab, r)
+	if !hh.loop.works(r) {
+		t.Fatal("a Molecule new to a dispatched Issue is not the loop's")
+	}
+	hh.loop.running = false
+	if hh.loop.works(r) {
+		t.Fatal("a stopped loop still works on a Molecule")
+	}
+	hh.loop.running = true
+	hh.observePass(nil)
+	if hh.loop.works(r) {
+		t.Fatal("a Molecule of an earlier pass is still the loop's")
+	}
+	// A later pass finds it running and only reports it.
+	hh.observePass(five)
+	if hh.loop.works(r) {
+		t.Fatal("a running Molecule a pass found is the loop's")
+	}
+	// An incomplete inventory records no pass.
+	if err := os.WriteFile(filepath.Join(lab, "ledgers", "mol-4-bad.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hh.observePass(five)
+	if hh.loop.pass != nil || hh.loop.works(r) {
+		t.Fatalf("an incomplete inventory recorded pass %+v", hh.loop.pass)
+	}
+	hh.loop.running = false
+}
+
 func TestUIDriveStopsAScopeApprovalJob(t *testing.T) {
 	lab, r, digest := gateFixture(t)
 	h, _ := driveHandler(t, lab, nil, &fakeDrive{})
@@ -372,6 +484,10 @@ func TestUIDriveStopsAScopeApprovalJob(t *testing.T) {
 	// The approved Molecule is coding.
 	r.Status = "running"
 	writeRecord(t, lab, r)
+	wantControl(t, h, r.ID, true, RunnerScope, "")
+	if s, _ := h.(*handler).jobs.get(r.ID); s.state != "running" {
+		t.Fatalf("reading the stop control changed the scope job %+v", s)
+	}
 	if v := viewOf[StopView](t, do(t, h, gatePost("/api/molecules/"+r.ID+"/stop", `{}`)), http.StatusAccepted); !v.Requested || v.Committed || v.Canonical.Status != "running" {
 		t.Fatalf("stop %+v", v)
 	}

@@ -191,7 +191,7 @@ func TestUIGateWriteProtectionRefusesForgedAndMalformedWrites(t *testing.T) {
 	engine := refuseEngine(t, h)
 	before := snapshot(t, lab)
 	scope := `{"digest":"` + digest + `"}`
-	for _, action := range []string{"scope", "delivery/preview", "delivery/publish"} {
+	for _, action := range []string{"scope", "amend", "delivery/preview", "delivery/publish"} {
 		for name, forged := range forgedWrites("/api/molecules/"+r.ID+"/"+action, scope) {
 			if w := do(t, h, forged); w.Code != http.StatusForbidden {
 				t.Errorf("%s %s: %d %s", name, action, w.Code, w.Body)
@@ -673,11 +673,16 @@ func TestUIGateServedJSSubmitsOnceAndReadsBack(t *testing.T) {
 		"method: 'POST'",
 		"'Content-Type': 'application/json'",
 		"'/scope'",
+		"'/amend'",
 		"'/delivery/preview'",
 		"'/delivery/publish'",
 		"'/job'",
 		"if (state.gate.pending) return null;",
-		"disabled: state.gate.pending",
+		"const busy = gate.pending || running;",
+		"c.approve.disabled = busy;",
+		"c.preview.disabled = busy;",
+		"c.publish.disabled = busy;",
+		"c.amendSubmit.disabled = busy;",
 		"JSON.stringify({ digest: digest })",
 		"JSON.stringify({ digest: preview.digest, title: title, acceptUnverified: accept })",
 		"readBack(",
@@ -686,6 +691,16 @@ func TestUIGateServedJSSubmitsOnceAndReadsBack(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js lacks %q", want)
 		}
+	}
+	// An ambiguous response is read back and never resubmitted.
+	submit := jsFunction(t, js, "submitGate")
+	for _, want := range []string{"if (!res || res.status >= 500) {", "readBack(gate);", "return null;"} {
+		if !strings.Contains(submit, want) {
+			t.Errorf("submitGate lacks %q", want)
+		}
+	}
+	if strings.Contains(submit, "gatePost(gate.id, action, payload);\n      res = await gatePost") {
+		t.Error("submitGate posts twice")
 	}
 	for _, gone := range []string{"approvals are not available in this UI", "/merge", "/deploy"} {
 		if strings.Contains(js, gone) {

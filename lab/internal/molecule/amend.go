@@ -253,9 +253,16 @@ type AmendRequest struct {
 	AcceptProtectedFailures bool
 	// Run reports that the caller approves and runs the new revision right after
 	// the amend (amend --run).
-	Run             bool
+	Run bool
+	// ExpectParent, when set, is the plan digest the caller reviewed: the amend is
+	// refused with ErrStalePlan unless it is still the latest plan under the lock.
+	ExpectParent    string
 	protectedDeltas []readiness.ProtectedDelta
 }
+
+// ErrStalePlan is the refusal of an amend whose ExpectParent is no longer the
+// latest plan: a newer revision was recorded after the caller read it.
+var ErrStalePlan = errors.New("the latest plan is not the one reviewed; a newer plan exists")
 
 // Bounds of one flag-driven amendment. Plan.Validate bounds the totals.
 const (
@@ -350,8 +357,9 @@ func refuseSelectionInputChange(previous, next readiness.Plan) error {
 // AmendFromLatest records the successor of the Molecule's latest plan built from
 // req. The parent is the latest plan digest, read under the Molecule flock and the
 // approval lock directory, so a concurrent amend either fails as locked or has
-// already been recorded and becomes the parent: the history never forks. Every
-// check of Amend applies; a refusal writes nothing.
+// already been recorded and becomes the parent: the history never forks. A set
+// req.ExpectParent that is not that latest digest is refused with ErrStalePlan.
+// Every check of Amend applies; a refusal writes nothing.
 func AmendFromLatest(ctx context.Context, lab, id string, req AmendRequest) (Record, error) {
 	var empty Record
 	if err := req.validate(); err != nil {
@@ -386,10 +394,13 @@ func AmendFromLatest(ctx context.Context, lab, id string, req AmendRequest) (Rec
 	if r.Readiness == nil || len(r.Readiness.Plans) == 0 {
 		return r, fmt.Errorf("Molecule has no readiness plan to amend")
 	}
+	latest := r.Readiness.Plans[len(r.Readiness.Plans)-1]
+	if req.ExpectParent != "" && req.ExpectParent != latest.Digest {
+		return r, ErrStalePlan
+	}
 	if r.Workspace.Path == "" || (r.CheckoutStatus != "" && r.CheckoutStatus != "available") {
 		return r, fmt.Errorf("coding checkout unavailable; refresh intake")
 	}
-	latest := r.Readiness.Plans[len(r.Readiness.Plans)-1]
 	if req.AcceptProtectedFailures {
 		if req.protectedDeltas, err = protectedFailureDeltas(ctx, r, latest); err != nil {
 			return r, err

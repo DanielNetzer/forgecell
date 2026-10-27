@@ -48,7 +48,7 @@ const maxInboxCount = 9999
 // Summary stays comparable. Each group of counts is served only with its flag:
 // Planned for Files and Checks, Verified for Passed of Ran, Captured for
 // Changed; without the flag it was not recorded, which is never zero.
-// StepSince is the current step's start as RFC 3339 UTC, for the browser's
+// StepSince is the current attempt's start as RFC 3339 UTC, for the browser's
 // elapsed time only; it is data, never shown.
 type InboxView struct {
 	Kind    string `json:"kind"`
@@ -68,8 +68,11 @@ type InboxView struct {
 	Step      int    `json:"step"`
 	StepLabel string `json:"stepLabel"`
 	StepSince string `json:"stepSince,omitempty"`
-	Queued    bool   `json:"queued,omitempty"`
-	Merged    bool   `json:"merged,omitempty"`
+	// StepNote is a fixed rerun note of the current attempt, "rerun" or "rerun
+	// after a plan revision", or empty.
+	StepNote string `json:"stepNote,omitempty"`
+	Queued   bool   `json:"queued,omitempty"`
+	Merged   bool   `json:"merged,omitempty"`
 }
 
 // inboxView maps one Molecule's lane, phase, Atoms and receipt to its Inbox
@@ -80,8 +83,8 @@ func inboxView(x redactor, r molecule.Record, lane, activity string, d *Delivery
 	if lane == LaneRunning && d.Published() {
 		lane = LaneFinished
 	}
-	step, label, since := progress(r, lane, activity, d)
-	v := InboxView{Step: step, StepLabel: label, StepSince: since}
+	step, label, since, note := stepProgress(r, lane, activity, d)
+	v := InboxView{Step: step, StepLabel: label, StepSince: since, StepNote: note}
 	switch lane {
 	case LaneDecision:
 		if phase(r) == "scope-waiting" {
@@ -217,19 +220,33 @@ func atomStep(typ string, coded bool) int {
 // phaseSteps is the fallback step of a readiness phase when no Atom is current.
 var phaseSteps = map[string]int{"scope-waiting": StepApproval, "approved": StepCoding, "coding": StepCoding, "check-pending": StepChecks, "review-waiting": StepReview}
 
-// progress is a Molecule's current step, its plain label and when it started.
-// A published receipt is the Draft PR step done (Merged when the receipt observed
-// a merge); otherwise the first active or waiting Atom decides, then a failed one,
-// then the readiness phase.
+// Rerun notes of the current attempt.
+const (
+	rerunNote         = "rerun"
+	rerunRevisionNote = "rerun after a plan revision"
+)
+
+// progress is a Molecule's current step, its plain label and when the current
+// attempt of that step started; stepProgress also gives the rerun note.
 func progress(r molecule.Record, lane, activity string, d *DeliveryState) (int, string, string) {
+	step, label, since, _ := stepProgress(r, lane, activity, d)
+	return step, label, since
+}
+
+// stepProgress is a Molecule's current step, its plain label, when the current
+// attempt of that step started, and a rerun note. A published receipt is the
+// Draft PR step done (Merged when the receipt observed a merge); otherwise the
+// first active or waiting Atom decides, then a failed one, then the readiness
+// phase.
+func stepProgress(r molecule.Record, lane, activity string, d *DeliveryState) (int, string, string, string) {
 	if d.Published() {
 		if d.Lifecycle == "MERGED" {
-			return StepMerged, "Merged", ""
+			return StepMerged, "Merged", "", ""
 		}
-		return StepMerged, "Draft published", ""
+		return StepMerged, "Draft published", "", ""
 	}
 	if activity == ActivityQueued {
-		return StepChecks, "Queued for checks", ""
+		return StepChecks, "Queued for checks", "", ""
 	}
 	coded, failedAt := false, -1
 	for _, a := range r.Atoms {
@@ -240,7 +257,8 @@ func progress(r molecule.Record, lane, activity string, d *DeliveryState) (int, 
 			if s < 0 {
 				s = StepDraft
 			}
-			return s, StepLabels[s], stepSince(a.StartedAt)
+			since, note := attemptSince(r, a)
+			return s, StepLabels[s], since, note
 		case "failed", "blocked":
 			if failedAt < 0 && s >= 0 {
 				failedAt = s
@@ -248,12 +266,57 @@ func progress(r molecule.Record, lane, activity string, d *DeliveryState) (int, 
 		}
 	}
 	if failedAt >= 0 {
-		return failedAt, StepLabels[failedAt], ""
+		return failedAt, StepLabels[failedAt], "", ""
 	}
 	if s, ok := phaseSteps[phase(r)]; ok {
-		return s, StepLabels[s], ""
+		return s, StepLabels[s], "", ""
 	}
-	return StepPlan, StepLabels[StepPlan], ""
+	return StepPlan, StepLabels[StepPlan], "", ""
+}
+
+// attemptSince is when the current attempt of a current Atom started, and its
+// rerun note. Coding counts from the latest harness attempt's start recorded on
+// the Atom, Checks from the latest verification attempt and Review from the
+// latest review pass, never from the Atom's first start, which an earlier
+// attempt set. A step with attempts but no recorded start of the latest one
+// shows no duration; a step with no attempt recorded yet, and other Atoms,
+// which run once, count from the Atom's own start.
+func attemptSince(r molecule.Record, a molecule.Atom) (string, string) {
+	var starts, digests []string
+	switch a.Type {
+	case "harness":
+		recorded := map[string]string{}
+		if a.Provenance != nil {
+			for _, act := range a.Provenance.Actions {
+				recorded[act.AttemptID] = act.StartedAt
+			}
+		}
+		for _, h := range r.HarnessAttempts {
+			starts, digests = append(starts, recorded[h.ID]), append(digests, h.PlanDigest)
+		}
+	case "check":
+		for _, v := range r.VerificationAttempts {
+			starts, digests = append(starts, v.StartedAt), append(digests, v.PlanDigest)
+		}
+	case "review":
+		for _, v := range r.ReviewAttempts {
+			starts, digests = append(starts, v.StartedAt), append(digests, v.PlanDigest)
+		}
+	default:
+		return stepSince(a.StartedAt), ""
+	}
+	n := len(starts)
+	if n == 0 {
+		return stepSince(a.StartedAt), ""
+	}
+	note := ""
+	if n > 1 {
+		note = rerunNote
+		if digests[n-1] != digests[n-2] {
+			note = rerunRevisionNote
+		}
+	}
+	return stepSince(starts[n-1]), note
 }
 
 // stepSince re-formats a recorded start time, or returns "" for anything that

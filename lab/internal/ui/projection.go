@@ -5,13 +5,18 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
+	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -77,6 +82,8 @@ type Detail struct {
 	Next        NextView       `json:"next"`
 	Retired     *RetiredView   `json:"retired"`
 	Diagnostics []string       `json:"diagnostics"`
+	// View is the plain-words Molecule view (#251): absent for sample data.
+	View *MoleculeView `json:"view,omitempty"`
 }
 
 // RetiredView is a retired Molecule's retired event: its time, the status it
@@ -655,7 +662,521 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 	for _, a := range r.ReviewAttempts {
 		out.Attempts = append(out.Attempts, AttemptView{Kind: "review", ID: fmt.Sprintf("review-%d", a.Ordinal), Status: a.Status, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Binding: a.Binding, Usage: a.Usage, FailureClass: knownFailureClass(a.FailureClass)})
 	}
+	out.View = moleculeView(x, r, out.Lane, out.Activity, out.Gate, d)
 	return out
+}
+
+// MoleculeView is the Molecule view in plain words: the state pill, the seven
+// steps, the latest plan, the one decision this page offers, the roles and the
+// planning cost. Free text is redacted, bounded to one line and stripped of raw
+// ids, digests and timestamps; Plan.Digest and PlannedAt are data for the
+// browser (the bound digest, shown only short inside Plan details, and a time it
+// formats), never prose.
+type MoleculeView struct {
+	State        StateView         `json:"state"`
+	Steps        []StepView        `json:"steps"`
+	Current      int               `json:"current"`
+	Plan         *PlanBrief        `json:"plan,omitempty"`
+	Decision     DecisionView      `json:"decision"`
+	Roles        RolesView         `json:"roles"`
+	PlanningCost *PlanningCostView `json:"planningCost,omitempty"`
+	// Control is set by the handler for a running Molecule: whether this Lab UI
+	// can stop it and, when not, who runs it.
+	Control *ControlView `json:"control,omitempty"`
+}
+
+// State tones: what the pill's dot and colour say, always with its text.
+const (
+	ToneNeeds   = "needs"
+	ToneRunning = "running"
+	ToneBlocked = "blocked"
+	ToneMerged  = "merged"
+	ToneNeutral = "neutral"
+)
+
+// StateView is the state pill: "Waiting for your approval", "Coding" (the
+// browser appends the minutes since Since, the current attempt's start, then
+// Note, a fixed rerun note), "Ready to publish", "Blocked · …".
+type StateView struct {
+	Label string `json:"label"`
+	Tone  string `json:"tone"`
+	Since string `json:"since,omitempty"`
+	Note  string `json:"note,omitempty"`
+}
+
+// Step states.
+const (
+	StepDone    = "done"
+	StepCurrent = "current"
+	StepFailed  = "blocked"
+	StepTodo    = "todo"
+)
+
+// StepView is one of Plan · Your approval · Coding · Checks · Review · Draft PR
+// · Merged, derived from the Atoms, the readiness phase and the receipt.
+type StepView struct {
+	Label string `json:"label"`
+	State string `json:"state"`
+}
+
+// File changes, from the frozen base tree: absent from it is new, present is an
+// edit. Unknown means the ledger has no frozen tree, so no badge is shown.
+const (
+	ChangeNew  = "new"
+	ChangeEdit = "edit"
+)
+
+// PlanBrief is the latest plan in plain words. Lists are bounded; their Total
+// says how many the plan has, so a cut list is never read as the whole.
+type PlanBrief struct {
+	Revision        int                `json:"revision"`
+	Digest          string             `json:"digest"`
+	PlannedAt       string             `json:"plannedAt,omitempty"`
+	Summary         string             `json:"summary"`
+	Questions       int                `json:"questions"`
+	Components      []string           `json:"components"`
+	ComponentsTotal int                `json:"componentsTotal"`
+	BudgetMS        int                `json:"budgetMs,omitempty"`
+	Note            string             `json:"note,omitempty"`
+	Files           []PlanFileView     `json:"files"`
+	FilesTotal      int                `json:"filesTotal"`
+	CheckGroups     []CheckGroupView   `json:"checkGroups"`
+	ChecksTotal     int                `json:"checksTotal"`
+	Acceptance      []string           `json:"acceptance"`
+	AcceptanceTotal int                `json:"acceptanceTotal"`
+	Evidence        []PlanEvidenceView `json:"evidence"`
+	EvidenceTotal   int                `json:"evidenceTotal"`
+}
+
+// PlanFileView is one scope path with its reason and its change from the base tree.
+type PlanFileView struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+	Change string `json:"change,omitempty"`
+}
+
+// CheckGroupView is checks under one human name. Baseline marks the Formula's
+// own checks, which every plan carries.
+type CheckGroupView struct {
+	Name     string          `json:"name"`
+	Baseline bool            `json:"baseline"`
+	Checks   []PlanCheckView `json:"checks"`
+}
+
+// PlanCheckView is one check's exact command, quoted as a shell would read it,
+// and its directory.
+type PlanCheckView struct {
+	ID      string `json:"id"`
+	Command string `json:"command"`
+	Dir     string `json:"dir,omitempty"`
+}
+
+// PlanEvidenceView is one frozen evidence file the plan cites.
+type PlanEvidenceView struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
+// Decision kinds: the scope gate, the review gate (preview, then publish), a
+// published draft, or nothing for this page to decide.
+const (
+	DecisionScope     = "scope"
+	DecisionDelivery  = "delivery"
+	DecisionPublished = "published"
+	DecisionNone      = "none"
+)
+
+// DecisionView is the sticky decision card. It has at most one Primary, and a
+// scope Primary carries the exact digest the Plan shows.
+type DecisionView struct {
+	Kind           string       `json:"kind"`
+	Title          string       `json:"title"`
+	Copy           string       `json:"copy"`
+	Primary        *PrimaryView `json:"primary,omitempty"`
+	RequestChanges bool         `json:"requestChanges,omitempty"`
+	PullURL        string       `json:"pullUrl,omitempty"`
+}
+
+// Primary actions.
+const (
+	PrimaryApprove = "approve"
+	PrimaryPreview = "preview"
+)
+
+// PrimaryView is the card's one primary action and the digest it is bound to.
+type PrimaryView struct {
+	Action string `json:"action"`
+	Label  string `json:"label"`
+	Digest string `json:"digest,omitempty"`
+}
+
+// RolesView names who works on the Molecule, from its Formula snapshot and its
+// recorded attempts; an absent value is not recorded.
+type RolesView struct {
+	Coding   string `json:"coding,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Reviewer string `json:"reviewer,omitempty"`
+}
+
+// PlanningCostView is the reported cost of the analysis attempts. USD is null
+// when none reported one; Partial when only some did.
+type PlanningCostView struct {
+	USD      *float64 `json:"usd"`
+	Reported int      `json:"reported"`
+	Attempts int      `json:"attempts"`
+	Partial  bool     `json:"partial"`
+}
+
+// Bounds of the plan in plain words.
+const (
+	maxPlanSummaryRunes = 1200
+	maxPlanReasonRunes  = 400
+	maxPlanPathRunes    = 300
+	maxPlanCommandRunes = 400
+	maxPlanFiles        = 200
+	maxPlanChecks       = 64
+	maxPlanAcceptance   = 64
+	maxPlanEvidence     = 64
+	maxPlanComponents   = 6
+	maxRoleRunes        = 80
+)
+
+// planText is untrusted plan text as one bounded plain line: redacted, controls
+// removed, ids replaced, digests shortened and timestamps cut to their date.
+func planText(x redactor, s string, limit int) string {
+	s = harness.ReviewDisplayText(redactSecrets(x.text(s)), 4*limit)
+	s = rawID.ReplaceAllStringFunc(s, func(id string) string {
+		if id[0] == 'a' {
+			return "an assay"
+		}
+		return "a Molecule"
+	})
+	s = longHex.ReplaceAllStringFunc(s, func(h string) string { return h[:7] + "…" })
+	s = isoTime.ReplaceAllString(s, "$1")
+	return harness.ReviewDisplayText(s, limit)
+}
+
+func moleculeView(x redactor, r molecule.Record, lane, activity string, g GateView, d *DeliveryState) *MoleculeView {
+	v := &MoleculeView{}
+	step, label, since, note := stepProgress(r, lane, activity, d)
+	merged := d.Published() && d.Lifecycle == "MERGED"
+	v.Current = step
+	for i, l := range StepLabels {
+		s := StepTodo
+		switch {
+		case i < step || merged:
+			s = StepDone
+		case i == step && lane == LaneBlocked:
+			s = StepFailed
+		case i == step:
+			s = StepCurrent
+		}
+		v.Steps = append(v.Steps, StepView{Label: l, State: s})
+	}
+	v.State = stateView(r, lane, activity, label, since, note, g, d)
+	if r.Readiness != nil && len(r.Readiness.Plans) > 0 {
+		v.Plan = planBrief(x, r)
+	}
+	v.Decision = decisionView(r, lane, activity, g, v.Plan)
+	f, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))
+	if err == nil {
+		v.Roles = roles(x, r, f)
+		if v.Plan != nil && v.Plan.BudgetMS == 0 {
+			b, _ := f.RoleBinding(formula.CodingHarness)
+			v.Plan.BudgetMS = b.EffectiveTimeoutMS()
+		}
+	} else {
+		v.Roles = roles(x, r, formula.Formula{})
+	}
+	v.PlanningCost = planningCost(r)
+	return v
+}
+
+// stateView is the pill: a gate first, then the lane.
+func stateView(r molecule.Record, lane, activity, label, since, note string, g GateView, d *DeliveryState) StateView {
+	switch {
+	case lane == LaneRetired:
+		return StateView{Label: "Retired", Tone: ToneNeutral}
+	case g.State == GateScope:
+		return StateView{Label: "Waiting for your approval", Tone: ToneNeeds}
+	case g.State == GateDelivery:
+		return StateView{Label: "Ready to publish", Tone: ToneNeeds}
+	case g.State == GatePublished && d != nil && d.Lifecycle == "MERGED":
+		return StateView{Label: "Merged", Tone: ToneMerged}
+	case g.State == GatePublished:
+		return StateView{Label: "Draft published", Tone: ToneMerged}
+	case lane == LaneBlocked:
+		return StateView{Label: "Blocked · " + strings.TrimSuffix(blockedReason(r), "."), Tone: ToneBlocked}
+	case lane == LaneRunning && activity == ActivityQueued:
+		return StateView{Label: "Queued for checks", Tone: ToneRunning}
+	case lane == LaneRunning:
+		return StateView{Label: label, Tone: ToneRunning, Since: since, Note: note}
+	case lane == LaneDecision:
+		return StateView{Label: "Waiting at a gate", Tone: ToneNeeds}
+	}
+	return StateView{Label: "Recorded", Tone: ToneNeutral}
+}
+
+// plannedAt is when the latest plan was proposed or amended, re-formatted, or ""
+// when no valid time is recorded for it.
+func plannedAt(s *readiness.State, digest string) string {
+	at := ""
+	for _, e := range s.Events {
+		if e.Digest == digest && e.Kind != "approved" {
+			at = e.At
+		}
+	}
+	return stepSince(at)
+}
+
+func planBrief(x redactor, r molecule.Record) *PlanBrief {
+	latest := r.Readiness.Plans[len(r.Readiness.Plans)-1]
+	p := latest.Plan
+	a := p.Analysis
+	b := &PlanBrief{Revision: p.Revision, PlannedAt: plannedAt(r.Readiness, latest.Digest), Summary: planText(x, a.Summary, maxPlanSummaryRunes), Questions: len(a.Questions), BudgetMS: max(p.HarnessTimeoutMS, 0),
+		Files: []PlanFileView{}, FilesTotal: len(a.Scope), CheckGroups: []CheckGroupView{}, ChecksTotal: len(a.Checks), Acceptance: []string{}, AcceptanceTotal: len(a.Acceptance), Evidence: []PlanEvidenceView{}, EvidenceTotal: len(p.Evidence), Components: []string{}}
+	if sha256Hex.MatchString(latest.Digest) {
+		b.Digest = latest.Digest
+	}
+	if p.OperatorNote != "" {
+		b.Note = planText(x, p.OperatorNote, maxPlanReasonRunes)
+	}
+	// Newness comes from the frozen base tree only, never from plan text.
+	var tree map[string]bool
+	if r.RepositoryEvidence != nil {
+		tree = map[string]bool{}
+		for _, f := range r.RepositoryEvidence.Files {
+			tree[f.Path] = true
+		}
+	}
+	components := map[string]bool{}
+	var order []string
+	for i, s := range a.Scope {
+		dir := path.Dir(s.Path)
+		if dir == "." {
+			dir = "repository root"
+		}
+		if !components[dir] {
+			components[dir] = true
+			order = append(order, dir)
+		}
+		if i >= maxPlanFiles {
+			continue
+		}
+		f := PlanFileView{Path: planText(x, s.Path, maxPlanPathRunes), Reason: planText(x, s.Reason, maxPlanReasonRunes)}
+		if tree != nil {
+			f.Change = ChangeEdit
+			if !tree[s.Path] {
+				f.Change = ChangeNew
+			}
+		}
+		b.Files = append(b.Files, f)
+	}
+	sort.Strings(order)
+	b.ComponentsTotal = len(order)
+	for _, c := range order[:min(len(order), maxPlanComponents)] {
+		b.Components = append(b.Components, planText(x, c, maxPlanPathRunes))
+	}
+	b.CheckGroups = checkGroups(x, p)
+	for i, c := range a.Acceptance {
+		if i == maxPlanAcceptance {
+			break
+		}
+		b.Acceptance = append(b.Acceptance, planText(x, c.Description, maxPlanReasonRunes))
+	}
+	for i, e := range p.Evidence {
+		if i == maxPlanEvidence {
+			break
+		}
+		b.Evidence = append(b.Evidence, PlanEvidenceView{ID: planText(x, e.ID, maxRoleRunes), Path: planText(x, e.Path, maxPlanPathRunes)})
+	}
+	return b
+}
+
+// The human names of check groups, in display order: the plan's own checks
+// first, then the Formula baseline.
+const (
+	GroupCandidate  = "New tests for this change"
+	GroupRegression = "Regression tests"
+	GroupSetup      = "Setup"
+	GroupFullSuite  = "Full test suite"
+	GroupVet        = "Go vet · gofmt"
+	GroupHygiene    = "Repository hygiene"
+	GroupBaseline   = "Other Formula checks"
+	GroupOther      = "Other checks"
+)
+
+var groupOrder = []string{GroupCandidate, GroupRegression, GroupSetup, GroupOther, GroupFullSuite, GroupVet, GroupHygiene, GroupBaseline}
+
+// checkGroupName names a check by what it runs: a Formula baseline check by its
+// command (go test, go vet or gofmt, the repository hygiene script), any other by
+// its category.
+func checkGroupName(c readiness.Check, baseline bool) string {
+	if !baseline {
+		switch c.Category {
+		case "candidate":
+			return GroupCandidate
+		case "regression":
+			return GroupRegression
+		case "setup":
+			return GroupSetup
+		}
+		return GroupOther
+	}
+	argv := c.Argv
+	has := func(part string) bool {
+		return slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, part) })
+	}
+	switch {
+	case len(argv) > 1 && path.Base(argv[0]) == "go" && argv[1] == "test":
+		return GroupFullSuite
+	case len(argv) > 1 && path.Base(argv[0]) == "go" && argv[1] == "vet", has("gofmt"):
+		return GroupVet
+	case has("check-repo-hygiene"):
+		return GroupHygiene
+	}
+	return GroupBaseline
+}
+
+func checkGroups(x redactor, p readiness.Plan) []CheckGroupView {
+	baseline := map[string]bool{}
+	for _, id := range p.FormulaBaseline {
+		baseline[id] = true
+	}
+	groups := map[string]*CheckGroupView{}
+	for i, c := range p.Analysis.Checks {
+		if i == maxPlanChecks {
+			break
+		}
+		name := checkGroupName(c, baseline[c.ID])
+		g := groups[name]
+		if g == nil {
+			g = &CheckGroupView{Name: name, Baseline: baseline[c.ID], Checks: []PlanCheckView{}}
+			groups[name] = g
+		}
+		check := PlanCheckView{ID: planText(x, c.ID, maxRoleRunes), Command: harness.ReviewDisplayText(redactSecrets(x.text(shellJoin(c.Argv))), maxPlanCommandRunes)}
+		if c.Dir != "" && c.Dir != "." {
+			check.Dir = planText(x, c.Dir, maxPlanPathRunes)
+		}
+		g.Checks = append(g.Checks, check)
+	}
+	out := []CheckGroupView{}
+	for _, name := range groupOrder {
+		if g := groups[name]; g != nil {
+			out = append(out, *g)
+		}
+	}
+	return out
+}
+
+// shellJoin quotes argv as a POSIX shell would read it, for display only.
+func shellJoin(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, a := range argv {
+		if a != "" && strings.IndexFunc(a, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./=:,+@%", r))
+		}) < 0 {
+			parts = append(parts, a)
+			continue
+		}
+		parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
+	}
+	return strings.Join(parts, " ")
+}
+
+// decisionView is the one decision this page offers for the gate, in plain words.
+func decisionView(r molecule.Record, lane, activity string, g GateView, plan *PlanBrief) DecisionView {
+	switch g.State {
+	case GateScope:
+		if plan == nil || plan.Digest != g.Digest {
+			break
+		}
+		return DecisionView{Kind: DecisionScope, Title: "Approve this plan?",
+			Copy:    "Forgecell will code " + countWords(plan.FilesTotal, "file", "files") + ", then run " + countWords(plan.ChecksTotal, "check", "checks") + " on its own. Nothing is published until you approve the draft PR.",
+			Primary: &PrimaryView{Action: PrimaryApprove, Label: "Approve plan & start coding", Digest: g.Digest}, RequestChanges: true}
+	case GateDelivery:
+		return DecisionView{Kind: DecisionDelivery, Title: "Ready to publish?",
+			Copy:    "Preview the exact change first. Publishing creates a draft pull request only; it never merges or deploys.",
+			Primary: &PrimaryView{Action: PrimaryPreview, Label: "Preview delivery"}}
+	case GatePublished:
+		text := "The draft PR is published. Merge it on GitHub; Forgecell does not verify merges or production."
+		if g.Lifecycle == "MERGED" {
+			text = "The receipt last observed the pull request merged on GitHub. Forgecell does not verify production."
+		}
+		return DecisionView{Kind: DecisionPublished, Title: "Nothing to do", Copy: text, PullURL: g.URL}
+	}
+	d := DecisionView{Kind: DecisionNone, Title: "Nothing to do", Copy: "This Molecule is recorded and has no open gate."}
+	switch lane {
+	case LaneRunning:
+		d.Title, d.Copy = "Nothing needs you now", "Forgecell is working within the approved scope. It comes back to your Inbox when it needs you."
+		if activity == ActivityQueued {
+			d.Copy = "It is queued for checks: another Molecule in this Lab holds the verification slot."
+		}
+	case LaneBlocked:
+		d.Title, d.Copy = "Blocked", blockedReason(r)+" Failure evidence stays in the timeline."
+		if hint, ok := molecule.NotAuthenticated(r); ok {
+			d.Copy = harness.ReviewDisplayText(hint, maxReasonRunes) + ", then start this Issue again."
+		}
+	case LaneDecision:
+		d.Title, d.Copy = "Waiting at a gate", "This page does not perform this gate. Decide with the forgecell CLI; the engine checks every decision again."
+	case LaneRetired:
+		d.Title, d.Copy = "Retired", "Every record is kept. The loop never resumes it and may start a fresh Molecule for its Issue."
+	}
+	return d
+}
+
+// countWords is a count with its noun: "1 file", "5 files".
+func countWords(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+// roles names the coding agent and model and the reviewer: the latest coding
+// attempt's recorded model first, else the Formula's pinned one.
+func roles(x redactor, r molecule.Record, f formula.Formula) RolesView {
+	text := func(s string) string { return harness.ReviewDisplayText(x.text(s), maxRoleRunes) }
+	coding, _ := f.RoleBinding(formula.CodingHarness)
+	v := RolesView{Coding: text(coding.Binding), Model: text(coding.Model)}
+	for i := len(r.HarnessAttempts) - 1; i >= 0; i-- {
+		if m := r.HarnessAttempts[i].Model; m != "" && m != "model unpinned" {
+			v.Model = text(m)
+			break
+		}
+	}
+	if _, ok, err := f.ReviewAtom(); err == nil && ok {
+		if review, bound := f.RoleBinding(formula.ReviewHarness); bound {
+			v.Reviewer = text(review.Binding)
+		}
+	}
+	return v
+}
+
+// planningCost sums the analysis attempts' reported costs; nothing reported is
+// null, never zero.
+func planningCost(r molecule.Record) *PlanningCostView {
+	if len(r.AnalysisAttempts) == 0 {
+		return nil
+	}
+	v := &PlanningCostView{Attempts: len(r.AnalysisAttempts)}
+	sum := 0.0
+	for _, a := range r.AnalysisAttempts {
+		if a.Usage == nil || a.Usage.TotalCostUSD == nil {
+			continue
+		}
+		c := *a.Usage.TotalCostUSD
+		if math.IsNaN(c) || math.IsInf(c, 0) || c < 0 {
+			continue
+		}
+		v.Reported++
+		sum += c
+	}
+	if v.Reported > 0 && !math.IsInf(sum, 0) {
+		v.USD = &sum
+	}
+	v.Partial = v.Reported < v.Attempts
+	return v
 }
 
 // ledgerETag fingerprints the names, sizes and modification times of the Lab's
