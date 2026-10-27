@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"github.com/DanielNetzer/forgecell/lab/internal/forgesync"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -28,6 +29,7 @@ import (
 //	GET  /api/loop                                            → this UI's loop, its last report and any Lab loop
 //	POST /api/molecules/{id}/stop  {}                         → cancels this UI's engine call for it
 //	POST /api/molecules/{id}/retire {"reason"}                → molecule.Retire (retire.go)
+//	POST /api/retire-closed        {"count","digest"}         → molecule.Retire for each closed-Issue attempt (bulk_retire.go)
 //
 // A started run counts only once a ledger for its Issue appears, and a stop only
 // once the ledger no longer reports the Molecule running; the job's own outcome
@@ -69,6 +71,8 @@ func driveRoute(path string) (id, action string, ok bool) {
 		return "", "loop/start", true
 	case "/api/loop/stop":
 		return "", "loop/stop", true
+	case "/api/retire-closed":
+		return "", "retire-closed", true
 	}
 	rest, found := strings.CutPrefix(path, "/api/molecules/")
 	if !found {
@@ -101,7 +105,7 @@ func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action strin
 		return
 	}
 	if h.opts.Demo {
-		if action == "retire" {
+		if action == "retire" || action == "retire-closed" {
 			h.refuseGate(w, http.StatusNotFound, "sample", "sample data cannot be retired; nothing was written")
 			return
 		}
@@ -111,6 +115,7 @@ func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action strin
 	var run runRequest
 	var loop loopRequest
 	var retire retireRequest
+	var closed retireClosedRequest
 	var body any = &emptyRequest{}
 	switch action {
 	case "run":
@@ -119,6 +124,8 @@ func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action strin
 		body = &loop
 	case "retire":
 		body = &retire
+	case "retire-closed":
+		body = &closed
 	}
 	if decodeGate(w, r, body) != nil {
 		h.refuseGate(w, http.StatusBadRequest, "invalid", "send one small JSON object with exactly the action's fields")
@@ -133,6 +140,8 @@ func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action strin
 		h.stopLoop(w)
 	case "retire":
 		h.retireMolecule(w, id, retire)
+	case "retire-closed":
+		h.retireClosed(w, r, closed)
 	default:
 		h.stopMolecule(w, id)
 	}
@@ -705,6 +714,10 @@ type LoopView struct {
 	Report        *LoopReportView `json:"report,omitempty"`
 	// LabLoop is any loop running in this Lab, whoever started it.
 	LabLoop LabLoopView `json:"labLoop"`
+	// DefaultSelect and DefaultSelectNote are the Start loop form's first
+	// selector and its plain explanation.
+	DefaultSelect     string `json:"defaultSelect"`
+	DefaultSelectNote string `json:"defaultSelectNote"`
 }
 
 // LabLoopView is the Lab's loop marker as molecule.ReadLoopStatus read it.
@@ -730,6 +743,81 @@ type LabLoopView struct {
 	// named, by number with their phase (planning).
 	Intake  []LabLoopIntakeView `json:"intake"`
 	CanStop bool                `json:"canStop"`
+	// OwnerText names who started the loop and where to stop it, in plain words.
+	OwnerText string `json:"ownerText,omitempty"`
+}
+
+// ownerText is the plain words naming a running loop's owner, its selector and
+// where it is stopped.
+func ownerText(v LabLoopView) string {
+	with := ""
+	if v.Select != "" {
+		with = " with " + v.Select
+	}
+	switch v.Owner {
+	case LoopOwnerThisUI:
+		return "Started from this Lab UI" + with
+	case LoopOwnerAnotherUI:
+		return "Started from another Lab UI" + with + " · stop it there"
+	case LoopOwnerTerminal:
+		return "Started from the command line" + with + " · stop it there"
+	}
+	return ""
+}
+
+// The Start loop form's default selector is milestone:<active milestone>: the
+// milestone with the most open Issues of the active Formula's repository, ties
+// going to the milestone whose lowest open Issue number is lowest, read from
+// the sync engine's open-Issue listing (#242) and never fetched for this. It is
+// oldest only when the listing is current, complete and names no milestone,
+// and "" when the listing is unknown, stale or truncated: the form then asks
+// for a milestone rather than guessing one.
+const (
+	// DefaultOldestNote explains the oldest selector wherever it is offered.
+	DefaultOldestNote = "Oldest: oldest open Issue, any milestone."
+	noMilestoneNote   = DefaultOldestNote + " This repository has no open milestone with open Issues."
+	unknownNote       = "The active milestone is unknown until GitHub Issue state is current: open the Issues view, or enter a milestone. " + DefaultOldestNote
+)
+
+// activeMilestoneSelect is the default selector and its plain explanation for
+// one current open-Issue listing; a nil snapshot gives "" and unknownNote.
+func activeMilestoneSelect(snap *forgesync.Snapshot) (string, string) {
+	if snap == nil || snap.Listing.Truncated {
+		return "", unknownNote
+	}
+	type count struct {
+		n      int
+		lowest int64
+	}
+	counts := map[string]*count{}
+	for _, issue := range snap.Listing.Issues {
+		if issue.Milestone == "" || (issue.State != "" && issue.State != forgesync.IssueOpen) {
+			continue
+		}
+		c := counts[issue.Milestone]
+		if c == nil {
+			c = &count{lowest: issue.Number}
+			counts[issue.Milestone] = c
+		}
+		c.n++
+		if issue.Number < c.lowest {
+			c.lowest = issue.Number
+		}
+	}
+	best, bestCount := "", (*count)(nil)
+	for title, c := range counts {
+		selector := intake.SelectMilestone + ":" + title
+		if _, err := intake.ParseSelector(selector); err != nil || len(selector) > maxSelectBytes || !validTitle(selector) {
+			continue
+		}
+		if bestCount == nil || c.n > bestCount.n || (c.n == bestCount.n && (c.lowest < bestCount.lowest || (c.lowest == bestCount.lowest && title < best))) {
+			best, bestCount = title, c
+		}
+	}
+	if bestCount == nil {
+		return intake.SelectOldest, noMilestoneNote
+	}
+	return intake.SelectMilestone + ":" + best, "Milestone " + best + ": the open milestone with the most open Issues (" + strconv.Itoa(bestCount.n) + "). " + DefaultOldestNote
 }
 
 // LabLoopIntakeView is an Issue in flight by number.
@@ -796,6 +884,7 @@ func labLoopView(lab molecule.LoopMarkerState, ownToken string, stoppable bool) 
 		}
 	}
 	v.InFlightTruncated = v.InFlightTruncated || s.InFlightTruncated
+	v.OwnerText = ownerText(v)
 	return v
 }
 
@@ -843,6 +932,7 @@ func (h *handler) loopView() LoopView {
 		own = l.token
 	}
 	v := LoopView{State: l.state, Category: l.category, Error: l.message, Reason: l.reason, Select: l.selector, MaxConcurrent: l.max, Limit: maxLoopConcurrent, LabLoop: labLoopView(lab, own, l.running && !l.drain)}
+	v.DefaultSelect, v.DefaultSelectNote = activeMilestoneSelect(h.forge.currentSnapshot(h.syncRepository()))
 	if v.State == "" {
 		v.State = "idle"
 	}

@@ -3,12 +3,18 @@
 // writes are the human gates in gates.go (scope approval and draft publication),
 // Request changes on a waiting plan (amend.go, which records a revision and never
 // approves it), the drive actions in drive.go (start intake, start or stop the
-// loop, stop a Molecule this UI runs) and retiring one Molecule (retire.go), each
-// a POST that needs the session cookie, the exact Origin and the per-tab session
-// header, and each performed by the engine, which validates digests, locks and
-// receipts. The one read that runs a process is a Molecule's diff size
-// (diffsize.go): git diff --numstat through the engine, bounded and cached by
-// tree. It never merges, deploys, recovers or changes permissions.
+// loop, stop a Molecule this UI runs), retiring one Molecule (retire.go), the
+// next actions of a blocked Molecule (actions.go: accept by-design failures,
+// approve a requested scope change, re-run checks and recover, each recording a
+// revision or an interruption and never approving) and retiring the attempts
+// for closed Issues (bulk_retire.go), each a POST that needs the session cookie,
+// the exact Origin and the per-tab session header, and each performed by the
+// engine, which validates digests, locks and receipts. The reads that run a
+// process are a Molecule's diff size (diffsize.go), git diff --numstat through
+// the engine, bounded and cached by tree, and its next actions, whose
+// accept-failures preview reads the retained tree through git. It never
+// merges, deploys or changes permissions, and recovers only on an explicit
+// confirmation.
 package ui
 
 import (
@@ -197,6 +203,14 @@ type handler struct {
 	// forge is the read-only GitHub sync behind /api/issues and /api/sync; tests
 	// replace its fetcher and clock.
 	forge *issueSync
+	// recover and deriveActions are the engine calls behind the next actions
+	// (actions.go): forgecell recover and molecule.NextActions. Tests may replace
+	// them.
+	recover       func(ctx context.Context, lab, id, digest string, confirmedStopped bool) (molecule.Record, error)
+	deriveActions func(ctx context.Context, lab string, r molecule.Record, preview bool, timeout time.Duration) []molecule.NextAction
+	// closedDeadline, when a test sets it, is the bulk retire's overall deadline
+	// in place of bulkRetireTimeout (bulk_retire.go).
+	closedDeadline func() (context.Context, context.CancelFunc)
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -303,7 +317,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil)}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), recover: molecule.Recover, deriveActions: molecule.NextActions}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -336,8 +350,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// GET serves every read; POST is served only on the gate and drive routes.
 	gateID, gateAction, gate := gateRoute(r.URL.Path)
 	driveID, driveAction, drive := driveRoute(r.URL.Path)
-	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive)) {
-		if gate || drive {
+	actionID, actionKind, action := actionRoute(r.URL.Path)
+	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive || action)) {
+		if gate || drive || action {
 			header.Set("Allow", http.MethodPost)
 		} else {
 			header.Set("Allow", http.MethodGet)
@@ -370,6 +385,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.drive(w, r, driveID, driveAction)
 			return
 		}
+		if action {
+			if !moleculeID.MatchString(actionID) {
+				h.refuseGate(w, http.StatusBadRequest, "invalid", "invalid Molecule id")
+				return
+			}
+			if h.opts.Demo {
+				h.refuseGate(w, http.StatusNotFound, "sample", "sample data has no actions; nothing was written")
+				return
+			}
+			h.moleculeAction(w, r, actionID, actionKind)
+			return
+		}
 		if h.refuseRetiredScope(w, gateID, gateAction) {
 			return
 		}
@@ -391,6 +418,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.issues(w, r)
 	case path == "/api/sync":
 		h.syncStates(w, r)
+	case path == "/api/retire-closed":
+		h.retireClosedStatus(w, r)
 	case strings.HasPrefix(path, "/api/molecules/"):
 		h.molecule(w, r, strings.TrimPrefix(path, "/api/molecules/"))
 	case staticFiles[path] != "":
@@ -491,10 +520,11 @@ func (h *handler) lab(w http.ResponseWriter) {
 		return
 	}
 	id := formula.ActiveIdentity(h.opts.LabDir)
-	// Retiring and Request changes need no source checkout; starting work does.
-	actions := []string{RetireAction, AmendAction}
+	// Retiring, the next actions and Request changes need no source checkout;
+	// starting work does.
+	actions := []string{RetireAction, UnblockAction, BulkRetireAction, AmendAction}
 	if h.opts.SourceRoot != "" {
-		actions = append(append([]string{}, DriveActions...), AmendAction)
+		actions = append(append([]string{}, DriveActions...), UnblockAction, BulkRetireAction, AmendAction)
 	}
 	h.json(w, http.StatusOK, LabView{Gates: Gates, Actions: actions, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable, Operator: operatorView(h.opts.Operator)})
 }
@@ -541,7 +571,7 @@ func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) 
 		h.refuse(w, http.StatusBadRequest, "invalid Molecule id")
 		return
 	}
-	if view != "" && view != "evidence" && view != "ledger" && view != "job" && view != "stats" {
+	if view != "" && view != "evidence" && view != "ledger" && view != "job" && view != "stats" && view != "actions" {
 		h.refuse(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -585,6 +615,10 @@ func (h *handler) molecule(w http.ResponseWriter, r *http.Request, rest string) 
 		h.json(w, http.StatusOK, text)
 	case "stats":
 		h.json(w, http.StatusOK, h.stats(record))
+	case "actions":
+		ctx, cancel := context.WithTimeout(r.Context(), previewTimeout)
+		defer cancel()
+		h.json(w, http.StatusOK, h.actionsView(ctx, record))
 	default:
 		d := project(h.opts.LabDir, record, h.receipts, withYAML)
 		if d.View != nil {
