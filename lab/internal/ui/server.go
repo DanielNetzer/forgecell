@@ -7,7 +7,8 @@
 // next actions of a blocked Molecule (actions.go: accept by-design failures,
 // approve a requested scope change, re-run checks and recover, each recording a
 // revision or an interruption and never approving) and retiring the attempts
-// for closed Issues (bulk_retire.go), Set up your Lab in a checkout with no ready Lab (setup.go), each a POST that needs the session cookie,
+// for closed Issues (bulk_retire.go), Set up your Lab in a checkout with no ready Lab (setup.go) and
+// creating, approving or dismissing a Formula proposal (formula_proposals.go), each a POST that needs the session cookie,
 // the exact Origin and the per-tab session header, and each performed by the
 // engine, which validates digests, locks and receipts. The reads that run a
 // process are a Molecule's diff size (diffsize.go), git diff --numstat through
@@ -31,6 +32,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
+	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"io"
 	"io/fs"
@@ -71,6 +73,14 @@ type Options struct {
 	// Setup, when set, serves Set up your Lab (setup.go) until the Lab has an
 	// approved Formula; every other API route is refused until then.
 	Setup *SetupOptions
+	// Launcher is the Forgecell launcher a rebind saves, as forgecell init picks
+	// it and ValidateLauncher accepts it; without it the Formula view says the
+	// launcher is unknown and offers no rebind.
+	Launcher string
+	// Home is the managed Forgecell home (FORGECELL_HOME or ~/.forgecell); the
+	// Formula view names a build under its releases or development tree as
+	// managed and any other as outside it. It is never served.
+	Home string
 }
 
 // Server is a UI listening on 127.0.0.1.
@@ -226,6 +236,14 @@ type handler struct {
 	// closedDeadline, when a test sets it, is the bulk retire's overall deadline
 	// in place of bulkRetireTimeout (bulk_retire.go).
 	closedDeadline func() (context.Context, context.CancelFunc)
+	// prepare is the engine call behind a Formula proposal, onboarding.Prepare;
+	// formulaRunner and formulaCandidates are its process runner and discovered
+	// harnesses (nil: the engine's own). formulaMu keeps one Formula write from
+	// this UI at a time. Tests replace all three seams.
+	prepare           func(context.Context, onboarding.InitOptions) (onboarding.Outcome, error)
+	formulaRunner     onboarding.Runner
+	formulaCandidates []onboarding.Candidate
+	formulaMu         sync.Mutex
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -334,7 +352,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -364,19 +382,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusForbidden, "cross-site request refused")
 		return
 	}
-	// GET serves every read; POST is served only on the gate, drive and setup
-	// routes.
+	// GET serves every read; POST is served only on the gate, drive, setup, action and
+	// Formula proposal routes.
 	gateID, gateAction, gate := gateRoute(r.URL.Path)
 	driveID, driveAction, drive := driveRoute(r.URL.Path)
 	setupAction, setup := setupRoute(r.URL.Path)
 	actionID, actionKind, action := actionRoute(r.URL.Path)
-	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive || setup || action)) {
-		if gate || drive || setup || action {
+	formulaID, formulaAction, formulaWrite := formulaRoute(r.URL.Path)
+	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive || setup || action || formulaWrite)) {
+		if gate || drive || setup || action || formulaWrite {
 			header.Set("Allow", http.MethodPost)
 		} else {
 			header.Set("Allow", http.MethodGet)
 		}
-		h.refuse(w, http.StatusMethodNotAllowed, "only GET is served here; the only writes are the gate, drive, setup and action POST routes")
+		h.refuse(w, http.StatusMethodNotAllowed, "only GET is served here; the only writes are the gate, drive, setup, action and Formula proposal POST routes")
 		return
 	}
 	if launch {
@@ -425,6 +444,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.moleculeAction(w, r, actionID, actionKind)
 			return
 		}
+		if formulaWrite {
+			h.formulaPost(w, r, formulaID, formulaAction)
+			return
+		}
 		if h.refuseRetiredScope(w, gateID, gateAction) {
 			return
 		}
@@ -438,6 +461,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.lab(w)
 	case path == "/api/loop":
 		h.loopStatus(w)
+	case path == "/api/formula":
+		h.formulaGet(w)
 	case strings.HasPrefix(path, "/api/runs/"):
 		h.runStatus(w, strings.TrimPrefix(path, "/api/runs/"))
 	case path == "/api/molecules":

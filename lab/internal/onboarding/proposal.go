@@ -51,6 +51,19 @@ type Proposal struct {
 	ReviewedAt       string `json:"reviewedAt,omitempty"`
 }
 
+// now is the clock behind a proposal's createdAt and reviewedAt, which the
+// proposal identity covers; SetClock replaces it in tests.
+var now = time.Now
+
+// SetClock replaces the proposal clock and returns a function that restores it.
+// Only tests call it, so a UI-created and a CLI-created proposal can be compared
+// byte for byte.
+func SetClock(clock func() time.Time) (restore func()) {
+	previous := now
+	now = clock
+	return func() { now = previous }
+}
+
 func hash(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
 func fingerprint(dir string) (string, error) {
 	cfg, err := os.ReadFile(filepath.Join(dir, "lab.json"))
@@ -183,7 +196,7 @@ func saveWithEvidence(dir, yaml string, evidence *Repository, reports ...*Bindin
 	if err != nil {
 		return Proposal{}, err
 	}
-	p := Proposal{ConfigBefore: cfgHash, YAML: yaml, YAMLHash: f.SHA256, Baseline: baseline, TargetBefore: before, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Status: "pending"}
+	p := Proposal{ConfigBefore: cfgHash, YAML: yaml, YAMLHash: f.SHA256, Baseline: baseline, TargetBefore: before, CreatedAt: now().UTC().Format(time.RFC3339Nano), Status: "pending"}
 	if cfgHash != "absent" {
 		active, e := formula.Inspect(dir, "")
 		if e != nil {
@@ -281,7 +294,7 @@ func Review(dir, id, decision string) (p Proposal, err error) {
 	}
 	if decision == "dismiss" {
 		p.Status = "dismissed"
-		p.ReviewedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		p.ReviewedAt = now().UTC().Format(time.RFC3339Nano)
 		return p, saveProposal(dir, p)
 	}
 	if p.ActiveIDBefore != "" && p.ActiveIDBefore != f.ID {
@@ -309,7 +322,7 @@ func Review(dir, id, decision string) (p Proposal, err error) {
 		return p, err
 	}
 	p.Status = "approved"
-	p.ReviewedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	p.ReviewedAt = now().UTC().Format(time.RFC3339Nano)
 	if err = saveProposal(dir, p); err != nil {
 		return p, err
 	}

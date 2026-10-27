@@ -183,6 +183,19 @@ func runUIChoosing(ctx context.Context, args []string, defaultLab string, choice
 			options.Resources = guard
 		}
 		options.SourceRoot = cwd
+		// A Formula rebind from the UI saves the launcher init --rebind would, and
+		// only one that resolves to a build this user owns under the managed
+		// Forgecell home; otherwise the Formula view says the launcher is unknown.
+		launcher := initLauncher()
+		if launcher == "" {
+			launcher, _ = os.Executable()
+		}
+		if root, e := resolvedCheckoutRoot(); e == nil {
+			if home, e := forgecellHome(root); e == nil {
+				options.Home = home
+				options.Launcher = ui.ValidateLauncher(home, launcher)
+			}
+		}
 		// The avatar's name; demo mode never reads git.
 		options.Operator = operatorName(ctx, cwd)
 	}
