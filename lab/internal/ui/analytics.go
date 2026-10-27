@@ -30,6 +30,12 @@ type AnalyticsView struct {
 	Models          BreakdownView   `json:"models"`
 	Cost            CostView        `json:"cost"`
 	CostPerMergedPR UnavailableView `json:"costPerMergedPr"`
+	// The Insights view (#261): additive, built in analytics_models.go.
+	Summary   InsightsSummaryView `json:"summary"`
+	ByModel   ByModelView         `json:"byModel"`
+	Weekly    WeeklyView          `json:"weekly"`
+	TimeSplit TimeSplitView       `json:"timeSplit"`
+	Planning  PlanningView        `json:"planning"`
 }
 
 // DurationView is one time measure summed over the Molecules that recorded it:
@@ -118,6 +124,8 @@ type moleculeFacts struct {
 	activeOK           bool
 	activeMS           int64
 	attempts           []attemptFact
+	// split is where the Molecule's wall-clock went (#261); see enrichFacts.
+	split timeSplitFact
 }
 
 // attemptFact is one harness attempt: its group, whether it recorded usage, and
@@ -128,6 +136,19 @@ type attemptFact struct {
 	usage                 bool
 	cost                  *float64
 	basis                 string
+	// The by-model facts (#261): the usage entry's kind and attempt id, which
+	// enrichFacts pairs with the ledger's attempt, and what that pairing filled.
+	kind, id          string
+	role              string
+	firstCheck        string
+	startOK, wallOK   bool
+	startMS, wallMS   int64
+	tokens            harness.TokenCategories
+	checks            string
+	findingsOK        bool
+	high, medium, low int
+	questionsOK       bool
+	questions         int
 }
 
 // analyzeRecord derives the analytics facts of one Molecule. Every attempt in
@@ -168,7 +189,7 @@ func analyzeRecord(lab string, r molecule.Record) *moleculeFacts {
 			}
 			review++
 		}
-		a := attemptFact{usage: u.Reported, cost: u.CostUSD, basis: harness.ReviewDisplayText(x.text(u.CostBasis), maxGroupLabel)}
+		a := attemptFact{usage: u.Reported, cost: reportedCost(u.CostUSD), basis: harness.ReviewDisplayText(x.text(u.CostBasis), maxGroupLabel), kind: u.Kind, id: u.ID}
 		a.harness, a.harnessState = groupLabel(x, binding)
 		switch {
 		case u.Reported && len(u.EffectiveModels) > 0:
@@ -183,6 +204,7 @@ func analyzeRecord(lab string, r molecule.Record) *moleculeFacts {
 		}
 		f.attempts = append(f.attempts, a)
 	}
+	enrichFacts(r, f)
 	return f
 }
 
@@ -370,7 +392,14 @@ type groupSum struct {
 
 // buildAnalytics derives the analytics of one inventory. It only reads inv, which
 // concurrent requests may share.
-func buildAnalytics(inv inventory) AnalyticsView {
+func buildAnalytics(inv inventory) AnalyticsView { return buildAnalyticsAt(inv, analyticsNow()) }
+
+// analyticsNow is the clock that decides "this week"; tests replace it.
+var analyticsNow = time.Now
+
+// buildAnalyticsAt is buildAnalytics with "this week" taken from now, so tests
+// need no wall clock.
+func buildAnalyticsAt(inv inventory, now time.Time) AnalyticsView {
 	list := inv.list
 	out := AnalyticsView{Sample: list.Sample, ETag: list.ETag, Complete: list.Complete, Truncated: list.Truncated, Diagnostics: list.Diagnostics, Molecules: len(list.Molecules), Counts: list.Counts}
 	if out.Diagnostics == nil {
@@ -444,6 +473,7 @@ func buildAnalytics(inv inventory) AnalyticsView {
 		Coverage: fmt.Sprintf("cost reported for %d of %d harness attempts", cost.reported, attempts),
 		Note:     "Only costs the harness reported are summed. A missing cost is unknown, never zero."}
 	out.CostPerMergedPR = UnavailableView{State: "unavailable", Reason: "No verified merge attribution exists; a draft publication receipt does not qualify."}
+	buildInsights(&out, inv, now)
 	return out
 }
 
