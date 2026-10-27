@@ -22,6 +22,9 @@ type issueSync struct {
 	// repository is the active Formula's repository; it never comes from a
 	// request.
 	repository func(lab string) string
+	// now is the cache's clock, so Start intake can tell a snapshot read after
+	// it began from an older one.
+	now        func() time.Time
 	receiptsMu sync.Mutex
 	receipts   map[string]publishedEntry
 }
@@ -30,7 +33,10 @@ func newIssueSync(fetcher forgesync.Fetcher, now func() time.Time) *issueSync {
 	if fetcher == nil {
 		fetcher = forgesync.NewGH()
 	}
-	return &issueSync{cache: forgesync.NewCache(fetcher, now), repository: func(lab string) string { return formula.ActiveIdentity(lab).Repository }, receipts: map[string]publishedEntry{}}
+	if now == nil {
+		now = time.Now
+	}
+	return &issueSync{cache: forgesync.NewCache(fetcher, now), now: now, repository: func(lab string) string { return formula.ActiveIdentity(lab).Repository }, receipts: map[string]publishedEntry{}}
 }
 
 // published is the pull request number and commit of one published receipt.

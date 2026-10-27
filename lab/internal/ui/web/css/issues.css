@@ -1,10 +1,73 @@
-/* Issues: the coming-next placeholder until the view is built. */
+/* Issues: every open Issue with its one sync state, after the approved mockup
+   (docs/design/ui/redesign-2026-10-26/Issues.html). The shared .btn, .seg and
+   .drive-field controls come from base.css and loop.css. */
 .placeholder { padding: 28px; }
 .placeholder h1 { font-size: 28px; letter-spacing: -.02em; }
-.placeholder-summary { margin-top: 6px; font-size: 15px; color: var(--needs-ink); font-weight: 500; }
 .placeholder-note { margin-top: 12px; max-width: 62ch; font-size: 14px; color: #56695e; }
 
+.issues { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.issues-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.issues-head h1 { font-size: 32px; font-weight: 500; letter-spacing: -.02em; }
+.issues-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 14px; color: #56695e; overflow-wrap: anywhere; }
+.sync-counts { margin-top: 4px; font-size: 13px; color: #3e5448; font-variant-numeric: tabular-nums; }
+.sync-counts:empty { display: none; }
+.issues-tools { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.segmented.issues-filters { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; }
+.issues-filters .seg { padding: 0 12px; white-space: nowrap; touch-action: manipulation; }
+.seg-count { color: #56695e; font-variant-numeric: tabular-nums; }
+.issues-fields { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.issues-search { flex: 2 1 240px; }
+.issues-submit { flex: none; touch-action: manipulation; }
+
+.issues-table { padding: 0; overflow: hidden; }
+.issue-row { display: grid; grid-template-columns: 72px minmax(0, 1fr) 120px 200px 150px; gap: 16px; align-items: center; min-height: 64px; padding: 10px 24px; border-bottom: 1px solid #1e4d3b0f; }
+.issue-row:last-child { border-bottom: 0; }
+.issue-head { min-height: 44px; font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: #56695e; border-bottom: 1px solid #1e4d3b14; }
+.issue-number { font-size: 14px; color: #56695e; font-variant-numeric: tabular-nums; }
+.issue-number a { color: inherit; }
+.issue-main { display: grid; gap: 4px; min-width: 0; }
+.issue-title { font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+.issue-labels { display: flex; gap: 6px; flex-wrap: wrap; }
+.issue-labels:empty { display: none; }
+.issue-chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #e6eef5; color: #2c4d66; overflow-wrap: anywhere; }
+.issue-milestone { font-size: 13px; color: #3e5448; overflow-wrap: anywhere; }
+.issue-state { display: grid; gap: 4px; min-width: 0; }
+.issue-pill { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: #3e5448; overflow-wrap: anywhere; }
+.issue-pill[data-tone=needs] { color: var(--needs-ink); }
+.issue-pill[data-tone=needs] .state-dot { background: #d99a2b; }
+.issue-pill[data-tone=running] .state-dot { background: var(--teal); }
+.issue-pill[data-tone=blocked] { color: var(--danger-ink); }
+.issue-pill[data-tone=blocked] .state-dot { background: #b4492f; }
+.issue-pill[data-tone=merged] .state-dot { background: #2d5b46; }
+.issue-notes { font-size: 12px; color: #56695e; overflow-wrap: anywhere; }
+.issue-notes:empty { display: none; }
+.issue-act { display: flex; justify-content: flex-end; }
+.issue-action { touch-action: manipulation; }
+.issue-reason { font-size: 13px; color: #56695e; text-align: right; overflow-wrap: anywhere; }
+#issues-refresh[aria-disabled=true] { cursor: progress; opacity: .7; }
+
+@media (max-width: 900px) {
+  .issue-head { display: none; }
+  .issue-row { grid-template-columns: 56px minmax(0, 1fr); gap: 8px 12px; padding: 14px 16px; }
+  .issue-milestone, .issue-state, .issue-act { grid-column: 2; }
+  .issue-act { justify-content: flex-start; }
+  .issue-reason { text-align: left; }
+}
 @media (max-width: 720px) {
   .placeholder { padding: 20px; }
   .placeholder h1 { font-size: 22px; }
+  .issues-head h1 { font-size: 24px; }
+  .issue-row { grid-template-columns: minmax(0, 1fr); }
+  .issue-milestone, .issue-state, .issue-act { grid-column: 1; }
+  .issue-action, .issues-submit { width: 100%; }
+}
+@media (pointer: coarse) {
+  .issues-filters .seg, .issue-action, .issues-submit, #issues-refresh, .issue-number a { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .issue-action, .issues-filters .seg { transition: none; }
+}
+@media (forced-colors: active) {
+  .issues-table, .issue-chip { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
+  .issue-pill .state-dot { forced-color-adjust: none; background: CanvasText; }
 }

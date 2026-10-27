@@ -4,11 +4,25 @@
 // anymore? block, each behind a confirmation that names the Molecule. Controls
 // are built once and patched in place, so a poll never rebuilds a form being
 // typed in, and the one live region changes only when its text does.
-import { $, el, fill, state, ctx, newGate, RETIRED, PULL_URL, notRecorded, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show } from './core.js';
+import { $, el, fill, state, ctx, newGate, RETIRED, PULL_URL, notRecorded, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show, syncOf } from './core.js';
 import { submitGate, gateMessage, fetchJob, readBack, rerenderGate, jobText } from './core-gates.js';
 
 // mv is the Molecule view's state, shared by its sub-modules.
 export const mv = { controls: null, steps: null, from: 'work', planKey: null, statsKey: null, statsToken: 0, stats: null, lastDigest: null, replaced: false, timelineId: null, timelineDirty: false };
+
+// mergedOf is the observed merge of a Molecule the sync files as merged, or
+// null: only the server's bucket and its forgecellMerge decide.
+export function mergedOf(d) {
+  const s = d && syncOf(d.id);
+  const m = s && s.bucket === 'merged' ? s.forgecellMerge : null;
+  return m && typeof m === 'object' && Number.isInteger(m.pr) ? m : null;
+}
+// mergeText is an observed merge in words: "Merged · 0123456 · today at 6:46 PM
+// · production unverified". Forgecell never verifies production.
+export function mergeText(m) {
+  const commit = typeof m.commit === 'string' && /^[0-9a-f]{7,64}$/.test(m.commit) ? m.commit.slice(0, 7) : '';
+  return ['Merged', commit, whenText(m.at), 'production unverified'].filter(Boolean).join(' · ');
+}
 
 // approveScope posts the exact digest the plan shows; the approval shows as
 // committed only once the ledger read back records it.
@@ -285,8 +299,10 @@ export function renderDecision(d) {
   const digest = readOnly ? '' : boundDigest(d);
   const scope = dec.kind === 'scope' && Boolean(digest);
   const delivery = !readOnly && dec.kind === 'delivery' && Boolean(d.gate && d.gate.state === 'delivery');
-  setText(c.heading, readOnly ? 'Sample data' : plainText(dec.title, 'Nothing to do'));
-  setText(c.copy, readOnly ? 'Sample data has no gates. Nothing here writes.' : plainText(dec.copy, ''));
+  // A Molecule GitHub shows merged has its gate and ship resolved: nothing to do.
+  const merged = !scope && !delivery ? mergedOf(d) : null;
+  setText(c.heading, readOnly ? 'Sample data' : merged ? 'Nothing to do · merged on GitHub' : plainText(dec.title, 'Nothing to do'));
+  setText(c.copy, readOnly ? 'Sample data has no gates. Nothing here writes.' : merged ? mergeText(merged) + '.' : plainText(dec.copy, ''));
 
   // A plan replaced while it is open says so before it can be approved.
   if (scope) {

@@ -4,9 +4,17 @@
 // no phase code, id, digest or timestamp is turned into text here. Polling
 // patches entries in place, keyed by Molecule id: an entry already shown keeps
 // its node and has only its changed text and attributes updated.
-import { $, el, fill, state, molecules, live, inboxOf, newestFirst, needsYou, needsYouText, moleculeHref, setText, setAttr, plainText, count, counted, ago, dateTitle, STEPS, withAttempt } from './core.js';
+import { $, el, fill, state, molecules, live, inboxOf, newestFirst, needsYou, needsYouText, moleculeHref, setText, setAttr, plainText, count, counted, ago, dateTitle, STEPS, withAttempt, syncOf, syncNotes, closedInProgress, inHistory, historyFromURL, historyRow, followHistory, syncCounts, syncCountsText } from './core.js';
 
-const CARD_KINDS = { scope: ['is-needs', '◇'], publish: ['is-ready', '✓'], blocked: ['is-blocked', '!'] };
+const CARD_KINDS = { scope: ['is-needs', '◇'], publish: ['is-ready', '✓'], blocked: ['is-blocked', '!'], closed: ['is-needs', '◇'] };
+
+// closedView is the Needs-you card of a row-14 Molecule (its Issue closed while
+// it was live): the server's label and fixed notes, never an Inbox kind of its own.
+function closedView(m) {
+  if (!closedInProgress(m)) return null;
+  const s = syncOf(m.id);
+  return { kind: 'closed', title: s.label, summary: syncNotes(s).join(' · '), action: 'Open' };
+}
 // Bounds: at most this many cards or rows each, and the last five recorded.
 const MAX_ENTRIES = 20, MAX_RECENT = 5;
 
@@ -75,7 +83,8 @@ function createCard() {
     el('a', { class: 'btn btn-primary inbox-action', dataset: { slot: 'action' } }));
 }
 function updateCard(node, m, v) {
-  const [cls, icon] = CARD_KINDS[v.kind];
+  v = closedView(m) || v;
+  const [cls, icon] = CARD_KINDS[v.kind] || CARD_KINDS.scope;
   setAttr(node, 'class', 'inbox-card glass ' + cls);
   setText(slot(node, 'icon'), icon);
   setText(slot(node, 'badge'), plainText(v.title, 'Needs you'));
@@ -125,8 +134,9 @@ function updateRecent(node, m, v) {
   if (node.dataset.molecule !== m.id) node.dataset.molecule = m.id;
   setText(slot(node, 'number'), numberText(m));
   setText(slot(node, 'title'), titleText(m));
-  const when = ago(m.finishedAt || m.startedAt);
-  setText(slot(node, 'meta'), plainText(v.title, 'Draft published') + (when ? ' · ' + when : ''));
+  const when = ago(m.finishedAt || m.startedAt), s = syncOf(m.id);
+  // GitHub's state, when it was read, names the outcome: Merged, Draft PR open, …
+  setText(slot(node, 'meta'), (s && s.checked ? s.label : plainText(v.title, 'Draft published')) + (when ? ' · ' + when : ''));
   setAttr(node, 'title', dateTitle(m.finishedAt || m.startedAt));
 }
 
@@ -148,14 +158,22 @@ function firstName() {
 
 function renderInbox() {
   const counts = (state.list && state.list.counts) || {};
-  const entries = molecules().filter((m) => live(m) && inboxOf(m));
-  const kind = (k) => entries.filter((m) => inboxOf(m).kind === k);
+  // Live work first: merged and closed history collapses into one row, shown
+  // only with ?history=1; a Molecule under Needs you is listed only there.
+  const history = molecules().filter((m) => inHistory(m) && inboxOf(m)).sort(newestFirst);
+  const entries = molecules().filter((m) => live(m) && inboxOf(m) && !inHistory(m));
+  const kind = (k) => entries.filter((m) => inboxOf(m).kind === k && !needs.includes(m));
   const needs = needsYou();
   const running = kind('progress').sort(newestFirst);
   const recent = kind('recorded').sort(newestFirst).slice(0, MAX_RECENT);
   patchList($('#inbox-needs'), needs.slice(0, MAX_ENTRIES), createCard, updateCard);
   patchList($('#inbox-progress'), running.slice(0, MAX_ENTRIES), createRow, updateRow);
   patchList($('#inbox-recent'), recent, createRecent, updateRecent);
+  const showHistory = historyFromURL() && history.length > 0;
+  historyRow($('#inbox-history'), history);
+  patchList($('#inbox-history-list'), showHistory ? history.slice(0, MAX_ENTRIES) : [], createRecent, updateRecent);
+  $('#inbox-history-list').hidden = !showHistory;
+  setText($('#inbox-sync-counts'), syncCountsText());
   $('#inbox-needs-empty').hidden = needs.length > 0;
   $('#inbox-progress-empty').hidden = running.length > 0;
   $('#inbox-recent-empty').hidden = recent.length > 0;
@@ -164,7 +182,10 @@ function renderInbox() {
 
   const name = firstName();
   setText($('#inbox-title'), 'Good ' + partOfDay(new Date().getHours()) + (name ? ', ' + name : ''));
-  const waiting = needs.length, inFlight = counts.running || 0, blocked = counts.blocked || 0, drafts = counts.finished || 0;
+  // Once /api/sync is loaded the headline counts its buckets, as the counts
+  // header does; the ledger lanes stand in only until then.
+  const served = syncCounts(), lane = (k, b) => served ? count(served[b]) : counts[k] || 0;
+  const waiting = needs.length, inFlight = lane('running', 'running'), blocked = lane('blocked', 'blocked'), drafts = lane('finished', 'draft-pr');
   // Merged counts need verified merge attribution; until then drafts are counted.
   const parts = [
     waiting ? needsYouText(waiting) : 'Nothing needs you',
@@ -182,8 +203,9 @@ function renderInbox() {
   note.hidden = complete;
 }
 
-// The Inbox mounts on its data-view-panel; its markup stays in index.html.
-export function mount(root, ctx) {}
+// The Inbox mounts on its data-view-panel; its markup stays in index.html. The
+// history row toggles ?history=1 through history.pushState.
+export function mount(root, ctx) { $('#inbox-history').addEventListener('click', followHistory); }
 
 // update patches the Inbox from the list and the Lab in place.
 export function update(state) { renderInbox(); }

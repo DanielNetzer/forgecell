@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"github.com/DanielNetzer/forgecell/lab/internal/forgesync"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -126,6 +127,9 @@ func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action strin
 	}
 	switch action {
 	case "run":
+		if h.refuseIssueNotOpen(r.Context(), w, run.Issue) {
+			return
+		}
 		h.startRun(w, run)
 	case "loop/start":
 		h.startLoop(w, loop)
@@ -194,6 +198,79 @@ func (h *handler) startRun(w http.ResponseWriter, req runRequest) {
 	}
 	h.json(w, http.StatusAccepted, h.runView(req.Issue, job.snapshot(&h.jobs.mu)))
 }
+
+// refuseIssueNotOpen refuses Start intake unless GitHub, read again now, and the
+// ledgers make the Issue startable by the sync's one rule: its state is built
+// exactly as /api/issues builds the row (queue summary, forgesync.SyncState,
+// ledger completeness, staleness), so only rows 1, 5, 10 and 15 start. An Issue
+// closed since the Issues view was shown, unreadable, not read, read from a
+// failed sync or read by a request that went away is never started. It checks
+// only when the active Formula names a repository, as /api/issues does; an
+// invalid Issue number is left to startRun. The refusals startRun makes without
+// GitHub (no source checkout, a resource floor, a running Molecule) come first,
+// so a start that cannot run never reads GitHub. The refresh is one shared sync
+// of the same Want the sync routes read, plus this Issue, so their snapshot
+// stays whole.
+func (h *handler) refuseIssueNotOpen(ctx context.Context, w http.ResponseWriter, issue int64) bool {
+	if issue < 1 || issue > maxIssueNumber {
+		return false
+	}
+	repo := h.syncRepository()
+	if repo == "" {
+		return false
+	}
+	if h.sourceMissing(w) || h.belowFloor(w) {
+		return true
+	}
+	if h.activeMolecule(issue) {
+		h.refuseGate(w, http.StatusConflict, "busy", "the ledgers already show a running Molecule for this Issue; nothing was started")
+		return true
+	}
+	start := h.forge.now()
+	work := h.syncWork(repo)
+	want := work.want
+	want.Issues = append(append([]int64{}, want.Issues...), issue)
+	res := h.forge.cache.Get(ctx, want, true)
+	// A forced Get that joined a flight begun before this request returns that
+	// older read: one more forced Get reads GitHub after start.
+	if ctx.Err() == nil && res.Snapshot != nil && res.Snapshot.FetchedAt.Before(start) {
+		res = h.forge.cache.Get(ctx, want, true)
+	}
+	found := res.Snapshot.Issue(issue)
+	switch {
+	case ctx.Err() != nil || !res.Current() || found == nil || res.Snapshot.FetchedAt.Before(start):
+		// A request that went away gets the previous snapshot back, never a
+		// current read: it is not checked.
+		h.refuseWith(w, http.StatusConflict, RefusedIssueNotChecked, "GitHub state for this Issue could not be checked just now; nothing was started", "Refresh the Issues view, then start intake again once GitHub state is current")
+	case !found.Found:
+		h.refuseWith(w, http.StatusConflict, RefusedIssueUnavailable, "GitHub does not show this Issue in the active Formula's repository; nothing was started", "Check the Issue on GitHub; a transferred or deleted Issue cannot be started here")
+	case found.State != forgesync.IssueOpen:
+		h.refuseWith(w, http.StatusConflict, RefusedIssueClosed, "the Issue is closed on GitHub; nothing was started", "Reopen the Issue on GitHub if the work is still wanted, then Refresh and start intake again")
+	default:
+		queue := molecule.ReadQueueInventory(h.opts.LabDir)
+		if !queue.Complete || !work.list.Complete {
+			h.refuseWith(w, http.StatusConflict, RefusedInventoryIncomplete, "some of the Lab's ledgers could not be read, so no Issue can be started; nothing was started", "Fix or remove the unreadable ledgers the Work view names, then start intake again")
+			return true
+		}
+		summary := queue.Summarize(repo, issue)
+		state := forgesync.SyncState(found, res.Snapshot.PRs, forgesync.Work{Molecules: work.byIssue[issue], SummaryStartable: summary.Startable()})
+		if state.Startable {
+			return false
+		}
+		h.refuseWith(w, http.StatusConflict, RefusedIssueNotStartable, "Forgecell already tracks work for this Issue, so a fresh start is not allowed; nothing was started", "Open the Issue's Molecule from the Issues view to see what it needs")
+	}
+	return true
+}
+
+// Refusal categories of Start intake when the sync does not make the Issue
+// startable.
+const (
+	RefusedIssueClosed         = "issue-closed"
+	RefusedIssueUnavailable    = "issue-unavailable"
+	RefusedIssueNotChecked     = "issue-not-checked"
+	RefusedIssueNotStartable   = "issue-not-startable"
+	RefusedInventoryIncomplete = "inventory-incomplete"
+)
 
 func active(status string) bool { return status == "running" || status == "allocating" }
 

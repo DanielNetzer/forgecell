@@ -1,7 +1,7 @@
 // ---- Work: grid, filters and search -------------------------------------------
 // The contribution-style Molecule grid under Work, its lane bar, search and
 // tooltip. A cell opens the Molecule view, which ctx.openMolecule owns.
-import { $, el, fill, add, state, LANES, RETIRED, notRecorded, molecules, laneOf, live, laneLabel, cells } from './core.js';
+import { $, el, fill, add, state, LANES, RETIRED, notRecorded, molecules, laneOf, live, laneLabel, cells, syncOf, inHistory, historyFromURL, historyRow, followHistory, syncCountsText } from './core.js';
 
 // The lane bar. Paused is not a filter: the engine has no pause semantics.
 const FILTERS = [
@@ -10,14 +10,18 @@ const FILTERS = [
 ];
 
 function statusLabel(m) {
-  return laneLabel(m) + ' · ' + notRecorded(m.status) + (m.phase ? ' · ' + m.phase : '');
+  const s = syncOf(m.id);
+  return laneLabel(m) + ' · ' + notRecorded(m.status) + (m.phase ? ' · ' + m.phase : '') + (s && s.checked ? ' · GitHub: ' + s.label : '');
 }
 
+// Under All, merged and closed history collapses into one row unless
+// ?history=1; a lane filter shows its lane whole.
 function matches(m) {
   const inLane = state.filter === 'all' ? live(m) : m.lane === state.filter;
+  const collapsed = state.filter === 'all' && !historyFromURL() && inHistory(m);
   const terms = state.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
   const haystack = ('#' + m.number + ' ' + (m.title || '') + ' ' + (m.formulaId || '') + ' ' + m.id).toLowerCase();
-  return inLane && terms.every((term) => haystack.includes(term));
+  return inLane && !collapsed && terms.every((term) => haystack.includes(term));
 }
 
 function renderGrid() {
@@ -28,6 +32,7 @@ function renderGrid() {
   $('#shelf-count').textContent = (sample ? 'Sample data · ' : '') + all.filter(live).length + ' Molecules · ' +
     Object.entries(LANES).map(([id, lane]) => (counts[id] || 0) + ' ' + lane.short).join(' · ') +
     (counts[RETIRED] ? ' · ' + counts[RETIRED] + ' retired (not counted)' : '');
+  $('#shelf-sync-counts').textContent = syncCountsText();
   renderNote(list);
   const cubes = $('#cubes');
   fill(cubes, all.map((m, i) => {
@@ -90,6 +95,8 @@ function applyFilter() {
   empty.hidden = shown.length > 0;
   empty.textContent = molecules().length === 0 ? 'No Molecules are recorded in this Lab yet.' : state.query.trim() ? 'No matching Molecules in this filter. Clear search or choose All.' : 'No Molecules in this lane.';
   $('#clear-search').hidden = !state.query;
+  const history = molecules().filter(inHistory);
+  historyRow($('#work-history'), state.filter === 'all' ? history : []);
   const label = (FILTERS.find(([id]) => id === state.filter) || FILTERS[0])[1];
   $('#search-status').textContent = state.query.trim() ? shown.length + ' matching ' + (shown.length === 1 ? 'Molecule' : 'Molecules') + ' · ' + (state.filter === 'all' ? 'all lanes' : label) : '';
   const outside = $('#outside-filter');
@@ -131,6 +138,7 @@ export function mount(root, ctx) {
 
   $('#molecule-search').addEventListener('input', (e) => { hideTip(); state.query = e.target.value; applyFilter(); });
   $('#clear-search').addEventListener('click', clearSearch);
+  $('#work-history').addEventListener('click', followHistory);
   $('#molecule-search').addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.query) { e.preventDefault(); clearSearch(); } });
 
   const cubes = $('#cubes');

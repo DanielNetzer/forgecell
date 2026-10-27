@@ -83,7 +83,7 @@ func demoIssues() IssuesView {
 // with sample GitHub state. Finished sample Molecules cycle through a merged
 // pull request with a closed Issue, a draft pull request and a closed one.
 func demoSync() SyncView {
-	out := SyncView{Sample: true, Repository: demoRepo, Freshness: Freshness{Checked: true, FetchedAt: "2026-10-26T12:00:00Z"}, Molecules: map[string]forgesync.DisplayState{}, Counts: map[string]int{}}
+	out := SyncView{Sample: true, Repository: demoRepo, Freshness: Freshness{Checked: true, FetchedAt: "2026-10-26T12:00:00Z"}, Molecules: map[string]forgesync.DisplayState{}, Counts: map[string]int{}, NeedsYou: map[string]bool{}}
 	for _, s := range demoList().Molecules {
 		m := forgesync.Molecule{ID: s.ID, Lane: s.Lane, Step: s.CurrentAtom}
 		issue := demoIssue(s.Number, s.Title, forgesync.IssueOpen, "")
@@ -104,6 +104,9 @@ func demoSync() SyncView {
 		out.Molecules[s.ID] = d
 		if d.Bucket != forgesync.BucketRetired {
 			out.Counts[d.Bucket]++
+		}
+		if needsYou(d) {
+			out.NeedsYou[s.ID] = true
 		}
 	}
 	return out

@@ -4,6 +4,8 @@
 .shelf > * { position: relative; }
 .shelf-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .shelf-count { font-size: 13px; color: var(--muted); margin-top: 5px; }
+/* The Work grid's collapsed merged and closed history row (?history=1). */
+#work-history { margin: 10px 0 0; }
 
 /* Lane bar: one pill of segments; the active segment is a raised paper thumb. */
 .grid-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 13px; }

@@ -59,6 +59,7 @@
     <div>
       <h1 id="inbox-title">Good day</h1>
       <p id="inbox-counts" class="inbox-counts"></p>
+      <p id="inbox-sync-counts" class="sync-counts"></p>
     </div>
     <a class="btn btn-secondary" href="?view=issues" data-view="issues"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Pick an Issue</a>
   </div>
@@ -80,18 +81,42 @@
     <h2 id="recent-title" class="inbox-heading">Recently recorded</h2>
     <div id="inbox-recent" class="inbox-recent"></div>
     <p id="inbox-recent-empty" class="inbox-empty" hidden>No draft PR is recorded yet.</p>
+    <a id="inbox-history" class="history-row" href="?view=inbox&amp;history=1" aria-controls="inbox-history-list" aria-expanded="false" hidden></a>
+    <div id="inbox-history-list" class="inbox-recent" hidden></div>
   </section>
 </section>
 
-<section id="view-issues" class="view glass placeholder" data-view-panel="issues" aria-labelledby="issues-title" hidden>
-  <h1 id="issues-title">Issues</h1>
-  <p class="placeholder-note">Coming next: every open Issue, including ones never started, with one action per row. Until then, start intake on an Issue number with Start intake in the side panel.</p>
+<section id="view-issues" class="view issues" data-view-panel="issues" aria-labelledby="issues-title" hidden>
+  <div class="issues-head">
+    <div>
+      <h1 id="issues-title" tabindex="-1">Issues</h1>
+      <p class="issues-sub"><span id="issues-fresh">GitHub state not loaded yet</span> <button type="button" id="issues-refresh" class="btn btn-ghost btn-small">Refresh</button></p>
+      <p id="issues-counts" class="sync-counts"></p>
+    </div>
+    <button type="button" id="issues-loop" class="btn btn-secondary" hidden>Run the loop on these</button>
+  </div>
+  <p id="issues-live" class="sr-only" role="status" aria-live="polite"></p>
+  <p id="issues-note" class="inventory-note" hidden></p>
+  <form id="issues-form" class="issues-tools" role="search" aria-label="Filter Issues" novalidate>
+    <div id="issues-filters" class="segmented issues-filters" role="group" aria-label="Forgecell state"></div>
+    <div class="issues-fields">
+      <div class="drive-field"><label class="field-label" for="issues-label">Label</label><input type="text" id="issues-label" name="label" maxlength="200" autocomplete="off" spellcheck="false" placeholder="bug…"></div>
+      <div class="drive-field"><label class="field-label" for="issues-milestone">Milestone</label><input type="text" id="issues-milestone" name="milestone" maxlength="200" autocomplete="off" spellcheck="false" placeholder="v1…"></div>
+      <div class="drive-field issues-search"><label class="field-label" for="issues-q">Search</label><input type="search" id="issues-q" name="q" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Search by number or title…"></div>
+      <button type="submit" class="btn btn-secondary issues-submit">Search</button>
+    </div>
+  </form>
+  <div class="glass issues-table" role="table" aria-label="Open Issues">
+    <div class="issue-row issue-head" role="row"><span role="columnheader">Issue</span><span role="columnheader">Title</span><span role="columnheader">Milestone</span><span role="columnheader">Forgecell</span><span role="columnheader" class="issue-act">Action</span></div>
+    <div id="issues-rows" role="rowgroup"></div>
+  </div>
+  <p id="issues-empty" class="inbox-empty" hidden></p>
 </section>
 
 <div id="view-work" class="view" data-view-panel="work" hidden>
 <section class="glass shelf" aria-labelledby="shelf-title">
   <div class="shelf-head">
-    <div><h1 id="shelf-title">Inside your Lab.</h1><p id="shelf-count" class="shelf-count"></p></div>
+    <div><h1 id="shelf-title">Inside your Lab.</h1><p id="shelf-count" class="shelf-count"></p><p id="shelf-sync-counts" class="sync-counts"></p></div>
   </div>
   <p id="inventory-note" class="inventory-note" role="status" hidden></p>
   <div class="grid-tools">
@@ -105,6 +130,7 @@
   </div>
   <span id="search-status" class="search-status" role="status" aria-live="polite"></span>
   <p id="outside-filter" class="outside-filter" role="status" hidden></p>
+  <a id="work-history" class="history-row" href="?view=work&amp;history=1" aria-expanded="false" hidden></a>
   <div class="culture-scroll" role="region" aria-label="Molecule grid, scroll horizontally for more Molecules" tabindex="0">
     <div class="grid-axis" aria-hidden="true"><span>Earlier Molecules</span><span>Recent Molecules</span></div>
     <div id="cubes" class="cubes" role="group" aria-label="Molecules, one cell per Molecule"></div>
@@ -127,6 +153,7 @@
       <span id="mv-planned" class="mv-planned" hidden></span>
     </div>
     <h1 id="mv-title" class="mv-title" tabindex="-1"></h1>
+    <p id="mv-sync" class="mv-sync" hidden><span id="mv-sync-issue"></span><span id="mv-sync-merge" hidden></span><span id="mv-sync-pr" hidden></span><span id="mv-sync-note" class="mv-sync-note" hidden></span></p>
   </div>
   <ol id="mv-steps" class="mv-steps" aria-label="Progress"></ol>
   <p id="mv-live" class="sr-only" role="status" aria-live="polite"></p>

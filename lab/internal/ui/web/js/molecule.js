@@ -3,8 +3,8 @@
 // back, the state pill, the seven steps, the plan in plain words and a sticky
 // decision card with one primary action, bound to the exact digest the plan
 // shows. The plan, the decision card and the Timeline are its sub-modules.
-import { $, add, el, fill, state, ctx, newGate, ISSUE_URL, laneLabel, cells, molecules, api, failed, keepFocus, VIEWS, navigate, showView, moleculeHref, moleculeFromURL, setText, setAttr, plainText, whenText, dateTitle, withAttempt, STEPS } from './core.js';
-import { mv, ensureMoleculeView, renderDecision, renderRoles, loadStats } from './molecule-decision.js';
+import { $, add, el, fill, state, ctx, newGate, ISSUE_URL, laneLabel, cells, molecules, api, failed, keepFocus, VIEWS, navigate, showView, moleculeHref, moleculeFromURL, setText, setAttr, plainText, whenText, dateTitle, dayText, withAttempt, STEPS, syncOf, syncNotes } from './core.js';
+import { mv, ensureMoleculeView, renderDecision, renderRoles, loadStats, mergedOf, mergeText } from './molecule-decision.js';
 import { renderPlan, copyDigest } from './molecule-plan.js';
 import { renderTimeline, mountTimeline } from './molecule-timeline.js';
 
@@ -93,6 +93,7 @@ function renderLoadingDetail(id) {
   $('#mv-no-plan').hidden = true;
   $('#mv-steps').hidden = true;
   $('#mv-planned').hidden = true;
+  $('#mv-sync').hidden = true;
   for (const s of ['#run-origin', '#molecule-totals', '#atoms', '#readiness', '#attempts']) fill($(s));
 }
 
@@ -132,8 +133,14 @@ function crumbText(d) {
   const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number + ' · ' : '';
   return number + ({ scope: 'Review plan', delivery: 'Review & publish' }[kind] || 'Molecule');
 }
+// SYNC_TONES are the pill tones of the server's sync buckets.
+const SYNC_TONES = { running: 'running', decision: 'needs', blocked: 'blocked', 'draft-pr': 'running', merged: 'merged' };
 // pillText is the state in plain words, with the minutes of a running step.
+// Once /api/sync serves the Molecule, the pill is the server's one DisplayState
+// label, as on the Issues view, the Inbox and the Work grid.
 function pillText(d) {
+  const sync = syncOf(d.id);
+  if (sync) return sync.label;
   const s = d.view && d.view.state;
   if (!s || typeof s.label !== 'string' || !s.label) return laneLabel(d);
   return withAttempt(s.label, s.since, s.note);
@@ -141,11 +148,11 @@ function pillText(d) {
 
 function renderHeader(d) {
   const c = ensureMoleculeView();
-  const v = d.view || {}, s = v.state || {};
+  const v = d.view || {}, s = v.state || {}, sync = syncOf(d.id);
   setText($('#mv-title'), (d.sample ? '[Sample] ' : '') + plainText(d.issue && d.issue.title, 'Untitled'));
   setText($('#mv-crumb'), crumbText(d));
   renderBack();
-  setAttr($('#mv-state'), 'data-tone', TONES.includes(s.tone) ? s.tone : 'neutral');
+  setAttr($('#mv-state'), 'data-tone', sync ? SYNC_TONES[sync.bucket] || 'neutral' : TONES.includes(s.tone) ? s.tone : 'neutral');
   setText($('#mv-state-text'), pillText(d));
   const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number : '';
   const url = d.issue && typeof d.issue.url === 'string' && ISSUE_URL.test(d.issue.url) ? d.issue.url : '';
@@ -160,18 +167,47 @@ function renderHeader(d) {
   setText(planned, when ? '· planned ' + when + ' from the Issue as written then' : '');
   setAttr(planned, 'title', when ? dateTitle(plan.plannedAt) : '');
   planned.hidden = !when;
-  renderSteps(v);
+  renderSteps(v, Boolean(mergedOf(d)));
+  renderIssueSync(d);
+}
+
+// CHECKS are the pull request check texts the server sends; nothing else shows.
+const CHECKS = ['passing', 'failing', 'pending', 'none'];
+const RECORDED_STATE = /^[A-Z_]{1,20}$/;
+// renderIssueSync patches the header's GitHub line from /api/sync: the live
+// Issue state, or the state recorded at intake when GitHub was not checked; an
+// observed merge; the pull request's checks and review; the server's notes.
+function renderIssueSync(d) {
+  const s = syncOf(d.id), line = $('#mv-sync');
+  line.hidden = !state.sync;
+  if (!state.sync) return;
+  const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number : 'Issue';
+  const recorded = d.issue && RECORDED_STATE.test(d.issue.state || '') ? d.issue.state : 'OPEN';
+  const at = dayText(d.startedAt);
+  setText($('#mv-sync-issue'), s && s.checked
+    ? number + ' · ' + (s.closedAt && dayText(s.closedAt) ? 'closed ' + dayText(s.closedAt) : s.label)
+    : number + ' · ' + recorded + ' at intake' + (at ? ' (' + at + ')' : '') + ' · GitHub not checked');
+  const merged = mergedOf(d), merge = $('#mv-sync-merge');
+  setText(merge, merged ? mergeText(merged) : '');
+  merge.hidden = !merged;
+  const pr = s && s.pr && typeof s.pr === 'object' && Number.isInteger(s.pr.number) ? s.pr : null, prLine = $('#mv-sync-pr');
+  setText(prLine, pr ? ['PR #' + pr.number + (pr.draft ? ' · draft' : ''), 'checks ' + (CHECKS.includes(pr.checks) ? pr.checks : 'none'), plainText(pr.review, '')].filter(Boolean).join(' · ') : '');
+  prLine.hidden = !pr;
+  const note = $('#mv-sync-note'), notes = s ? syncNotes(s).join(' · ') : '';
+  setText(note, notes);
+  note.hidden = !notes;
 }
 
 // renderSteps marks each of the seven steps from the server's states, with
-// aria-current on the current one.
-function renderSteps(v) {
+// aria-current on the current one. A Molecule merged on GitHub has every step,
+// its gate and ship included, resolved.
+function renderSteps(v, merged) {
   const steps = Array.isArray(v.steps) && v.steps.length === STEPS.length ? v.steps : null;
   $('#mv-steps').hidden = !steps;
   if (!steps) return;
   mv.steps.forEach((li, i) => {
-    const s = steps[i] && STEP_STATES.includes(steps[i].state) ? steps[i].state : 'todo';
-    const current = i === v.current;
+    const s = merged ? 'done' : steps[i] && STEP_STATES.includes(steps[i].state) ? steps[i].state : 'todo';
+    const current = !merged && i === v.current;
     setAttr(li, 'class', 'mv-step is-' + s + (current ? ' is-now' : ''));
     if (current) setAttr(li, 'aria-current', 'step');
     else if (li.hasAttribute('aria-current')) li.removeAttribute('aria-current');
@@ -220,12 +256,19 @@ function rememberFrom(from) {
   try { history.replaceState(Object.assign({}, history.state, { from: mv.from }), ''); } catch (error) { /* the breadcrumb falls back to Work */ }
 }
 
+// renderMoleculeSync patches the open Molecule's header and decision card when
+// GitHub state changes without a ledger change.
+function renderMoleculeSync() {
+  const d = state.detail;
+  if (d && !$('#selected').hidden) keepFocus(() => { renderHeader(d); renderDecision(d); });
+}
+
 // The Molecule view mounts on #selected, inside the Work panel. It registers
 // the calls other modules make: opening a Molecule, following the URL, reading
 // a detail back after a gate, re-rendering the decision card and closing the
 // view.
 export function mount(root, ctx) {
-  Object.assign(ctx, { openMolecule, restoreSelection, loadDetail, renderDecision, overview });
+  Object.assign(ctx, { openMolecule, restoreSelection, loadDetail, renderDecision, overview, renderMoleculeSync });
   $('#mv-tabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) chooseTab(b.dataset.tab, false); });
   $('#mv-tabs').addEventListener('keydown', (e) => {
     const b = e.target.closest('[data-tab]');

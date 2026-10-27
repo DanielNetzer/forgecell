@@ -14,6 +14,9 @@
 .mv-title { margin-top: 12px; font-size: 32px; font-weight: 500; letter-spacing: -.02em; line-height: 1.2; text-wrap: balance; overflow-wrap: anywhere; }
 .mv-title:focus-visible { outline-offset: 4px; }
 .mv-issue a { color: var(--forest); }
+/* The live GitHub line: Issue state, observed merge, PR checks, server notes. */
+.mv-sync { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 13px; color: #3e5448; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.mv-sync-note { color: var(--needs-ink); }
 .mv-planned { color: #6b7f72; font-variant-numeric: tabular-nums; }
 .state-pill { display: inline-flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 12px; border-radius: 999px; background: #eef0e6; color: #3e5448; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .state-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #9fb3a6; }

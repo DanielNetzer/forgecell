@@ -46,8 +46,42 @@ async function poll() {
     keepFocus(renderList);
     if (previous && previous !== state.etag) loadLab().catch(failed);
     if (previous !== state.etag) loadAnalytics();
+    if (previous !== state.etag) loadSync(false);
     molecule.update(state);
   } catch (error) { failed(error); } finally { state.polling = false; }
+}
+
+// ---- GitHub sync --------------------------------------------------------------
+// /api/sync, then /api/issues, one load in flight at a time. Only Refresh asks
+// for ?refresh=1, and only on the first request: the second reads the cache the
+// first just filled, so one Refresh reads GitHub once. A response older than the
+// newest load is dropped.
+async function loadSync(refresh) {
+  if (state.syncPending || state.sessionLost) return;
+  state.syncPending = true;
+  const token = ++state.syncToken;
+  ctx.renderSync();
+  try {
+    const res = await api('/api/sync' + (refresh ? '?refresh=1' : ''));
+    if (!res.ok) throw new Error('sync ' + res.status);
+    const sync = await res.json();
+    const more = await api('/api/issues');
+    if (!more.ok) throw new Error('issues ' + more.status);
+    const issues = await more.json();
+    if (token !== state.syncToken) return;
+    state.sync = sync;
+    state.issues = issues;
+  } catch (error) { failed(error); } finally {
+    if (token === state.syncToken) state.syncPending = false;
+    ctx.renderSync();
+  }
+}
+
+// renderSync fans GitHub state out to every surface that shows it.
+function renderSync() {
+  if (state.list) keepFocus(renderList);
+  issues.update(state);
+  ctx.renderMoleculeSync();
 }
 
 // Analytics share the list's ETag; a response older than the newest request is
@@ -145,7 +179,8 @@ function renderOperator(operator) {
 // ---- Mount, route and poll ------------------------------------------------
 // Each view mounts on its existing markup: the five views on their
 // data-view-panel, the Molecule view on #selected under Work and the loop on
-// the side panel's #drive-slot.
+// the side panel's #drive-slot. The Issues view's Refresh calls ctx.loadSync.
+Object.assign(ctx, { loadSync, renderSync });
 for (const [view, root] of [
   [work, $('[data-view-panel="work"]')],
   [molecule, $('#selected')],
@@ -163,6 +198,8 @@ document.addEventListener('click', (e) => {
   navigate(link.dataset.view, true);
 });
 window.addEventListener('popstate', () => { showView(viewFromURL()); ctx.restoreSelection(); });
+// Back and Forward also move the Issues filters and the history toggle.
+window.addEventListener('popstate', renderSync);
 document.addEventListener('click', (e) => {
   const link = e.target.closest('a[data-molecule]');
   if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -190,6 +227,9 @@ setInterval(poll, 5000);
 // An unchanged list answers 304, so the Inbox's elapsed and relative times are
 // patched on their own interval.
 setInterval(() => { if (!document.hidden && state.list) inbox.update(state); }, 30000);
+// GitHub state changes without a ledger change; the server's cache bounds the
+// reads to one per TTL however often this asks.
+setInterval(() => { if (!document.hidden && !state.sessionLost) loadSync(false); }, 60000);
 // The Lab header also changes without a ledger change, as when a Formula is
 // activated, so it is refreshed on its own slower interval.
 setInterval(() => { if (!document.hidden && !state.sessionLost) loadLab().catch(failed); }, 30000);
