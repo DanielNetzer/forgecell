@@ -60,7 +60,7 @@ export const LANES = {
 export const RETIRED = 'retired';
 export const ALL_LANES = Object.assign({}, LANES, { retired: { label: 'Retired', short: 'retired', symbol: '–', cls: 'other' } });
 
-export const state = { lab: null, list: null, etag: null, analytics: null, analyticsEtag: null, analyticsToken: 0, filter: 'all', query: '', selectedId: null, detail: null, detailText: null, atomIndex: null, detailToken: 0, labToken: 0, pollToken: 0, polling: false, noteKey: null, sessionLost: false, gate: newGate(null) };
+export const state = { lab: null, list: null, etag: null, sync: null, issues: null, syncPending: false, syncToken: 0, analytics: null, analyticsEtag: null, analyticsToken: 0, filter: 'all', query: '', selectedId: null, detail: null, detailText: null, atomIndex: null, detailToken: 0, labToken: 0, pollToken: 0, polling: false, noteKey: null, sessionLost: false, gate: newGate(null) };
 
 // gate is the selected Molecule's gate state: one request in flight at most,
 // the last preview shown, and the last job read back from the server.
@@ -150,9 +150,94 @@ function timeOf(m) { const t = Date.parse(m.finishedAt || m.startedAt); return N
 export function newestFirst(a, b) { return timeOf(b) - timeOf(a) || (a.id < b.id ? -1 : 1); }
 // needsYou is the one definition of what needs you: the Molecules shown under
 // Needs you (scope gate, ready to publish, blocked), newest first. The headline,
-// the live region, the nav badge and the resident all count it.
+// the live region, the nav badge and the resident all count it. Once /api/sync
+// is loaded its needsYou flags decide (row 14 included); the ledger kinds stand
+// in only until then.
 export function needsYou() {
-  return molecules().filter((m) => { const v = live(m) && inboxOf(m); return Boolean(v) && NEEDS_KINDS.includes(v.kind); }).sort(newestFirst);
+  const served = servedNeedsYou();
+  return molecules().filter((m) => {
+    const v = live(m) && inboxOf(m);
+    if (served) return Boolean(v) && Object.prototype.hasOwnProperty.call(served, m.id) && served[m.id] === true;
+    return Boolean(v) && NEEDS_KINDS.includes(v.kind);
+  }).sort(newestFirst);
+}
+// servedNeedsYou is /api/sync's needsYou map, or null before it is loaded.
+function servedNeedsYou() {
+  const n = state.sync && state.sync.needsYou;
+  return n && typeof n === 'object' && !Array.isArray(n) ? n : null;
+}
+// syncCounts is /api/sync's bucket counts, or null before it is loaded.
+export function syncCounts() {
+  const c = state.sync && state.sync.counts;
+  return c && typeof c === 'object' && !Array.isArray(c) ? c : null;
+}
+
+// ---- GitHub sync (#242) -------------------------------------------------------
+// state.sync is GET /api/sync and state.issues GET /api/issues. Every label,
+// bucket, note and startable flag is the server's forgesync.DisplayState: no
+// module derives a sync state. These helpers only look a state up and map its
+// server bucket to the surfaces that show it.
+const CLOSED_IN_PROGRESS = 'issue-closed-in-progress';
+const HISTORY_BUCKETS = ['merged', 'history'];
+// syncOf is the DisplayState of the Molecule id, or null when none was served.
+export function syncOf(id) {
+  const all = state.sync && state.sync.molecules;
+  const d = all && typeof all === 'object' && MOLECULE_ID.test(id || '') && Object.prototype.hasOwnProperty.call(all, id) ? all[id] : null;
+  return d && typeof d === 'object' && typeof d.label === 'string' && typeof d.bucket === 'string' ? d : null;
+}
+// syncNotes are a state's fixed server notes, bounded.
+export function syncNotes(d) { return d && Array.isArray(d.notes) ? d.notes.filter((n) => typeof n === 'string' && n).slice(0, 8) : []; }
+// closedInProgress is row 14: the Issue closed while its Molecule was live. It
+// shows under Needs you on every surface.
+export function closedInProgress(m) { const d = live(m) && syncOf(m.id); return Boolean(d) && d.kind === CLOSED_IN_PROGRESS; }
+// inHistory is a Molecule the sync files as merged or closed history: Inbox and
+// Work collapse these into one row unless ?history=1.
+export function inHistory(m) { const d = live(m) && syncOf(m.id); return Boolean(d) && HISTORY_BUCKETS.includes(d.bucket); }
+export function historyFromURL() { return new URLSearchParams(location.search).get('history') === '1'; }
+// historyHref is this URL with the history toggle set or cleared, every other
+// parameter kept.
+export function historyHref(on) {
+  const q = new URLSearchParams(location.search);
+  if (on) q.set('history', '1'); else q.delete('history');
+  const s = q.toString();
+  return s ? '?' + s : '?view=' + (state.view || 'inbox');
+}
+// followHistory is the click handler of a history toggle link: a plain click
+// moves through history.pushState, so Back and reload keep the choice.
+export function followHistory(e) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  history.pushState(history.state, '', e.currentTarget.getAttribute('href'));
+  ctx.renderSync();
+}
+// historyRow patches a collapsed history toggle in place: "38 merged · 2 closed ·
+// show", or "Hide merged and closed" while shown.
+export function historyRow(link, list) {
+  const merged = list.filter((m) => syncOf(m.id).bucket === 'merged').length, closed = list.length - merged;
+  const on = historyFromURL();
+  const parts = [merged ? wholeNumber.format(merged) + ' merged' : '', closed ? wholeNumber.format(closed) + ' closed' : ''].filter(Boolean);
+  setText(link, on ? 'Hide merged and closed' : parts.concat('show').join(' · '));
+  setAttr(link, 'href', historyHref(!on));
+  setAttr(link, 'aria-expanded', String(on));
+  link.hidden = list.length === 0;
+}
+// syncCountsText is the one counts split every surface shows: "3 running · 0
+// need you · 38 merged", from /api/sync's bucket counts.
+// The "need you" part is needsYou(), the server's flags, as everywhere else.
+export function syncCountsText() {
+  const c = syncCounts();
+  if (!c) return '';
+  const n = (k) => count(c[k]);
+  return [wholeNumber.format(n('running')) + ' running', wholeNumber.format(needsYou().length) + ' need you', wholeNumber.format(n('merged')) + ' merged'].join(' · ');
+}
+// freshnessText is the age of the GitHub state a view shows, in words, and why
+// it is not current; the reason is one of the server's fixed texts.
+export function freshnessText(f) {
+  if (!f || typeof f !== 'object') return 'GitHub state not loaded yet';
+  const reason = typeof f.reason === 'string' && f.reason.length <= 300 ? f.reason : '';
+  if (!f.checked) return 'GitHub state not checked' + (reason ? ' · ' + reason : '');
+  const when = ago(f.fetchedAt);
+  return 'GitHub state from ' + (when || 'an unknown time') + (f.stale ? ' · couldn’t check GitHub just now' + (reason ? ': ' + reason : '') : '');
 }
 
 // ---- Router: views and the selected Molecule in the URL ------------------------
@@ -231,6 +316,9 @@ export function whenText(iso) {
   if (day(t) === day(Date.now() - 86400000)) return 'yesterday at ' + time;
   return 'on ' + dayOnly.format(t) + ' at ' + time;
 }
+
+// dayText is a recorded time as a date only: "Oct 18, 2026".
+export function dayText(iso) { const t = Date.parse(iso || ''); return Number.isFinite(t) ? dayOnly.format(t) : ''; }
 
 const relativeTime = new Intl.RelativeTimeFormat('en-US', { numeric: 'auto' });
 const fullDate = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' });

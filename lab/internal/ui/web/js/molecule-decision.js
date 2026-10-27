@@ -4,32 +4,24 @@
 // anymore? block, each behind a confirmation that names the Molecule. Controls
 // are built once and patched in place, so a poll never rebuilds a form being
 // typed in, and the one live region changes only when its text does.
-import { $, el, fill, state, ctx, newGate, RETIRED, PULL_URL, ISSUE_URL, notRecorded, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show, SessionError } from './core.js';
-import { submitGate, gateMessage, fetchJob, readBack, rerenderGate, jobText, refusalText, postJSON } from './core-gates.js';
+import { $, el, fill, state, ctx, newGate, RETIRED, PULL_URL, ISSUE_URL, notRecorded, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show, SessionError, syncOf } from './core.js';
+import { submitGate, gateMessage, fetchJob, readBack, rerenderGate, jobText, refusalText, postJSON, approveScope, previewDelivery, publishDelivery, stopMolecule, retireMolecule } from './core-gates.js';
 
 // mv is the Molecule view's state, shared by its sub-modules.
 export const mv = { controls: null, steps: null, from: 'work', planKey: null, statsKey: null, statsToken: 0, stats: null, lastDigest: null, replaced: false, timelineId: null, timelineDirty: false };
 
-// approveScope posts the exact digest the plan shows; the approval shows as
-// committed only once the ledger read back records it.
-async function approveScope(digest) {
-  const job = await submitGate('/scope', JSON.stringify({ digest: digest }));
-  if (job) { state.gate.job = job; readBack(state.gate); }
+// mergedOf is the observed merge of a Molecule the sync files as merged, or
+// null: only the server's bucket and its forgecellMerge decide.
+export function mergedOf(d) {
+  const s = d && syncOf(d.id);
+  const m = s && s.bucket === 'merged' ? s.forgecellMerge : null;
+  return m && typeof m === 'object' && Number.isInteger(m.pr) ? m : null;
 }
-
-async function previewDelivery() {
-  const gate = state.gate;
-  const preview = await submitGate('/delivery/preview', '{}');
-  if (preview && state.gate === gate) { gate.preview = preview; rerenderGate(gate); }
-}
-
-async function publishDelivery() {
-  const gate = state.gate;
-  const preview = gate.preview, title = gate.title.trim(), accept = gate.accept;
-  if (!preview || !title) { gateMessage('publish', 'Enter a one-line title for the draft PR, such as the change in a few words.'); return; }
-  if (preview.acceptanceUnverified && !accept) { gateMessage('publish', 'Tick the box once you have checked the acceptance criteria yourself.'); return; }
-  const job = await submitGate('/delivery/publish', JSON.stringify({ digest: preview.digest, title: title, acceptUnverified: accept }));
-  if (job && state.gate === gate) { gate.job = job; readBack(gate); }
+// mergeText is an observed merge in words: "Merged · 0123456 · today at 6:46 PM
+// · production unverified". Forgecell never verifies production.
+export function mergeText(m) {
+  const commit = typeof m.commit === 'string' && /^[0-9a-f]{7,64}$/.test(m.commit) ? m.commit.slice(0, 7) : '';
+  return ['Merged', commit, whenText(m.at), 'production unverified'].filter(Boolean).join(' · ');
 }
 
 // requestChanges posts the additions with the exact digest the plan shows. The
@@ -47,23 +39,6 @@ async function requestChanges(digest, acceptance, path, reason) {
   }
 }
 
-// stopMolecule posts once; the stop shows as done only when the ledger read back
-// no longer reports the Molecule running.
-async function stopMolecule() {
-  const gate = state.gate;
-  const stop = await submitGate('/stop', '{}');
-  if (stop && state.gate === gate) { gate.stop = stop; rerenderGate(gate); ctx.loadDetail(gate.id, false); }
-}
-
-// retireMolecule posts once with the typed reason; the retirement shows as
-// committed only when the response's ledger read-back records it.
-async function retireMolecule() {
-  const gate = state.gate;
-  const reason = gate.reason.trim();
-  if (!reason || /[\r\n]/.test(reason) || [...reason].length > 200) { gateMessage('retire', 'Enter a one-line reason of at most 200 characters, such as why the Molecule is no longer needed.'); return; }
-  const retired = await submitGate('/retire', JSON.stringify({ reason: reason }));
-  if (retired && state.gate === gate) { gate.retire = retired; rerenderGate(gate); ctx.loadDetail(gate.id, false); }
-}
 
 function retireText(d, gate) {
   const r = d.retired;
@@ -285,8 +260,10 @@ export function renderDecision(d) {
   const digest = readOnly ? '' : boundDigest(d);
   const scope = dec.kind === 'scope' && Boolean(digest);
   const delivery = !readOnly && dec.kind === 'delivery' && Boolean(d.gate && d.gate.state === 'delivery');
-  setText(c.heading, readOnly ? 'Sample data' : plainText(dec.title, 'Nothing to do'));
-  setText(c.copy, readOnly ? 'Sample data has no gates. Nothing here writes.' : plainText(dec.copy, ''));
+  // A Molecule GitHub shows merged has its gate and ship resolved: nothing to do.
+  const merged = !scope && !delivery ? mergedOf(d) : null;
+  setText(c.heading, readOnly ? 'Sample data' : merged ? 'Nothing to do · merged on GitHub' : plainText(dec.title, 'Nothing to do'));
+  setText(c.copy, readOnly ? 'Sample data has no gates. Nothing here writes.' : merged ? mergeText(merged) + '.' : plainText(dec.copy, ''));
 
   // A plan replaced while it is open says so before it can be approved.
   if (scope) {

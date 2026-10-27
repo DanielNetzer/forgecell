@@ -121,3 +121,44 @@ export function jobText(job) {
     el('p', { class: 'scope-note' }, status),
     job.error ? el('p', { class: 'scope-note' }, (job.category ? job.category + ': ' : '') + job.error + '.' + reasonText(job)) : null);
 }
+
+// ---- The decision card's gate posts (used by the Molecule view) ------------------
+// approveScope posts the exact digest the plan shows; the approval shows as
+// committed only once the ledger read back records it.
+export async function approveScope(digest) {
+  const job = await submitGate('/scope', JSON.stringify({ digest: digest }));
+  if (job) { state.gate.job = job; readBack(state.gate); }
+}
+
+export async function previewDelivery() {
+  const gate = state.gate;
+  const preview = await submitGate('/delivery/preview', '{}');
+  if (preview && state.gate === gate) { gate.preview = preview; rerenderGate(gate); }
+}
+
+export async function publishDelivery() {
+  const gate = state.gate;
+  const preview = gate.preview, title = gate.title.trim(), accept = gate.accept;
+  if (!preview || !title) { gateMessage('publish', 'Enter a one-line title for the draft PR, such as the change in a few words.'); return; }
+  if (preview.acceptanceUnverified && !accept) { gateMessage('publish', 'Tick the box once you have checked the acceptance criteria yourself.'); return; }
+  const job = await submitGate('/delivery/publish', JSON.stringify({ digest: preview.digest, title: title, acceptUnverified: accept }));
+  if (job && state.gate === gate) { gate.job = job; readBack(gate); }
+}
+
+// stopMolecule posts once; the stop shows as done only when the ledger read back
+// no longer reports the Molecule running.
+export async function stopMolecule() {
+  const gate = state.gate;
+  const stop = await submitGate('/stop', '{}');
+  if (stop && state.gate === gate) { gate.stop = stop; rerenderGate(gate); ctx.loadDetail(gate.id, false); }
+}
+
+// retireMolecule posts once with the typed reason; the retirement shows as
+// committed only when the response's ledger read-back records it.
+export async function retireMolecule() {
+  const gate = state.gate;
+  const reason = gate.reason.trim();
+  if (!reason || /[\r\n]/.test(reason) || [...reason].length > 200) { gateMessage('retire', 'Enter a one-line reason of at most 200 characters, such as why the Molecule is no longer needed.'); return; }
+  const retired = await submitGate('/retire', JSON.stringify({ reason: reason }));
+  if (retired && state.gate === gate) { gate.retire = retired; rerenderGate(gate); ctx.loadDetail(gate.id, false); }
+}

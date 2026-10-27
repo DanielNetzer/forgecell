@@ -19,6 +19,14 @@ type SyncView struct {
 	Molecules       map[string]forgesync.DisplayState `json:"molecules"`
 	// Counts tallies the buckets of the non-retired Molecules.
 	Counts map[string]int `json:"counts"`
+	// NeedsYou is every Molecule whose state needs you (bucket decision or
+	// blocked), so no surface re-derives it.
+	NeedsYou map[string]bool `json:"needsYou"`
+}
+
+// needsYou reports a state the counts header files under "need you".
+func needsYou(d forgesync.DisplayState) bool {
+	return d.Bucket == forgesync.BucketDecision || d.Bucket == forgesync.BucketBlocked
 }
 
 func (h *handler) syncStates(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +35,7 @@ func (h *handler) syncStates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo := h.syncRepository()
-	out := SyncView{Repository: repo, Molecules: map[string]forgesync.DisplayState{}, Counts: map[string]int{}}
+	out := SyncView{Repository: repo, Molecules: map[string]forgesync.DisplayState{}, Counts: map[string]int{}, NeedsYou: map[string]bool{}}
 	work := h.syncWork(repo)
 	var res forgesync.Result
 	if repo == "" {
@@ -58,6 +66,9 @@ func (h *handler) syncStates(w http.ResponseWriter, r *http.Request) {
 		out.Molecules[s.ID] = d
 		if d.Bucket != forgesync.BucketRetired {
 			out.Counts[d.Bucket]++
+		}
+		if needsYou(d) {
+			out.NeedsYou[s.ID] = true
 		}
 	}
 	h.json(w, http.StatusOK, out)

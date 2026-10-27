@@ -43,6 +43,11 @@
 .recent-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #2d5b46; }
 .inbox-recent-row .inbox-number { width: 52px; flex: none; }
 .recent-title { flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Merged and closed history collapses into one row; ?history=1 shows it. */
+.history-row { display: inline-flex; align-items: center; min-height: 36px; margin-top: 10px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--card-edge); background: var(--glass); color: var(--ink); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; text-decoration: none; touch-action: manipulation; }
+.history-row:hover { background: var(--paper); }
+.history-row:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+#inbox-history-list { margin-top: 10px; }
 
 @media (max-width: 720px) {
   .inbox { gap: 22px; }
@@ -62,9 +67,11 @@
 }
 @media (pointer: coarse) {
   .inbox-watch, .inbox-recent-row { min-height: 44px; }
+  .history-row { min-height: 44px; }
 }
 @media (forced-colors: active) {
   .inbox-row, .inbox-recent, .inbox-icon, .inbox-badge { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
   .inbox-steps li.is-done .step-bar, .inbox-steps li.is-current .step-bar { background: Highlight; }
   .recent-dot { background: CanvasText; }
+  .history-row { background: Canvas; color: LinkText; border: 1px solid CanvasText; }
 }

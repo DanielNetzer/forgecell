@@ -134,8 +134,9 @@ func TestUIShellServedPageHasViewsNavAndTabBar(t *testing.T) {
 			t.Errorf("panel %s hidden=%t", panel[1], hidden)
 		}
 	}
-	if !strings.Contains(between(t, page, `id="view-issues"`, "</section>"), "Coming next") {
-		t.Error("view-issues is not a coming-next placeholder")
+	// The Issues view is built (#266): its containers replace the placeholder.
+	if issues := between(t, page, `id="view-issues"`, "</section>"); strings.Contains(issues, "Coming next") || !strings.Contains(issues, `<div id="issues-rows" role="rowgroup"></div>`) {
+		t.Error("view-issues is still a coming-next placeholder")
 	}
 	// The Inbox is built (#250): its containers replace the placeholder.
 	if inbox := between(t, page, `id="view-inbox"`, `id="view-issues"`); strings.Contains(inbox, "Coming next") {

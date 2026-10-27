@@ -24,11 +24,13 @@ type issueSync struct {
 	// repository is the active Formula's repository; it never comes from a
 	// request.
 	repository func(lab string) string
+	// now is the cache's clock, so Start intake can tell a snapshot read after
+	// it began from an older one and the loop view can age the last answer.
+	now        func() time.Time
 	receiptsMu sync.Mutex
 	receipts   map[string]publishedEntry
-	// now is the cache's clock; last is the latest answer get returned, which
-	// the loop view reads without starting a sync.
-	now    func() time.Time
+	// last is the latest answer get returned, which the loop view reads
+	// without starting a sync.
 	lastMu sync.Mutex
 	last   forgesync.Result
 }
