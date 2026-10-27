@@ -319,7 +319,7 @@ func TestUIAtomPanelSeparatesPlannedFromObserved(t *testing.T) {
 	if d.Atoms[0].Provenance != nil {
 		t.Fatalf("intake provenance inferred: %+v", d.Atoms[0].Provenance)
 	}
-	js := do(t, h, authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"'PLANNED CAPABILITIES · DECLARED, NOT OBSERVED'",
 		"'ACTIONS TAKEN · OBSERVED'",

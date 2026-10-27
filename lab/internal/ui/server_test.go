@@ -144,7 +144,7 @@ func TestUITokenExchangeSetsStrictHttpOnlyCookie(t *testing.T) {
 	if w := do(t, h, nav); w.Code != http.StatusForbidden {
 		t.Fatalf("cross-site navigation to the API: %d", w.Code)
 	}
-	if w := do(t, h, authed("/")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "<script src=\"/app.js\"></script>") {
+	if w := do(t, h, authed("/")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "<script type=\"module\" src=\"/app.js\"></script>") {
 		t.Fatalf("index with cookie: %d", w.Code)
 	}
 }
@@ -184,7 +184,7 @@ func TestUIAPIRequiresTheTabSessionHeader(t *testing.T) {
 
 func TestUIRefusesRequestsWithoutTheCookie(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir()})
-	for _, path := range []string{"/", "/app.js", "/api/lab", "/api/molecules", "/api/molecules/m1"} {
+	for _, path := range []string{"/", "/app.js", "/js/core.js", "/css/base.css", "/api/lab", "/api/molecules", "/api/molecules/m1"} {
 		if w := do(t, h, request{path: path}); w.Code != http.StatusForbidden {
 			t.Errorf("%s without cookie: %d", path, w.Code)
 		}
@@ -634,7 +634,7 @@ func TestUINeverWritesTheLab(t *testing.T) {
 	h := testHandler(t, Options{LabDir: lab, SourceRoot: "/src/checkout"})
 	engine := refuseEngine(t, h)
 	drive := installDrive(h, &fakeDrive{})
-	for _, path := range []string{"/", "/app.js", "/style.css", "/api/lab", "/api/loop", "/api/runs/7", "/api/molecules", "/api/molecules/" + r.ID, "/api/molecules/" + r.ID + "?yaml=1", "/api/molecules/" + r.ID + "/job", "/api/runs", "/api/loop/start", "/api/loop/stop", "/api/molecules/" + r.ID + "/stop"} {
+	for _, path := range []string{"/", "/app.js", "/js/core.js", "/css/base.css", "/style.css", "/api/lab", "/api/loop", "/api/runs/7", "/api/molecules", "/api/molecules/" + r.ID, "/api/molecules/" + r.ID + "?yaml=1", "/api/molecules/" + r.ID + "/job", "/api/runs", "/api/loop/start", "/api/loop/stop", "/api/molecules/" + r.ID + "/stop"} {
 		do(t, h, authed(path))
 		post := authed(path)
 		post.method, post.origin = http.MethodPost, "http://"+testHost
@@ -667,23 +667,25 @@ func TestUINeverWritesTheLab(t *testing.T) {
 // page has no inline script, style or handler for data to reach.
 func TestUIServedJSNeverAssignsDataToInnerHTML(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir()})
-	js := do(t, h, authed("/app.js"))
-	if js.Code != http.StatusOK || !strings.HasPrefix(js.Header().Get("Content-Type"), "text/javascript") {
-		t.Fatalf("app.js: %d %v", js.Code, js.Header())
+	res := do(t, h, authed("/app.js"))
+	if res.Code != http.StatusOK || !strings.HasPrefix(res.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("app.js: %d %v", res.Code, res.Header())
 	}
-	for _, sink := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser", "createContextualFragment", "eval(", "new Function", "srcdoc", "javascript:"} {
-		if strings.Contains(js.Body.String(), sink) {
-			t.Errorf("app.js uses %s", sink)
+	// Every module, so no sink hides in a file the entry imports.
+	js := servedJS(t)
+	for _, sink := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser", "createContextualFragment", "eval(", "new Function", "srcdoc", "javascript:", "import("} {
+		if strings.Contains(js, sink) {
+			t.Errorf("the served JS uses %s", sink)
 		}
 	}
-	if !strings.Contains(js.Body.String(), "document.createTextNode") || !strings.Contains(js.Body.String(), "textContent") {
-		t.Fatal("app.js does not render text through text nodes")
+	if !strings.Contains(js, "document.createTextNode") || !strings.Contains(js, "textContent") {
+		t.Fatal("the served JS does not render text through text nodes")
 	}
 	page := do(t, h, authed("/")).Body.String()
 	if regexp.MustCompile(`<script(?:\s[^>]*)?>[^<]+</script>|<script>`).MatchString(page) || regexp.MustCompile(`\son[a-z]+=|\sstyle=`).MatchString(page) {
 		t.Fatal("index.html has inline script, style or handlers")
 	}
-	for _, name := range []string{"app.js", "style.css", "index.html"} {
+	for _, name := range staticFiles {
 		data, err := web.ReadFile("web/" + name)
 		if err != nil || len(data) == 0 {
 			t.Fatalf("embedded %s: %v", name, err)
@@ -695,23 +697,20 @@ func TestUIServedJSNeverAssignsDataToInnerHTML(t *testing.T) {
 // served script renders only through el, add and fill, which skip null,
 // undefined and false: the overview, analytics included, has no literal null.
 func TestUIServedJSNeverRendersNullChildren(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	js := servedJS(t)
 	if !strings.Contains(js, "if (child === undefined || child === null || child === false) continue;") || !strings.Contains(js, "return add(node, ...children);") {
 		t.Fatal("el and fill do not skip null children through add")
 	}
 	if m := regexp.MustCompile(`replaceChildren\(\s*[^)\s]`).FindAllString(js, -1); len(m) != 0 {
-		t.Errorf("app.js passes children to replaceChildren directly: %q", m)
+		t.Errorf("the served JS passes children to replaceChildren directly: %q", m)
 	}
 	if n := strings.Count(js, ".append("); n != 1 || !strings.Contains(js, "node.append(child instanceof Node ? child : document.createTextNode(String(child)));") {
-		t.Errorf("app.js appends outside add: %d calls", n)
+		t.Errorf("the served JS appends outside add: %d calls", n)
 	}
 	for _, name := range []string{"renderOverview", "renderAnalytics"} {
-		body := regexp.MustCompile(`(?s)function ` + name + `\(\) \{(.*?)\n  \}\n`).FindStringSubmatch(js)
-		if body == nil {
-			t.Fatalf("app.js has no %s", name)
-		}
-		if strings.Contains(body[1], "replaceChildren") || !strings.Contains(body[1], "fill(") || regexp.MustCompile(`['"]null['"]`).MatchString(body[1]) {
-			t.Errorf("%s may render a literal null:\n%s", name, body[1])
+		body := moduleFunction(t, js, name)
+		if strings.Contains(body, "replaceChildren") || !strings.Contains(body, "fill(") || regexp.MustCompile(`['"]null['"]`).MatchString(body) {
+			t.Errorf("%s may render a literal null:\n%s", name, body)
 		}
 	}
 }
@@ -844,7 +843,7 @@ func TestUIListenServesLoopbackAndStops(t *testing.T) {
 // on change, refetches the Lab when the ETag changes, and maps every Atom
 // status the engine writes.
 func TestUIServedJSGuardsPollsFocusAndAtomStatuses(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"if (document.hidden || state.polling || state.sessionLost) return;",
 		"token !== state.pollToken",
@@ -865,16 +864,13 @@ func TestUIServedJSGuardsPollsFocusAndAtomStatuses(t *testing.T) {
 			t.Errorf("app.js lacks %q", want)
 		}
 	}
-	marks := regexp.MustCompile(`(?s)const ATOM_MARKS = \{(.*?)\n  \};`).FindStringSubmatch(js)
-	if marks == nil {
-		t.Fatal("app.js has no ATOM_MARKS table")
-	}
+	marks := moduleTable(t, js, "ATOM_MARKS", "}")
 	for status, mark := range map[string]string{"done": "['✓', 'is-done']", "failed": "['✕', 'is-failed']", "blocked": "['!', 'is-failed']", "skipped": "['–', 'is-skipped']", "waiting": "['◇', 'is-waiting']", "active": "[null, 'is-running']"} {
-		if !strings.Contains(marks[1], " "+status+": "+mark) {
+		if !strings.Contains(marks, " "+status+": "+mark) {
 			t.Errorf("Atom status %s is not mapped to %s", status, mark)
 		}
 	}
-	if strings.Contains(marks[1], "pending:") {
+	if strings.Contains(marks, "pending:") {
 		t.Error("pending must show its step number, not a mark")
 	}
 }

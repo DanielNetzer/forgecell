@@ -79,11 +79,11 @@ func wantDecls(t *testing.T, rules map[string]string, selector string, decls ...
 // the radius scale, styles the Start Work inputs, and never removes an outline
 // without a replacement focus ring.
 func TestUIServedCSSPolish(t *testing.T) {
-	res := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/style.css"))
+	res := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/css/base.css"))
 	if res.Code != http.StatusOK || !strings.HasPrefix(res.Header().Get("Content-Type"), "text/css") {
-		t.Fatalf("style.css: %d %v", res.Code, res.Header())
+		t.Fatalf("base.css: %d %v", res.Code, res.Header())
 	}
-	css := res.Body.String()
+	css := servedCSS(t)
 	rules := cssRules(css)
 
 	wantDecls(t, rules, ":root", "--forest: #183e32;", "--radius-panel: 20px;", "--radius-card: 14px;", "--radius-control: 12px;",
@@ -125,7 +125,7 @@ func TestUIServedCSSPolish(t *testing.T) {
 	if strings.Contains(css, "#235b43") || strings.Contains(css, ".filter-chip") {
 		t.Error("style.css keeps the old solid-fill filter chips")
 	}
-	mobile := cssRules(mediaBlock(t, css, "@media (max-width: 720px)"))
+	mobile := cssRules(mediaBlocks(t, css, "@media (max-width: 720px)"))
 	wantDecls(t, mobile, ".lane-segment", "min-height: 44px;")
 	wantDecls(t, mobile, ".grid-search", "width: 100%;")
 
@@ -148,11 +148,15 @@ func TestUIServedCSSPolish(t *testing.T) {
 	if !strings.Contains(rules["button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible, .motion-option input:focus-visible"], "outline: 2px solid var(--focus);") {
 		t.Error("style.css lost the global focus-visible ring")
 	}
-	if !strings.Contains(mediaBlock(t, css, "@media (prefers-reduced-motion: reduce)"), "transition: none !important;") {
+	if !strings.Contains(mediaBlocks(t, css, "@media (prefers-reduced-motion: reduce)"), "transition: none !important;") {
 		t.Error("reduced motion no longer disables transitions")
 	}
-	forced := cssRules(mediaBlock(t, css, "@media (forced-colors: active)"))
-	wantDecls(t, forced, ".btn, .stepper-button, .lane-segment, .drive-field input, .stepper input, .grid-search, .lane-bar", "border: 1px solid ButtonText;")
+	// Each sheet keeps the forced-colors edge of its own controls, after the
+	// rules it overrides.
+	forced := cssRules(mediaBlocks(t, css, "@media (forced-colors: active)"))
+	for _, selector := range []string{".btn, .drive-field input, .stepper input", ".stepper-button", ".lane-segment, .grid-search, .lane-bar"} {
+		wantDecls(t, forced, selector, "border: 1px solid ButtonText;")
+	}
 	wantDecls(t, forced, ".lane-segment[aria-pressed=true]", "background: Highlight;", "color: HighlightText;")
 }
 
@@ -189,20 +193,17 @@ func jsFunction(t *testing.T, js, name string) string {
 // keeping the drive validation and pending semantics.
 func TestUIServedJSStartWorkAndLaneBar(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir()})
-	js := do(t, h, authed("/app.js")).Body.String()
+	js := servedJS(t)
 
-	filters := regexp.MustCompile(`(?s)const FILTERS = \[(.*?)\n  \];`).FindStringSubmatch(js)
-	if filters == nil {
-		t.Fatal("app.js has no FILTERS table")
-	}
+	filters := moduleTable(t, js, "FILTERS", "]")
 	var ids []string
-	for _, m := range regexp.MustCompile(`\['([a-z]+)', '`).FindAllStringSubmatch(filters[1], -1) {
+	for _, m := range regexp.MustCompile(`\['([a-z]+)', '`).FindAllStringSubmatch(filters, -1) {
 		ids = append(ids, m[1])
 	}
 	if want := []string{"all", "running", "decision", "blocked", "finished", "other", "retired"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("filter ids %q, want %q", ids, want)
 	}
-	bar := jsFunction(t, js, "renderFilters")
+	bar := moduleFunction(t, js, "renderFilters")
 	for _, want := range []string{
 		"fill($('#run-filters'), FILTERS.flatMap(",
 		"el('button', {",
@@ -227,7 +228,7 @@ func TestUIServedJSStartWorkAndLaneBar(t *testing.T) {
 	// control, the labelled stepper bounded 1..max and submit buttons, so Enter
 	// submits. Stop loop is no longer beside the primary; it is behind the header
 	// pill's disclosure and confirmation.
-	panel := jsFunction(t, js, "ensureDrive")
+	panel := moduleFunction(t, js, "ensureDrive")
 	for _, want := range []string{
 		"el('label', { class: 'field-label', for: 'drive-issue' }, 'Issue number'), issue)",
 		"type: 'text', id: 'drive-issue', name: 'issue', inputmode: 'numeric', maxlength: '10', autocomplete: 'off', placeholder: '245…', 'aria-describedby': 'drive-run-error'",
@@ -258,7 +259,7 @@ func TestUIServedJSStartWorkAndLaneBar(t *testing.T) {
 		}
 	}
 
-	render := jsFunction(t, js, "renderDrive")
+	render := moduleFunction(t, js, "renderDrive")
 	for _, want := range []string{
 		"c.run.disabled = drive.pending || Boolean(drive.run && drive.run.state === 'running');",
 		"c.start.disabled = drive.pending || looping;",

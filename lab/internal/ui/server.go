@@ -197,10 +197,35 @@ type handler struct {
 }
 
 // staticFiles are the only embedded files served, with their content types.
+// Every script module and stylesheet is named here: there is no wildcard or
+// prefix match, so any other /js/ or /css/ path is not found.
 var staticFiles = map[string]string{
-	"/":          "index.html",
-	"/app.js":    "app.js",
-	"/style.css": "style.css",
+	"/":       "index.html",
+	"/app.js": "app.js",
+	// The entry's modules: the shared core and one module per view, with the
+	// Molecule view's sub-modules.
+	"/js/core.js":              "js/core.js",
+	"/js/core-gates.js":        "js/core-gates.js",
+	"/js/inbox.js":             "js/inbox.js",
+	"/js/molecule.js":          "js/molecule.js",
+	"/js/molecule-plan.js":     "js/molecule-plan.js",
+	"/js/molecule-decision.js": "js/molecule-decision.js",
+	"/js/molecule-timeline.js": "js/molecule-timeline.js",
+	"/js/work.js":              "js/work.js",
+	"/js/issues.js":            "js/issues.js",
+	"/js/insights.js":          "js/insights.js",
+	"/js/formula.js":           "js/formula.js",
+	"/js/loop.js":              "js/loop.js",
+	// The stylesheets index.html links, in its order: tokens, base, then views.
+	"/css/tokens.css":   "css/tokens.css",
+	"/css/base.css":     "css/base.css",
+	"/css/inbox.css":    "css/inbox.css",
+	"/css/molecule.css": "css/molecule.css",
+	"/css/work.css":     "css/work.css",
+	"/css/issues.css":   "css/issues.css",
+	"/css/insights.css": "css/insights.css",
+	"/css/formula.css":  "css/formula.css",
+	"/css/loop.css":     "css/loop.css",
 	// session.js only copies the exchange page's value into sessionStorage; it
 	// holds no secret, so it is served without the cookie.
 	"/session.js": "session.js",
@@ -217,8 +242,9 @@ var staticFiles = map[string]string{
 // change within a release; every other response stays no-store.
 const assetCache = "private, max-age=31536000, immutable"
 
-// assetVersionMark is the placeholder index.html, app.js and style.css put in
-// every asset URL's ?v= query; file replaces it with assetVersion, so an
+// assetVersionMark is the placeholder index.html, the scripts and the
+// stylesheets (css/tokens.css and css/base.css today) put in every asset URL's
+// ?v= query; file replaces it with assetVersion, so an
 // upgrade changes each asset URL and the immutable cache never serves stale art
 // or fonts.
 const assetVersionMark = "__ASSET_VERSION__"

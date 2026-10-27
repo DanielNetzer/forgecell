@@ -221,7 +221,7 @@ func TestUIRetireAction(t *testing.T) {
 // The served script has the Retired lane and filter, keeps retired Molecules out
 // of All and the headline counts, and posts the retire reason as JSON.
 func TestUIServedJSRetire(t *testing.T) {
-	js := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"['retired', 'Retired']",
 		"state.filter === 'all' ? live(m) : m.lane === state.filter",

@@ -344,7 +344,7 @@ func TestAnalyticsIsGuardedReadOnlyAndSampleOnlyInDemo(t *testing.T) {
 // and the Unavailable cost-per-merged-PR card.
 func TestAnalyticsOverviewRendersTextOnly(t *testing.T) {
 	h := testHandler(t, Options{LabDir: t.TempDir()})
-	js := do(t, h, authed("/app.js")).Body.String()
+	js := servedJS(t)
 	for _, want := range []string{
 		"api('/api/analytics'",
 		"token !== state.analyticsToken",

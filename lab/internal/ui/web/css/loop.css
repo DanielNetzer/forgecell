@@ -1,0 +1,61 @@
+/* Loop: the side panel's Run the loop and Start intake forms. The header's
+   loop pill is part of the shell, in base.css. */
+.side-panel .drive-panel { margin-top: 0; }
+.side-panel .drive-groups { grid-template-columns: minmax(0, 1fr); }
+
+/* Start Work: two composed groups, Start intake and Run the loop. */
+.drive-panel { margin-top: 13px; padding: 14px 16px; border: 1px solid var(--card-edge); border-radius: var(--radius-card); background: var(--paper); box-shadow: var(--shadow-card); min-width: 0; }
+.drive-groups { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr); gap: 14px 28px; margin-top: 10px; }
+.drive-group { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.drive-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; min-width: 0; }
+.drive-field-stepper { flex: 0 0 auto; }
+.stepper { display: inline-flex; align-items: center; gap: 4px; }
+.stepper input { width: 56px; padding: 0 6px; text-align: center; font-variant-numeric: tabular-nums; appearance: textfield; -moz-appearance: textfield; }
+.stepper input::-webkit-inner-spin-button, .stepper input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.stepper-button { width: 40px; height: 40px; min-height: 40px; padding: 0; border: 1px solid var(--edge); border-radius: var(--radius-control); background: var(--paper); color: var(--forest); font-size: 18px; line-height: 1; }
+.stepper-button:hover { border-color: var(--edge-strong); background: #f1f6ee; }
+.stepper-button:active { background: #e6efe4; }
+.drive-status { padding: 7px 12px; border: 1px solid #d6e2d4; border-radius: var(--radius-control); background: #f1f6ee; color: #345642; font-size: 12px; overflow-wrap: anywhere; }
+.drive-status:empty { display: none; }
+.drive-status > :first-child, .drive-status .gate-job > :first-child { margin-top: 0; }
+.drive-status .diagnostics { margin-top: 8px; }
+
+/* Run the loop and Start intake: real forms in the side panel. */
+.drive-forms { display: grid; gap: 20px; min-width: 0; }
+.drive-form { display: flex; flex-direction: column; gap: 14px; padding: 22px; border-radius: var(--radius-panel); }
+.drive-form .drive-help { margin-top: 2px; }
+.drive-form:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.drive-title { font-size: 16px; font-weight: 500; letter-spacing: 0; }
+.segmented { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: var(--radius-control); background: #eef0e6; border: 1px solid var(--shell-edge); }
+.seg { min-height: 34px; padding: 0 6px; border: 0; border-radius: 9px; background: transparent; color: #3e5448; font-size: 13px; font-weight: 500; }
+.seg:hover { background: #ffffff99; }
+.seg[aria-pressed=true] { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px #1a3a2a24; }
+.drive-at-once { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.drive-at-once .field-label { font-size: 13px; font-weight: 500; color: var(--ink); }
+.drive-submit { width: 100%; }
+
+@media (max-width: 1000px) {
+  .drive-groups { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 1199px) {
+  .side-panel .drive-groups { grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr); }
+}
+@media (max-width: 900px) {
+  .side-panel .drive-groups { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  .drive-form { padding: 16px; }
+  .drive-panel { padding: 12px; }
+  .drive-row > .btn { flex: 1 1 auto; height: 44px; min-height: 44px; }
+  .stepper-button { width: 44px; height: 44px; min-height: 44px; }
+}
+@media (pointer: coarse) {
+  .seg, .stepper-button { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .drive-panel { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
+  .stepper-button { border: 1px solid ButtonText; box-shadow: none; }
+  .segmented { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
+  .seg { border: 1px solid ButtonText; }
+  .seg[aria-pressed=true] { background: Highlight; color: HighlightText; border-color: Highlight; }
+}
