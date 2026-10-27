@@ -7,9 +7,15 @@
 import { el, state, ctx, notRecorded, SessionError, tabSession, api, failed, keepFocus } from './core.js';
 
 export async function gatePost(id, action, body) {
+  return postJSON('/api/molecules/' + encodeURIComponent(id) + action, body);
+}
+
+// postJSON is one write: the tab session header, same-origin credentials and a
+// JSON body. A 403 means this tab lost its session.
+export async function postJSON(path, body) {
   const session = tabSession();
   if (!session || state.sessionLost) throw new SessionError('no session');
-  const res = await fetch('/api/molecules/' + encodeURIComponent(id) + action, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Forgecell-Session': session, 'Content-Type': 'application/json' }, body: body });
+  const res = await fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Forgecell-Session': session, 'Content-Type': 'application/json' }, body: body });
   if (res.status === 403) throw new SessionError('forbidden');
   return res;
 }

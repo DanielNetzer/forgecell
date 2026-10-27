@@ -57,7 +57,6 @@ const (
 	ProposeModel    = "model"
 )
 
-var assayID = regexp.MustCompile(`^assay-[a-f0-9]{64}$`)
 var safeWord = regexp.MustCompile(`^[A-Za-z0-9._-]{1,80}$`)
 var releaseVersion = regexp.MustCompile(`/releases/([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?)/forgecell$`)
 
@@ -576,7 +575,7 @@ func (h *handler) formulaView() FormulaPage {
 	case err != nil:
 		pendingReason = "A saved proposal could not be read safely; inspect the Lab's proposals with forgecell init"
 	case pending != nil:
-		v.Pending = proposalView(h.opts.LabDir, h.opts.Home, *pending)
+		v.Pending = formulaProposalView(h.opts.LabDir, h.opts.Home, *pending)
 		pendingReason = "A proposal is already pending; approve or dismiss it first"
 	}
 	v.Writable = h.opts.SourceRoot != "" && approved && pendingReason == ""
@@ -760,9 +759,9 @@ var kindNotes = map[string]string{
 	onboarding.KindChange:       "This change is not one of the kinds this view proposes. Review the exact YAML under details before you approve.",
 }
 
-// proposalView builds the review of a pending proposal; home names builds in the
+// formulaProposalView builds the review of a pending proposal; home names builds in the
 // readable diff. Only Details carries the exact id, digest, keys and YAML lines.
-func proposalView(lab, home string, p onboarding.Proposal) *ProposalView {
+func formulaProposalView(lab, home string, p onboarding.Proposal) *ProposalView {
 	v := &ProposalView{Changes: []ChangeView{}, Notes: []string{}, Details: ProposalDetailView{ID: p.ID, Digest: p.YAMLHash, Keys: []onboarding.KeyChange{}, Lines: []onboarding.DiffLine{}}}
 	if _, err := time.Parse(time.RFC3339Nano, p.CreatedAt); err == nil {
 		v.CreatedAt = p.CreatedAt

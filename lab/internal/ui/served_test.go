@@ -23,6 +23,7 @@ var servedModules = []string{
 	"/js/insights.js",
 	"/js/formula.js",
 	"/js/loop.js",
+	"/js/setup.js",
 }
 
 // servedStylesheets are the stylesheets index.html links, in link order:
@@ -37,11 +38,12 @@ var servedStylesheets = []string{
 	"/css/insights.css",
 	"/css/formula.css",
 	"/css/loop.css",
+	"/css/setup.css",
 }
 
 // viewModules are the view modules; each exports mount(root, ctx) and
 // update(state), and imports only the core and its own sub-modules.
-var viewModules = []string{"inbox", "molecule", "work", "issues", "insights", "formula", "loop"}
+var viewModules = []string{"inbox", "molecule", "work", "issues", "insights", "formula", "loop", "setup"}
 
 // maxModuleLines bounds every script module and stylesheet.
 const maxModuleLines = 600

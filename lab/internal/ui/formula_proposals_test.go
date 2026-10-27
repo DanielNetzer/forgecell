@@ -377,13 +377,13 @@ func TestUIFormulaLauncherOnlyRebindOffersRebase(t *testing.T) {
 	}
 	yaml := strings.ReplaceAll(active.Formula.YAML, current, next)
 	p := onboarding.Proposal{ID: "assay-" + strings.Repeat("d", 64), YAML: yaml, ActiveIDBefore: active.Formula.ID, ActiveHashBefore: active.Formula.SHA256, Status: "pending"}
-	v := proposalView(lab, "", p)
+	v := formulaProposalView(lab, "", p)
 	if v.Kind != onboarding.KindRebind || !v.Rebase || len(v.Changes) == 0 {
 		t.Fatalf("%+v", v)
 	}
 	// An older build is never launcher-only: the engine refuses to carry it.
 	p.YAML = strings.ReplaceAll(active.Formula.YAML, current, "/opt/fc/releases/0.16.8/forgecell")
-	if v = proposalView(lab, "", p); v.Rebase {
+	if v = formulaProposalView(lab, "", p); v.Rebase {
 		t.Fatalf("rebase offered for an older build: %+v", v)
 	}
 }
