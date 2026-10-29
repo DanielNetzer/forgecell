@@ -174,6 +174,14 @@ Both temp locations are considered only when the Lab has a `ledgers/` directory.
 
 Ledgers, history and evidence files are never removed. A removed workspace stays registered as a Git worktree of its source until you run `git worktree prune` there.
 
+## Tips for running a Lab
+
+- **Edit an Issue before you start it.** Intake reads the Issue body (not comments) once. Changing the body while its Molecule is planning or waiting for plan approval makes the plan stale ("readiness inputs changed"), and you must start intake again.
+- **Keep the computer awake for long unattended runs.** A check whose wall clock runs far past its budget, for example during sleep, is stopped as stalled ("… the machine may have slept"). Rerun its checks only: Re-run checks in the UI, or `amend --continuation checks-only`.
+- **Prefer `milestone:<name>` (or `label:<name>`) over `oldest`** when the repository has parked or future Issues. `oldest` picks the oldest open Issue in any milestone.
+- **When a change deliberately updates an existing test,** the protected view reports it. Accept it with Accept by-design failures (the "Accept by-design test failures" action), which lists exactly the tests it declares.
+- **Two verification slots** (`<lab>/resources.json` → `{"verificationSlots": 2}`) let two Molecules check at once. On a 16 GB machine, don't go higher: the full suites start hitting package timeouts.
+
 ## Local UI
 
 ```sh
