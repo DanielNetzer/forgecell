@@ -7,8 +7,14 @@ import (
 )
 
 // TTL is how long one read of GitHub serves a server: at most one sync per TTL,
-// failed or not, unless a caller asks for a refresh.
+// failed or not, unless a caller asks for a refresh or wants a pull request no
+// attempt has asked for yet.
 const TTL = 60 * time.Second
+
+// maxAskedPRs bounds the pull request numbers the cache remembers asking for.
+// Once full, a new number waits for the TTL like any other read: the bound
+// stops early reads, never the TTL.
+const maxAskedPRs = MaxStateNumbers
 
 // syncTimeout bounds one whole sync, every gh call in it included.
 const syncTimeout = 2 * time.Minute
@@ -66,7 +72,11 @@ type Cache struct {
 	reason        string
 	attempted     time.Time
 	attemptedRepo string
-	flight        *flight
+	// asked holds the pull request numbers the attempts for attemptedRepo
+	// wanted, at most maxAskedPRs. A want naming one not in it is read again
+	// within the TTL, once: the first view after publishing sees its PR.
+	asked  map[int64]bool
+	flight *flight
 	// joined, when set by a test, receives once per caller that joins a flight:
 	// a readiness marker, so tests never poll.
 	joined chan struct{}
@@ -87,8 +97,9 @@ func NewCache(fetcher Fetcher, now func() time.Time) *Cache {
 }
 
 // Get returns GitHub state for want, syncing when the latest attempt for its
-// repository is older than TTL or refresh is set. A caller arriving while a
-// sync runs waits for it, or for ctx, instead of starting another.
+// repository is older than TTL, refresh is set, or want names a pull request
+// no attempt for the repository has asked for. A caller arriving while a sync
+// runs waits for it, or for ctx, instead of starting another.
 func (c *Cache) Get(ctx context.Context, want Want, refresh bool) Result {
 	c.mu.Lock()
 	if f := c.flight; f != nil {
@@ -107,7 +118,7 @@ func (c *Cache) Get(ctx context.Context, want Want, refresh bool) Result {
 		return c.result(want.Repository)
 	}
 	fresh := !c.attempted.IsZero() && c.attemptedRepo == want.Repository && c.now().Sub(c.attempted) < TTL
-	if fresh && !refresh {
+	if fresh && !refresh && !c.newPR(want.PRs) {
 		defer c.mu.Unlock()
 		return c.result(want.Repository)
 	}
@@ -128,7 +139,13 @@ func (c *Cache) run(want Want, f *flight) (r Result) {
 			snap, reason = nil, ReasonFailed
 		}
 		c.mu.Lock()
+		if c.attemptedRepo != want.Repository {
+			c.asked = nil
+		}
 		c.attempted, c.attemptedRepo, c.reason = c.now(), want.Repository, reason
+		// Failed or not, the numbers count as asked, so a failure or a read cut
+		// off at MaxStateNumbers never forces another read before the TTL.
+		c.recordAsked(want.PRs)
 		if reason == "" {
 			c.snap = snap
 		} else if c.snap != nil && c.snap.Repository != want.Repository {
@@ -141,6 +158,33 @@ func (c *Cache) run(want Want, f *flight) (r Result) {
 	}()
 	snap, reason = c.sync(want)
 	return r
+}
+
+// newPR reports a wanted pull request no attempt for attemptedRepo asked for,
+// while asked is below its bound; the caller holds mu.
+func (c *Cache) newPR(prs []int64) bool {
+	if len(c.asked) >= maxAskedPRs {
+		return false
+	}
+	for _, n := range prs {
+		if !c.asked[n] {
+			return true
+		}
+	}
+	return false
+}
+
+// recordAsked adds prs to asked, up to maxAskedPRs; the caller holds mu.
+func (c *Cache) recordAsked(prs []int64) {
+	if c.asked == nil {
+		c.asked = map[int64]bool{}
+	}
+	for _, n := range prs {
+		if len(c.asked) >= maxAskedPRs {
+			return
+		}
+		c.asked[n] = true
+	}
 }
 
 // Current reports GitHub state fit to allow a start: the latest sync succeeded

@@ -36,6 +36,12 @@ import (
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// installNextSteps is the installer's closing hint: the whole loop starts
+// from forgecell ui in the repository, with doctor kept as a diagnosis hint.
+func installNextSteps() string {
+	return "Next: cd into your repository and run forgecell ui (Set up your Lab).\nTrouble? Run forgecell doctor to see what is missing.\n"
+}
+
 func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer, version string) int {
 	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
 	harness.SetRunningVersion(version)
@@ -300,7 +306,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		if err != nil {
 			return fail(err)
 		}
-		fmt.Fprintf(out, "Forgecell %s installed. Lab data preserved.\nCommand: %s\nNext: forgecell doctor → forgecell init → approve Formula → forgecell run <issue>\n", result.Version, result.Command)
+		fmt.Fprintf(out, "Forgecell %s installed. Lab data preserved.\nCommand: %s\n%s", result.Version, result.Command, installNextSteps())
 		fmt.Fprintf(out, "Ensure this directory is on PATH: %s\nGit, authenticated GitHub CLI (gh), and a configured coding harness are required to run tickets.\n", filepath.Dir(result.Command))
 		return 0
 	}

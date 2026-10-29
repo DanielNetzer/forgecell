@@ -17,6 +17,7 @@ var servedModules = []string{
 	"/js/molecule.js",
 	"/js/molecule-plan.js",
 	"/js/molecule-decision.js",
+	"/js/molecule-actions.js",
 	"/js/molecule-timeline.js",
 	"/js/work.js",
 	"/js/issues.js",

@@ -260,6 +260,7 @@ var staticFiles = map[string]string{
 	"/js/molecule.js":          "js/molecule.js",
 	"/js/molecule-plan.js":     "js/molecule-plan.js",
 	"/js/molecule-decision.js": "js/molecule-decision.js",
+	"/js/molecule-actions.js":  "js/molecule-actions.js",
 	"/js/molecule-timeline.js": "js/molecule-timeline.js",
 	"/js/work.js":              "js/work.js",
 	"/js/issues.js":            "js/issues.js",

@@ -362,7 +362,7 @@ func TestMoleculeViewServedJS(t *testing.T) {
 			"'Request changes…'",
 			"c.amendForm = el('form', { class: 'amend-form', id: 'mv-amend-form'",
 			"name: 'acceptance', maxlength: '1000', autocomplete: 'off', placeholder: 'The help text names the new flag…', 'aria-describedby': 'mv-amend-error'",
-			"name: 'title', maxlength: '256', autocomplete: 'off', placeholder: 'Add the Molecule view to the Lab UI…', 'aria-describedby': 'mv-publish-error', dataset: { gate: 'title' }, oninput: (e) => { state.gate.title = e.target.value; } }",
+			"name: 'title', maxlength: '256', autocomplete: 'off', placeholder: 'Describe the change in a few words…', 'aria-describedby': 'mv-publish-error', dataset: { gate: 'title' }, oninput: (e) => { state.gate.title = e.target.value; } }",
 			"el('summary', null, 'Not needed anymore?')",
 			"onclick: () => openConfirm('retire') }, 'Retire this Molecule…')",
 			"onclick: () => openConfirm('stop') }, 'Stop this Molecule…')",

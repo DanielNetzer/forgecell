@@ -6,6 +6,11 @@
 
 export const $ = (selector) => document.querySelector(selector);
 
+// uid is a useId-style id, unique on the page: a label binds its input through
+// it with for/id. A control built once keeps its id for the page's lifetime.
+let uidCount = 0;
+export function uid(prefix) { uidCount += 1; return (/^[a-z][a-z0-9-]{0,31}$/.test(prefix) ? prefix : 'fc') + '-' + uidCount; }
+
 // el builds an element. Strings among children become text nodes; props are
 // fixed by the calling module, never taken from data.
 export function el(tag, props, ...children) {
