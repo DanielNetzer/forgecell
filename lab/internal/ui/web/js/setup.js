@@ -6,7 +6,7 @@
 // and nothing is resubmitted. Approve Formula sends the exact proposal and
 // digest shown, and nothing is approved without that click. Every served value
 // is untrusted and reaches the page only as a text node.
-import { $, el, fill, setText, state, short, counted, SessionError, tabSession, api, failed, showView } from './core.js';
+import { $, el, uid, fill, setText, state, short, counted, SessionError, tabSession, api, failed, showView } from './core.js';
 
 const STEPS = [
   ['repository', 'Repository'],
@@ -26,6 +26,18 @@ const DIGEST = /^[a-f0-9]{64}$/;
 const setup = { root: null, view: null, pending: '', error: '', errorFor: '', keys: {}, timer: null, review: false, live: '' };
 
 const text = (value, fallback) => (typeof value === 'string' && value ? value : fallback);
+
+// fieldId is one uid() per setup input, kept across card rebuilds so its label
+// stays bound and refocus finds the same id. Keys come from served values, so
+// the map stays bounded.
+const fieldIds = new Map();
+function fieldId(key) {
+  if (!fieldIds.has(key)) {
+    if (fieldIds.size >= 64) fieldIds.clear();
+    fieldIds.set(key, uid('setup-field'));
+  }
+  return fieldIds.get(key);
+}
 
 export function mount(root, ctx) {
   setup.root = root;
@@ -239,8 +251,8 @@ function chooseCard(view) {
     el('p', { class: 'setup-note' }, counted(labs.length, 'Lab matches', 'Labs match') + ' this repository. Pick the one to open; the others stay as they are.'),
     form('choose', (f) => { const picked = f.querySelector('input[name="lab"]:checked'); if (picked) submit('choose', { lab: Number(picked.value) }, 'choose'); },
       el('fieldset', { class: 'setup-options' }, el('legend', { class: 'sr-only' }, 'Labs for this repository'),
-        labs.map((lab, i) => el('label', { class: 'setup-option' },
-          el('input', { type: 'radio', name: 'lab', value: String(Number.isInteger(lab.index) ? lab.index : i), required: true, checked: i === 0 }),
+        labs.map((lab, i) => el('label', { class: 'setup-option', for: fieldId('lab-' + i) },
+          el('input', { type: 'radio', id: fieldId('lab-' + i), name: 'lab', value: String(Number.isInteger(lab.index) ? lab.index : i), required: true, checked: i === 0 }),
           el('span', { class: 'setup-option-text' }, el('strong', null, text(lab.name, 'Lab')), el('small', null, lab.formula ? 'Formula ' + lab.formula + (lab.binding ? ' · ' + lab.binding : '') : 'No Formula yet'))))),
       el('div', { class: 'setup-actions' }, submitButton('choose', 'Open Lab', true))));
 }
@@ -274,8 +286,8 @@ function agentCard(view) {
     el('p', { class: 'setup-note' }, ready ? 'Pick the coding agent that writes changes. You can change it later with a reviewed Formula change.' : 'No coding agent is ready yet. Install one and sign in with its own CLI, then Check Again.'),
     form('agent', (f) => { const picked = f.querySelector('input[name="harness"]:checked'); if (picked) submit('create', { harness: picked.value }, 'agent'); },
       el('fieldset', { class: 'setup-options' }, el('legend', { class: 'sr-only' }, 'Coding agents'),
-        agents.map((a) => el('label', { class: 'setup-option', dataset: { ready: a.ready === true ? 'yes' : 'no' } },
-          el('input', { type: 'radio', name: 'harness', value: a.id, required: true, disabled: a.ready !== true, checked: a === firstReady, 'aria-describedby': 'setup-agent-' + a.id }),
+        agents.map((a) => el('label', { class: 'setup-option', for: fieldId('harness-' + a.id), dataset: { ready: a.ready === true ? 'yes' : 'no' } },
+          el('input', { type: 'radio', id: fieldId('harness-' + a.id), name: 'harness', value: a.id, required: true, disabled: a.ready !== true, checked: a === firstReady, 'aria-describedby': 'setup-agent-' + a.id }),
           el('span', { class: 'setup-option-text' },
             el('strong', null, text(a.name, a.id)),
             el('small', { id: 'setup-agent-' + a.id }, agentLine(a)))))),
@@ -319,7 +331,7 @@ function reviewCard(view) {
       setup.review = p.kind === 'bootstrap' && Boolean(f.querySelector('input[name="review-atom"]:checked'));
       approve(p.id, p.digest, setup.review);
     },
-      p.kind === 'bootstrap' ? el('label', { class: 'setup-toggle' }, el('input', { type: 'checkbox', name: 'review-atom', checked: setup.review }), ' Also propose the review Atom after this approval. You approve it separately.') : null,
+      p.kind === 'bootstrap' ? el('label', { class: 'setup-toggle', for: fieldId('review-atom') }, el('input', { type: 'checkbox', id: fieldId('review-atom'), name: 'review-atom', checked: setup.review }), ' Also propose the review Atom after this approval. You approve it separately.') : null,
       el('div', { class: 'setup-actions' }, valid ? submitButton('approve', p.resume ? 'Finish Approval' : 'Approve Formula', true) : null)));
 }
 

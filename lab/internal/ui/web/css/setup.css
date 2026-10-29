@@ -1,8 +1,12 @@
 /* Set up your Lab: the first-run view (js/setup.js). While it shows, the Lab
    navigation, the tab bar and the side panel are hidden: there is no Lab yet. */
 body.setup-mode .app-nav, body.setup-mode .tab-bar, body.setup-mode .side-panel, body.setup-mode #loop-pill, body.setup-mode .readonly-badge { display: none; }
+/* With the navigation and side panel hidden, the shell is one column at every
+   width: the view no longer falls into the 200px navigation column, so the
+   step and repository cards take the available width. */
+body.setup-mode .shell { grid-template-columns: minmax(0, 1fr); }
 
-.setup { display: grid; gap: 16px; max-width: 760px; min-width: 0; }
+.setup { display: grid; gap: 16px; width: 100%; max-width: 760px; min-width: 0; }
 .setup-head { padding: 22px 24px; border-radius: var(--radius-panel); }
 .setup-head h1 { margin: 0; font-size: 26px; font-weight: 500; letter-spacing: 0; }
 .setup-intro { margin: 6px 0 0; color: var(--muted); }
