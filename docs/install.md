@@ -1,9 +1,9 @@
 # Install Forgecell CLI
 
-Public CLI `0.2.0-preview.2` prerelease; core source licensed under the [MIT License](../LICENSE). No repository access, Node or Go is needed to install.
+Public CLI `v0.3.1` release; core source licensed under the [MIT License](../LICENSE). No repository access, Node or Go is needed to install.
 
 ```sh
-sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.2.0-preview.2/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
+sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.3.1/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
 ```
 
 The command downloads the bootstrap over HTTPS before executing it. A failed download
@@ -126,7 +126,7 @@ a Molecule's delivery and exits nonzero unless they passed.
 and authentication checks; it does not prove model access or repository policy
 readiness. `forgecell --help` lists every command and flag.
 
-The `0.2.0-preview.2` prerelease uses a distinct directory under `~/.forgecell/labs/`
+The `v0.3.1` release uses a distinct directory under `~/.forgecell/labs/`
 for each checkout by default; `forgecell doctor --json` reports the exact location.
 Existing preview.1 checkout Labs in the ignored `.forgecell` directory are left
 intact. Use the same `--lab .forgecell` path for every command to continue using one;
@@ -136,7 +136,7 @@ path such as the example above keeps records outside the checkout.
 
 ## Versions, upgrade and rollback
 
-The command above pins `0.2.0-preview.2`. Repeating it safely reinstalls that version. For another GitHub release, use its matching versioned installer; `FORGECELL_VERSION` overrides require the generic `FORGECELL_RELEASE_BASE` layout. Review release notes before upgrading.
+The command above pins `v0.3.1`. v0.3.1 is the first release that drives the whole loop from `forgecell ui`. Repeating it safely reinstalls that version. For another GitHub release, use its matching versioned installer; `FORGECELL_VERSION` overrides require the generic `FORGECELL_RELEASE_BASE` layout. Review release notes before upgrading.
 
 `forgecell rollback` restores the previous verified installation when one exists. Installation preserves Formulas and ledgers, stores versioned executables under `~/.forgecell/releases`, and refuses conflicting unmanaged launchers.
 
@@ -202,9 +202,9 @@ Native maintainers use [the distribution design](design/native-cli-distribution.
 
 ## Published public-core release and legacy provenance
 
-The published [v0.2.0-preview.2 prerelease](https://github.com/DanielNetzer/forgecell/releases/tag/v0.2.0-preview.2)
+The pinned installer uses `DanielNetzer/forgecell` and the `v0.3.1` tag.
+The earlier published [v0.2.0-preview.2 prerelease](https://github.com/DanielNetzer/forgecell/releases/tag/v0.2.0-preview.2)
 was built from public-core source `801a9846fc9066dde985bb678348cac2bc89a249`.
-The pinned installer uses `DanielNetzer/forgecell` and the `v0.2.0-preview.2` tag.
 Installation requires no GitHub token, Git, gh, Go or Node.
 
 The legacy `DanielNetzer/forgecell-releases` preview `0.2.0-preview.1` used an
