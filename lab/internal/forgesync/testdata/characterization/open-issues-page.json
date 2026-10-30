@@ -1,0 +1,4 @@
+{"data":{"repository":{"issues":{"totalCount":3,"pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29yOjI="},"nodes":[
+  {"number":3,"state":"OPEN","stateReason":"REOPENED","createdAt":"2026-10-01T09:00:00+02:00","updatedAt":"2026-10-02T10:00:00Z","title":"First\tissue","locked":true,"labels":{"nodes":[{"name":"bug"},{"name":""}]},"milestone":{"title":"v1"},"reopened":{"nodes":[{"createdAt":"2026-10-03T00:00:00Z"}]}},
+  {"number":5,"state":"OPEN","stateReason":null,"createdAt":"2026-10-04T00:00:00Z","updatedAt":"not a time","title":"Second","locked":false,"labels":{"nodes":[]},"milestone":null,"reopened":{"nodes":[]}}
+]}}}}

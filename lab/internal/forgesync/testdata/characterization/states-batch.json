@@ -1,0 +1,10 @@
+{"data":{"repository":{
+  "i12":null,
+  "i11":null,
+  "p9":{"number":9,"state":"MERGED","isDraft":false,"mergedAt":"2026-10-05T11:00:00Z","mergeCommit":{"oid":"1111111111111111111111111111111111111111"},"headRefOid":"2222222222222222222222222222222222222222","headRef":null,"reviewDecision":"APPROVED","commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}},
+  "i7":{"number":7,"state":"OPEN","stateReason":null,"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z","title":"Open one","locked":false,"labels":{"nodes":[]},"milestone":null,"reopened":{"nodes":[]},"closedAt":null,"timelineItems":{"nodes":[]}},
+  "i4":{"number":4,"state":"CLOSED","stateReason":"COMPLETED","createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-10-05T12:00:00Z","title":"Closed one","locked":false,"labels":{"nodes":[{"name":"done"}]},"milestone":null,"reopened":{"nodes":[]},"closedAt":"2026-10-05T12:00:00Z","timelineItems":{"nodes":[{"closer":{"__typename":"PullRequest","number":9}}]}}
+}},"errors":[
+  {"type":"FORBIDDEN","path":["repository","i12"],"message":"Resource not accessible"},
+  {"type":"NOT_FOUND","path":["repository","i11"],"message":"Could not resolve to an Issue with the number of 11."}
+]}
