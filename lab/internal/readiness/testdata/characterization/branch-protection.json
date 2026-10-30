@@ -1,0 +1,4 @@
+{
+  "url": "https://api.github.com/repos/owner/repo/branches/release/v1/protection",
+  "enforce_admins": {"enabled": true}
+}

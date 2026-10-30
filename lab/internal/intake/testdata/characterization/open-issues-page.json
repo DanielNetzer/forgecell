@@ -1,0 +1,5 @@
+[
+  {"number":2,"title":"Oldest","state":"open","html_url":"https://github.com/owner/repo/issues/2","created_at":"2026-01-01T00:00:00Z","labels":[{"name":"bug"},{"name":"help wanted"}],"milestone":{"title":"v1"}},
+  {"number":3,"title":"A pull request","state":"open","html_url":"https://github.com/owner/repo/pull/3","created_at":"2026-01-02T00:00:00Z","pull_request":{"url":"https://api.github.com/repos/owner/repo/pulls/3"}},
+  {"number":4,"title":"Newer","state":"open","html_url":"https://github.com/owner/repo/issues/4","created_at":"2026-01-03T00:00:00+02:00","labels":[],"milestone":null,"pull_request":null}
+]
