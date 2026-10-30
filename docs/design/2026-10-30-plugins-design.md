@@ -435,7 +435,31 @@ Each slice follows `lab/CLAUDE.md`:
 
 Slices 3 and 4 can run in parallel once 2 merges.
 
-## 11. Future (not v1)
+## 11. Open architecture roadmap
+
+The plugin kinds in this design open Forgecell **at its integration edges**. The core
+stays closed **by design**, and no plugin may weaken it:
+- human gates;
+- digest binding;
+- the ledger;
+- the closed-set rule for commands Forgecell executes;
+- "never merges or deploys".
+
+The extension points below are committed so that "open" is a stated direction with
+contracts, not an accident. Each one gets its own design before it is built.
+
+| Order | Extension point | What it opens | Power it never gets |
+|---|---|---|---|
+| v1 (this doc) | `tracker`, `forge`, `reviewer` plugins; MCP extensions for model context | New issue sources, forges, review agents and model tools, in any language, with no release | No write without a gate; no merge or deploy |
+| v1.x | **`observer` kind: typed lifecycle events** (Molecule created, gate waiting, checks completed, change published, finding raised, Molecule finished) delivered to observer plugins | Chat notifications (Slack, Teams), dashboards, metrics, audit export | Receive-only: an observer can't gate, write, retry or change state |
+| v1.x | **Harness adapters as plugins**: the versioned adapter protocol (today protocol 6, built-in for claude-code, codex and cursor) served by an external process | New coding agents (Aider, Gemini CLI, OpenHands…) plug in like trackers | Outcomes stay strictly schema-validated and untrusted; no access to gates, ledger writes or credentials beyond the harness's own |
+| later | **Evidence Atoms** (#5): a custom Formula step implemented by a plugin, for example a security scan, licence check or preview URL | Team-specific steps inside the loop | Evidence only: it can fail a step but never approve one |
+| later | **`ci` kind**: a plugin proposes check commands from other CI systems (Jenkins, CircleCI, Buildkite) | Required-check baselines beyond GitHub Actions and GitLab CI | Proposed commands still pass the engine's closed-set validation and your Formula review |
+| later | **A versioned read API** for ledgers, receipts and Formulas | Stable integration for external tools, instead of reading internal files | Read-only |
+| later | **OS-level plugin sandboxing**, which enforces declared network and filesystem access | Safer third-party plugins | — |
+| later | **`memory` kind** (below) | Cross-harness knowledge | Proposals approved by you; never instructions from untrusted text |
+
+## 12. Future (not v1)
 
 - **`memory` kind.** A Lab-owned, reviewed store of repo facts and operator decisions, with
   provenance. It's rendered into every role's prompt for every harness, and exported to
@@ -446,7 +470,7 @@ Slices 3 and 4 can run in parallel once 2 merges.
 - **Tracker writes** (`tracker_comment`, `tracker_transition`) behind the document Atom's gate.
 - **Self-managed GitLab, Bitbucket, Gitea, Linear, Azure DevOps:** plugins, not core work.
 
-## 12. Left to the builder
+## 13. Left to the builder
 
 - Exact Go package boundaries and names, as long as §5's responsibilities hold.
 - Per-tool size caps and timeouts, within the bounds stated.
