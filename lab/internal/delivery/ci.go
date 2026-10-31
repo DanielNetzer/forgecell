@@ -14,6 +14,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/checks"
 	"github.com/DanielNetzer/forgecell/lab/internal/forge"
+	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 )
 
@@ -29,6 +30,8 @@ type CIIdentity struct {
 	PR            int    `json:"pr"`
 	URL           string `json:"url"`
 	Commit        string `json:"commit"`
+	// Ref is a plugin forge's opaque change ref; GitHub observations never set it.
+	Ref string `json:"ref,omitempty"`
 }
 type CIObservation struct {
 	SchemaVersion string          `json:"schemaVersion"`
@@ -37,6 +40,10 @@ type CIObservation struct {
 	SHA256        string          `json:"sha256"`
 	Identity      CIIdentity      `json:"identity"`
 	Snapshot      checks.Snapshot `json:"snapshot"`
+	// PluginCalls records a plugin forge observation's calls (digests and fixed
+	// reasons only); GitHub observations never set them.
+	PluginCalls        []mcpadapter.CallRecord `json:"pluginCalls,omitempty"`
+	PluginCallsDropped int                     `json:"pluginCallsDropped,omitempty"`
 }
 
 func ciHash(a CIObservation) string {
@@ -87,6 +94,9 @@ func ciIdentity(o Options) (CIIdentity, error) {
 	if err = json.Unmarshal(raw, &record); err != nil {
 		return id, err
 	}
+	if r.Forge != "" && record.ID == o.MoleculeID {
+		return pluginCIIdentity(o, r, record)
+	}
 	if record.ID != o.MoleculeID || !MatchesPublishedEvidence(r, record) {
 		return id, fmt.Errorf("CI requires a matching published delivery receipt and ledger")
 	}
@@ -94,9 +104,12 @@ func ciIdentity(o Options) (CIIdentity, error) {
 	if err != nil {
 		return id, err
 	}
-	return CIIdentity{o.MoleculeID, r.Preview.Digest, r.Preview.Repo, number, r.URL, r.Commit}, nil
+	return CIIdentity{MoleculeID: o.MoleculeID, PreviewDigest: r.Preview.Digest, Repo: r.Preview.Repo, PR: number, URL: r.URL, Commit: r.Commit}, nil
 }
 func ciValidate(id CIIdentity, s checks.Snapshot) error {
+	if id.Ref != "" {
+		return validatePluginSnapshot(id, s)
+	}
 	if s.Repo != id.Repo || s.PR != id.PR || s.Commit != id.Commit {
 		return fmt.Errorf("CI repository, PR or commit differs from delivery")
 	}
@@ -184,7 +197,7 @@ func ReadCI(o Options) ([]CIObservation, error) {
 		if err = json.Unmarshal(raw, &a); err != nil {
 			return nil, err
 		}
-		if a.SchemaVersion != "v1" || a.Sequence != i+1 || a.Previous != previous || a.Identity != id || a.SHA256 != ciHash(a) || name != fmt.Sprintf("%06d-%s.json", a.Sequence, a.SHA256) {
+		if a.SchemaVersion != "v1" || a.Sequence != i+1 || a.Previous != previous || a.Identity != id || a.SHA256 != ciHash(a) || name != fmt.Sprintf("%06d-%s.json", a.Sequence, a.SHA256) || !validCIPluginCalls(id, a) {
 			return nil, fmt.Errorf("invalid CI history identity or hash link")
 		}
 		if err = ciValidate(id, a.Snapshot); err != nil {
@@ -235,6 +248,12 @@ func CollectCI(ctx context.Context, o Options, target checks.Options) (CIObserva
 }
 
 func appendCI(o Options, s checks.Snapshot) (CIObservation, error) {
+	return appendCIWith(o, s, nil, 0)
+}
+
+// appendCIWith is appendCI for an observation that also records its plugin
+// calls; GitHub observations pass none.
+func appendCIWith(o Options, s checks.Snapshot, calls []mcpadapter.CallRecord, dropped int) (CIObservation, error) {
 	var a CIObservation
 	id, err := ciIdentity(o)
 	if err != nil {
@@ -250,7 +269,10 @@ func appendCI(o Options, s checks.Snapshot) (CIObservation, error) {
 	if len(history) >= MaxCIObservations {
 		return a, fmt.Errorf("CI history count exceeds bound; observation not saved")
 	}
-	a = CIObservation{SchemaVersion: "v1", Sequence: len(history) + 1, Identity: id, Snapshot: s}
+	a = CIObservation{SchemaVersion: "v1", Sequence: len(history) + 1, Identity: id, Snapshot: s, PluginCalls: calls, PluginCallsDropped: dropped}
+	if !validCIPluginCalls(id, a) {
+		return a, fmt.Errorf("CI plugin call records exceed bound or belong to another forge; observation not saved")
+	}
 	if len(history) > 0 {
 		a.Previous = history[len(history)-1].SHA256
 	}
@@ -346,6 +368,9 @@ func ValidateCITarget(o Options, repo string, pr int, commit string) error {
 	id, err := ciIdentity(o)
 	if err != nil {
 		return err
+	}
+	if id.Ref != "" {
+		return fmt.Errorf("CI for a delivery published through a forge plugin is collected with --project and --ref, not --repo and --pr")
 	}
 	if id.Repo != repo || id.PR != pr || id.Commit != commit {
 		return fmt.Errorf("CI target differs from delivery")

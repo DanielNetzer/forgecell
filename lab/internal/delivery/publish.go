@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/forge"
+	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
@@ -37,12 +38,27 @@ type Receipt struct {
 	State                        string                  `json:"state"`
 	Commit                       string                  `json:"commit,omitempty"`
 	URL                          string                  `json:"url,omitempty"`
+	// A receipt published through a plugin forge names the plugin, its project,
+	// host and change noun, and the change's opaque ref, and records the plugin's
+	// publish-time calls (digests and fixed reasons only). All are omitempty, so
+	// a GitHub receipt never writes them.
+	Forge              string                  `json:"forge,omitempty"`
+	Project            string                  `json:"project,omitempty"`
+	ForgeHost          string                  `json:"forgeHost,omitempty"`
+	ChangeNoun         string                  `json:"changeNoun,omitempty"`
+	Ref                string                  `json:"ref,omitempty"`
+	PluginCalls        []mcpadapter.CallRecord `json:"pluginCalls,omitempty"`
+	PluginCallsDropped int                     `json:"pluginCallsDropped,omitempty"`
 }
 type PublishOptions struct {
 	Options
 	Approve, Title   string
 	AcceptUnverified bool
 	Runner           func(context.Context, process.Options) process.Result // Remote operations only.
+	// Changes, when set, publishes through a plugin forge (Plugin names it);
+	// nil keeps GitHub. Runner still runs git fetch and push.
+	Changes forge.Changes
+	Plugin  PluginForge
 }
 
 func digest(p PreviewResult) string {
@@ -236,6 +252,12 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 			return "", fmt.Errorf("%s failed or uncertain: %s %s", argv[0], p.Error, p.Stderr)
 		}
 		return strings.TrimSpace(p.Stdout), nil
+	}
+	if o.Changes != nil {
+		return publishPlugin(ctx, o, r, record, path, call)
+	}
+	if r.Forge != "" {
+		return r, fmt.Errorf("delivery receipt was published through a forge plugin; deliver it with the Formula that declares that plugin")
 	}
 	// Policy and PR calls go through the forge; git fetch and push stay on call.
 	host := forge.GitHub{Run: runner}

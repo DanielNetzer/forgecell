@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/forge"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/contract"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/mcp"
@@ -79,6 +80,31 @@ func TrackerFor(labDir string, f formula.Formula, opts Options) (tracker.Keyed, 
 		return nil, true, err
 	}
 	return t, true, nil
+}
+
+// ForgeFor returns the plugin forge the Formula's forge block names, with
+// forge.project as the {project} of every call, or false when no forge block is
+// declared, so the caller keeps forge.GitHub. A forge block that names no
+// declared plugin is refused, never taken as GitHub. It sets opts' LabDir, Ref
+// and RunRoot itself, as TrackerFor does.
+func ForgeFor(labDir string, f formula.Formula, opts Options) (forge.Changes, bool, error) {
+	p, project, ok := f.ForgePlugin()
+	if !ok {
+		if f.Forge != nil {
+			return nil, false, refuse("", stepOptions, mcp.Failed, "forge.plugin names no declared plugin")
+		}
+		return nil, false, nil
+	}
+	root, err := PrepareRunRoot(labDir)
+	if err != nil {
+		return nil, true, err
+	}
+	opts.LabDir, opts.Ref, opts.RunRoot = labDir, Ref{Manifest: p.Manifest, SHA256: p.SHA256}, root
+	fg, err := NewForge(opts, project)
+	if err != nil {
+		return nil, true, err
+	}
+	return fg, true, nil
 }
 
 // DescribeReviewer runs reviewer_describe on a reviewer plugin with config, a

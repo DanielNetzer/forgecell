@@ -332,6 +332,13 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		options := delivery.Options{LabDir: *lab, MoleculeID: args[1], BaseBranch: *base, Files: flags.Args()}
 		if *approve != "" {
+			f, ok, err := moleculeForgeFormula(*lab, args[1])
+			if err != nil {
+				return fail(err)
+			}
+			if ok {
+				return deliverPlugin(ctx, f, delivery.PublishOptions{Options: options, Approve: *approve, Title: *title, AcceptUnverified: *acceptUnverified}, out, stderr)
+			}
 			result, err := delivery.Publish(ctx, delivery.PublishOptions{Options: options, Approve: *approve, Title: *title, AcceptUnverified: *acceptUnverified})
 			if err != nil {
 				return fail(err)
@@ -358,13 +365,24 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		sha := flags.String("commit", "", "Exact expected commit")
 		var required []string
 		flags.Func("required", "Exact required check name; repeat for multiple checks", func(name string) error { required = append(required, name); return nil })
-		if err := flags.Parse(args[1:]); err != nil {
+		rest, pluginFlags, err := splitPluginCheckFlags(args[1:])
+		if err != nil {
+			return fail(err)
+		}
+		if err := flags.Parse(rest); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 {
 			return fail(fmt.Errorf("unexpected checks arguments"))
 		}
 		link := delivery.Options{LabDir: *lab, MoleculeID: *mol}
+		f, plugin, err := checksForgeRoute(*lab, *mol, pluginFlags, *repo, *pr)
+		if err != nil {
+			return fail(err)
+		}
+		if plugin {
+			return checksPlugin(ctx, f, link, pluginFlags, *sha, required, out, stderr)
+		}
 		observation, err := delivery.CollectCI(ctx, link, checks.Options{Repo: *repo, PR: *pr, Commit: *sha, Required: required})
 		if err != nil {
 			return fail(err)
