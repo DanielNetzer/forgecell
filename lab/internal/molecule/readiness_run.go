@@ -526,7 +526,21 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 		}
 		target = strings.TrimPrefix(target, "origin/")
 	}
-	if o.ReadIssue == nil && key == "" {
+	if hasPluginForge(f) {
+		// A plugin forge reads policy through the plugin, never through GitHub.
+		if err = RefuseGitHubPolicyConstraints(o.MandatoryConstraints); err != nil {
+			return stopIntake(r, err.Error())
+		}
+		// A supplied numeric Issue reader is the test and evaluation seam that
+		// keeps the GitHub branch from reading live policy; it keeps any plugin
+		// from starting here too.
+		if o.ReadIssue == nil {
+			calls := pluginPolicyCalls(o)
+			policy := readPluginForgePolicy(ctx, o.LabDir, f, target, calls)
+			absorbPluginCalls(&r, calls)
+			r.RemotePolicy = &policy
+		}
+	} else if o.ReadIssue == nil && key == "" {
 		policy := readiness.ReadRemotePolicy(ctx, w.Repo, target, w.SourceRoot, nil)
 		r.RemotePolicy = &policy
 	}
@@ -1114,7 +1128,22 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 	if err != nil {
 		return r, err
 	}
-	if len(p.Inputs.MandatoryConstraints) > 0 {
+	if len(p.Inputs.MandatoryConstraints) > 0 && hasPluginForge(f) {
+		if err = RefuseGitHubPolicyConstraints(p.Inputs.MandatoryConstraints); err != nil {
+			return r, err
+		}
+		calls := pluginPolicyCalls(o)
+		policy := readPluginForgePolicy(ctx, o.LabDir, f, p.Inputs.TargetBranch, calls)
+		if absorbPluginCalls(&r, calls) {
+			if saveErr := save(r); saveErr != nil {
+				return r, saveErr
+			}
+		}
+		if err = ValidatePluginRequirements(policy, p.Inputs.MandatoryConstraints); err != nil {
+			return r, err
+		}
+		r.RemotePolicy = &policy
+	} else if len(p.Inputs.MandatoryConstraints) > 0 {
 		policy := readiness.ReadRemotePolicy(ctx, repo, p.Inputs.TargetBranch, r.Workspace.SourceRoot, nil)
 		if err = policy.ValidateRequirements(p.Inputs.MandatoryConstraints); err != nil {
 			return r, err
