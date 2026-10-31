@@ -110,6 +110,9 @@ type Atom struct {
 type Intake struct {
 	Source string `yaml:"source"`
 	Repo   string `yaml:"repo"`
+	// Config is passed to a tracker plugin's calls. A nil map is absent and is
+	// omitted, so earlier Formulas keep their bytes, SHA and behaviour.
+	Config map[string]any `yaml:"config,omitempty" json:"config,omitempty"`
 }
 type Formula struct {
 	SchemaVersion string  `yaml:"schemaVersion"`
@@ -135,8 +138,14 @@ type Formula struct {
 	// exec the CLI binary. Absent means DefaultFullSuiteTriggers and keeps the Formula
 	// bytes, SHA and behaviour of earlier Formulas unchanged.
 	FullSuiteTriggers []string `yaml:"fullSuiteTriggers" json:"fullSuiteTriggers,omitempty"`
-	YAML              string   `yaml:"-"`
-	SHA256            string   `yaml:"-"`
+	// Plugins pins plugin manifests by name; Forge and ReviewerPlugins name them
+	// (see plugins.go). Absent keeps the Formula bytes, SHA and behaviour of
+	// earlier Formulas unchanged, and a nil Forge means GitHub stays the forge.
+	Plugins         []PluginRef   `yaml:"plugins,omitempty" json:"plugins,omitempty"`
+	Forge           *ForgeRef     `yaml:"forge,omitempty" json:"forge,omitempty"`
+	ReviewerPlugins []ReviewerRef `yaml:"reviewers,omitempty" json:"reviewers,omitempty"`
+	YAML            string        `yaml:"-"`
+	SHA256          string        `yaml:"-"`
 }
 type Loaded struct {
 	Formula  Formula
@@ -491,6 +500,9 @@ func Parse(data []byte) (Formula, error) {
 		}
 	}
 	if err := validateExtensions(raw); err != nil {
+		return f, err
+	}
+	if err := validatePlugins(raw); err != nil {
 		return f, err
 	}
 	if value, exists := raw["requiredChecks"]; exists {
