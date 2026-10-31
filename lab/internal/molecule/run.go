@@ -5,13 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
+	"github.com/DanielNetzer/forgecell/lab/internal/tracker"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
 	"net"
 	"net/url"
@@ -30,6 +30,8 @@ type Issue struct {
 	Body      string `json:"body"`
 	URL       string `json:"url"`
 	State     string `json:"state"`
+	// Key is a tracker's own display key; GitHub Issues never set it.
+	Key string `json:"key,omitempty"`
 }
 type Workspace struct {
 	SourceRoot string `json:"sourceRoot"`
@@ -459,16 +461,8 @@ func allocateWorkspace(ctx context.Context, w Workspace) error {
 	return err
 }
 func readIssue(ctx context.Context, repo string, number int64, cwd string) (Issue, error) {
-	r := process.Run(ctx, process.Options{Argv: []string{"gh", "issue", "view", fmt.Sprint(number), "--repo", repo, "--json", "number,title,body,state,url,updatedAt"}, Dir: cwd, Stdin: []byte{}, Timeout: 20 * time.Second})
-	if !r.OK {
-		return Issue{}, fmt.Errorf("GitHub intake failed: %s %s", r.Error, r.Stderr)
-	}
-	var issue Issue
-	if err := json.Unmarshal([]byte(r.Stdout), &issue); err != nil {
-		return issue, err
-	}
-	issue.Repo = repo
-	return issue, nil
+	t, err := tracker.GitHub{}.Get(ctx, repo, number, cwd)
+	return Issue{UpdatedAt: t.UpdatedAt, Number: t.Number, Repo: t.Repo, Title: t.Title, Body: t.Body, URL: t.URL, State: t.State}, err
 }
 
 // Generated bindings invoke the adapter in-process so a single managed process group

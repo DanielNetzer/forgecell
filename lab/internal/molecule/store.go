@@ -114,7 +114,7 @@ func save(r Record) error {
 		return err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Molecule %s\n\n- Status: %s\n- Formula: %s\n- Formula SHA-256: %s\n- Issue: %s#%d\n- Workspace: %s\n- Branch: %s\n- Base commit: %s\n\n## Atoms\n", r.ID, r.Status, r.FormulaID, r.FormulaSnapshot.SHA256, r.Issue.Repo, r.Issue.Number, r.Workspace.Path, r.Workspace.Branch, r.Workspace.BaseCommit)
+	fmt.Fprintf(&b, "# Molecule %s\n\n- Status: %s\n- Formula: %s\n- Formula SHA-256: %s\n- Issue: %s%s\n- Workspace: %s\n- Branch: %s\n- Base commit: %s\n\n## Atoms\n", r.ID, r.Status, r.FormulaID, r.FormulaSnapshot.SHA256, r.Issue.Repo, r.Issue.DisplayKey(), r.Workspace.Path, r.Workspace.Branch, r.Workspace.BaseCommit)
 	if r.CheckoutStatus != "" {
 		fmt.Fprintf(&b, "Checkout availability: %s\n", r.CheckoutStatus)
 	}

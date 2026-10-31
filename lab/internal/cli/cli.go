@@ -1102,7 +1102,7 @@ func initLauncher() string {
 }
 
 func presentRun(out io.Writer, r molecule.Record) {
-	fmt.Fprintf(out, "Molecule %s · %s\n%s#%d — %s\n", r.ID, r.Status, r.Issue.Repo, r.Issue.Number, r.Issue.Title)
+	fmt.Fprintf(out, "Molecule %s · %s\n%s%s — %s\n", r.ID, r.Status, r.Issue.Repo, r.Issue.DisplayKey(), r.Issue.Title)
 	if r.Analysis != nil {
 		fmt.Fprintln(out, r.Analysis.Summary)
 		for _, q := range r.Analysis.Questions {
