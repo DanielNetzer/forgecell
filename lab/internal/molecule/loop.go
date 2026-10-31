@@ -10,6 +10,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
+	"github.com/DanielNetzer/forgecell/lab/internal/tracker"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -190,7 +191,7 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 	if lo.ListIssues == nil {
 		selector := lo.Select
 		lo.ListIssues = func(ctx context.Context, repository string) (intake.OpenIssues, error) {
-			return intake.ReadSelectedOpenIssues(ctx, repository, selector)
+			return tracker.GitHub{}.List(ctx, repository, selector)
 		}
 	}
 	lo.Template.LabDir = lab

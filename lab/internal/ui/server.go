@@ -34,6 +34,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
+	"github.com/DanielNetzer/forgecell/lab/internal/tracker"
 	"io"
 	"io/fs"
 	"net"
@@ -353,7 +354,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: intake.ReadSelectedOpenIssues, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: tracker.GitHub{}.List, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

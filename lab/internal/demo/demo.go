@@ -721,7 +721,7 @@ func (s *session) preview(ctx context.Context, r molecule.Record) error {
 // prBody is the body Publish writes for a draft PR. The delivery commit exists
 // only after an approved delivery, so the preview names it as such.
 func prBody(r molecule.Record, p delivery.PreviewResult) string {
-	return fmt.Sprintf("Implements issue #%d.\n\nMolecule: `%s`\nFormula: `%s`\nBase: `%s`\nDelivery: `%s`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n", r.Issue.Number, r.ID, r.FormulaID, p.BaseCommit, "(the commit an approved delivery creates)")
+	return fmt.Sprintf("Implements issue %s.\n\nMolecule: `%s`\nFormula: `%s`\nBase: `%s`\nDelivery: `%s`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n", r.Issue.DisplayKey(), r.ID, r.FormulaID, p.BaseCommit, "(the commit an approved delivery creates)")
 }
 
 // displayBlock is text made safe for a terminal: valid UTF-8, no control or
