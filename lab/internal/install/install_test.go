@@ -6,6 +6,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +59,39 @@ func TestBrokenReleaseDoesNotReplaceCurrent(t *testing.T) {
 		t.Fatal("current changed")
 	}
 }
+func TestSmokeFailureNamesHowTheProbeEnded(t *testing.T) {
+	failing := filepath.Join(t.TempDir(), "forgecell")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\nprintf '0.2.1\\n'\nexit 3\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, source, want string
+	}{
+		{"wrong version", fixture(t, "wrong"), "(probe succeeded, version mismatch true)"},
+		{"non-zero exit", failing, "(probe failed, version mismatch false)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := Options{Home: t.TempDir(), Bin: t.TempDir(), Source: fixture(t, "0.2.0"), Version: "0.2.0"}
+			if _, err := Install(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			o.Source, o.Version = c.source, "0.2.1"
+			_, err := Install(context.Background(), o)
+			if err == nil || !strings.Contains(err.Error(), "release smoke check failed; current CLI unchanged") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Install = %v, want a smoke failure naming %q", err, c.want)
+			}
+			for _, local := range []string{o.Home, o.Bin, filepath.Dir(c.source), os.TempDir()} {
+				if strings.Contains(err.Error(), local) {
+					t.Fatalf("smoke failure leaks a local path: %v", err)
+				}
+			}
+			if target, _ := os.Readlink(filepath.Join(o.Home, "current")); filepath.Base(target) != "0.2.0" {
+				t.Fatalf("current changed to %s", target)
+			}
+		})
+	}
+}
+
 func TestRefuseUnmanagedCommandAndCorruptRollback(t *testing.T) {
 	o := Options{Home: t.TempDir(), Bin: t.TempDir(), Source: fixture(t, "0.2.0"), Version: "0.2.0"}
 	os.WriteFile(filepath.Join(o.Bin, "forgecell"), []byte("mine"), 0600)

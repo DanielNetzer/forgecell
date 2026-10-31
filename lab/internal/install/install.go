@@ -119,10 +119,17 @@ func target(home, name string) (string, error) {
 // cannot fail a fixture that answers at once.
 var ProbeTimeout = 15 * time.Second
 
+// ProbeWaitDelay bounds how long a probe's pipes may take to drain after the
+// release executable exits. Production never changes it; tests widen it for the
+// same reason as ProbeTimeout.
+var ProbeWaitDelay = process.DefaultWaitDelay
+
 func smoke(ctx context.Context, file, version string) error {
-	r := process.Run(ctx, process.Options{Argv: []string{file, "--version"}, Stdin: []byte{}, Timeout: ProbeTimeout, MaxOutputBytes: 100000})
-	if !r.OK || strings.TrimSpace(r.Stdout) != version {
-		return fmt.Errorf("release smoke check failed; current CLI unchanged")
+	r := process.Run(ctx, process.Options{Argv: []string{file, "--version"}, Stdin: []byte{}, Timeout: ProbeTimeout, WaitDelay: ProbeWaitDelay, MaxOutputBytes: 100000})
+	mismatch := strings.TrimSpace(r.Stdout) != version
+	if !r.OK || mismatch {
+		// Only the enumerated terminal state and a flag: never paths or child output.
+		return fmt.Errorf("release smoke check failed; current CLI unchanged (probe %s, version mismatch %t)", r.TerminalState(), mismatch)
 	}
 	return nil
 }

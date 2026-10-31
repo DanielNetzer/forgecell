@@ -21,17 +21,30 @@ func fired() <-chan time.Time {
 	return c
 }
 
+// hangGuard bounds the handshake and every tool call that is not designed to time
+// out. It only stops a hung server failing the test well inside go test's own
+// timeout; a loaded machine never reaches it, so no outcome depends on speed.
+const hangGuard = 5 * time.Minute
+
+// testOptions gives every mode the hang guard instead of the kit's 30 s handshake
+// and the contract tool timeouts. Only the slow mode relies on a timeout.
+func testOptions(root, mode string) Options {
+	opts := Options{Root: root, Grace: fired, Handshake: hangGuard, Timeout: hangGuard}
+	if mode == "slow" {
+		// The slow server never answers, so any timeout gives the same outcome.
+		opts.Timeout = 10 * time.Millisecond
+	}
+	return opts
+}
+
 func run(t *testing.T, kind, mode string) (Report, string) {
 	t.Helper()
 	server := plugintest.Server(t)
 	path := plugintest.WriteManifest(t, plugintest.Manifest(t, server, kind, mode))
 	root := plugintest.TempDir(t)
-	opts := Options{Root: root, Grace: fired}
-	if mode == "slow" {
-		// The slow server never answers, so any timeout gives the same outcome.
-		opts.Timeout = 10 * time.Millisecond
-	}
-	r := Run(context.Background(), path, opts)
+	started := time.Now()
+	r := Run(context.Background(), path, testOptions(root, mode))
+	t.Logf("%s/%s: Run took %s", kind, mode, time.Since(started).Round(time.Millisecond))
 	if left, err := os.ReadDir(root); err != nil || len(left) != 0 {
 		t.Fatalf("the run left %d entries behind (%v)", len(left), err)
 	}
@@ -82,6 +95,18 @@ func TestFailingPluginsNameTheFailedCheck(t *testing.T) {
 	}
 }
 
+func TestHandshakeBoundFailsAServerThatNeverAnswers(t *testing.T) {
+	server := plugintest.Server(t)
+	path := plugintest.WriteManifest(t, plugintest.Manifest(t, server, "tracker", "silent"))
+	opts := testOptions(plugintest.TempDir(t), "silent")
+	// The silent server never answers initialize, so any bound gives the same outcome.
+	opts.Handshake = 10 * time.Millisecond
+	r := Run(context.Background(), path, opts)
+	if failed, ok := r.Failed(); r.Passed || !ok || failed.ID != CheckInitialize || failed.Reason != "timeout" {
+		t.Fatalf("first failure %+v, want initialize timeout", failed)
+	}
+}
+
 func TestBoundChecksSkipWhenNoToolCallRan(t *testing.T) {
 	for _, c := range []struct{ kind, mode string }{{"forge", "wrong-contract"}, {"tracker", "bad-framing"}, {"tracker", "wrong-protocol"}} {
 		r, _ := run(t, c.kind, c.mode)
@@ -101,7 +126,7 @@ func TestCleanupFailureFailsTheReport(t *testing.T) {
 	// The unmark plugin removes the run marker, so the run directory is left.
 	path := plugintest.WriteManifest(t, plugintest.Manifest(t, server, "tracker", "unmark"))
 	root := plugintest.TempDir(t)
-	r := Run(context.Background(), path, Options{Root: root, Grace: fired})
+	r := Run(context.Background(), path, testOptions(root, "unmark"))
 	if r.Passed || r.Cleanup != cleanupLeft || len(r.Checks) != len(checkOrder) {
 		t.Fatalf("report = %+v", r)
 	}
@@ -174,7 +199,7 @@ func TestTamperedServerFailsStart(t *testing.T) {
 	if err := os.WriteFile(server.Path, []byte("tampered"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	r := Run(context.Background(), path, Options{Root: plugintest.TempDir(t), Grace: fired})
+	r := Run(context.Background(), path, testOptions(plugintest.TempDir(t), "good"))
 	if failed, _ := r.Failed(); failed.ID != CheckStart || failed.Reason != "manifest-changed" {
 		t.Fatalf("report = %+v", r)
 	}

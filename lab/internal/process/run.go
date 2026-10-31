@@ -59,7 +59,14 @@ type Options struct {
 	// Watchdog is nil for every caller except verification checks, which end a stuck
 	// run as interrupted: stalled instead of letting it run for hours.
 	Watchdog *Watchdog
+	// WaitDelay bounds how long Wait keeps draining an exited or cancelled child's
+	// pipes before it fails the run. Zero keeps DefaultWaitDelay; tests widen it so a
+	// loaded machine cannot fail a child that has already answered.
+	WaitDelay time.Duration
 }
+
+// DefaultWaitDelay is the pipe-drain bound a run uses when Options names none.
+const DefaultWaitDelay = time.Second
 
 // DefaultWatchdogInterval paces a Watchdog's samples when it names none.
 const DefaultWatchdogInterval = 30 * time.Second
@@ -408,7 +415,10 @@ func Run(parent context.Context, o Options) (result Result) {
 	cmd.Stdin = bytes.NewReader(input)
 	cmd.Stdout = stream{capture: c}
 	cmd.Stderr = stream{capture: c, stderr: true}
-	cmd.WaitDelay = time.Second
+	cmd.WaitDelay = DefaultWaitDelay
+	if o.WaitDelay > 0 {
+		cmd.WaitDelay = o.WaitDelay
+	}
 	configureProcess(cmd)
 	err := cmd.Start()
 	if err == nil {
