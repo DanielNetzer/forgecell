@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/forge"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
@@ -236,6 +237,8 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 		}
 		return strings.TrimSpace(p.Stdout), nil
 	}
+	// Policy and PR calls go through the forge; git fetch and push stay on call.
+	host := forge.GitHub{Run: runner}
 	reconcile := func(state, reason string) (Receipt, error) {
 		r.Lifecycle = &LifecycleObservation{State: state, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Reconciliation: reason}
 		if e := writeReceipt(o.Options, r); e != nil {
@@ -244,7 +247,7 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 		return r, fmt.Errorf("PR reconciliation required: %s", reason)
 	}
 	verify := func() (Receipt, error) {
-		raw, e := call("gh", "pr", "view", r.URL, "--repo", r.Preview.Repo, "--json", prFields)
+		raw, e := host.Change(ctx, r.Preview.Repo, r.URL, path)
 		if e != nil {
 			return reconcile("UNKNOWN", e.Error())
 		}
@@ -294,7 +297,7 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 	if err = validateBase(ctx, path, r.Preview.BaseCommit, r.Preview.BaseBranch); err != nil {
 		return r, err
 	}
-	policy := readiness.ReadRemotePolicy(ctx, r.Preview.Repo, r.Preview.BaseBranch, path, runner)
+	policy := host.Policy(ctx, r.Preview.Repo, r.Preview.BaseBranch, path)
 	r.Policy = &policy
 	if err = writeReceipt(o.Options, r); err != nil {
 		return r, err
@@ -306,7 +309,7 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 	if _, err = call("git", "push", "origin", r.Commit+":refs/heads/"+r.Preview.Branch); err != nil {
 		return r, err
 	}
-	existing, err := call("gh", "pr", "list", "--repo", r.Preview.Repo, "--head", r.Preview.Branch, "--state", "all", "--limit", "2", "--json", prFields)
+	existing, err := host.FindChange(ctx, r.Preview.Repo, r.Preview.Branch, path)
 	if err != nil {
 		return reconcile("UNKNOWN", err.Error())
 	}
@@ -356,7 +359,7 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 		if err = writeReceipt(o.Options, r); err != nil {
 			return r, err
 		}
-		url, createErr := call("gh", "pr", "create", "--draft", "--repo", r.Preview.Repo, "--base", r.Preview.BaseBranch, "--head", r.Preview.Branch, "--title", r.Title, "--body-file", f.Name())
+		url, createErr := host.PublishDraft(ctx, r.Preview.Repo, r.Preview.BaseBranch, r.Preview.Branch, r.Title, f.Name(), path)
 		if createErr != nil {
 			return reconcile("UNKNOWN", createErr.Error())
 		}

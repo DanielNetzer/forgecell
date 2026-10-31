@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/checks"
+	"github.com/DanielNetzer/forgecell/lab/internal/forge"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 )
 
@@ -226,7 +227,7 @@ func CollectCI(ctx context.Context, o Options, target checks.Options) (CIObserva
 	if err := ValidateCITarget(o, target.Repo, target.PR, target.Commit); err != nil {
 		return a, err
 	}
-	s, err := checks.Collect(ctx, target)
+	s, err := forge.GitHub{Run: target.Runner}.Checks(ctx, target)
 	if err != nil {
 		return a, err
 	}
