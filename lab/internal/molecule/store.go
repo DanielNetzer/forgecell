@@ -587,6 +587,16 @@ func UsageSummaryLines(r Record) []string {
 
 // History is advisory only. Bounds never broaden approval lookup or mutate predecessors.
 func clarificationHistory(lab, repo string, number int64) ([]string, bool, error) {
+	return clarificationHistoryOf(lab, repo, func(i ledger.IssueProjection) bool { return i.Number == number && i.Key == "" })
+}
+
+// clarificationHistoryKey is clarificationHistory for a keyed Issue: the key
+// matches exactly and the Number is 0.
+func clarificationHistoryKey(lab, repo, key string) ([]string, bool, error) {
+	return clarificationHistoryOf(lab, repo, func(i ledger.IssueProjection) bool { return key != "" && i.Key == key && i.Number == 0 })
+}
+
+func clarificationHistoryOf(lab, repo string, same func(ledger.IssueProjection) bool) ([]string, bool, error) {
 	scan := scanLedgers(lab, nil)
 	if scan.Missing {
 		return nil, false, nil
@@ -617,7 +627,7 @@ func clarificationHistory(lab, repo string, number int64) ([]string, bool, error
 		}
 		h := f.Header
 		if h.LabDir != lab || h.Mode != "ticket" ||
-			!strings.EqualFold(h.Issue.Repo, repo) || h.Issue.Number != number ||
+			!strings.EqualFold(h.Issue.Repo, repo) || !same(h.Issue) ||
 			h.Workspace == nil || !strings.EqualFold(h.Workspace.Repo, repo) {
 			continue
 		}

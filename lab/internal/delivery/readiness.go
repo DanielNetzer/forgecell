@@ -20,7 +20,7 @@ func validateReadiness(ctx context.Context, o Options, r molecule.Record, expect
 	if err != nil {
 		return err
 	}
-	if p.MoleculeID != r.ID || p.Inputs.Repository != r.Issue.Repo || p.Inputs.Issue.Number != r.Issue.Number || p.Inputs.FormulaSHA256 != r.FormulaSnapshot.SHA256 || p.Inputs.BaseCommit != r.Workspace.BaseCommit || p.Inputs.TargetBranch != o.BaseBranch {
+	if p.MoleculeID != r.ID || p.Inputs.Repository != r.Issue.Repo || p.Inputs.Issue.Number != r.Issue.Number || p.Inputs.Issue.Key != r.Issue.Key || p.Inputs.FormulaSHA256 != r.FormulaSnapshot.SHA256 || p.Inputs.BaseCommit != r.Workspace.BaseCommit || p.Inputs.TargetBranch != o.BaseBranch {
 		return fmt.Errorf("delivery does not match the approved readiness identity")
 	}
 	v := r.Verification

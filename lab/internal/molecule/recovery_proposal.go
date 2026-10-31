@@ -33,16 +33,18 @@ type RecoveryStep struct {
 // owner is gone. The loop writes it and never runs the commands it names. The
 // file holds no timestamp, so an unchanged proposal rewrites to identical bytes.
 type RecoveryProposal struct {
-	SchemaVersion string         `json:"schemaVersion"`
-	MoleculeID    string         `json:"moleculeId"`
-	Repository    string         `json:"repository"`
-	Issue         int64          `json:"issue"`
-	Status        string         `json:"status"`
-	Phase         string         `json:"phase"`
-	PlanDigest    string         `json:"planDigest"`
-	Command       string         `json:"command"`
-	Followup      []RecoveryStep `json:"followup,omitempty"`
-	Path          string         `json:"path"`
+	SchemaVersion string `json:"schemaVersion"`
+	MoleculeID    string `json:"moleculeId"`
+	Repository    string `json:"repository"`
+	Issue         int64  `json:"issue"`
+	// IssueKey is a keyed Issue's tracker key (Issue is then 0); omitted for GitHub.
+	IssueKey   string         `json:"issueKey,omitempty"`
+	Status     string         `json:"status"`
+	Phase      string         `json:"phase"`
+	PlanDigest string         `json:"planDigest"`
+	Command    string         `json:"command"`
+	Followup   []RecoveryStep `json:"followup,omitempty"`
+	Path       string         `json:"path"`
 
 	adoptPlan []byte
 }
@@ -102,6 +104,7 @@ func buildRecoveryProposal(lab, id string) (RecoveryProposal, string) {
 		MoleculeID:    r.ID,
 		Repository:    r.Issue.Repo,
 		Issue:         r.Issue.Number,
+		IssueKey:      r.Issue.Key,
 		Status:        r.Status,
 		Phase:         statePhase(r),
 		PlanDigest:    digest,

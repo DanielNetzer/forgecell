@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	pathpkg "path"
 	"regexp"
@@ -28,7 +29,24 @@ type Issue struct {
 	Title      string `json:"title"`
 	Body       string `json:"body"`
 	UpdatedAt  string `json:"updatedAt"`
+	// Key is a tracker's own Issue key; a keyed Issue has Number 0. GitHub Issues
+	// never set it, so their plan JSON and digest are unchanged.
+	Key string `json:"key,omitempty"`
 }
+
+// issueIdentityOK accepts a GitHub Issue (Number >= 1 at its exact GitHub URL) or a
+// keyed Issue (Key set, Number 0, an absolute https URL).
+func issueIdentityOK(repository string, issue Issue) bool {
+	if issue.Key == "" {
+		return issue.Number >= 1 && issue.URL == fmt.Sprintf("https://github.com/%s/issues/%d", repository, issue.Number)
+	}
+	if issue.Number != 0 || len(issue.Key) > 512 || !utf8.ValidString(issue.Key) || strings.ContainsFunc(issue.Key, unicode.IsControl) || len(issue.URL) > 2048 {
+		return false
+	}
+	u, err := url.Parse(issue.URL)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil
+}
+
 type Inputs struct {
 	Repository           string   `json:"repository"`
 	TargetBranch         string   `json:"targetBranch"`
@@ -610,7 +628,7 @@ func (p Plan) validateDigestible() error {
 		return fmt.Errorf("incomplete frozen inputs")
 	}
 	issue := in.Issue
-	if issue.Repository != in.Repository || issue.Number < 1 || issue.State != "OPEN" || !textOK(issue.Title) || issue.URL != fmt.Sprintf("https://github.com/%s/issues/%d", in.Repository, issue.Number) {
+	if issue.Repository != in.Repository || issue.State != "OPEN" || !textOK(issue.Title) || !issueIdentityOK(in.Repository, issue) {
 		return fmt.Errorf("issue must be open and match the selected repository and identity")
 	}
 	refs, evidencePaths, err := p.evidenceRefs()

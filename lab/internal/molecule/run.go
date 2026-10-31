@@ -370,7 +370,10 @@ type Options struct {
 	Approve, TargetBranch                      string
 	Analyze                                    func(context.Context, formula.Binding, Issue, readiness.RepositorySnapshot) (readiness.Analysis, error)
 	ReadIssue                                  func(context.Context, string, int64, string) (Issue, error)
-	PrepareWorkspace                           func(context.Context, Workspace) error
+	// ReadIssueKey reads a keyed Issue (repository, key, source directory) for
+	// RunKeyed. There is no default reader: a keyed run without it is refused.
+	ReadIssueKey     func(ctx context.Context, repo, key, dir string) (Issue, error)
+	PrepareWorkspace func(context.Context, Workspace) error
 	// InvokeReview and ReviewDiff replace the review process and the diff read, so
 	// tests never start a provider. InvokeReview receives the resolved binding, the
 	// directory for project-configuration checks, the timeout, the request and the
