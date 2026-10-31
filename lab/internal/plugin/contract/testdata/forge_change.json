@@ -1,0 +1,38 @@
+[
+  {
+    "name": "open",
+    "tool": "forge_change",
+    "output": {"state": "open", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567", "url": "https://gitlab.com/example/project/-/merge_requests/14"},
+    "want": {"state": "open", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567", "url": "https://gitlab.com/example/project/-/merge_requests/14"}
+  },
+  {
+    "name": "merged with mergeCommit",
+    "tool": "forge_change",
+    "output": {"state": "merged", "draft": false, "headCommit": "0123456789abcdef0123456789abcdef01234567", "mergedAt": "2026-10-30T12:00:00Z", "mergeCommit": "89abcdef0123456789abcdef0123456789abcdef", "url": "https://gitlab.com/x/-/merge_requests/14"},
+    "want": {"state": "merged", "draft": false, "headCommit": "0123456789abcdef0123456789abcdef01234567", "mergedAt": "2026-10-30T12:00:00Z", "mergeCommit": "89abcdef0123456789abcdef0123456789abcdef", "url": "https://gitlab.com/x/-/merge_requests/14"}
+  },
+  {
+    "name": "bad commit",
+    "tool": "forge_change",
+    "output": {"state": "open", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef0123456", "url": "https://gitlab.com/x"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "merge commit on an open change",
+    "tool": "forge_change",
+    "output": {"state": "open", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567", "mergeCommit": "89abcdef0123456789abcdef0123456789abcdef", "url": "https://gitlab.com/x"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "unknown state",
+    "tool": "forge_change",
+    "output": {"state": "approved", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567", "url": "https://gitlab.com/x"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "duplicate key",
+    "tool": "forge_change",
+    "output": {"state": "open", "state": "merged", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567", "url": "https://gitlab.com/x"},
+    "reason": "schema-invalid"
+  }
+]

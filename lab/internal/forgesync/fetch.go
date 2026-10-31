@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
+	"github.com/DanielNetzer/forgecell/lab/internal/safetext"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 )
 
 // Bounds of one sync. The open-Issue listing reads at most MaxListed Issues in
@@ -513,26 +513,8 @@ func str(s *string) string {
 // text bounds untrusted display text: valid UTF-8, no control characters, no
 // format characters (unicode.Cf, such as U+202E bidi overrides or zero-width
 // joiners, which can disguise text), at most limit runes.
-func text(s string, limit int) string {
-	s = strings.ToValidUTF8(s, "�")
-	var b strings.Builder
-	n := 0
-	for _, r := range s {
-		if unicode.Is(unicode.Cf, r) {
-			continue
-		}
-		if unicode.IsControl(r) {
-			r = ' '
-		}
-		if n == limit {
-			b.WriteString("…")
-			break
-		}
-		b.WriteRune(r)
-		n++
-	}
-	return strings.TrimSpace(b.String())
-}
+// The rules live in safetext so plugin output decoders share them.
+func text(s string, limit int) string { return safetext.Text(s, limit) }
 
 func oneOf(s string, values ...string) string {
 	for _, v := range values {

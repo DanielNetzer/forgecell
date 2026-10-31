@@ -1,0 +1,33 @@
+[
+  {
+    "name": "complete",
+    "tool": "forge_checks",
+    "output": {"checks": [{"name": "build", "status": "completed", "conclusion": "success", "url": "https://gitlab.com/x/-/jobs/1"}], "complete": true},
+    "want": {"checks": [{"name": "build", "status": "completed", "conclusion": "success", "url": "https://gitlab.com/x/-/jobs/1"}], "complete": true}
+  },
+  {
+    "name": "incomplete",
+    "tool": "forge_checks",
+    "output": {"checks": [{"name": "te​st", "status": "in_progress", "conclusion": ""}], "complete": false},
+    "want": {"checks": [{"name": "test", "status": "in_progress", "conclusion": ""}], "complete": false}
+  },
+  {
+    "name": "oversized name",
+    "tool": "forge_checks",
+    "output": {"checks": [{"name": "@NAME@", "status": "queued", "conclusion": ""}], "complete": false},
+    "expand": {"@NAME@": {"repeat": "n", "count": 201}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "wrong type for complete",
+    "tool": "forge_checks",
+    "output": {"checks": [], "complete": 1},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "unknown conclusion",
+    "tool": "forge_checks",
+    "output": {"checks": [{"name": "build", "status": "completed", "conclusion": "approved"}], "complete": true},
+    "reason": "schema-invalid"
+  }
+]

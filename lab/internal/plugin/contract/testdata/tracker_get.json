@@ -1,0 +1,52 @@
+[
+  {
+    "name": "good issue keeps body lines",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-7", "title": "Add export", "body": "Steps:\r\n1. export\n\tdone", "state": "open", "url": "https://example.atlassian.net/browse/ENG-7", "updatedAt": "2026-10-30T10:00:00+02:00", "labels": ["feature"]},
+    "want": {"key": "ENG-7", "title": "Add export", "body": "Steps:\n1. export\n\tdone", "state": "open", "url": "https://example.atlassian.net/browse/ENG-7", "updatedAt": "2026-10-30T10:00:00+02:00", "labels": ["feature"]}
+  },
+  {
+    "name": "control characters",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-8", "title": "a\u0000b\u001bc\nd", "body": "x\u0007y‮z", "state": "closed", "stateReason": "completed", "url": "https://example.com/8", "updatedAt": "2026-10-30T10:00:00Z", "labels": [], "milestone": "M‮1"},
+    "want": {"key": "ENG-8", "title": "a b c d", "body": "x yz", "state": "closed", "stateReason": "completed", "url": "https://example.com/8", "updatedAt": "2026-10-30T10:00:00Z", "labels": [], "milestone": "M1"}
+  },
+  {
+    "name": "body over its rune bound",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-9", "title": "t", "body": "@BODY@", "state": "open", "url": "https://example.com/9", "updatedAt": "2026-10-30T10:00:00Z", "labels": []},
+    "expand": {"@BODY@": {"repeat": "a", "count": 65537}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "body over the byte cap",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-9", "title": "t", "body": "@BODY@", "state": "open", "url": "https://example.com/9", "updatedAt": "2026-10-30T10:00:00Z", "labels": []},
+    "expand": {"@BODY@": {"repeat": "é", "count": 70000}},
+    "reason": "output-too-large"
+  },
+  {
+    "name": "missing required key",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-9", "title": "t", "state": "open", "url": "https://example.com/9", "updatedAt": "2026-10-30T10:00:00Z", "labels": []},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "wrong type",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-9", "title": "t", "body": "b", "state": "open", "url": "https://example.com/9", "updatedAt": "2026-10-30T10:00:00Z", "labels": "bug"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "non-http url",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-9", "title": "t", "body": "b", "state": "open", "url": "javascript:alert(1)", "updatedAt": "2026-10-30T10:00:00Z", "labels": []},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "bad timestamp",
+    "tool": "tracker_get",
+    "output": {"key": "ENG-9", "title": "t", "body": "b", "state": "open", "url": "https://example.com/9", "updatedAt": "yesterday", "labels": []},
+    "reason": "schema-invalid"
+  }
+]

@@ -1,0 +1,147 @@
+{
+  "contract": "forgecell.tracker/v1",
+  "tools": [
+    {
+      "name": "tracker_describe",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 65536,
+      "timeoutMs": 15000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["config"],
+        "properties": {
+          "config": {"type": "object", "additionalProperties": true, "maxProperties": 64}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["displayName", "keyPattern", "states", "selectors"],
+        "properties": {
+          "displayName": {"type": "string", "minLength": 1, "maxLength": 100},
+          "keyPattern": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "states": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 64}},
+          "selectors": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"}},
+          "capabilities": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 64, "format": "identifier"}}
+        }
+      }
+    },
+    {
+      "name": "tracker_list",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 2097152,
+      "timeoutMs": 30000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["config", "selector", "limit"],
+        "properties": {
+          "config": {"type": "object", "additionalProperties": true, "maxProperties": 64},
+          "selector": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "cursor": {"type": "string", "minLength": 1, "maxLength": 1024, "format": "identifier"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "title", "labels", "updatedAt", "state"],
+              "properties": {
+                "key": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"},
+                "title": {"type": "string", "maxLength": 300},
+                "labels": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 100}},
+                "milestone": {"type": "string", "maxLength": 200},
+                "updatedAt": {"type": "string", "maxLength": 40, "format": "date-time"},
+                "state": {"type": "string", "enum": ["open", "closed"]}
+              }
+            }
+          },
+          "nextCursor": {"type": "string", "minLength": 1, "maxLength": 1024, "format": "identifier"},
+          "total": {"type": "integer", "minimum": 0, "maximum": 1000000000}
+        }
+      }
+    },
+    {
+      "name": "tracker_get",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 131072,
+      "timeoutMs": 30000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["config", "key"],
+        "properties": {
+          "config": {"type": "object", "additionalProperties": true, "maxProperties": 64},
+          "key": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "title", "body", "state", "url", "updatedAt", "labels"],
+        "properties": {
+          "key": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"},
+          "title": {"type": "string", "maxLength": 300},
+          "body": {"type": "string", "maxLength": 65536},
+          "state": {"type": "string", "enum": ["open", "closed"]},
+          "stateReason": {"type": "string", "maxLength": 64},
+          "url": {"type": "string", "minLength": 1, "maxLength": 2048, "format": "uri"},
+          "updatedAt": {"type": "string", "maxLength": 40, "format": "date-time"},
+          "labels": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 100}},
+          "milestone": {"type": "string", "maxLength": 200}
+        }
+      }
+    },
+    {
+      "name": "tracker_states",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 262144,
+      "timeoutMs": 30000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["config", "keys"],
+        "properties": {
+          "config": {"type": "object", "additionalProperties": true, "maxProperties": 64},
+          "keys": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"}}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["states"],
+        "properties": {
+          "states": {
+            "type": "object",
+            "maxProperties": 50,
+            "propertyNames": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"},
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state"],
+              "properties": {
+                "state": {"type": "string", "enum": ["open", "closed"]},
+                "stateReason": {"type": "string", "maxLength": 64},
+                "closedAt": {"type": "string", "maxLength": 40, "format": "date-time"},
+                "reopenedAt": {"type": "string", "maxLength": 40, "format": "date-time"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

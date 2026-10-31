@@ -1,0 +1,32 @@
+[
+  {
+    "name": "good policy",
+    "tool": "forge_policy",
+    "output": {"requiredChecks": ["build", "te‮st"], "requiredReviews": 1, "protected": true},
+    "want": {"requiredChecks": ["build", "test"], "requiredReviews": 1, "protected": true}
+  },
+  {
+    "name": "negative required reviews",
+    "tool": "forge_policy",
+    "output": {"requiredChecks": [], "requiredReviews": -1, "protected": false},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "wrong type",
+    "tool": "forge_policy",
+    "output": {"requiredChecks": [], "requiredReviews": 0, "protected": "yes"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "unknown key",
+    "tool": "forge_policy",
+    "output": {"requiredChecks": [], "requiredReviews": 0, "protected": false, "autoMerge": true},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "not an object",
+    "tool": "forge_policy",
+    "raw": "[]",
+    "reason": "schema-invalid"
+  }
+]

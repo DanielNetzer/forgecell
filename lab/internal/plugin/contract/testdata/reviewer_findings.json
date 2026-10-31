@@ -1,0 +1,39 @@
+[
+  {
+    "name": "pending",
+    "tool": "reviewer_findings",
+    "output": {"status": "pending", "findings": []},
+    "want": {"status": "pending", "findings": []}
+  },
+  {
+    "name": "complete",
+    "tool": "reviewer_findings",
+    "output": {"status": "complete", "findings": [{"id": "f1", "severity": "high", "path": "lab/a.go", "line": 3, "title": "Nil ‮deref", "body": "Line 3 can panic.\nFix it.", "resolved": false}]},
+    "want": {"status": "complete", "findings": [{"id": "f1", "severity": "high", "path": "lab/a.go", "line": 3, "title": "Nil deref", "body": "Line 3 can panic.\nFix it.", "resolved": false}]}
+  },
+  {
+    "name": "unknown severity",
+    "tool": "reviewer_findings",
+    "output": {"status": "complete", "findings": [{"id": "f2", "severity": "critical", "title": "t", "body": "b", "resolved": false}]},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "huge title",
+    "tool": "reviewer_findings",
+    "output": {"status": "complete", "findings": [{"id": "f3", "severity": "low", "title": "@TITLE@", "body": "b", "resolved": false}]},
+    "expand": {"@TITLE@": {"repeat": "t", "count": 301}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "extra key",
+    "tool": "reviewer_findings",
+    "output": {"status": "complete", "findings": [], "approve": true},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "status wrong type",
+    "tool": "reviewer_findings",
+    "output": {"status": true, "findings": []},
+    "reason": "schema-invalid"
+  }
+]

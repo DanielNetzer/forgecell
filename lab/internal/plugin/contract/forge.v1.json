@@ -1,0 +1,242 @@
+{
+  "contract": "forgecell.forge/v1",
+  "tools": [
+    {
+      "name": "forge_describe",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 65536,
+      "timeoutMs": 15000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project"],
+        "properties": {
+          "project": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["identity", "host", "displayName", "changeNoun", "defaultBranch", "ciKind", "webURL"],
+        "properties": {
+          "identity": {"type": "string", "minLength": 1, "maxLength": 300, "format": "identifier"},
+          "host": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$"},
+          "displayName": {"type": "string", "minLength": 1, "maxLength": 100},
+          "changeNoun": {"type": "string", "minLength": 1, "maxLength": 40},
+          "defaultBranch": {"type": "string", "minLength": 1, "maxLength": 255, "format": "identifier"},
+          "ciKind": {"type": "string", "enum": ["github-actions", "gitlab-ci", "none"]},
+          "webURL": {"type": "string", "minLength": 1, "maxLength": 2048, "format": "uri"},
+          "capabilities": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 64, "format": "identifier"}}
+        }
+      }
+    },
+    {
+      "name": "forge_policy",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 65536,
+      "timeoutMs": 15000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "branch"],
+        "properties": {
+          "project": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "branch": {"type": "string", "minLength": 1, "maxLength": 255, "format": "identifier"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["requiredChecks", "requiredReviews", "protected"],
+        "properties": {
+          "requiredChecks": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+          "requiredReviews": {"type": "integer", "minimum": 0, "maximum": 100},
+          "protected": {"type": "boolean"}
+        }
+      }
+    },
+    {
+      "name": "forge_find_change",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 65536,
+      "timeoutMs": 15000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "headBranch"],
+        "properties": {
+          "project": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "headBranch": {"type": "string", "minLength": 1, "maxLength": 255, "format": "identifier"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["changes"],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ref", "url", "state", "draft", "headCommit"],
+              "properties": {
+                "ref": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+                "url": {"type": "string", "minLength": 1, "maxLength": 2048, "format": "uri"},
+                "state": {"type": "string", "enum": ["open", "closed", "merged"]},
+                "draft": {"type": "boolean"},
+                "headCommit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "forge_publish_draft",
+      "access": "write",
+      "required": true,
+      "maxOutputBytes": 65536,
+      "timeoutMs": 60000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "headBranch", "base", "title", "body", "commit"],
+        "properties": {
+          "project": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "headBranch": {"type": "string", "minLength": 1, "maxLength": 255, "format": "identifier"},
+          "base": {"type": "string", "minLength": 1, "maxLength": 255, "format": "identifier"},
+          "title": {"type": "string", "minLength": 1, "maxLength": 300},
+          "body": {"type": "string", "maxLength": 65536},
+          "commit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "url", "draft", "headCommit"],
+        "properties": {
+          "ref": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "url": {"type": "string", "minLength": 1, "maxLength": 2048, "format": "uri"},
+          "draft": {"type": "boolean", "enum": [true]},
+          "headCommit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+        }
+      }
+    },
+    {
+      "name": "forge_change",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 65536,
+      "timeoutMs": 15000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "ref"],
+        "properties": {
+          "project": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "ref": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "draft", "headCommit", "url"],
+        "properties": {
+          "state": {"type": "string", "enum": ["open", "closed", "merged"]},
+          "draft": {"type": "boolean"},
+          "headCommit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+          "mergedAt": {"type": "string", "maxLength": 40, "format": "date-time"},
+          "mergeCommit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+          "url": {"type": "string", "minLength": 1, "maxLength": 2048, "format": "uri"}
+        }
+      }
+    },
+    {
+      "name": "forge_checks",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 524288,
+      "timeoutMs": 30000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "ref", "commit"],
+        "properties": {
+          "project": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "ref": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "commit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["checks", "complete"],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "status", "conclusion"],
+              "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                "status": {"type": "string", "enum": ["queued", "in_progress", "completed"]},
+                "conclusion": {"type": "string", "enum": ["", "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale"]},
+                "url": {"type": "string", "minLength": 1, "maxLength": 2048, "format": "uri"}
+              }
+            }
+          },
+          "complete": {"type": "boolean"}
+        }
+      }
+    },
+    {
+      "name": "forge_comments",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 2097152,
+      "timeoutMs": 30000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "ref"],
+        "properties": {
+          "project": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "ref": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "since": {"type": "string", "maxLength": 40, "format": "date-time"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["comments"],
+        "properties": {
+          "comments": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "author", "isBot", "body", "createdAt"],
+              "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"},
+                "author": {"type": "string", "maxLength": 100},
+                "isBot": {"type": "boolean"},
+                "body": {"type": "string", "maxLength": 65536},
+                "path": {"type": "string", "minLength": 1, "maxLength": 4096, "format": "identifier"},
+                "line": {"type": "integer", "minimum": 1, "maximum": 10000000},
+                "createdAt": {"type": "string", "maxLength": 40, "format": "date-time"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+[
+  {
+    "name": "tracker good",
+    "tool": "tracker_describe",
+    "output": {"displayName": "Jira", "keyPattern": "^[A-Z]+-[0-9]+$", "states": ["To Do", "Done"], "selectors": ["jql:forgecell"]},
+    "want": {"displayName": "Jira", "keyPattern": "^[A-Z]+-[0-9]+$", "states": ["To Do", "Done"], "selectors": ["jql:forgecell"]}
+  },
+  {
+    "name": "tracker bidi display name",
+    "tool": "tracker_describe",
+    "output": {"displayName": "Ji‮ra​", "keyPattern": "^#[0-9]+$", "states": [], "selectors": [], "capabilities": ["milestones"]},
+    "want": {"displayName": "Jira", "keyPattern": "^#[0-9]+$", "states": [], "selectors": [], "capabilities": ["milestones"]}
+  },
+  {
+    "name": "tracker unknown key",
+    "tool": "tracker_describe",
+    "output": {"displayName": "Jira", "keyPattern": "^x$", "states": [], "selectors": [], "approve": true},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "tracker invalid key pattern",
+    "tool": "tracker_describe",
+    "output": {"displayName": "Jira", "keyPattern": "(", "states": [], "selectors": []},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "tracker display name only format characters",
+    "tool": "tracker_describe",
+    "output": {"displayName": "‮", "keyPattern": "^x$", "states": [], "selectors": []},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "forge good",
+    "tool": "forge_describe",
+    "output": {"identity": "gitlab.com/example/project", "host": "gitlab.com", "displayName": "GitLab", "changeNoun": "merge request", "defaultBranch": "main", "ciKind": "gitlab-ci", "webURL": "https://gitlab.com/example/project"},
+    "want": {"identity": "gitlab.com/example/project", "host": "gitlab.com", "displayName": "GitLab", "changeNoun": "merge request", "defaultBranch": "main", "ciKind": "gitlab-ci", "webURL": "https://gitlab.com/example/project"}
+  },
+  {
+    "name": "forge wrong type",
+    "tool": "forge_describe",
+    "output": {"identity": "gitlab.com/x", "host": "gitlab.com", "displayName": 7, "changeNoun": "merge request", "defaultBranch": "main", "ciKind": "gitlab-ci", "webURL": "https://gitlab.com/x"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "forge case variant key",
+    "tool": "forge_describe",
+    "output": {"Identity": "gitlab.com/x", "identity": "gitlab.com/x", "host": "gitlab.com", "displayName": "GitLab", "changeNoun": "merge request", "defaultBranch": "main", "ciKind": "gitlab-ci", "webURL": "https://gitlab.com/x"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "forge credentials in url",
+    "tool": "forge_describe",
+    "output": {"identity": "gitlab.com/x", "host": "gitlab.com", "displayName": "GitLab", "changeNoun": "merge request", "defaultBranch": "main", "ciKind": "gitlab-ci", "webURL": "https://user:pass@gitlab.com/x"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "forge unknown ci kind",
+    "tool": "forge_describe",
+    "output": {"identity": "gitlab.com/x", "host": "gitlab.com", "displayName": "GitLab", "changeNoun": "merge request", "defaultBranch": "main", "ciKind": "jenkins", "webURL": "https://gitlab.com/x"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "reviewer good",
+    "tool": "reviewer_describe",
+    "output": {"displayName": "BugBot", "severities": ["high", "low"]},
+    "want": {"displayName": "BugBot", "severities": ["high", "low"]}
+  },
+  {
+    "name": "reviewer huge display name",
+    "tool": "reviewer_describe",
+    "output": {"displayName": "@HUGE@", "severities": []},
+    "expand": {"@HUGE@": {"repeat": "a", "count": 200}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "reviewer over the byte cap",
+    "tool": "reviewer_describe",
+    "output": {"displayName": "@HUGE@", "severities": []},
+    "expand": {"@HUGE@": {"repeat": "a", "count": 70000}},
+    "reason": "output-too-large"
+  },
+  {
+    "name": "reviewer invalid utf8",
+    "tool": "reviewer_describe",
+    "output": {"displayName": "Bug@BAD@Bot", "severities": []},
+    "expand": {"@BAD@": {"hex": "ff"}},
+    "reason": "schema-invalid"
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "good",
+    "tool": "forge_publish_draft",
+    "output": {"ref": "!14", "url": "https://gitlab.com/example/project/-/merge_requests/14", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567"},
+    "want": {"ref": "!14", "url": "https://gitlab.com/example/project/-/merge_requests/14", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567"}
+  },
+  {
+    "name": "draft false refused",
+    "tool": "forge_publish_draft",
+    "output": {"ref": "!14", "url": "https://gitlab.com/x/-/merge_requests/14", "draft": false, "headCommit": "0123456789abcdef0123456789abcdef01234567"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "bad commit",
+    "tool": "forge_publish_draft",
+    "output": {"ref": "!14", "url": "https://gitlab.com/x/-/merge_requests/14", "draft": true, "headCommit": "main"},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "extra key",
+    "tool": "forge_publish_draft",
+    "output": {"ref": "!14", "url": "https://gitlab.com/x/-/merge_requests/14", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567", "approved": true},
+    "reason": "schema-invalid"
+  }
+]

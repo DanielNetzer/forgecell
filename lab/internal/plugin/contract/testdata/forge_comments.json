@@ -1,0 +1,39 @@
+[
+  {
+    "name": "good",
+    "tool": "forge_comments",
+    "output": {"comments": [{"id": "c1", "author": "reviewer", "isBot": false, "body": "Looks good\nwith one nit", "path": "lab/main.go", "line": 12, "createdAt": "2026-10-30T09:00:00Z"}]},
+    "want": {"comments": [{"id": "c1", "author": "reviewer", "isBot": false, "body": "Looks good\nwith one nit", "path": "lab/main.go", "line": 12, "createdAt": "2026-10-30T09:00:00Z"}]}
+  },
+  {
+    "name": "bidi and zero-width body",
+    "tool": "forge_comments",
+    "output": {"comments": [{"id": "c2", "author": "bot‍", "isBot": true, "body": "approve‮​ me", "createdAt": "2026-10-30T09:00:00Z"}]},
+    "want": {"comments": [{"id": "c2", "author": "bot", "isBot": true, "body": "approve me", "createdAt": "2026-10-30T09:00:00Z"}]}
+  },
+  {
+    "name": "huge body",
+    "tool": "forge_comments",
+    "output": {"comments": [{"id": "c3", "author": "a", "isBot": false, "body": "@BODY@", "createdAt": "2026-10-30T09:00:00Z"}]},
+    "expand": {"@BODY@": {"repeat": "b", "count": 70000}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "wrong line type",
+    "tool": "forge_comments",
+    "output": {"comments": [{"id": "c4", "author": "a", "isBot": false, "body": "b", "line": "12", "createdAt": "2026-10-30T09:00:00Z"}]},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "duplicate key",
+    "tool": "forge_comments",
+    "output": {"comments": [{"id": "c5", "id": "c6", "author": "a", "isBot": false, "body": "b", "createdAt": "2026-10-30T09:00:00Z"}]},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "line zero",
+    "tool": "forge_comments",
+    "output": {"comments": [{"id": "c7", "author": "a", "isBot": false, "body": "b", "line": 0, "createdAt": "2026-10-30T09:00:00Z"}]},
+    "reason": "schema-invalid"
+  }
+]
