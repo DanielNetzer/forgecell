@@ -138,6 +138,21 @@ func TestAdvertisedInputSchemaCompatibility(t *testing.T) {
 	}
 }
 
+func TestIdentifiersRefuseLineAndParagraphSeparators(t *testing.T) {
+	for _, format := range []string{"identifier", "uri"} {
+		s := &Schema{Type: "string", Format: format}
+		good := map[string]string{"identifier": "FAKE-1", "uri": "https://example.com/x"}[format]
+		if err := s.validateString("value", good); err != nil {
+			t.Fatalf("%s: %q was refused: %v", format, good, err)
+		}
+		for _, sep := range []string{string(rune(0x2028)), string(rune(0x2029))} {
+			if err := s.validateString("value", good+sep+"x"); err == nil {
+				t.Errorf("%s: a value with %U was accepted", format, []rune(sep)[0])
+			}
+		}
+	}
+}
+
 func TestValidateInput(t *testing.T) {
 	c, _ := Lookup("tracker")
 	tool, _ := c.Tool("tracker_list")

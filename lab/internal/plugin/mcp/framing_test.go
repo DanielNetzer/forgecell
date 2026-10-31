@@ -147,11 +147,11 @@ func TestClientRejectsUnknownAndStaleResponseIDs(t *testing.T) {
 
 func TestClientIgnoresABoundedNumberOfNotifications(t *testing.T) {
 	note := `{"jsonrpc":"2.0","method":"notifications/progress","params":{}}` + "\n"
-	c := scripted(t, strings.Repeat(note, maxIgnored)+`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"x"}}`+"\n")
+	c := scripted(t, strings.Repeat(note, maxIgnored)+`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"`+ProtocolVersion+`"}}`+"\n")
 	if _, err := c.Initialize(context.Background()); err != nil {
 		t.Fatalf("notifications within the bound: %v", err)
 	}
-	c = scripted(t, strings.Repeat(note, maxIgnored+1)+`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"x"}}`+"\n")
+	c = scripted(t, strings.Repeat(note, maxIgnored+1)+`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"`+ProtocolVersion+`"}}`+"\n")
 	_, err := c.Initialize(context.Background())
 	reasonIs(t, err, OutputTooLarge)
 }

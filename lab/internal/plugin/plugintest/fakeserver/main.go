@@ -4,7 +4,8 @@
 //
 // Usage: fakeserver --kind tracker|forge|reviewer --mode MODE, where MODE is
 // good, slow, crash, oversized, bad-framing, wrong-contract, server-request,
-// missing-tool, bad-input-crash or wrong-id.
+// missing-tool, bad-input-crash, wrong-id, wrong-protocol, dirty-contract,
+// zero-width-contract, silent, silent-list, grandchild, locked-home or unmark.
 package main
 
 import (
@@ -13,6 +14,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -22,6 +25,10 @@ import (
 
 // readyMarker is written to stderr once the server is serving.
 const readyMarker = "fake-mcp-ready"
+
+// grandchildMarker is written to stderr once the grandchild mode's background
+// child is running.
+const grandchildMarker = "fake-grandchild-ready"
 
 // plantedSecret is written to stderr so tests can check that diagnostics
 // redact it and errors never carry it.
@@ -37,7 +44,11 @@ type server struct {
 func main() {
 	kind := flag.String("kind", "", "contract kind")
 	mode := flag.String("mode", "good", "behaviour")
+	grandchild := flag.Bool("grandchild", false, "run as the grandchild mode's background child")
 	flag.Parse()
+	if *grandchild {
+		holdStderr()
+	}
 	c, ok := contract.Lookup(*kind)
 	if !ok {
 		fmt.Fprintln(os.Stderr, "fake: unknown kind")
@@ -46,8 +57,79 @@ func main() {
 	s := &server{mode: *mode, contract: c, in: bufio.NewReaderSize(os.Stdin, 1<<20), out: bufio.NewWriter(os.Stdout)}
 	reportEnvironment()
 	fmt.Fprintln(os.Stderr, "debug: "+plantedSecret)
+	if err := s.prepare(); err != nil {
+		fmt.Fprintln(os.Stderr, "fake: preparing the mode failed")
+		os.Exit(7)
+	}
 	fmt.Fprintln(os.Stderr, readyMarker)
 	s.serve()
+}
+
+// prepare sets up the modes that act before serving: grandchild leaves a
+// background child in the process group holding stderr; locked-home leaves a
+// read-only directory tree and a symlink to FAKE_OUTSIDE (when set) in HOME;
+// unmark removes the launcher's run marker beside HOME.
+func (s *server) prepare() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	switch s.mode {
+	case "grandchild":
+		return spawnGrandchild()
+	case "locked-home":
+		sub := filepath.Join(home, "locked", "sub")
+		if err := os.MkdirAll(sub, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(sub, "file"), []byte("x"), 0o600); err != nil {
+			return err
+		}
+		if outside := os.Getenv("FAKE_OUTSIDE"); outside != "" {
+			if err := os.Symlink(outside, filepath.Join(home, "outside")); err != nil {
+				return err
+			}
+		}
+		if err := os.Chmod(sub, 0); err != nil {
+			return err
+		}
+		return os.Chmod(filepath.Dir(sub), 0o500)
+	case "unmark":
+		return os.Remove(filepath.Join(filepath.Dir(home), ".forgecell-plugin-run"))
+	}
+	return nil
+}
+
+// spawnGrandchild starts this executable again as a background child that
+// inherits stderr, waits until it runs and leaves it running.
+func spawnGrandchild() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(self, "--grandchild")
+	cmd.Stderr = os.Stderr
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil || line != "ready\n" {
+		return fmt.Errorf("the grandchild did not start")
+	}
+	fmt.Fprintf(os.Stderr, "%s pid=%d\n", grandchildMarker, cmd.Process.Pid)
+	return nil
+}
+
+// holdStderr is the grandchild: it reports readiness on stdout, then holds the
+// inherited stderr open forever.
+func holdStderr() {
+	fmt.Fprintln(os.Stdout, "ready")
+	os.Stdout.Close()
+	blockForever()
 }
 
 // reportEnvironment writes the environment's names (never values) and whether
@@ -126,13 +208,24 @@ func (s *server) initialize(id json.RawMessage) {
 			s.fail(id, -32000, "the client acted on a server request")
 			return
 		}
+	case "silent":
+		return
 	}
 	declared := s.contract.ID
-	if s.mode == "wrong-contract" {
+	switch s.mode {
+	case "wrong-contract":
 		declared = strings.TrimSuffix(declared, "/v1") + "/v2"
+	case "dirty-contract":
+		declared = strings.TrimSuffix(declared, "/v1") + "/v2\xe2\x80\xae\x07\xe2\x80\xa8x"
+	case "zero-width-contract":
+		declared += "​"
+	}
+	protocol := mcp.ProtocolVersion
+	if s.mode == "wrong-protocol" {
+		protocol = "2024-11-05"
 	}
 	s.reply(id, map[string]any{
-		"protocolVersion": mcp.ProtocolVersion,
+		"protocolVersion": protocol,
 		"capabilities":    map[string]any{"tools": map[string]any{}, "experimental": map[string]any{"forgecell": map[string]any{"contract": declared}}},
 		"serverInfo":      map[string]any{"name": "fake", "version": "1"},
 	})
@@ -156,6 +249,9 @@ func (s *server) refusedServerRequest() bool {
 }
 
 func (s *server) list(id json.RawMessage) {
+	if s.mode == "silent-list" {
+		return
+	}
 	s.write(map[string]any{"jsonrpc": "2.0", "method": "notifications/message", "params": map[string]any{"level": "debug"}})
 	tools := []map[string]any{}
 	for i, t := range s.contract.Tools {

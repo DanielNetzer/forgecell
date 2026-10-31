@@ -2,11 +2,14 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/contract"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/mcp"
@@ -133,6 +136,233 @@ func TestShutdownKillsAServerThatIgnoresEOF(t *testing.T) {
 	}
 	if len(entries(t, root)) != 0 {
 		t.Fatal("the private directory was left behind")
+	}
+}
+
+func TestShutdownKillsWhatAPluginLeftInItsGroup(t *testing.T) {
+	// The grandchild mode leaves a background child that holds stderr open and
+	// never exits on its own; the server reports it before serving.
+	p, root := startFake(t, "tracker", "grandchild", nil)
+	if _, err := p.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.Shutdown(nil) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Minute):
+		// Only a regression gets here: free the pipe so the test can end.
+		if pid := grandchildPID(p.Diagnostics()); pid > 0 {
+			if grandchild, err := os.FindProcess(pid); err == nil {
+				grandchild.Kill()
+			}
+		}
+		<-done
+		t.Fatal("Shutdown waited on a stderr pipe the grandchild held")
+	}
+	// With no grace, Shutdown returns only once stderr reached EOF, which the
+	// grandchild allows only by exiting.
+	if p.cmd.ProcessState.ExitCode() != 0 {
+		t.Fatalf("the server did not exit on its own: %v", p.cmd.ProcessState)
+	}
+	diag := p.Diagnostics()
+	if grandchildPID(diag) <= 0 || !strings.Contains(diag, "fake: stdin closed") {
+		t.Fatalf("diagnostics lack the grandchild marker or the clean exit:\n%s", diag)
+	}
+	if left := entries(t, root); len(left) != 0 {
+		t.Fatalf("the private directory was left behind: %v", left)
+	}
+}
+
+// grandchildPID reads the pid the grandchild mode reports, or 0.
+func grandchildPID(diag string) int {
+	_, rest, ok := strings.Cut(diag, "fake-grandchild-ready pid=")
+	if !ok {
+		return 0
+	}
+	line, _, _ := strings.Cut(rest, "\n")
+	pid, err := strconv.Atoi(line)
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+func TestShutdownRemovesAHomeThePluginMadeReadOnly(t *testing.T) {
+	outside := filepath.Join(plugintest.TempDir(t), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "kept"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outside, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(outside, 0o700) })
+	// locked-home leaves HOME/locked (0500) holding sub (0000), and a symlink
+	// HOME/outside to a read-only directory outside the run directory.
+	p, root := startFake(t, "forge", "locked-home", map[string]string{"FAKE_OUTSIDE": outside}, "FAKE_OUTSIDE")
+	if _, err := p.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Shutdown(nil); err != nil {
+		t.Fatal(err)
+	}
+	if left := entries(t, root); len(left) != 0 {
+		t.Fatalf("the private directory was left behind: %v", left)
+	}
+	info, err := os.Lstat(outside)
+	if err != nil || info.Mode().Perm() != 0o500 {
+		t.Fatalf("the symlinked directory outside the run was changed: %v, %v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "kept")); err != nil {
+		t.Fatalf("a file outside the run was removed: %v", err)
+	}
+}
+
+func TestCleanupFailuresAreFixedErrors(t *testing.T) {
+	// The unmark plugin removes its run marker, so the directory is refused.
+	p, root := startFake(t, "reviewer", "unmark", nil)
+	if _, err := p.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err := p.Shutdown(nil)
+	if err == nil || strings.Contains(err.Error(), root) || strings.Contains(err.Error(), "/") {
+		t.Fatalf("Shutdown = %v, want a fixed error", err)
+	}
+	if len(entries(t, root)) != 1 {
+		t.Fatal("an unmarked directory was removed")
+	}
+
+	base := plugintest.TempDir(t)
+	dir, err := makeRunDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeAll = func(path string) error {
+		return &os.PathError{Op: "unlinkat", Path: filepath.Join(path, "home", "x"), Err: os.ErrPermission}
+	}
+	err = removeRunDir(dir)
+	removeAll = os.RemoveAll
+	if err == nil || strings.Contains(err.Error(), base) || strings.Contains(err.Error(), "/") {
+		t.Fatalf("removeRunDir = %v, want a fixed error", err)
+	}
+	if err := removeRunDir(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartVerifiesTheInterpreterJustBeforeExec(t *testing.T) {
+	server := plugintest.Server(t)
+	m, err := Decode(plugintest.Manifest(t, server, "forge", "good"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Any pinned file stands in for the interpreter: it is never run.
+	interpreter := plugintest.Server(t)
+	m.Server.Interpreter = &interpreter
+	beforeExec = func() {
+		if err := os.WriteFile(interpreter.Path, []byte("#!/bin/sh\necho swapped\n"), 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { beforeExec = nil })
+	root := plugintest.TempDir(t)
+	_, err = Start(context.Background(), m, Options{Root: root})
+	if mcp.ReasonOf(err) != mcp.ManifestChanged || err.Error() != "plugin: manifest-changed" {
+		t.Fatalf("Start = %v, want manifest-changed", err)
+	}
+	if len(entries(t, root)) != 0 {
+		t.Fatal("the private directory was left behind")
+	}
+}
+
+func TestHandshakeHasADefaultTimeout(t *testing.T) {
+	// The silent servers never answer, so any timeout gives the same outcome.
+	handshakeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { handshakeTimeout = 30 * time.Second })
+	p, _ := startFake(t, "tracker", "silent", nil)
+	if _, err := p.Initialize(context.Background()); mcp.ReasonOf(err) != mcp.Timeout {
+		t.Fatalf("Initialize = %v, want timeout", err)
+	}
+	p, _ = startFake(t, "tracker", "silent-list", nil)
+	// The server answers initialize; a caller deadline keeps the lowered
+	// default from bounding its start-up.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if _, err := p.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ListTools(context.Background()); mcp.ReasonOf(err) != mcp.Timeout {
+		t.Fatalf("ListTools = %v, want timeout", err)
+	}
+}
+
+func TestHandshakeKeepsTheCallerDeadline(t *testing.T) {
+	handshakeTimeout = 0
+	t.Cleanup(func() { handshakeTimeout = 30 * time.Second })
+	p, _ := startFake(t, "forge", "good", nil)
+	// A zero default would expire at once; the caller's deadline is used.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if _, err := p.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ListTools(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitTerminatedAcceptsOnlyATerminatedLeader(t *testing.T) {
+	const (
+		exited, killed, dumped, trapped, stopped, continued = 1, 2, 3, 4, 5, 6
+	)
+	for _, want := range []int32{exited, killed, dumped} {
+		// A stop, a continue, a trap and an interrupted call come first; each must
+		// wait again rather than count as the leader's exit.
+		script := []struct {
+			code  int32
+			retry bool
+		}{{stopped, false}, {continued, false}, {trapped, false}, {exited, true}, {want, false}}
+		calls := 0
+		err := waitTerminated(func(info *siginfo) (bool, error) {
+			s := script[calls]
+			calls++
+			*(*int32)(unsafe.Pointer(&info[siCodeOffset])) = s.code
+			return s.retry, nil
+		})
+		if err != nil || calls != len(script) {
+			t.Fatalf("si_code %d: err %v after %d calls, want %d", want, err, calls, len(script))
+		}
+	}
+	for _, code := range []int32{0, stopped, continued, trapped} {
+		if terminated(code) {
+			t.Fatalf("si_code %d counted as terminated", code)
+		}
+	}
+}
+
+func TestWaitTerminatedReportsAWaitFailure(t *testing.T) {
+	failure := errors.New("waitid failed")
+	calls := 0
+	err := waitTerminated(func(info *siginfo) (bool, error) {
+		calls++
+		return false, failure
+	})
+	if err != failure || calls != 1 {
+		t.Fatalf("err %v after %d calls", err, calls)
+	}
+}
+
+func TestInitializeRefusesAZeroWidthContract(t *testing.T) {
+	p, _ := startFake(t, "tracker", "zero-width-contract", nil)
+	info, err := p.Initialize(context.Background())
+	if mcp.ReasonOf(err) != mcp.ContractMismatch || info.Contract != "forgecell.tracker/v1" {
+		t.Fatalf("Initialize = %+v, %v", info, err)
 	}
 }
 

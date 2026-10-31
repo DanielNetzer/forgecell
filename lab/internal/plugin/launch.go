@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/pinned"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/contract"
@@ -31,6 +32,22 @@ const (
 	defaultPath     = "/usr/bin:/bin"
 	defaultLang     = "C"
 	minSecretLength = 4
+	// maxUnlockEntries and maxUnlockDepth bound the walk that makes a run
+	// directory's own subdirectories removable.
+	maxUnlockEntries = 1 << 16
+	maxUnlockDepth   = 64
+)
+
+// Seams for tests.
+var (
+	// handshakeTimeout bounds Initialize and ListTools when the caller's context
+	// has no deadline.
+	handshakeTimeout = 30 * time.Second
+	// beforeExec, when set, runs just before the interpreter is verified again
+	// and the server is executed.
+	beforeExec func()
+	// removeAll removes a run directory's tree.
+	removeAll = os.RemoveAll
 )
 
 // Options configure one plugin start.
@@ -62,7 +79,8 @@ type Process struct {
 }
 
 // Start verifies every pinned file, copies the verified server executable into
-// a fresh private directory and starts it there in its own process group, with
+// a fresh private directory, verifies the interpreter (if any) once more and
+// starts the server there in its own process group, with
 // an environment of exactly PATH, HOME (a fresh directory), LANG and the set
 // needs.env names. Canceling ctx kills the process group.
 func Start(ctx context.Context, m Manifest, opts Options) (*Process, error) {
@@ -127,6 +145,16 @@ func start(ctx context.Context, m Manifest, opts Options, dir string, lookup fun
 	cmd.Dir, cmd.Env = home, env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdinR, stdoutW, stderrW
 	configure(cmd)
+	if beforeExec != nil {
+		beforeExec()
+	}
+	// The server runs from its verified private copy; the interpreter runs from
+	// its pinned path, so it is verified again as late as possible.
+	if err := verifyInterpreter(m); err != nil {
+		cancel()
+		closeAll(stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW)
+		return nil, err
+	}
 	err = cmd.Start()
 	closeAll(stdinR, stdoutW, stderrW)
 	if err != nil {
@@ -141,10 +169,26 @@ func start(ctx context.Context, m Manifest, opts Options, dir string, lookup fun
 	}
 	go p.stderr.run(stderrR)
 	go func() {
-		_ = cmd.Wait()
+		_ = reap(cmd)
 		close(p.done)
 	}()
 	return p, nil
+}
+
+// verifyInterpreter hashes the pinned interpreter, when there is one, as it is
+// now.
+func verifyInterpreter(m Manifest) error {
+	if m.Server.Interpreter == nil {
+		return nil
+	}
+	_, finding := pinned.Verify("server interpreter", *m.Server.Interpreter, "unavailable")
+	if strings.HasPrefix(finding, "changed:") {
+		return mcp.Fail(mcp.ManifestChanged, "", "the server interpreter changed before it was started")
+	}
+	if finding != "" {
+		return mcp.Fail(mcp.NotInstalled, "", "the server interpreter is missing, unreadable or unsafely placed")
+	}
+	return nil
 }
 
 // environment builds exactly PATH, HOME, LANG and the needs.env names that are
@@ -178,21 +222,28 @@ func closeAll(files ...*os.File) {
 }
 
 // Initialize runs the MCP handshake and requires the server to declare the
-// manifest's contract.
+// manifest's contract. Without a deadline on ctx it is bounded by
+// handshakeTimeout, as Call is by the contract timeout.
 func (p *Process) Initialize(ctx context.Context) (mcp.ServerInfo, error) {
-	info, err := p.client.Initialize(ctx)
-	if err != nil {
-		return mcp.ServerInfo{}, err
-	}
-	if info.Contract != p.manifest.Contract {
-		return info, mcp.Fail(mcp.ContractMismatch, "initialize", "the server declares a different contract")
-	}
-	return info, nil
+	ctx, cancel := withHandshake(ctx)
+	defer cancel()
+	return p.client.InitializeContract(ctx, p.manifest.Contract)
 }
 
-// ListTools returns the server's tools/list.
+// ListTools returns the server's tools/list, bounded like Initialize.
 func (p *Process) ListTools(ctx context.Context) ([]mcp.ToolInfo, error) {
+	ctx, cancel := withHandshake(ctx)
+	defer cancel()
 	return p.client.ListTools(ctx)
+}
+
+// withHandshake keeps a caller's deadline and otherwise applies
+// handshakeTimeout.
+func withHandshake(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, handshakeTimeout)
 }
 
 // Call calls a contract tool within its message bound and the given timeout
@@ -229,8 +280,11 @@ func (p *Process) Exited() bool {
 }
 
 // Shutdown closes the plugin's stdin and waits for it to exit. If grace fires
-// first, the whole process group is killed. Afterwards it removes the marked
-// per-start directory. A nil grace waits for the plugin to exit on its own.
+// first, the whole process group is killed; when the plugin exits on its own,
+// whatever it left in its group is killed before it is reaped, so a background
+// child cannot hold stderr open. Afterwards it removes the marked per-start
+// directory; a removal failure is a fixed error naming no path. A nil grace
+// waits for the plugin to exit on its own.
 func (p *Process) Shutdown(grace <-chan time.Time) error {
 	var err error
 	p.once.Do(func() {
@@ -346,7 +400,8 @@ func makeRunDir(root string) (string, error) {
 
 // removeRunDir removes a per-start directory only when it is a real directory
 // (not a symlink) owned by the current user, named like one, and still holding
-// its marker as a regular file.
+// its marker as a regular file. Subdirectories the plugin made unwritable are
+// made removable first. Every error is fixed text that names no path.
 func removeRunDir(dir string) error {
 	refuse := errors.New("the plugin directory is not a marked Forgecell directory; it was left in place")
 	if !strings.HasPrefix(filepath.Base(dir), runPrefix) {
@@ -360,5 +415,84 @@ func removeRunDir(dir string) error {
 	if err != nil || !marker.Mode().IsRegular() || !ownedByMe(marker) {
 		return refuse
 	}
-	return os.RemoveAll(dir)
+	if removeAll(dir) == nil {
+		return nil
+	}
+	unlockTree(dir)
+	if removeAll(dir) != nil {
+		return errors.New("the plugin directory could not be removed completely; it was left in place")
+	}
+	return nil
+}
+
+// unlockTree gives every real directory under dir that the current user owns
+// mode 0700, so a plugin that made part of its HOME read-only cannot keep the
+// tree from being removed. It works inside an os.Root, never follows a symlink
+// out of dir and never descends into one, and is bounded in entries and depth;
+// past a bound the removal that follows fails safe.
+func unlockTree(dir string) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	budget := maxUnlockEntries
+	unlockDir(root, ".", 0, &budget)
+}
+
+func unlockDir(root *os.Root, name string, depth int, budget *int) {
+	if depth > maxUnlockDepth || *budget <= 0 {
+		return
+	}
+	info, err := root.Lstat(name)
+	if err != nil || !info.IsDir() || !ownedByMe(info) {
+		return
+	}
+	if info.Mode().Perm()&0o700 != 0o700 {
+		if root.Chmod(name, 0o700) != nil {
+			return
+		}
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return
+	}
+	entries, _ := f.ReadDir(*budget)
+	f.Close()
+	*budget -= len(entries)
+	for _, e := range entries {
+		if e.Type().IsDir() {
+			unlockDir(root, filepath.Join(name, e.Name()), depth+1, budget)
+		}
+	}
+}
+
+// siginfo is a buffer for siginfo_t, which is at most 128 bytes on Linux and
+// macOS. si_code is the int32 at siCodeOffset, after si_signo and si_errno.
+type siginfo [128]byte
+
+const siCodeOffset = 8
+
+func (s *siginfo) code() int32 { return *(*int32)(unsafe.Pointer(&s[siCodeOffset])) }
+
+// terminated reports whether a waitid si_code means the process has really
+// terminated: CLD_EXITED (1), CLD_KILLED (2) or CLD_DUMPED (3). A stopped,
+// trapped or continued process (CLD_STOPPED, CLD_TRAPPED, CLD_CONTINUED) has not.
+func terminated(code int32) bool { return code >= 1 && code <= 3 }
+
+// waitTerminated calls wait, one non-reaping waitid, until it reports a
+// terminated process. wait returns retry for an interrupted call; a report of a
+// stopped or continued process waits again, so the caller never signals the
+// group of a leader that is still alive.
+func waitTerminated(wait func(info *siginfo) (retry bool, err error)) error {
+	for {
+		var info siginfo
+		retry, err := wait(&info)
+		if err != nil {
+			return err
+		}
+		if !retry && terminated(info.code()) {
+			return nil
+		}
+	}
 }
