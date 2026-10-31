@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -353,6 +354,12 @@ type Record struct {
 	// Retired is the retired event Retire appends with status retired (#236).
 	// Additive and omitempty: a ledger without it decodes unchanged.
 	Retired *Retirement `json:"retired,omitempty"`
+	// PluginCalls records, in order, the plugin tool calls made for the Molecule:
+	// digests and fixed reasons, never content. At most MaxPluginCalls are kept;
+	// PluginCallsDropped counts the rest. Both are additive and omitempty, so a
+	// GitHub Molecule writes neither.
+	PluginCalls        []mcpadapter.CallRecord `json:"pluginCalls,omitempty"`
+	PluginCallsDropped int                     `json:"pluginCallsDropped,omitempty"`
 }
 type Options struct {
 	MandatoryConstraints []string
@@ -372,8 +379,16 @@ type Options struct {
 	ReadIssue                                  func(context.Context, string, int64, string) (Issue, error)
 	// ReadIssueKey reads a keyed Issue (repository, key, source directory) for
 	// RunKeyed. There is no default reader: a keyed run without it is refused.
-	ReadIssueKey     func(ctx context.Context, repo, key, dir string) (Issue, error)
-	PrepareWorkspace func(context.Context, Workspace) error
+	ReadIssueKey func(ctx context.Context, repo, key, dir string) (Issue, error)
+	// PluginCalls, when set, holds the records of the plugin calls made for the
+	// Molecule (the adapter's Observer is PluginCalls.Observe); the run moves
+	// them into the Record after each Issue read.
+	PluginCalls *PluginCallLog
+	// AllowKeyedApproval lets RunKeyed approve o.Approve on the pending keyed
+	// Molecule of its key. Unset, RunKeyed keeps refusing an approval, as it
+	// did before keyed approval existed.
+	AllowKeyedApproval bool
+	PrepareWorkspace   func(context.Context, Workspace) error
 	// InvokeReview and ReviewDiff replace the review process and the diff read, so
 	// tests never start a provider. InvokeReview receives the resolved binding, the
 	// directory for project-configuration checks, the timeout, the request and the

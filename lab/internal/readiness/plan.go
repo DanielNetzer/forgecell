@@ -40,11 +40,32 @@ func issueIdentityOK(repository string, issue Issue) bool {
 	if issue.Key == "" {
 		return issue.Number >= 1 && issue.URL == fmt.Sprintf("https://github.com/%s/issues/%d", repository, issue.Number)
 	}
-	if issue.Number != 0 || len(issue.Key) > 512 || !utf8.ValidString(issue.Key) || strings.ContainsFunc(issue.Key, unicode.IsControl) || len(issue.URL) > 2048 {
+	if issue.Number != 0 || !issueKeyOK(issue.Key) || len(issue.URL) > 2048 {
 		return false
 	}
 	u, err := url.Parse(issue.URL)
 	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil
+}
+
+// maxIssueKeyRunes is intake.MaxIssueKeyRunes; readiness does not import intake.
+const maxIssueKeyRunes = 128
+
+// issueKeyOK applies intake.ValidateIssueKey's rules (valid UTF-8 of at most
+// 128 runes with no control, format (Cf), bidi control, line or paragraph
+// separator character) and requires a usable slug: at least one ASCII letter
+// or digit, which is what the Molecule's KeySlug keeps.
+func issueKeyOK(key string) bool {
+	if key == "" || len(key) > maxIssueKeyRunes*utf8.UTFMax || !utf8.ValidString(key) || utf8.RuneCountInString(key) > maxIssueKeyRunes {
+		return false
+	}
+	usable := false
+	for _, r := range key {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Bidi_Control) {
+			return false
+		}
+		usable = usable || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+	}
+	return usable
 }
 
 type Inputs struct {

@@ -25,9 +25,12 @@ import (
 
 // Summary is one Molecule in GET /api/molecules.
 type Summary struct {
-	ID          string `json:"id"`
-	Repository  string `json:"repository"`
-	Number      int64  `json:"number"`
+	ID         string `json:"id"`
+	Repository string `json:"repository"`
+	Number     int64  `json:"number"`
+	// Key is a keyed Issue's DisplayKey (its tracker key; Number is then 0). It
+	// is absent for a GitHub Issue, whose summary is unchanged.
+	Key         string `json:"key,omitempty"`
 	Title       string `json:"title"`
 	FormulaID   string `json:"formulaId"`
 	Status      string `json:"status"`
@@ -582,10 +585,17 @@ func phase(r molecule.Record) string {
 	return r.Readiness.Phase
 }
 
+// uiIssueKeyRunes bounds a keyed Issue's key in the summary, as intake bounds keys.
+const uiIssueKeyRunes = 128
+
 func summarize(lab string, r molecule.Record, read receiptReader) Summary {
 	x := newRedactor(lab, r)
 	d, view := loadDelivery(read, lab, r)
 	s := Summary{ID: r.ID, Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), FormulaID: r.FormulaID, Status: r.Status, Phase: phase(r), CurrentAtom: currentAtom(r), StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Lane: Lane(r.Status, phase(r), d)}
+	if r.Issue.IsKeyed() {
+		// A ledger is untrusted: the key is shown redacted, bounded and control-free.
+		s.Key = harness.ReviewDisplayText(x.text(r.Issue.DisplayKey()), uiIssueKeyRunes)
+	}
 	s.Activity = Activity(s.Lane, molecule.QueuedForChecks(r))
 	if view != nil {
 		s.Delivery = view.Label

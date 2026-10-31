@@ -14,8 +14,10 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/install"
+	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/learning"
 	"github.com/DanielNetzer/forgecell/lab/internal/ledger"
+	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
@@ -752,6 +754,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		// Resources are informational: a low reading or a large cache never changes
 		// doctor's readiness verdict.
 		machine := inspectResources(labDir, home)
+		// The plugins line counts the declared plugins; it starts none of them.
+		plugins := doctorPluginSummary(active.Formula)
 		if structured {
 			report := map[string]any{"schemaVersion": doctorSchemaVersion, "roles": roles, "metaBinding": meta, "metaCandidates": views, "activeFormulaId": active.Formula.ID, "labDir": *lab, "legacyLabDir": existingCheckoutLab(), "savedBinding": savedView, "learnBound": onboarding.LearnBound(active.Formula), "workflow": workflow, "gitReady": git.OK, "githubAuthenticated": gh.OK, "candidates": views, "selection": selection, "note": note}
 			if next != "" {
@@ -781,11 +785,14 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				report["queuedForChecks"] = map[string]any{"molecules": queued, "truncated": queuedTruncated}
 			}
 			report["loop"] = loopState
+			if plugins != "" {
+				report["plugins"] = map[string]any{"declared": len(active.Formula.Plugins), "summary": plugins, "nextCommand": "forgecell plugin doctor"}
+			}
 			if err = json.NewEncoder(out).Encode(report); err != nil {
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr, Queued: queued, QueuedTruncated: queuedTruncated, Loop: loopState})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr, Queued: queued, QueuedTruncated: queuedTruncated, Loop: loopState, Plugins: plugins})
 			renderResources(out, machine)
 		}
 		if !ready {
@@ -870,6 +877,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			}
 			presentRun(out, r)
 			return 0
+		}
+		if *runAfter && amendTargetKeyed(*lab, args[1]) {
+			return fail(errKeyedAmendRun)
 		}
 		if *file != "" && builder {
 			return fail(fmt.Errorf("--plan takes no --from-latest, --add-scope, --add-acceptance, --note, --continuation or --accept-protected-failures; edit the plan file instead"))
@@ -1015,18 +1025,31 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			return fail(e)
 		}
 	}
+	// The active Formula decides the form of <issue>: a tracker plugin's key or a
+	// GitHub Issue reference. The other form is refused before anything starts.
+	keyedFormula, err := runTrackerFormula(*lab, *formula, args[1])
+	if err != nil {
+		return fail(err)
+	}
 	guard, err := newResourceGuard(*lab, stderr)
 	if err != nil {
 		return fail(err)
 	}
-	// Intake takes the Issue's start lock, as the loop and the UI do, so a run and a
-	// loop never create two Molecules for one Issue.
-	r, err := runIssue(ctx, molecule.Options{LabDir: *lab, SourceRoot: cwd, Issue: args[1], FormulaID: *formula, Base: *base, Approve: *approve, TargetBranch: *target, MandatoryConstraints: requirements, CheckInputs: supplied.CheckInputs, Checks: supplied.Checks, Setup: supplied.Setup, Artifacts: supplied.Artifacts, Policy: supplied.Policy, Resources: guard})
+	options := molecule.Options{LabDir: *lab, SourceRoot: cwd, Issue: args[1], FormulaID: *formula, Base: *base, Approve: *approve, TargetBranch: *target, MandatoryConstraints: requirements, CheckInputs: supplied.CheckInputs, Checks: supplied.Checks, Setup: supplied.Setup, Artifacts: supplied.Artifacts, Policy: supplied.Policy, Resources: guard}
+	var r molecule.Record
+	if keyedFormula != nil {
+		r, err = runKeyedIssue(ctx, *keyedFormula, args[1], options)
+	} else {
+		// Intake takes the Issue's start lock, as the loop and the UI do, so a run and a
+		// loop never create two Molecules for one Issue.
+		r, err = runIssue(ctx, options)
+	}
 	if err != nil {
 		return fail(err)
 	}
 	if *jsonMode {
-		if err = json.NewEncoder(out).Encode(r); err != nil {
+		// Plugin call diagnostics stay in the ledger, never in run output.
+		if err = json.NewEncoder(out).Encode(molecule.WithoutPluginDiagnostics(r)); err != nil {
 			return fail(err)
 		}
 		renderLearnNotices(stderr, stderr, *lab)
@@ -1040,6 +1063,141 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 	return 0
 }
 
+// issueLabel shows an Issue after its repository: repo#N for a GitHub Issue,
+// as before, and "repo KEY" for a keyed one, never repo#0.
+func issueLabel(repo string, i molecule.Issue) string {
+	if i.IsKeyed() {
+		return repo + " " + flatten(i.DisplayKey())
+	}
+	return repo + i.DisplayKey()
+}
+
+// runKeyed starts a keyed Molecule under the key's start lock, as runIssue does
+// for a GitHub Issue; tests replace it to supply an analysis.
+var runKeyed = molecule.RunIntakeKeyed
+
+// pluginLookupEnv reads the environment a plugin process may receive and the
+// needs.env names plugin doctor checks; tests replace it.
+var pluginLookupEnv = os.LookupEnv
+
+// runTrackerFormula returns the active approved Formula when its intake.source
+// is a declared tracker plugin, so run's argument is that tracker's key, and
+// nil for GitHub Issues. A numeric argument with a tracker plugin, and a
+// tracker key with GitHub Issues, are refused with a plain reason before
+// anything starts. A Formula that cannot be loaded or is not approved returns
+// nil, so run reports it as it always has.
+func runTrackerFormula(lab, formulaID, arg string) (*formula.Loaded, error) {
+	dir, err := filepath.Abs(lab)
+	if err != nil {
+		return nil, nil
+	}
+	loaded, err := formula.Load(dir, formulaID)
+	if err != nil || !loaded.Approved {
+		return nil, nil
+	}
+	_, refErr := intake.ParseIssueRef(arg)
+	if p, ok := loaded.Formula.TrackerPlugin(); ok {
+		if refErr == nil {
+			return nil, fmt.Errorf("the active Formula reads Issues from the tracker plugin %s, so run takes that tracker's Issue key, not a GitHub Issue number; nothing was started", p.Name)
+		}
+		return &loaded, nil
+	}
+	if refErr != nil && trackerKeyShaped(arg) {
+		return nil, fmt.Errorf("the active Formula reads GitHub Issues, so run takes 123, #123, owner/repo#123 or a GitHub issue URL, not a tracker key; nothing was started")
+	}
+	return nil, nil
+}
+
+// trackerKeyShaped reports an argument that reads as a tracker key such as
+// ENG-123: a valid key with an ASCII letter and none of the characters of a
+// GitHub reference or URL.
+func trackerKeyShaped(arg string) bool {
+	if intake.ValidateIssueKey(arg) != nil || strings.ContainsAny(arg, "/#: \t") {
+		return false
+	}
+	return strings.ContainsFunc(arg, func(r rune) bool { return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' })
+}
+
+// runKeyedIssue runs `run KEY` through the Formula's tracker plugin: it reads
+// the plugin's keyPattern with tracker_describe, validates KEY against it with
+// intake.ParseIssueKey and runs molecule.RunKeyed, whose Issue reads go
+// through tracker_get. Every plugin call is recorded on the Molecule; failed
+// calls' diagnostics reach only its ledger notes.
+func runKeyedIssue(ctx context.Context, loaded formula.Loaded, arg string, o molecule.Options) (molecule.Record, error) {
+	lab, err := filepath.Abs(o.LabDir)
+	if err != nil {
+		return molecule.Record{}, fmt.Errorf("the Lab directory cannot be resolved")
+	}
+	// The adapter needs the Lab's real path; the Molecule keeps the Lab as given.
+	resolved, err := filepath.EvalSymlinks(lab)
+	if err != nil {
+		return molecule.Record{}, fmt.Errorf("the Lab directory cannot be resolved")
+	}
+	calls := molecule.NewPluginCallLog(resolved, lab)
+	keyed, _, err := mcpadapter.TrackerFor(resolved, loaded.Formula, mcpadapter.Options{LookupEnv: pluginLookupEnv, Observer: calls.Observe})
+	if err != nil {
+		return molecule.Record{}, err
+	}
+	d, err := keyed.Describe(ctx)
+	if err != nil {
+		return molecule.Record{}, err
+	}
+	pattern := d.KeyPattern
+	if !strings.HasPrefix(pattern, "^") || !strings.HasSuffix(pattern, "$") {
+		// The adapter always matches keyPattern whole; ParseIssueKey wants it written so.
+		pattern = "^(?:" + pattern + ")$"
+	}
+	key, err := intake.ParseIssueKey(arg, pattern)
+	if err != nil {
+		return molecule.Record{}, err
+	}
+	o.ReadIssueKey = func(ctx context.Context, repo, key, _ string) (molecule.Issue, error) {
+		issue, err := keyed.Get(ctx, key)
+		if err != nil {
+			calls.Fail(err)
+			return molecule.Issue{}, err
+		}
+		state := map[string]string{"open": "OPEN", "closed": "CLOSED"}[issue.State]
+		return molecule.Issue{Key: issue.Key, Number: 0, Repo: repo, Title: issue.Title, Body: issue.Body, State: state, URL: issue.URL, UpdatedAt: issue.UpdatedAt}, nil
+	}
+	o.Issue, o.PluginCalls, o.AllowKeyedApproval = "", calls, true
+	return runKeyed(ctx, o, key)
+}
+
+// doctorPluginSummary is doctor's one line about the Formula's plugins, or
+// empty when it declares none. It loads and starts nothing.
+func doctorPluginSummary(f formula.Formula) string {
+	if len(f.Plugins) == 0 {
+		return ""
+	}
+	roles := f.PluginRoles()
+	counts := map[string]int{}
+	unused := 0
+	for _, p := range f.Plugins {
+		if len(roles[p.Name]) == 0 {
+			unused++
+		}
+		for _, role := range roles[p.Name] {
+			counts[role]++
+		}
+	}
+	return fmt.Sprintf("Plugins: %d declared (%d tracker, %d forge, %d reviewer, %d unused); none started here. Run forgecell plugin doctor to start and check them.", len(f.Plugins), counts["tracker"], counts["forge"], counts["reviewer"], unused)
+}
+
+// errKeyedAmendRun is the plain reason amend --run refuses a keyed Molecule.
+var errKeyedAmendRun = fmt.Errorf("amend --run does not run a keyed Molecule yet (that lands in a later slice); amend without --run, then approve the new digest with forgecell run KEY --approve DIGEST")
+
+// amendTargetKeyed reports a Molecule whose ledger reads as a keyed Issue. A
+// ledger that cannot be read is left for the amend itself to report.
+func amendTargetKeyed(lab, id string) bool {
+	dir, err := filepath.Abs(lab)
+	if err != nil {
+		return false
+	}
+	r, err := molecule.ReadRecord(dir, id)
+	return err == nil && r.Issue.IsKeyed()
+}
+
 // presentAmend prints the one-line diff summary and the exact --approve digest of
 // the amendment. With run it then approves and runs that exact plan from its
 // recorded base, as `forgecell run --approve` does, and prints the run summary.
@@ -1051,6 +1209,12 @@ func presentAmend(ctx context.Context, out, stderr io.Writer, lab string, r mole
 	if !run {
 		presentRun(out, r)
 		return 0
+	}
+	if r.Issue.IsKeyed() {
+		// The amendment is recorded; only its run is refused, before anything starts.
+		presentRun(out, r)
+		fmt.Fprintln(stderr, "forgecell: the amendment is recorded, but its run did not start:", errKeyedAmendRun)
+		return 1
 	}
 	if len(p.ExpectedProtectedDeltas) > 0 {
 		// The exact declared failures are shown before --run approves this digest.
@@ -1105,7 +1269,7 @@ func initLauncher() string {
 }
 
 func presentRun(out io.Writer, r molecule.Record) {
-	fmt.Fprintf(out, "Molecule %s · %s\n%s%s — %s\n", r.ID, r.Status, r.Issue.Repo, r.Issue.DisplayKey(), r.Issue.Title)
+	fmt.Fprintf(out, "Molecule %s · %s\n%s — %s\n", r.ID, r.Status, issueLabel(r.Issue.Repo, r.Issue), r.Issue.Title)
 	if r.Analysis != nil {
 		fmt.Fprintln(out, r.Analysis.Summary)
 		for _, q := range r.Analysis.Questions {
@@ -1176,7 +1340,21 @@ func presentRun(out io.Writer, r molecule.Record) {
 		}
 		fmt.Fprintln(out, "Check execution: temporary HOME and reviewed environment; filesystem/network access is not OS-sandboxed. Network is unrestricted.")
 		if r.Readiness.Phase == "scope-waiting" {
-			fmt.Fprintf(out, "\nReview the full ledger, then approve exactly this plan:\nforgecell run %d --lab %s --formula %s --base %s --target %s --approve %s\n", r.Issue.Number, shellWord(r.LabDir), shellWord(r.FormulaID), shellWord(p.Inputs.BaseCommit), shellWord(p.Inputs.TargetBranch), proposal.Digest)
+			issueArg := fmt.Sprint(r.Issue.Number)
+			if r.Issue.IsKeyed() {
+				// A keyed Molecule is approved by its exact key, never as run 0. A
+				// display form of the key would name another Issue, so a ledger key
+				// that is not a valid key gets no command at all.
+				if intake.ValidateIssueKey(r.Issue.Key) != nil {
+					fmt.Fprintln(out, "\nThis Molecule's Issue key is not a valid tracker key, so no approve command is shown.")
+					issueArg = ""
+				} else {
+					issueArg = shellWord(r.Issue.Key)
+				}
+			}
+			if issueArg != "" {
+				fmt.Fprintf(out, "\nReview the full ledger, then approve exactly this plan:\nforgecell run %s --lab %s --formula %s --base %s --target %s --approve %s\n", issueArg, shellWord(r.LabDir), shellWord(r.FormulaID), shellWord(p.Inputs.BaseCommit), shellWord(p.Inputs.TargetBranch), proposal.Digest)
+			}
 		}
 	}
 	if r.Readiness == nil || len(r.Readiness.Plans) == 0 {
@@ -1642,6 +1820,8 @@ type doctorView struct {
 	// Loop is the Lab's loop marker as molecule.ReadLoopStatus read it; a zero
 	// value renders nothing.
 	Loop molecule.LoopMarkerState
+	// Plugins is the one-line plugins summary; empty renders nothing.
+	Plugins string
 }
 
 // renderDoctorLoop prints the Lab's loop status. It never changes doctor's
@@ -1887,7 +2067,7 @@ func renderDoctor(out io.Writer, v doctorView) {
 	if len(v.RecoveryProposals) > 0 || v.RecoveryError != nil {
 		fmt.Fprintln(out, "\nRecovery proposals (saved by the loop; it never runs them, and you run them only after every Lab process has stopped):")
 		for _, p := range v.RecoveryProposals {
-			fmt.Fprintf(out, "  %s#%d · Molecule %s · %s %s\n    %s\n", flatten(p.Repository), p.Issue, p.MoleculeID, flatten(p.Status), flatten(p.Phase), p.Command)
+			fmt.Fprintf(out, "  %s · Molecule %s · %s %s\n    %s\n", issueLabel(flatten(p.Repository), molecule.Issue{Number: p.Issue, Key: p.IssueKey}), p.MoleculeID, flatten(p.Status), flatten(p.Phase), p.Command)
 			for _, step := range p.Followup {
 				fmt.Fprintf(out, "    then: %s\n", step.Command)
 			}
@@ -1906,6 +2086,9 @@ func renderDoctor(out io.Writer, v doctorView) {
 		}
 	}
 	renderDoctorLoop(out, v.Loop)
+	if v.Plugins != "" {
+		fmt.Fprintf(out, "\n%s\n", v.Plugins)
+	}
 	if v.Next != "" {
 		fmt.Fprintf(out, "\nNext: %s\n", v.Next)
 	}

@@ -237,13 +237,16 @@ func reviewLedger(r Record, harnessAttemptID string) map[string]any {
 			view["codingOutcome"] = map[string]any{"outcome": a.Coding.Outcome}
 		}
 	}
+	// Plugin call diagnostics hold plugin stderr; they stay in the ledger and
+	// never reach the review provider.
+	source := WithoutPluginDiagnostics(r).Notes
 	notes := []string{}
-	for i := max(0, len(r.Notes)-reviewLedgerNotes); i < len(r.Notes); i++ {
-		if tainted(r.Notes[i]) {
+	for i := max(0, len(source)-reviewLedgerNotes); i < len(source); i++ {
+		if tainted(source[i]) {
 			notes = append(notes, reviewOmittedAuthored)
 			continue
 		}
-		notes = append(notes, reviewText(r.Notes[i], reviewDetailRunes))
+		notes = append(notes, reviewText(source[i], reviewDetailRunes))
 	}
 	view["notes"] = notes
 	return view

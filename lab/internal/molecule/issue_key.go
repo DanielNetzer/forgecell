@@ -80,8 +80,10 @@ func keySlug(i Issue) (string, error) {
 // RunKeyed is Run for an Issue a tracker identifies by key (for example ENG-1234)
 // instead of a GitHub number. The ledger records Issue{Key, Number: 0}, the id is
 // mol-<slug>-<nonce> and the workspace issue-<slug>-<nonce>. It reads the Issue
-// only through o.ReadIssueKey and ignores o.Issue. Approving a keyed Molecule is
-// not supported yet, so o.Approve must be empty.
+// only through o.ReadIssueKey and ignores o.Issue. With o.Approve set and
+// o.AllowKeyedApproval, it resolves the pending keyed Molecule by its raw Key
+// and approves exactly as Run does by number; without AllowKeyedApproval an
+// approval is refused, as before keyed approval existed.
 func RunKeyed(ctx context.Context, o Options, key string) (Record, error) {
 	if err := intake.ValidateIssueKey(key); err != nil {
 		return Record{}, err
@@ -92,7 +94,7 @@ func RunKeyed(ctx context.Context, o Options, key string) (Record, error) {
 	if o.ReadIssueKey == nil {
 		return Record{}, fmt.Errorf("a keyed run needs an Issue key reader")
 	}
-	if o.Approve != "" {
+	if o.Approve != "" && !o.AllowKeyedApproval {
 		return Record{}, fmt.Errorf("approving a keyed Molecule is not supported yet")
 	}
 	return runIntake(ctx, o, key)
