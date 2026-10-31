@@ -169,6 +169,54 @@ func TestWrongContractIsRecordedForTheCaller(t *testing.T) {
 	}
 }
 
+func TestAnotherProtocolVersionIsRefused(t *testing.T) {
+	c := spawn(t, "tracker", "wrong-protocol")
+	info, err := c.Initialize(context.Background())
+	reason(t, err, mcp.ContractMismatch)
+	if info != (mcp.ServerInfo{}) || c.Server() != (mcp.ServerInfo{}) {
+		t.Fatalf("a refused server was recorded: %+v", info)
+	}
+	if _, err := c.ListTools(context.Background()); err == nil {
+		t.Fatal("tools/list ran after a refused initialize")
+	}
+}
+
+func TestDeclaredContractIsSanitized(t *testing.T) {
+	c := spawn(t, "tracker", "dirty-contract")
+	info, err := c.Initialize(context.Background())
+	if err != nil || info.Contract != "forgecell.tracker/v2  x" {
+		t.Fatalf("Initialize = %q, %v", info.Contract, err)
+	}
+}
+
+func TestInitializeContractComparesTheRawContract(t *testing.T) {
+	c := spawn(t, "tracker", "zero-width-contract")
+	info, err := c.InitializeContract(context.Background(), "forgecell.tracker/v1")
+	reason(t, err, mcp.ContractMismatch)
+	if info.Contract != "forgecell.tracker/v1" || c.Server() != (mcp.ServerInfo{}) {
+		t.Fatalf("Initialize = %+v, recorded %+v", info, c.Server())
+	}
+	if _, err := c.ListTools(context.Background()); err == nil {
+		t.Fatal("tools/list ran after a refused initialize")
+	}
+}
+
+func TestInitializeContractAcceptsTheExactContract(t *testing.T) {
+	c := spawn(t, "tracker", "good")
+	if info, err := c.InitializeContract(context.Background(), "forgecell.tracker/v1"); err != nil || info.Contract != "forgecell.tracker/v1" {
+		t.Fatalf("InitializeContract = %+v, %v", info, err)
+	}
+}
+
+func TestInitializeHonoursTheCallerDeadline(t *testing.T) {
+	// The silent server never answers, so any deadline gives the same outcome.
+	c := spawn(t, "tracker", "silent")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := c.Initialize(ctx)
+	reason(t, err, mcp.Timeout)
+}
+
 func TestServerRequestIsRefusedNotActedOn(t *testing.T) {
 	// The fake answers initialize only if the client replied to its
 	// sampling/createMessage request with a JSON-RPC error.

@@ -75,8 +75,21 @@ func NewClient(r io.Reader, w io.Writer, maxMessageBytes int) *Client {
 }
 
 // Initialize runs the initialize handshake, records what the server reported and
-// sends notifications/initialized.
+// sends notifications/initialized. A server that answers with a protocolVersion
+// other than ProtocolVersion is refused as ContractMismatch.
 func (c *Client) Initialize(ctx context.Context) (ServerInfo, error) {
+	return c.initialize(ctx, nil)
+}
+
+// InitializeContract runs Initialize and also requires the server to declare
+// exactly the contract want. The comparison uses the raw declared value, so a
+// contract that differs only by characters safetext would remove is refused as
+// ContractMismatch; the returned info holds the sanitized copy for reporting.
+func (c *Client) InitializeContract(ctx context.Context, want string) (ServerInfo, error) {
+	return c.initialize(ctx, &want)
+}
+
+func (c *Client) initialize(ctx context.Context, want *string) (ServerInfo, error) {
 	params := map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{},
@@ -95,7 +108,9 @@ func (c *Client) Initialize(ctx context.Context) (ServerInfo, error) {
 	if err := json.Unmarshal(result["protocolVersion"], &info.ProtocolVersion); err != nil || info.ProtocolVersion == "" || len(info.ProtocolVersion) > 64 {
 		return invalid("the initialize result has no protocolVersion")
 	}
-	info.ProtocolVersion = safetext.Text(info.ProtocolVersion, 64)
+	if info.ProtocolVersion != ProtocolVersion {
+		return ServerInfo{}, Fail(ContractMismatch, "initialize", "the server negotiated another MCP protocol version")
+	}
 	if raw, ok := result["serverInfo"]; ok {
 		si, err := object(raw)
 		if err != nil {
@@ -109,7 +124,12 @@ func (c *Client) Initialize(ctx context.Context) (ServerInfo, error) {
 	if !ok {
 		return invalid("capabilities.experimental.forgecell.contract is malformed")
 	}
-	info.Contract = contract
+	// The declared contract is server text: only a sanitized copy is kept for
+	// reporting, and the raw value is what gets compared.
+	info.Contract = safetext.Text(contract, 64)
+	if want != nil && contract != *want {
+		return info, Fail(ContractMismatch, "initialize", "the server declares a different contract")
+	}
 	line, err := encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}, c.max)
 	if err != nil {
 		return ServerInfo{}, err

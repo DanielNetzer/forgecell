@@ -12,13 +12,21 @@ import (
 // SecretMark replaces every secret in served evidence and ledger text.
 const SecretMark = "[redacted]"
 
+// U+2028 and U+2029 end a line in JavaScript and some log readers.
+const (
+	lineSeparator      = 0x2028
+	paragraphSeparator = 0x2029
+)
+
 // Text bounds untrusted display text: valid UTF-8, no control characters, no
-// format characters (unicode.Cf, such as U+202E bidi overrides or zero-width
-// joiners, which can disguise text), at most limit runes.
+// line or paragraph separators (U+2028, U+2029, which end a line in JSON
+// readers and logs), no format characters (unicode.Cf, such as U+202E bidi
+// overrides or zero-width joiners, which can disguise text), at most limit
+// runes.
 func Text(s string, limit int) string { return clean(strings.ToValidUTF8(s, "�"), limit, false) }
 
 // Multiline is Text for bodies: it keeps newlines and tabs (a CRLF becomes a
-// newline) and replaces every other control character.
+// newline) and replaces every other control character and both separators.
 func Multiline(s string, limit int) string {
 	return clean(strings.ReplaceAll(strings.ToValidUTF8(s, "�"), "\r\n", "\n"), limit, true)
 }
@@ -30,7 +38,7 @@ func clean(s string, limit int, lines bool) string {
 		if unicode.Is(unicode.Cf, r) {
 			continue
 		}
-		if unicode.IsControl(r) && !(lines && (r == '\n' || r == '\t')) {
+		if r == lineSeparator || r == paragraphSeparator || unicode.IsControl(r) && !(lines && (r == '\n' || r == '\t')) {
 			r = ' '
 		}
 		if n == limit {

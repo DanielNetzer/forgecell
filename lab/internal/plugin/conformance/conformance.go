@@ -72,7 +72,9 @@ func Run(ctx context.Context, manifestPath string, opts Options) Report {
 	if grace == nil {
 		grace = func() <-chan time.Time { return time.After(defaultGrace) }
 	}
-	k.p.Shutdown(grace())
+	if k.p.Shutdown(grace()) != nil {
+		r.Cleanup = cleanupLeft
+	}
 	return k.report(r)
 }
 
@@ -136,6 +138,7 @@ func (k *kit) covers(tools []mcp.ToolInfo) error {
 
 // call calls a contract tool within its bounds and decodes the output.
 func (k *kit) call(t *contract.Tool, args any) (any, error) {
+	k.calls++
 	out, err := k.p.Call(k.ctx, t, args, k.opts.Timeout)
 	return out, k.observe(err)
 }
@@ -154,6 +157,7 @@ func (k *kit) malformed() error {
 			if timeout <= 0 {
 				timeout = t.Timeout()
 			}
+			k.calls++
 			_, err := k.p.CallRaw(k.ctx, t.Name, args, t.MessageBytes(), timeout)
 			var e *mcp.Error
 			switch {
@@ -192,9 +196,9 @@ func describeArgs(kind string) map[string]any {
 	return map[string]any{"config": map[string]any{}}
 }
 
-// observe notes bound failures for the output and timeout checks.
+// observe notes bound failures for the output and timeout checks. Only tool
+// calls count toward k.calls, so the bound checks are skipped when none ran.
 func (k *kit) observe(err error) error {
-	k.calls++
 	if err == nil {
 		return nil
 	}
@@ -238,5 +242,6 @@ func (k *kit) report(r Report) Report {
 		r.Passed = r.Passed && result.Status == Pass
 		r.Checks = append(r.Checks, result)
 	}
+	r.Passed = r.Passed && r.Cleanup == ""
 	return r
 }

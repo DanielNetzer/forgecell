@@ -82,6 +82,73 @@ func TestFailingPluginsNameTheFailedCheck(t *testing.T) {
 	}
 }
 
+func TestBoundChecksSkipWhenNoToolCallRan(t *testing.T) {
+	for _, c := range []struct{ kind, mode string }{{"forge", "wrong-contract"}, {"tracker", "bad-framing"}, {"tracker", "wrong-protocol"}} {
+		r, _ := run(t, c.kind, c.mode)
+		if failed, _ := r.Failed(); r.Passed || failed.ID != CheckInitialize {
+			t.Fatalf("%s: first failure %+v", c.mode, failed)
+		}
+		for _, check := range r.Checks {
+			if (check.ID == CheckOutputBound || check.ID == CheckTimeoutBound) && check.Status != Skip {
+				t.Fatalf("%s: %s = %+v, want skip", c.mode, check.ID, check)
+			}
+		}
+	}
+}
+
+func TestCleanupFailureFailsTheReport(t *testing.T) {
+	server := plugintest.Server(t)
+	// The unmark plugin removes the run marker, so the run directory is left.
+	path := plugintest.WriteManifest(t, plugintest.Manifest(t, server, "tracker", "unmark"))
+	root := plugintest.TempDir(t)
+	r := Run(context.Background(), path, Options{Root: root, Grace: fired})
+	if r.Passed || r.Cleanup != cleanupLeft || len(r.Checks) != len(checkOrder) {
+		t.Fatalf("report = %+v", r)
+	}
+	for _, c := range r.Checks {
+		if c.Status != Pass {
+			t.Fatalf("%s did not pass: %+v", c.ID, c)
+		}
+	}
+	var text, js bytes.Buffer
+	if err := r.WriteText(&text); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.WriteJSON(&js); err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{text.String(), js.String()} {
+		if strings.Contains(out, root) || strings.Contains(out, filepath.Dir(path)) || strings.Contains(out, os.TempDir()) {
+			t.Fatalf("report leaks a local path:\n%s", out)
+		}
+	}
+	if !strings.Contains(text.String(), "FAIL cleanup: run-directory-left") || !strings.Contains(text.String(), "Result: FAIL") {
+		t.Fatalf("text report:\n%s", text.String())
+	}
+	var decoded Report
+	if err := json.Unmarshal(js.Bytes(), &decoded); err != nil || decoded.Passed || decoded.Cleanup != cleanupLeft {
+		t.Fatalf("JSON report = %+v, %v", decoded, err)
+	}
+}
+
+func TestPassingReportsCarryNoCleanupField(t *testing.T) {
+	r, _ := run(t, "forge", "good")
+	var js bytes.Buffer
+	if err := r.WriteJSON(&js); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Passed || strings.Contains(js.String(), "cleanup") {
+		t.Fatalf("passing report:\n%s", js.String())
+	}
+}
+
+func TestLockedHomeIsRemovedAfterARun(t *testing.T) {
+	// run asserts that nothing is left under the root.
+	if r, _ := run(t, "reviewer", "locked-home"); !r.Passed {
+		t.Fatalf("report = %+v", r)
+	}
+}
+
 func TestServerRequestsAreRefusedDuringARun(t *testing.T) {
 	r, _ := run(t, "forge", "server-request")
 	if !r.Passed {

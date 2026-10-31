@@ -20,7 +20,7 @@ import (
 // required, additionalProperties (false, true or a schema for map values),
 // maxProperties, propertyNames, items, maxItems, enum, minLength, maxLength
 // (runes), minimum, maximum, pattern and format. format is "identifier" (no
-// control or format characters), "uri" (absolute http or https without
+// control, format or line separator characters), "uri" (absolute http or https without
 // credentials) or "date-time" (RFC 3339).
 type Schema struct {
 	Type                 string             `json:"type"`
@@ -221,7 +221,7 @@ func (s *Schema) validateString(path, str string) error {
 	switch s.Format {
 	case "identifier":
 		if !identifier(str) {
-			return bad("contains control or format characters")
+			return bad("contains control, format or line separator characters")
 		}
 	case "uri":
 		u, err := url.Parse(str)
@@ -236,11 +236,12 @@ func (s *Schema) validateString(path, str string) error {
 	return nil
 }
 
-// identifier reports whether s has no control, format or surrounding space
-// characters, so it can be compared and shown verbatim.
+// identifier reports whether s has no control, format, line or paragraph
+// separator (U+2028, U+2029) or surrounding space characters, so it can be
+// compared and shown verbatim.
 func identifier(s string) bool {
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029 {
 			return false
 		}
 	}

@@ -19,4 +19,6 @@ func supported() error {
 
 func configure(*exec.Cmd) {}
 
+func reap(cmd *exec.Cmd) error { return cmd.Wait() }
+
 func ownedByMe(os.FileInfo) bool { return false }

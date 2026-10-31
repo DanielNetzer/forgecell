@@ -38,6 +38,19 @@ func TestMultilineKeepsLinesOnly(t *testing.T) {
 	}
 }
 
+func TestLineAndParagraphSeparatorsBecomeSpaces(t *testing.T) {
+	const ls, ps = "\xe2\x80\xa8", "\xe2\x80\xa9" // U+2028, U+2029
+	if got := Text("a"+ls+"b"+ps+"c", 50); got != "a b c" {
+		t.Fatalf("Text = %q", got)
+	}
+	if got := Multiline("a"+ls+"b\nc"+ps+"d", 50); got != "a b\nc d" {
+		t.Fatalf("Multiline = %q", got)
+	}
+	if got := Text(ls+ps, 50); got != "" {
+		t.Fatalf("Text of separators only = %q", got)
+	}
+}
+
 func TestRedactSecretsCoversTheSharedRules(t *testing.T) {
 	for _, secret := range []string{
 		"Authorization: Bearer abcdefghijklmnopqrstuvwxyz",

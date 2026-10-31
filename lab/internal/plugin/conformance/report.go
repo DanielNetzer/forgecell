@@ -63,7 +63,14 @@ type Report struct {
 	ManifestSHA256 string   `json:"manifestSha256,omitempty"`
 	Passed         bool     `json:"passed"`
 	Checks         []Result `json:"checks"`
+	// Cleanup is the fixed reason "run-directory-left" when the plugin's
+	// private run directory could not be removed after the run; the report
+	// then fails.
+	Cleanup string `json:"cleanup,omitempty"`
 }
+
+// cleanupLeft is Report.Cleanup when the run directory was left in place.
+const cleanupLeft = "run-directory-left"
 
 // Failed returns the first check that did not pass, if any.
 func (r Report) Failed() (Result, bool) {
@@ -95,6 +102,9 @@ func (r Report) WriteText(w io.Writer) error {
 		if c.Status == Pass {
 			passed++
 		}
+	}
+	if r.Cleanup != "" {
+		fmt.Fprintf(w, "FAIL cleanup: %s — the plugin's private run directory could not be removed\n", r.Cleanup)
 	}
 	verdict := "PASS"
 	if !r.Passed {
