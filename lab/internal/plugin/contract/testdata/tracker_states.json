@@ -1,0 +1,39 @@
+[
+  {
+    "name": "good map",
+    "tool": "tracker_states",
+    "output": {"states": {"ENG-1": {"state": "open"}, "ENG-2": {"state": "closed", "stateReason": "Won‮t Do", "closedAt": "2026-10-29T08:00:00Z"}}},
+    "want": {"states": {"ENG-1": {"state": "open"}, "ENG-2": {"state": "closed", "stateReason": "Wont Do", "closedAt": "2026-10-29T08:00:00Z"}}}
+  },
+  {
+    "name": "over 50 keys",
+    "tool": "tracker_states",
+    "output": {"states": {"@MANY@": {"state": "open"}}},
+    "expand": {"\"@MANY@\": {\"state\": \"open\"}": {"sequence": "\"ENG-%d\": {\"state\": \"open\"}", "count": 51, "separator": ", "}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "unknown state value",
+    "tool": "tracker_states",
+    "output": {"states": {"ENG-1": {"state": "in-review"}}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "duplicate key",
+    "tool": "tracker_states",
+    "output": {"states": {"ENG-1": {"state": "open"}, "ENG-1": {"state": "closed"}}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "case variant key in a map value",
+    "tool": "tracker_states",
+    "output": {"states": {"ENG-1": {"State": "open", "state": "open"}}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "bidi map key",
+    "tool": "tracker_states",
+    "output": {"states": {"ENG-1‮": {"state": "open"}}},
+    "reason": "schema-invalid"
+  }
+]

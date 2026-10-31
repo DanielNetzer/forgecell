@@ -1,0 +1,73 @@
+{
+  "contract": "forgecell.reviewer/v1",
+  "tools": [
+    {
+      "name": "reviewer_describe",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 65536,
+      "timeoutMs": 15000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["config"],
+        "properties": {
+          "config": {"type": "object", "additionalProperties": true, "maxProperties": 64}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["displayName", "severities"],
+        "properties": {
+          "displayName": {"type": "string", "minLength": 1, "maxLength": 100},
+          "severities": {"type": "array", "maxItems": 4, "items": {"type": "string", "enum": ["high", "medium", "low", "info"]}},
+          "capabilities": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 64, "format": "identifier"}}
+        }
+      }
+    },
+    {
+      "name": "reviewer_findings",
+      "access": "read",
+      "required": true,
+      "maxOutputBytes": 2097152,
+      "timeoutMs": 60000,
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["forge", "ref", "commit"],
+        "properties": {
+          "forge": {"type": "object", "additionalProperties": true, "maxProperties": 16},
+          "ref": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
+          "commit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "findings"],
+        "properties": {
+          "status": {"type": "string", "enum": ["pending", "complete"]},
+          "findings": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "severity", "title", "body", "resolved"],
+              "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"},
+                "severity": {"type": "string", "enum": ["high", "medium", "low", "info"]},
+                "path": {"type": "string", "minLength": 1, "maxLength": 4096, "format": "identifier"},
+                "line": {"type": "integer", "minimum": 1, "maximum": 10000000},
+                "title": {"type": "string", "minLength": 1, "maxLength": 300},
+                "body": {"type": "string", "maxLength": 65536},
+                "resolved": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

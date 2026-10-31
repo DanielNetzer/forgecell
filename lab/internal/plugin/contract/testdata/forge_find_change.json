@@ -1,0 +1,33 @@
+[
+  {
+    "name": "good",
+    "tool": "forge_find_change",
+    "output": {"changes": [{"ref": "!12", "url": "https://gitlab.com/example/project/-/merge_requests/12", "state": "open", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567"}]},
+    "want": {"changes": [{"ref": "!12", "url": "https://gitlab.com/example/project/-/merge_requests/12", "state": "open", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567"}]}
+  },
+  {
+    "name": "sha-256 commit",
+    "tool": "forge_find_change",
+    "output": {"changes": [{"ref": "!13", "url": "https://gitlab.com/x/-/merge_requests/13", "state": "merged", "draft": false, "headCommit": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]},
+    "accepted": true
+  },
+  {
+    "name": "bad commit",
+    "tool": "forge_find_change",
+    "output": {"changes": [{"ref": "!12", "url": "https://gitlab.com/x/-/merge_requests/12", "state": "open", "draft": true, "headCommit": "0123456789ABCDEF0123456789abcdef01234567"}]},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "unknown state",
+    "tool": "forge_find_change",
+    "output": {"changes": [{"ref": "!12", "url": "https://gitlab.com/x/-/merge_requests/12", "state": "locked", "draft": true, "headCommit": "0123456789abcdef0123456789abcdef01234567"}]},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "too many changes",
+    "tool": "forge_find_change",
+    "output": {"changes": ["@MANY@"]},
+    "expand": {"\"@MANY@\"": {"sequence": "{\"ref\": \"!%d\", \"url\": \"https://gitlab.com/x\", \"state\": \"open\", \"draft\": true, \"headCommit\": \"0123456789abcdef0123456789abcdef01234567\"}", "count": 21, "separator": ", "}},
+    "reason": "schema-invalid"
+  }
+]

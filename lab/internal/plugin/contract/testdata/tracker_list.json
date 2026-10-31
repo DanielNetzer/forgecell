@@ -1,0 +1,58 @@
+[
+  {
+    "name": "good page",
+    "tool": "tracker_list",
+    "output": {"items": [{"key": "ENG-1", "title": "Fix login", "labels": ["bug"], "updatedAt": "2026-10-30T10:00:00Z", "state": "open", "milestone": "v1"}], "nextCursor": "page-2", "total": 1},
+    "want": {"items": [{"key": "ENG-1", "title": "Fix login", "labels": ["bug"], "updatedAt": "2026-10-30T10:00:00Z", "state": "open", "milestone": "v1"}], "nextCursor": "page-2", "total": 1}
+  },
+  {
+    "name": "bidi title",
+    "tool": "tracker_list",
+    "output": {"items": [{"key": "ENG-2", "title": "invoice‮txt.exe", "labels": ["a‍b"], "updatedAt": "2026-10-30T10:00:00Z", "state": "closed"}]},
+    "want": {"items": [{"key": "ENG-2", "title": "invoicetxt.exe", "labels": ["ab"], "updatedAt": "2026-10-30T10:00:00Z", "state": "closed"}]}
+  },
+  {
+    "name": "exactly 100 items",
+    "tool": "tracker_list",
+    "output": {"items": ["@ITEMS@", {"key": "ENG-0", "title": "t", "labels": [], "updatedAt": "2026-10-30T10:00:00Z", "state": "open"}]},
+    "expand": {"\"@ITEMS@\",": {"repeat": "{\"key\": \"ENG-0\", \"title\": \"t\", \"labels\": [], \"updatedAt\": \"2026-10-30T10:00:00Z\", \"state\": \"open\"},", "count": 99}},
+    "accepted": true
+  },
+  {
+    "name": "over 100 items",
+    "tool": "tracker_list",
+    "output": {"items": ["@ITEMS@", {"key": "ENG-0", "title": "t", "labels": [], "updatedAt": "2026-10-30T10:00:00Z", "state": "open"}]},
+    "expand": {"\"@ITEMS@\",": {"repeat": "{\"key\": \"ENG-0\", \"title\": \"t\", \"labels\": [], \"updatedAt\": \"2026-10-30T10:00:00Z\", \"state\": \"open\"},", "count": 100}},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "duplicate key",
+    "tool": "tracker_list",
+    "output": {"items": [{"key": "ENG-1", "key": "ENG-2", "title": "t", "labels": [], "updatedAt": "2026-10-30T10:00:00Z", "state": "open"}]},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "invalid cursor type",
+    "tool": "tracker_list",
+    "output": {"items": [], "nextCursor": 2},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "control character in key",
+    "tool": "tracker_list",
+    "output": {"items": [{"key": "ENG-1\n", "title": "t", "labels": [], "updatedAt": "2026-10-30T10:00:00Z", "state": "open"}]},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "fractional total",
+    "tool": "tracker_list",
+    "output": {"items": [], "total": 1.5},
+    "reason": "schema-invalid"
+  },
+  {
+    "name": "trailing data",
+    "tool": "tracker_list",
+    "raw": "{\"items\": []} {}",
+    "reason": "schema-invalid"
+  }
+]
