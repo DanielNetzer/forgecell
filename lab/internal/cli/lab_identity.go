@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
@@ -112,8 +114,16 @@ func resolveDefaultLab(ctx context.Context, name string) (labResolution, error) 
 	if err != nil {
 		return labResolution{}, err
 	}
-	repo, why := checkoutRepository(ctx, root)
+	repo, forgeIdentity, why := checkoutOrigin(ctx, root)
 	if repo == "" {
+		var forgeNotice string
+		if forgeIdentity != "" {
+			found, ok, err := resolveForgeLab(root, forgeIdentity, name)
+			if err != nil || ok {
+				return found, err
+			}
+			forgeNotice = found.Notice
+		}
 		if name != "" {
 			return labResolution{}, fmt.Errorf("--lab-name needs a GitHub origin remote (%s); use --lab DIR to choose a Lab explicitly", why)
 		}
@@ -121,7 +131,7 @@ func resolveDefaultLab(ctx context.Context, name string) (labResolution, error) 
 		if err != nil {
 			return labResolution{}, err
 		}
-		return labResolution{Dir: dir, Notice: fmt.Sprintf("%s; using path-keyed Lab %s", why, shown(dir))}, nil
+		return labResolution{Dir: dir, Notice: joinNotices(fmt.Sprintf("%s; using path-keyed Lab %s", why, shown(dir)), forgeNotice)}, nil
 	}
 	home, err := forgecellHome(root)
 	if err != nil {
@@ -165,12 +175,7 @@ func resolveDefaultLab(ctx context.Context, name string) (labResolution, error) 
 				matches = append(matches, e.Dir)
 			}
 		}
-		if len(unreadable) > 0 {
-			notice = fmt.Sprintf("these Labs could not be read, so none was considered for %s: %s; fix or remove them, or choose a Lab with --lab DIR", repo, strings.Join(unreadable[:min(len(unreadable), 5)], "; "))
-			if more := len(unreadable) - 5; more > 0 {
-				notice += fmt.Sprintf(" (and %d more)", more)
-			}
-		}
+		notice = unreadableLabsNotice(repo, unreadable)
 		identityMatches := slices.Contains(matches, identity)
 		switch {
 		case identityMatches && len(matches) == 1:
@@ -230,6 +235,19 @@ func legacyLabFor(legacy, repo, identity string) (bool, error) {
 	return strings.EqualFold(e.Repo, repo), nil
 }
 
+// unreadableLabsNotice names up to five Labs a scan could not read, so a
+// resolution never skips them silently. It is empty when every Lab was read.
+func unreadableLabsNotice(subject string, unreadable []string) string {
+	if len(unreadable) == 0 {
+		return ""
+	}
+	notice := fmt.Sprintf("these Labs could not be read, so none was considered for %s: %s; fix or remove them, or choose a Lab with --lab DIR", subject, strings.Join(unreadable[:min(len(unreadable), 5)], "; "))
+	if more := len(unreadable) - 5; more > 0 {
+		notice += fmt.Sprintf(" (and %d more)", more)
+	}
+	return notice
+}
+
 func withoutDir(items []string, drop string) []string {
 	return slices.DeleteFunc(slices.Clone(items), func(item string) bool { return item == drop })
 }
@@ -246,18 +264,134 @@ func joinNotices(parts ...string) string {
 
 // checkoutRepository returns OWNER/REPO from origin, or why none is available.
 func checkoutRepository(ctx context.Context, root string) (repo, why string) {
+	repo, _, why = checkoutOrigin(ctx, root)
+	return repo, why
+}
+
+// checkoutOrigin reads origin once. It tries GitHub first, exactly as
+// checkoutRepository always has; only when origin is not GitHub does it fall back
+// to the plugin-forge host/path identity. why is unchanged either way, so a
+// checkout with no Lab for its forge identity keeps today's path-keyed fallback.
+func checkoutOrigin(ctx context.Context, root string) (repo, forgeIdentity, why string) {
 	if _, err := os.Lstat(filepath.Join(root, ".git")); err != nil {
-		return "", "not inside a git checkout"
+		return "", "", "not inside a git checkout"
 	}
 	remote, err := originRemote(ctx, root)
 	if err != nil || remote == "" {
-		return "", "no origin remote could be read"
+		return "", "", "no origin remote could be read"
 	}
 	repo, ok := onboarding.GitHubRepoFromRemote(remote)
 	if !ok {
-		return "", "origin is not a GitHub repository"
+		identity, _ := onboarding.ForgeIdentityFromRemote(remote)
+		return "", identity, "origin is not a GitHub repository"
 	}
-	return repo, ""
+	return repo, "", ""
+}
+
+// maxLabDirName is the longest Lab directory name resolution will look up.
+const maxLabDirName = 255
+
+// forgeLabName replaces each "/" of a forge identity with "--", adds "-" and the
+// first 8 hex characters of the identity's sha256, and adds a Lab name with "@".
+// A segment may itself contain "--", so host--path alone is ambiguous
+// (h.com/a--b/c and h.com/a/b--c); the digest keeps such identities apart. The
+// host always contains a dot and a GitHub owner never does, so it cannot equal a
+// GitHub owner--repo name. A Lab under it is still used only after its lab.json
+// confirms the identity.
+func forgeLabName(identity, name string) string {
+	sum := sha256.Sum256([]byte(identity))
+	label := strings.ReplaceAll(identity, "/", "--") + "-" + hex.EncodeToString(sum[:])[:8]
+	if name != "" {
+		label += "@" + strings.ToLower(name)
+	}
+	return label
+}
+
+// resolveForgeLab finds the Lab of a plugin-forge checkout by its host/path
+// identity. ok is false when no Lab declares that identity, so the caller keeps
+// its path-keyed fallback and shows the returned notice. The canonical directory
+// is used only after its lab.json verifies a Formula whose forge.identity
+// matches; one whose verified Formula declares another identity is skipped for
+// the identity scan, and one that cannot be verified, or is linked, is refused,
+// never adopted. A scan that meets an unreadable Lab names it, and without a
+// match it refuses rather than fall back beside a Lab that may hold the
+// identity. It only reads local state and never starts a plugin.
+func resolveForgeLab(root, identity, name string) (labResolution, bool, error) {
+	home, err := forgecellHome(root)
+	if err != nil {
+		return labResolution{}, false, err
+	}
+	labs := filepath.Join(home, "labs")
+	label := forgeLabName(identity, name)
+	if len(label) > maxLabDirName {
+		return labResolution{}, false, fmt.Errorf("the Lab directory name for %s is longer than %d bytes; choose a Lab with --lab DIR", identity, maxLabDirName)
+	}
+	dir := filepath.Join(labs, label)
+	info, statErr := os.Lstat(dir)
+	canonical := false
+	var notice string
+	switch {
+	case statErr == nil && !info.IsDir():
+		return labResolution{}, false, fmt.Errorf("Lab path %s exists but is not a real directory (a symbolic link or file is never followed); remove it or choose a Lab with --lab DIR", shown(dir))
+	case statErr != nil && !os.IsNotExist(statErr):
+		return labResolution{}, false, fmt.Errorf("Lab path %s cannot be inspected (%s); choose a Lab with --lab DIR", shown(dir), shown(statErr.Error()))
+	case statErr == nil:
+		if _, err := os.Lstat(filepath.Join(dir, "lab.json")); err != nil {
+			return labResolution{}, false, fmt.Errorf("Lab directory %s has no readable lab.json, so it cannot be verified as the Lab for %s; choose a Lab with --lab DIR or repair it", shown(dir), identity)
+		}
+		e := inspectLab(dir)
+		if e.Err != "" {
+			return labResolution{}, false, fmt.Errorf("Lab directory %s cannot be verified as the Lab for %s (%s); choose a Lab with --lab DIR or repair it", shown(dir), identity, shown(e.Err))
+		}
+		if e.Identity == identity {
+			canonical = true
+		} else {
+			owner := "no forge identity"
+			if e.Identity != "" {
+				owner = "forge identity " + shown(e.Identity)
+			}
+			notice = fmt.Sprintf("Lab directory %s belongs to %s, not %s, so it was not used", shown(dir), owner, identity)
+		}
+	}
+	if name != "" {
+		if canonical {
+			return labResolution{Dir: dir}, true, nil
+		}
+		return labResolution{}, false, fmt.Errorf("no Lab named %s exists for forge identity %s (looked for %s); use --lab DIR to choose a Lab explicitly", name, identity, shown(dir))
+	}
+	entries, truncated, err := scanLabs(labs)
+	if err != nil {
+		return labResolution{}, false, fmt.Errorf("cannot scan Labs under %s (%s); use --lab DIR to choose one", shown(labs), shown(err.Error()))
+	}
+	if truncated {
+		return labResolution{}, false, fmt.Errorf("more than %d entries under %s, so a unique Lab for %s cannot be established; use --lab DIR to choose one", maxLabEntries, shown(labs), identity)
+	}
+	var matches, unreadable []string
+	for _, e := range entries {
+		switch {
+		case e.Err != "":
+			unreadable = append(unreadable, fmt.Sprintf("%s (%s)", shown(e.Dir), shown(e.Err)))
+		case e.Identity == identity:
+			matches = append(matches, e.Dir)
+		}
+	}
+	unread := unreadableLabsNotice(identity, unreadable)
+	notice = joinNotices(notice, unread)
+	switch {
+	case canonical && len(matches) > 1:
+		return labResolution{Dir: dir, Notice: joinNotices(notice, fmt.Sprintf("using Lab %s for %s; other Labs also match it: %s", shown(dir), identity, strings.Join(shownAll(withoutDir(matches, dir)), ", ")))}, true, nil
+	case canonical:
+		return labResolution{Dir: dir, Notice: notice}, true, nil
+	case len(matches) > 1:
+		return labResolution{}, false, fmt.Errorf("forge identity %s matches more than one Lab; choose one with --lab DIR:\n  %s", identity, strings.Join(shownAll(matches), "\n  "))
+	case len(matches) == 1:
+		return labResolution{Dir: matches[0], Notice: joinNotices(notice, fmt.Sprintf("using existing Lab %s for %s (its Formula's forge.identity matches); pass --lab DIR to choose another", shown(matches[0]), identity))}, true, nil
+	case unread != "":
+		// An unreadable Lab may be this identity's, so no path-keyed Lab is
+		// chosen beside it.
+		return labResolution{}, false, fmt.Errorf("no readable Lab declares forge identity %s and %s", identity, notice)
+	}
+	return labResolution{Notice: notice}, false, nil
 }
 
 // identityLabName joins owner and repository with "--" and a Lab name with "@".
@@ -286,6 +420,7 @@ func legacyLabName(repo, name string) string {
 type labEntry struct {
 	Dir       string
 	Repo      string
+	Identity  string
 	FormulaID string
 	Binding   string
 	Err       string
@@ -349,5 +484,8 @@ func inspectLab(dir string) labEntry {
 		return e
 	}
 	e.Repo, e.FormulaID, e.Binding = active.Formula.Intake.Repo, active.Formula.ID, active.Formula.Harness.Binding
+	if active.Formula.Forge != nil {
+		e.Identity = active.Formula.Forge.Identity
+	}
 	return e
 }

@@ -23,6 +23,7 @@ type labMolecule struct {
 type labSummary struct {
 	Directory         string         `json:"directory"`
 	Repo              string         `json:"repo"`
+	Identity          string         `json:"identity,omitempty"`
 	FormulaID         string         `json:"activeFormulaId"`
 	Binding           string         `json:"binding"`
 	LastMolecule      *labMolecule   `json:"lastMolecule"`
@@ -69,7 +70,7 @@ func runLabs(args []string, out, stderr io.Writer) int {
 	}
 	report := labsReport{ReadOnly: true, Directory: labs, Truncated: truncated, Labs: []labSummary{}}
 	for _, e := range entries {
-		s := labSummary{Directory: e.Dir, Repo: e.Repo, FormulaID: e.FormulaID, Binding: e.Binding, Error: e.Err, StatusCounts: map[string]int{}, Diagnostics: []string{}}
+		s := labSummary{Directory: e.Dir, Repo: e.Repo, Identity: e.Identity, FormulaID: e.FormulaID, Binding: e.Binding, Error: e.Err, StatusCounts: map[string]int{}, Diagnostics: []string{}}
 		if !e.Linked {
 			summarizeLedgers(e.Dir, &s)
 		}
@@ -149,6 +150,9 @@ func renderLabs(out io.Writer, report labsReport) {
 			fmt.Fprintf(out, "  error: %s\n", safeText(l.Error))
 		}
 		fmt.Fprintf(out, "  repository: %s · Formula: %s · binding: %s\n", orNone(l.Repo), orNone(l.FormulaID), orNone(l.Binding))
+		if l.Identity != "" {
+			fmt.Fprintf(out, "  identity: %s\n", safeText(l.Identity))
+		}
 		switch {
 		case l.LastMolecule != nil:
 			fmt.Fprintf(out, "  last Molecule: %s · %s · started %s\n", safeText(l.LastMolecule.ID), safeText(l.LastMolecule.Status), l.LastMolecule.StartedAt)

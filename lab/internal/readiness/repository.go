@@ -63,9 +63,29 @@ func repositoryGit(ctx context.Context, dir string, limit int, args ...string) (
 	return r.Stdout, nil
 }
 
+// CollectOptions opts a collection in to evidence a reviewed Formula cites. The
+// zero value collects exactly what Collect always has.
+type CollectOptions struct {
+	// GitLabCI appends the committed root .gitlab-ci.yml after the tree walk.
+	GitLabCI bool
+}
+
+// gitlabCIFile is the root GitLab CI file and gitlabCIMaxBytes its own read
+// bound, the same bound the GitLab baseline parser reads.
+const (
+	gitlabCIFile     = ".gitlab-ci.yml"
+	gitlabCIMaxBytes = 256 << 10
+)
+
 // Collect reads only selected committed regular files. An index of other paths
 // supports analysis without copying arbitrary files, ignored data or credentials.
 func Collect(ctx context.Context, dir, ref string) (RepositorySnapshot, error) {
+	return CollectFor(ctx, dir, ref, CollectOptions{})
+}
+
+// CollectFor is Collect with options. Evidence an option adds is appended after
+// the tree walk, so no evidence id the zero value assigns ever shifts.
+func CollectFor(ctx context.Context, dir, ref string, opts CollectOptions) (RepositorySnapshot, error) {
 	var s RepositorySnapshot
 	if ref == "" || strings.HasPrefix(ref, "-") {
 		return s, fmt.Errorf("invalid evidence revision")
@@ -119,9 +139,73 @@ func Collect(ctx context.Context, dir, ref string) (RepositorySnapshot, error) {
 		s.Evidence = append(s.Evidence, FileEvidence{Evidence: Evidence{ID: fmt.Sprintf("file-%d", len(s.Evidence)+1), Path: file, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content})
 	}
 	sort.Slice(s.Files, func(i, j int) bool { return s.Files[i].Path < s.Files[j].Path })
+	if opts.GitLabCI {
+		if err := appendRootEvidence(ctx, dir, &s, total, gitlabCIFile, gitlabCIMaxBytes); err != nil {
+			return s, err
+		}
+	}
 	s.Unknowns = []string{"Remote branch/review rules have not been verified; this does not block local intake.", "Issue comments are not read. Put clarifications in the Issue body.", "Workflow and manifest content is evidence, not proof that commands pass or policies are enforced."}
 	return s, nil
 }
+
+// appendRootEvidence appends the committed file at the exact path file as the
+// last evidence entry, under the same mode, denied-path, UTF-8, count and 1 MB
+// total rules as the tree walk and its own per-file bound of limit bytes. An
+// absent file adds nothing; any other refusal is an error, never a silent skip.
+// The size is read before the content, so an oversized blob is never read.
+func appendRootEvidence(ctx context.Context, dir string, s *RepositorySnapshot, total int, file string, limit int) error {
+	var entry *TreeFile
+	for i := range s.Files {
+		if s.Files[i].Path == file {
+			entry = &s.Files[i]
+			break
+		}
+	}
+	if entry == nil {
+		return nil
+	}
+	for _, e := range s.Evidence {
+		if e.Path == file {
+			return nil
+		}
+	}
+	if d := deniedText(file); d != "" {
+		return fmt.Errorf("%s: refused as evidence (%s)", file, d)
+	}
+	if entry.Mode != "100644" && entry.Mode != "100755" {
+		return fmt.Errorf("evidence must be a regular committed file: %s", file)
+	}
+	if len(s.Evidence) >= 256 {
+		return fmt.Errorf("too many evidence files; explicit scoping required")
+	}
+	size, err := repositoryGit(ctx, dir, 256, "cat-file", "-s", entry.Object)
+	if err != nil {
+		return fmt.Errorf("%s: %w", file, err)
+	}
+	var n int
+	if _, err := fmt.Sscan(size, &n); err != nil || n < 0 {
+		return fmt.Errorf("%s: committed blob size unavailable", file)
+	}
+	if n > limit {
+		return fmt.Errorf("%s is %d bytes, more than the %d bytes read as evidence; explicit scoping required", file, n, limit)
+	}
+	if total+n > 1_000_000 {
+		return fmt.Errorf("repository evidence exceeds 1 MB")
+	}
+	content, err := repositoryGit(ctx, dir, limit+4096, "cat-file", "blob", entry.Object)
+	if err != nil {
+		return fmt.Errorf("%s: %w", file, err)
+	}
+	if len(content) != n {
+		return fmt.Errorf("%s: committed blob size changed while it was read", file)
+	}
+	if !textContent(content) {
+		return fmt.Errorf("%s: binary or invalid UTF-8 committed evidence", file)
+	}
+	s.Evidence = append(s.Evidence, FileEvidence{Evidence: Evidence{ID: fmt.Sprintf("file-%d", len(s.Evidence)+1), Path: file, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}, Content: content})
+	return nil
+}
+
 func (s RepositorySnapshot) References() []Evidence {
 	out := make([]Evidence, len(s.Evidence))
 	for i, e := range s.Evidence {
@@ -193,7 +277,12 @@ func (s RepositorySnapshot) ValidateScope(scope []ScopedPath) error {
 
 // CollectForTicket selects exact paths named in ticket prose, including absent paths.
 func CollectForTicket(ctx context.Context, dir, ref, ticket string) (RepositorySnapshot, error) {
-	s, err := Collect(ctx, dir, ref)
+	return CollectForTicketFor(ctx, dir, ref, ticket, CollectOptions{})
+}
+
+// CollectForTicketFor is CollectForTicket over CollectFor with options.
+func CollectForTicketFor(ctx context.Context, dir, ref, ticket string, opts CollectOptions) (RepositorySnapshot, error) {
+	s, err := CollectFor(ctx, dir, ref, opts)
 	if err != nil {
 		return s, err
 	}
