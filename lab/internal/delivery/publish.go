@@ -341,7 +341,7 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 		if r.CreationAttemptedAt != "" {
 			return reconcile("MISSING", "no PR found for unresolved creation attempt; replacement requires reconciliation")
 		}
-		body := fmt.Sprintf("Implements issue #%d.\n\nMolecule: `%s`\nFormula: `%s`\nBase: `%s`\nDelivery: `%s`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n", record.Issue.Number, record.ID, record.FormulaID, r.Preview.BaseCommit, r.Commit)
+		body := fmt.Sprintf("Implements issue %s.\n\nMolecule: `%s`\nFormula: `%s`\nBase: `%s`\nDelivery: `%s`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n", record.Issue.DisplayKey(), record.ID, record.FormulaID, r.Preview.BaseCommit, r.Commit)
 		f, err := os.CreateTemp(filepath.Join(o.LabDir, "deliveries"), ".pr-body-")
 		if err != nil {
 			return r, err

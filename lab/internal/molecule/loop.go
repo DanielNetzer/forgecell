@@ -788,6 +788,22 @@ func issueLockName(repository string, number int64) (string, error) {
 	return "issue-" + hex.EncodeToString(sum[:16]) + "-" + strconv.FormatInt(number, 10) + loopLockSuffix, nil
 }
 
+// issueKeyLockName is issueLockName for a keyed Issue: issue-<hash>-<slug>. The
+// hash covers the lowercased repository and the exact key under a keyed domain
+// separator, so it never equals a numeric lock's hash and two keys that share a
+// slug (ENG-1 and eng_1) still take different locks.
+func issueKeyLockName(repository, key string) (string, error) {
+	if _, err := issueLockName(repository, 1); err != nil {
+		return "", err
+	}
+	slug, err := keySlug(Issue{Key: key})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte("forgecell keyed issue lock\x00" + strings.ToLower(repository) + "\x00" + key))
+	return "issue-" + hex.EncodeToString(sum[:16]) + "-" + slug + loopLockSuffix, nil
+}
+
 // flockLedgerFile never blocks. The operating system drops the lock when the file
 // is closed or the process exits, including on a crash, so no stale lock can
 // outlive its holder. Lock files are never removed: unlinking one while another

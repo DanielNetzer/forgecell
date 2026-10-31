@@ -81,7 +81,7 @@ func validatedHead(ctx context.Context, o Options, expected string) (molecule.Re
 	}
 	if molecule.FailedTreeAdopted(r) {
 		approved := r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan.Inputs.Issue
-		if approved.Repository != r.Issue.Repo || approved.Number != r.Issue.Number || approved.URL != r.Issue.URL || approved.Title != r.Issue.Title || approved.Body != r.Issue.Body || approved.State != r.Issue.State {
+		if approved.Repository != r.Issue.Repo || approved.Number != r.Issue.Number || approved.Key != r.Issue.Key || approved.URL != r.Issue.URL || approved.Title != r.Issue.Title || approved.Body != r.Issue.Body || approved.State != r.Issue.State {
 			return r, fmt.Errorf("adopted failed-tree issue identity changed")
 		}
 	}

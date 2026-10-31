@@ -18,6 +18,8 @@ type QueueAttempt struct {
 	Status     string `json:"status"`
 	Phase      string `json:"phase,omitempty"`
 	StartedAt  string `json:"startedAt,omitempty"`
+	// Key is a keyed Issue's tracker key; its Number is 0.
+	Key string `json:"key,omitempty"`
 }
 type QueueInventory struct {
 	Complete    bool           `json:"complete"`
@@ -108,6 +110,14 @@ func readQueueInventory(lab string, wrap func(string, io.Reader) io.Reader) Queu
 			continue
 		}
 		name, header, p := f.Name, f.Header, f.Header.QueueProjection
+		if p.Issue.Key != "" {
+			if a, problem := keyedQueueAttempt(header); problem != "" {
+				q.problem(name + ": " + problem)
+			} else {
+				q.Attempts = append(q.Attempts, a)
+			}
+			continue
+		}
 		ref, e := intake.BindRepository(intake.IssueRef{Number: p.Issue.Number}, p.Issue.Repo)
 		if e != nil {
 			q.problem(name + ": missing or invalid historical Issue identity; unjoinable")
@@ -143,6 +153,27 @@ func readQueueInventory(lab string, wrap func(string, io.Reader) io.Reader) Queu
 	return q
 }
 
+// keyedQueueAttempt projects a keyed ledger (Key set, Number 0), or returns why
+// it is unjoinable. Its URL must be an https URL; it is not a GitHub Issue URL.
+func keyedQueueAttempt(header ledger.Header) (QueueAttempt, string) {
+	p := header.QueueProjection
+	repo, err := intake.BindKeyRepository(p.Issue.Repo)
+	if err != nil || p.Issue.Number != 0 || intake.ValidateIssueKey(p.Issue.Key) != nil || (Issue{Key: p.Issue.Key}).KeySlug() == "" {
+		return QueueAttempt{}, "missing or invalid historical Issue key identity; unjoinable"
+	}
+	if p.Workspace != nil && p.Workspace.Repo != "" && !strings.EqualFold(p.Workspace.Repo, p.Issue.Repo) {
+		return QueueAttempt{}, "workspace/Issue repository identity mismatch"
+	}
+	if p.Issue.URL != "" && !httpsURL(p.Issue.URL) {
+		return QueueAttempt{}, "historical Issue URL is not an https URL"
+	}
+	a := QueueAttempt{ID: header.ID, Repository: repo, Key: p.Issue.Key, Status: header.Status, StartedAt: p.StartedAt}
+	if p.Readiness != nil {
+		a.Phase = p.Readiness.Phase
+	}
+	return a, ""
+}
+
 // Summary states. StateRetired is an Issue whose every recorded attempt is
 // retired: like StateUntouched it is free for a fresh Molecule.
 const (
@@ -156,10 +187,24 @@ func (s QueueSummary) Startable() bool {
 }
 
 func (q QueueInventory) Summarize(repository string, number int64) QueueSummary {
+	return q.summarize(func(a QueueAttempt) bool {
+		return strings.EqualFold(repository, a.Repository) && number == a.Number && a.Key == ""
+	})
+}
+
+// SummarizeKey is Summarize for a keyed Issue. Keys match exactly, since the
+// tracker defines key identity; a numeric attempt never matches.
+func (q QueueInventory) SummarizeKey(repository, key string) QueueSummary {
+	return q.summarize(func(a QueueAttempt) bool {
+		return key != "" && strings.EqualFold(repository, a.Repository) && a.Number == 0 && a.Key == key
+	})
+}
+
+func (q QueueInventory) summarize(match func(QueueAttempt) bool) QueueSummary {
 	s := QueueSummary{State: "unknown", Partial: !q.Complete, Attempts: []QueueAttempt{}}
 	var retired []QueueAttempt
 	for _, a := range q.Attempts {
-		if !strings.EqualFold(repository, a.Repository) || number != a.Number {
+		if !match(a) {
 			continue
 		}
 		if a.Status == StatusRetired {

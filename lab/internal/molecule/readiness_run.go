@@ -258,7 +258,7 @@ func approvedCodingAllowlist(f formula.Formula, p readiness.Plan) ([]string, err
 	return allowed, nil
 }
 func issueInput(i Issue) readiness.Issue {
-	return readiness.Issue{Repository: i.Repo, Number: i.Number, URL: i.URL, State: i.State, Title: i.Title, Body: i.Body, UpdatedAt: i.UpdatedAt}
+	return readiness.Issue{Repository: i.Repo, Number: i.Number, URL: i.URL, State: i.State, Title: i.Title, Body: i.Body, UpdatedAt: i.UpdatedAt, Key: i.Key}
 }
 
 // analyzeWithWrapper runs the separately approved analysis wrapper. The decision,
@@ -398,7 +398,11 @@ func stopIntake(r Record, reason string) (Record, error) {
 	r.Notes = append(r.Notes, reason)
 	return r, save(r)
 }
-func Run(ctx context.Context, o Options) (r Record, err error) {
+func Run(ctx context.Context, o Options) (r Record, err error) { return runIntake(ctx, o, "") }
+
+// runIntake is Run's body. With key empty it runs the GitHub Issue that o.Issue
+// names; with key set it runs that keyed Issue through o.ReadIssueKey (RunKeyed).
+func runIntake(ctx context.Context, o Options, key string) (r Record, err error) {
 	o.LabDir, err = filepath.Abs(o.LabDir)
 	if err != nil {
 		return r, err
@@ -417,18 +421,25 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if f.Intake.Source != "github-issues" {
 		return r, fmt.Errorf("unsupported intake source")
 	}
-	ref, err := intake.ParseIssueRef(o.Issue)
-	if err != nil {
+	var ref intake.IssueRef
+	var repo string
+	if key == "" {
+		ref, err = intake.ParseIssueRef(o.Issue)
+		if err != nil {
+			return r, err
+		}
+		ref, err = intake.BindRepository(ref, f.Intake.Repo)
+		if err != nil {
+			return r, err
+		}
+		if o.Approve != "" {
+			return resume(ctx, o, loaded, ref.Number, ref.Owner+"/"+ref.Repo)
+		}
+		repo = ref.Owner + "/" + ref.Repo
+	} else if repo, err = intake.BindKeyRepository(f.Intake.Repo); err != nil {
 		return r, err
 	}
-	ref, err = intake.BindRepository(ref, f.Intake.Repo)
-	if err != nil {
-		return r, err
-	}
-	if o.Approve != "" {
-		return resume(ctx, o, loaded, ref.Number, ref.Owner+"/"+ref.Repo)
-	}
-	w, err := resolveSource(ctx, o, ref.Owner+"/"+ref.Repo)
+	w, err := resolveSource(ctx, o, repo)
 	if err != nil {
 		return r, err
 	}
@@ -436,9 +447,17 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if err != nil {
 		return r, err
 	}
-	r = Record{SchemaVersion: "v0", Kind: "molecule", ID: fmt.Sprintf("mol-%d-%s", ref.Number, nonce), Mode: "ticket", Status: "running", FormulaID: f.ID, FormulaApproved: true, FormulaSnapshot: Snapshot{f.YAML, f.SHA256}, StartedAt: stamp(), LabDir: o.LabDir, Workspace: w, Issue: Issue{Number: ref.Number, Repo: w.Repo}, Notes: []string{"Intake reads the Issue body, not comments. Clarify the body and run again if blocked.", "Scope approval never authorizes publication, merge, deployment or issue comments."}}
+	id := fmt.Sprintf("mol-%d-%s", ref.Number, nonce)
+	if key != "" {
+		id = "mol-" + Issue{Key: key}.KeySlug() + "-" + nonce
+	}
+	r = Record{SchemaVersion: "v0", Kind: "molecule", ID: id, Mode: "ticket", Status: "running", FormulaID: f.ID, FormulaApproved: true, FormulaSnapshot: Snapshot{f.YAML, f.SHA256}, StartedAt: stamp(), LabDir: o.LabDir, Workspace: w, Issue: Issue{Number: ref.Number, Repo: w.Repo, Key: key}, Notes: []string{"Intake reads the Issue body, not comments. Clarify the body and run again if blocked.", "Scope approval never authorizes publication, merge, deployment or issue comments."}}
 	r.CheckoutStatus = "absent"
-	r.ClarificationPredecessors, r.ClarificationHistoryTruncated, err = clarificationHistory(o.LabDir, w.Repo, ref.Number)
+	if key == "" {
+		r.ClarificationPredecessors, r.ClarificationHistoryTruncated, err = clarificationHistory(o.LabDir, w.Repo, ref.Number)
+	} else {
+		r.ClarificationPredecessors, r.ClarificationHistoryTruncated, err = clarificationHistoryKey(o.LabDir, w.Repo, key)
+	}
 	if err != nil {
 		return r, err
 	}
@@ -453,6 +472,9 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if o.ReadIssue != nil {
 		intakeSource = "supplied-issue-reader"
 	}
+	if key != "" {
+		intakeSource = "supplied-issue-key-reader"
+	}
 	startAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "", intakeSource, "read-ticket")
 	if err = save(r); err != nil {
 		return r, err
@@ -461,12 +483,22 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 	if reader == nil {
 		reader = readIssue
 	}
-	issue, err := reader(ctx, w.Repo, ref.Number, w.SourceRoot)
+	var issue Issue
+	if key == "" {
+		issue, err = reader(ctx, w.Repo, ref.Number, w.SourceRoot)
+	} else {
+		issue, err = o.ReadIssueKey(ctx, w.Repo, key, w.SourceRoot)
+	}
 	if err != nil {
 		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "read-failed")
 		return stopIntake(r, err.Error())
 	}
-	if issue.Number != ref.Number || issue.Repo != w.Repo || issue.URL != fmt.Sprintf("https://github.com/%s/issues/%d", w.Repo, ref.Number) || issue.State != "OPEN" {
+	if key != "" {
+		if !readKeyedIssueMatches(issue, w.Repo, key) {
+			observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "response-rejected")
+			return stopIntake(r, "Issue is closed or does not match the requested repository and key.")
+		}
+	} else if issue.Number != ref.Number || issue.Key != "" || issue.Repo != w.Repo || issue.URL != fmt.Sprintf("https://github.com/%s/issues/%d", w.Repo, ref.Number) || issue.State != "OPEN" {
 		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "response-rejected")
 		return stopIntake(r, "Issue is closed or does not match the requested repository and number.")
 	}
@@ -485,7 +517,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 		}
 		target = strings.TrimPrefix(target, "origin/")
 	}
-	if o.ReadIssue == nil {
+	if o.ReadIssue == nil && key == "" {
 		policy := readiness.ReadRemotePolicy(ctx, w.Repo, target, w.SourceRoot, nil)
 		r.RemotePolicy = &policy
 	}
@@ -788,7 +820,7 @@ func Run(ctx context.Context, o Options) (r Record, err error) {
 // Persist the exact destination before any checkout side effect. A failed final
 // save leaves the allocating record discoverable and unable to authorize coding.
 func allocateRecord(ctx context.Context, o Options, r Record, allocate func(context.Context, Workspace) error, persist func(Record) error) (Record, error) {
-	w, err := planWorkspace(o, r.Workspace, r.Issue.Number)
+	w, err := planIssueWorkspace(o, r.Workspace, r.Issue)
 	if err != nil {
 		return stopIntake(r, err.Error())
 	}

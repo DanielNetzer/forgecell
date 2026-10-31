@@ -59,6 +59,8 @@ type IssueProjection struct {
 	URL    string `json:"url"`
 	Repo   string `json:"repo"`
 	Number int64  `json:"number"`
+	// Key is a tracker's own Issue key; a keyed Issue has Number 0.
+	Key string `json:"key,omitempty"`
 }
 type WorkspaceProjection struct {
 	Repo string `json:"repo"`
