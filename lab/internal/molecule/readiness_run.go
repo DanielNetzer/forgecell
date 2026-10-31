@@ -513,7 +513,7 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 	}
 	r.Issue = issue
 	observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "read-completed", ProvenanceEvidence{Pointer: "/issue"})
-	snapshot, err := readiness.CollectForTicket(ctx, w.SourceRoot, w.BaseCommit, issue.Title+"\n"+issue.Body)
+	snapshot, err := readiness.CollectForTicketFor(ctx, w.SourceRoot, w.BaseCommit, issue.Title+"\n"+issue.Body, formulaCollectOptions(f))
 	if err != nil {
 		return stopIntake(r, err.Error())
 	}
@@ -1102,7 +1102,7 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 	if err != nil {
 		return r, err
 	}
-	snapshot, err := readiness.CollectForTicket(ctx, r.Workspace.SourceRoot, r.Workspace.BaseCommit, issue.Title+"\n"+issue.Body)
+	snapshot, err := readiness.CollectForTicketFor(ctx, r.Workspace.SourceRoot, r.Workspace.BaseCommit, issue.Title+"\n"+issue.Body, formulaCollectOptions(f))
 	if err != nil {
 		return r, err
 	}

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"regexp"
 	"slices"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -18,10 +20,44 @@ type PluginRef struct {
 }
 
 // ForgeRef names the declared plugin that serves as the forge, and the project
-// it delivers to. Absent, GitHub stays the forge.
+// it delivers to. Absent, GitHub stays the forge. Identity, when present, is the
+// lower-case host/path a plugin-forge checkout's origin resolves to, so the Lab
+// can be found from that checkout.
 type ForgeRef struct {
-	Plugin  string `yaml:"plugin" json:"plugin"`
-	Project string `yaml:"project" json:"project"`
+	Plugin   string `yaml:"plugin" json:"plugin"`
+	Project  string `yaml:"project" json:"project"`
+	Identity string `yaml:"identity,omitempty" json:"identity,omitempty"`
+}
+
+// MaxForgeIdentity bounds forge.identity.
+const MaxForgeIdentity = 256
+
+var (
+	forgeIdentityHost    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+	forgeIdentitySegment = regexp.MustCompile(`^[a-z0-9_.~-]+$`)
+)
+
+// ValidForgeIdentity reports why identity is not a lower-case host/seg(/seg)*
+// with a dotted host, or "" when it is. A segment is never "." or "..", so the
+// identity cannot name a traversal, and no query, fragment, port or userinfo
+// character is allowed.
+func ValidForgeIdentity(identity string) string {
+	if identity == "" || len(identity) > MaxForgeIdentity {
+		return fmt.Sprintf("must be a non-empty host/path of at most %d characters", MaxForgeIdentity)
+	}
+	parts := strings.Split(identity, "/")
+	if len(parts) < 2 || !forgeIdentityHost.MatchString(parts[0]) {
+		return "must be a lower-case host/path whose host contains a dot, such as gitlab.com/group/project"
+	}
+	for _, seg := range parts[1:] {
+		if seg == "." || seg == ".." || strings.Contains(seg, "..") || !forgeIdentitySegment.MatchString(seg) {
+			return "path segments must be non-empty lower-case letters, digits, '.', '_', '~' or '-', without '..'"
+		}
+	}
+	if strings.HasSuffix(parts[len(parts)-1], ".git") {
+		return "must name the project without a trailing .git"
+	}
+	return ""
 }
 
 // ReviewerRef names a declared reviewer plugin, the lowest finding severity it
@@ -151,7 +187,11 @@ func validateForge(value any, declared map[string]bool) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("must be a mapping with plugin and project: `forge` is a reserved top-level Formula key, so a Formula that already used it for something else must rename or remove it")
 	}
-	if err := exactKeys(m, []string{"plugin", "project"}, nil); err != nil {
+	// identity is optional but checked apart from the other keys, so the message
+	// for an unknown key still names only plugin and project.
+	keys := maps.Clone(m)
+	delete(keys, "identity")
+	if err := exactKeys(keys, []string{"plugin", "project"}, nil); err != nil {
 		return "", err
 	}
 	name, err := declaredPlugin(m["plugin"], declared)
@@ -161,6 +201,15 @@ func validateForge(value any, declared map[string]bool) (string, error) {
 	project, ok := m["project"].(string)
 	if !ok || project == "" || !utf8.ValidString(project) || utf8.RuneCountInString(project) > maxForgeProject {
 		return "", fmt.Errorf("project must be a non-empty string of at most %d characters", maxForgeProject)
+	}
+	if value, exists := m["identity"]; exists {
+		identity, ok := value.(string)
+		if !ok {
+			return "", fmt.Errorf("identity must be a string")
+		}
+		if why := ValidForgeIdentity(identity); why != "" {
+			return "", fmt.Errorf("identity %s", why)
+		}
 	}
 	return name, nil
 }

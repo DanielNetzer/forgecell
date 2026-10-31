@@ -31,6 +31,21 @@ func formulaBaselineChecks(f formula.Formula, evidence []readiness.Evidence) ([]
 	return checks, nil
 }
 
+// gitlabCIWorkflow is the one non-GitHub workflow a RequiredCheck may cite.
+const gitlabCIWorkflow = ".gitlab-ci.yml"
+
+// formulaCollectOptions collects the root .gitlab-ci.yml only when the approved
+// Formula's baseline cites it, so a stray file in a GitHub repository is never
+// collected and GitHub evidence digests never change.
+func formulaCollectOptions(f formula.Formula) readiness.CollectOptions {
+	for _, rc := range f.RequiredChecks {
+		if rc.Workflow == gitlabCIWorkflow {
+			return readiness.CollectOptions{GitLabCI: true}
+		}
+	}
+	return readiness.CollectOptions{}
+}
+
 // applyFormulaBaseline adds every Formula baseline check to the plan and labels it in
 // FormulaBaseline, whatever the analysis or the supplied checks propose. A proposed
 // check that reuses a baseline id is refused rather than allowed to redefine it.
