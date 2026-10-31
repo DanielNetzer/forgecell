@@ -62,7 +62,8 @@ func (c RequiredCheck) Validate() error {
 	if c.TimeoutMS < 1 || c.TimeoutMS > maxFormulaTimeoutMS {
 		return fmt.Errorf("timeoutMs must be an integer from 1 to %d", maxFormulaTimeoutMS)
 	}
-	if len(c.Workflow) > 512 || path.Clean(c.Workflow) != c.Workflow || strings.ContainsAny(c.Workflow, "\\\x00") || !strings.HasPrefix(c.Workflow, ".github/workflows/") || !(strings.HasSuffix(c.Workflow, ".yml") || strings.HasSuffix(c.Workflow, ".yaml")) {
+	// A GitLab-derived check names the root pipeline file, and only that path.
+	if c.Workflow != ".gitlab-ci.yml" && (len(c.Workflow) > 512 || path.Clean(c.Workflow) != c.Workflow || strings.ContainsAny(c.Workflow, "\\\x00") || !strings.HasPrefix(c.Workflow, ".github/workflows/") || !(strings.HasSuffix(c.Workflow, ".yml") || strings.HasSuffix(c.Workflow, ".yaml"))) {
 		return fmt.Errorf("workflow must be a clean path under .github/workflows/")
 	}
 	if strings.TrimSpace(c.Reason) == "" || len(c.Reason) > 2000 || strings.ContainsRune(c.Reason, 0) {
