@@ -95,7 +95,7 @@ func TestPluginTestUsage(t *testing.T) {
 	usePluginTestOptions(t, 0)
 	for _, args := range [][]string{
 		{"plugin"},
-		{"plugin", "list"},
+		{"plugin", "frobnicate"},
 		{"plugin", "test"},
 		{"plugin", "test", "a.json", "b.json"},
 		{"plugin", "test", "--verbose", "a.json"},

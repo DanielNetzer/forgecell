@@ -10,7 +10,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/conformance"
 )
 
-const pluginUsage = "usage: forgecell plugin test <manifest> [--json]"
+const pluginUsage = "usage: forgecell plugin test <manifest> [--json] | forgecell plugin list [--lab DIR] [--lab-name NAME] [--json]"
 
 // pluginTestOptions configures plugin test runs; tests replace it to keep runs
 // under their temporary directory and to fire the shutdown grace at once.
@@ -20,8 +20,11 @@ var pluginTestOptions = func() conformance.Options {
 
 // runPlugin runs `plugin test <manifest> [--json]`: the contract-mode
 // conformance kit, offline. It exits 0 when every check passes, 2 when one
-// fails and 1 on bad usage. It needs no Lab.
+// fails and 1 on bad usage. It needs no Lab. `plugin list` is runPluginList.
 func runPlugin(ctx context.Context, args []string, out, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "list" {
+		return runPluginList(ctx, args[1:], out, stderr)
+	}
 	if len(args) == 0 || args[0] != "test" {
 		fmt.Fprintln(stderr, "forgecell:", pluginUsage)
 		return 1
