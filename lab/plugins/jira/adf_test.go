@@ -114,9 +114,92 @@ func TestADFSkipsUnknownNodes(t *testing.T) {
 		`{"type":"panel","attrs":{"panelType":"info"},"content":[`+para(text("in a panel"))+`]}`,
 		`{"type":"expand","attrs":{"title":"Details"},"content":[`+para(text("expanded"))+`]}`,
 	))
-	want := "kept\n\nin a panel\n\nDetails\nexpanded"
+	// The skipped blocks are marked, and what follows them is still rendered.
+	want := "kept\n\nin a panel\n\nDetails\nexpanded" + truncatedMark
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func task(state string, inline ...string) string {
+	return `{"type":"taskItem","attrs":{"localId":"1","state":"` + state + `"},"content":[` + strings.Join(inline, ",") + `]}`
+}
+
+func taskList(items ...string) string {
+	return `{"type":"taskList","attrs":{"localId":"l"},"content":[` + strings.Join(items, ",") + `]}`
+}
+
+func TestADFFlattensTaskAndDecisionLists(t *testing.T) {
+	got := flatten(t, doc(
+		taskList(
+			task("TODO", text("one")),
+			task("DONE", text("two")),
+			taskList(task("DONE", text("nested")), taskList(task("TODO", text("deep")))),
+			task("TODO", text("three"), `{"type":"hardBreak"}`, text("more")),
+			task("SOMETHING", text("odd state")),
+		),
+		`{"type":"decisionList","attrs":{"localId":"d"},"content":[{"type":"decisionItem","attrs":{"state":"DECIDED"},"content":[`+text("agreed")+`]}]}`,
+		`{"type":"bulletList","content":[`+item(para(text("item")), taskList(task("DONE", text("in a list"))))+`]}`,
+	))
+	want := strings.Join([]string{
+		"- [ ] one",
+		"- [x] two",
+		"      - [x] nested",
+		"            - [ ] deep",
+		"- [ ] three",
+		"      more",
+		"- [ ] odd state",
+		"",
+		"- agreed",
+		"",
+		"- item",
+		"  - [x] in a list",
+	}, "\n")
+	if got != want {
+		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestADFMarksASkippedBlock(t *testing.T) {
+	// A document with only known blocks, or none, has no mark.
+	for _, raw := range []string{doc(), doc(para(text("plain"))), doc(taskList(task("TODO", text("t"))))} {
+		if got := flatten(t, raw); strings.HasSuffix(got, truncatedMark) {
+			t.Errorf("%s: %q is marked", raw, got)
+		}
+	}
+	for name, raw := range map[string]string{
+		"unknown block":            doc(para(text("before")), `{"type":"extension","attrs":{"extensionKey":"x"}}`, para(text("after"))),
+		"item in a task list":      doc(para(text("before")), taskList(`{"type":"decisionItem","content":[`+text("x")+`]}`), para(text("after"))),
+		"item in a decision list":  doc(para(text("before")), `{"type":"decisionList","content":[`+task("TODO", text("x"))+`]}`, para(text("after"))),
+		"task list in a decisions": doc(para(text("before")), `{"type":"decisionList","content":[`+taskList(task("TODO", text("x")))+`]}`, para(text("after"))),
+		"not a list item":          doc(para(text("before")), `{"type":"bulletList","content":[`+para(text("x"))+`]}`, para(text("after"))),
+		"not a table row":          doc(para(text("before")), `{"type":"table","content":[`+para(text("x"))+`]}`, para(text("after"))),
+	} {
+		got := flatten(t, raw)
+		if !strings.HasPrefix(got, "before") || !strings.HasSuffix(got, "after"+truncatedMark) || strings.Contains(got, "x") {
+			t.Errorf("%s: got %q", name, got)
+		}
+	}
+	// The mark fits within the rune bound.
+	raw := doc(`{"type":"futureBlock"}`, para(text(strings.Repeat("y", 100))))
+	got, err := descriptionText(json.RawMessage(raw), 40)
+	if err != nil || utf8.RuneCountInString(got) != 40 || !strings.HasSuffix(got, truncatedMark) {
+		t.Fatalf("got %q %v", got, err)
+	}
+	got, err = descriptionText(json.RawMessage(doc(`{"type":"futureBlock"}`, para(text("short")))), 40)
+	if err != nil || got != "short"+truncatedMark {
+		t.Fatalf("got %q %v", got, err)
+	}
+}
+
+func TestADFBoundsDeepTaskLists(t *testing.T) {
+	deep := taskList(task("TODO", text("leaf")))
+	for range 100 {
+		deep = taskList(task("TODO", text("t")), deep)
+	}
+	got := flatten(t, doc(deep))
+	if strings.Contains(got, "leaf") || !strings.HasSuffix(got, truncatedMark) || utf8.RuneCountInString(got) > maxBodyRunes {
+		t.Fatalf("got %q", got[max(0, len(got)-80):])
 	}
 }
 

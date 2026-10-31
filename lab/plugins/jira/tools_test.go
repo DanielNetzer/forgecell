@@ -203,6 +203,53 @@ func TestSiteRules(t *testing.T) {
 	}
 }
 
+func TestSiteRulesRefuseNumericLastLabels(t *testing.T) {
+	cloud := &tracker{}
+	custom := &tracker{customCA: true}
+	for _, s := range []string{"169.254.169.254", "127.1", "10.0.0.1", "127.0.0.1", "x.atlassian.123", "jira.example.0", "a.08"} {
+		if cloud.validSite(s) || custom.validSite(s) {
+			t.Errorf("%q was accepted", s)
+		}
+	}
+	for _, s := range []string{"jira.example.com", "10.example.com", "1.2.3.x4", "jira.123a"} {
+		if !custom.validSite(s) {
+			t.Errorf("%q was refused with JIRA_CA_FILE", s)
+		}
+	}
+	// The refusal happens at config parsing, before any request.
+	h := newHarness(t)
+	h.tr.customCA = true
+	_, err := h.call(t, "tracker_get", map[string]any{"config": map[string]any{"site": "169.254.169.254", "project": "ENG"}, "key": "ENG-1"})
+	failure(t, err, mcpserver.Failed)
+	if n := len(h.fake.seen()); n != 0 {
+		t.Fatalf("%d requests, want none", n)
+	}
+}
+
+func TestJQLRefusesABackslashOutsideQuotes(t *testing.T) {
+	for _, s := range []string{
+		`a = \" ) OR (project = X) OR (b = \"`,
+		`a = b\c`,
+		`a = b\\c`,
+		`summary ~ "x" AND a = \'y'`,
+		`\`,
+	} {
+		if validJQL(s) {
+			t.Errorf("%q was accepted", s)
+		}
+	}
+	for _, s := range []string{
+		"priority = High",
+		`component = "Back end" AND summary ~ "a)b"`,
+		`summary ~ "a\"b"`,
+		`summary ~ 'a\'b' AND x = "c\\"`,
+	} {
+		if !validJQL(s) {
+			t.Errorf("%q was refused", s)
+		}
+	}
+}
+
 func TestListMapsIssuesAndBuildsTheQuery(t *testing.T) {
 	h := newHarness(t)
 	got := decoded[contract.TrackerPage](t, h, "tracker_list", map[string]any{"config": siteCfg(), "selector": "oldest", "limit": 10})
@@ -484,7 +531,12 @@ func TestStateAndReasonMapping(t *testing.T) {
 		{"new", "", "open", ""},
 		{"indeterminate", "", "open", ""},
 		{"undefined", "", "open", ""},
-		{"", "", "open", ""},
+		// A missing, empty or unknown category has no state.
+		{"", "", "", ""},
+		{"", "Done", "", ""},
+		{"closed", "", "", ""},
+		{" done", "", "", ""},
+		{"DONE", "Done", "", ""},
 		{"new", "Won't Do", "open", ""},
 		{"done", "", "closed", "completed"},
 		{"done", "Done", "closed", "completed"},
@@ -496,7 +548,7 @@ func TestStateAndReasonMapping(t *testing.T) {
 		{"done", "cannot reproduce", "closed", "not_planned"},
 		{"done", "Declined", "closed", "not_planned"},
 		{"done", "Declined later", "closed", "completed"},
-		{"Done", "Won't Do", "open", ""},
+		{"Done", "Won't Do", "", ""},
 	}
 	for _, c := range cases {
 		var res *jiraNamed
@@ -511,6 +563,68 @@ func TestStateAndReasonMapping(t *testing.T) {
 		if state != c.state || got != c.reason {
 			t.Errorf("%q %q: %s %s, want %s %s", c.category, c.resolution, state, got, c.state, c.reason)
 		}
+	}
+}
+
+// categoryChanges set the first issue's status category to a value Jira should
+// never send.
+var categoryChanges = map[string]func(fields map[string]any){
+	"no category": func(fields map[string]any) { delete(fields["status"].(map[string]any), "statusCategory") },
+	"no key": func(fields map[string]any) {
+		delete(fields["status"].(map[string]any)["statusCategory"].(map[string]any), "key")
+	},
+	"empty key": func(fields map[string]any) {
+		fields["status"].(map[string]any)["statusCategory"].(map[string]any)["key"] = ""
+	},
+	"unknown key": func(fields map[string]any) {
+		fields["status"].(map[string]any)["statusCategory"].(map[string]any)["key"] = "closed"
+	},
+	"wrong case": func(fields map[string]any) {
+		fields["status"].(map[string]any)["statusCategory"].(map[string]any)["key"] = "Done"
+	},
+	"null category": func(fields map[string]any) { fields["status"].(map[string]any)["statusCategory"] = nil },
+}
+
+func TestGetFailsOnAnUnknownStatusCategory(t *testing.T) {
+	for name, change := range categoryChanges {
+		h := newHarness(t)
+		h.fake.set(func(f *fakeJira) { change(f.issues[0]["fields"].(map[string]any)) })
+		_, err := h.call(t, "tracker_get", map[string]any{"config": siteCfg(), "key": "ENG-1"})
+		if msg := failure(t, err, mcpserver.Failed); !strings.Contains(msg, "Jira sent") {
+			t.Fatalf("%s: %q", name, msg)
+		}
+	}
+	// undefined is a known category, and open.
+	h := newHarness(t)
+	h.fake.set(func(f *fakeJira) {
+		f.issues[0]["fields"].(map[string]any)["status"].(map[string]any)["statusCategory"].(map[string]any)["key"] = "undefined"
+	})
+	if got := decoded[contract.TrackerIssue](t, h, "tracker_get", map[string]any{"config": siteCfg(), "key": "ENG-1"}); got.State != "open" || got.StateReason != nil {
+		t.Fatalf("issue %+v", got)
+	}
+}
+
+func TestStatesLeaveOutAnUnknownStatusCategory(t *testing.T) {
+	for name, change := range categoryChanges {
+		h := newHarness(t)
+		h.fake.set(func(f *fakeJira) { change(f.issues[0]["fields"].(map[string]any)) })
+		got := decoded[contract.TrackerStates](t, h, "tracker_states", map[string]any{"config": siteCfg(), "keys": []string{"ENG-1", "ENG-2", "ENG-3"}})
+		want := map[string]contract.TrackerState{
+			"ENG-2": {State: "open"},
+			"ENG-3": {State: "closed", StateReason: ptr("completed"), ClosedAt: ptr("2026-10-29T06:00:00Z")},
+		}
+		if !reflect.DeepEqual(got.States, want) {
+			t.Fatalf("%s: states %+v, want %+v", name, got.States, want)
+		}
+	}
+}
+
+func TestListKeepsAnIssueWithAnUnknownCategoryOpen(t *testing.T) {
+	h := newHarness(t)
+	h.fake.set(func(f *fakeJira) { categoryChanges["empty key"](f.issues[0]["fields"].(map[string]any)) })
+	got := decoded[contract.TrackerPage](t, h, "tracker_list", map[string]any{"config": siteCfg(), "selector": "oldest", "limit": 10})
+	if len(got.Items) != 2 || got.Items[0].Key != "ENG-1" || got.Items[0].State != "open" {
+		t.Fatalf("page %+v", got)
 	}
 }
 
