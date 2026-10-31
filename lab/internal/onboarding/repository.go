@@ -30,6 +30,9 @@ type Repository struct {
 	Workflows      []string                 `json:"workflows" yaml:"workflows"`
 	PolicyFiles    []string                 `json:"policyFiles" yaml:"policyFiles"`
 	Unknowns       []string                 `json:"unknowns" yaml:"unknowns"`
+	// GitLabCI records a committed root .gitlab-ci.yml; omitempty keeps the evidence
+	// of every other repository byte-identical.
+	GitLabCI bool `json:"gitlabCI,omitempty" yaml:"gitlabCI,omitempty"`
 }
 
 func ReadRepository(ctx context.Context, cwd string, runner Runner) (Repository, error) {
@@ -96,6 +99,9 @@ func ReadRepository(ctx context.Context, cwd string, runner Runner) (Repository,
 	tracked := map[string]bool{}
 	for _, file := range snapshot.Files {
 		tracked[file.Path] = true
+		if file.Path == ".gitlab-ci.yml" && (file.Mode == "100644" || file.Mode == "100755") {
+			repo.GitLabCI = true
+		}
 	}
 	paths := []string{}
 	contents := map[string]string{}
