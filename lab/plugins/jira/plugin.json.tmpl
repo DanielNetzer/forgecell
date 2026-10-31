@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "v1",
+  "kind": "tracker",
+  "name": "jira",
+  "contract": "forgecell.tracker/v1",
+  "server": {
+    "executable": {"path": "{{SERVER_PATH}}", "sha256": "{{SERVER_SHA256}}"},
+    "args": []
+  },
+  "tools": [
+    {"name": "tracker_describe", "access": "read-only"},
+    {"name": "tracker_list", "access": "read-only"},
+    {"name": "tracker_get", "access": "read-only"},
+    {"name": "tracker_states", "access": "read-only"}
+  ],
+  "roles": [],
+  "needs": {
+    "env": ["JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_CA_FILE"],
+    "network": ["atlassian.net"],
+    "minPollSeconds": 60
+  },
+  "dependencies": [],
+  "limitations": "Serves forgecell.tracker/v1 over the Jira Cloud REST API v3. It only reads. Listings show Issues of one project whose status category is not Done, oldest first, and follow at most five pages per call. Descriptions are flattened from ADF to plain text. Labels are cut to the first 20."
+}
