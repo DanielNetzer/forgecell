@@ -418,7 +418,10 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 	if err = f.ValidateReadiness(); err != nil {
 		return r, err
 	}
-	if f.Intake.Source != "github-issues" {
+	// A declared tracker plugin is an intake source for keyed runs only; the
+	// numeric path stays GitHub Issues.
+	trackerPlugin, pluginSource := f.TrackerPlugin()
+	if f.Intake.Source != "github-issues" && (key == "" || !pluginSource) {
 		return r, fmt.Errorf("unsupported intake source")
 	}
 	var ref intake.IssueRef
@@ -438,6 +441,8 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 		repo = ref.Owner + "/" + ref.Repo
 	} else if repo, err = intake.BindKeyRepository(f.Intake.Repo); err != nil {
 		return r, err
+	} else if o.Approve != "" {
+		return resumeKeyed(ctx, o, loaded, key, repo)
 	}
 	w, err := resolveSource(ctx, o, repo)
 	if err != nil {
@@ -474,6 +479,9 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 	}
 	if key != "" {
 		intakeSource = "supplied-issue-key-reader"
+		if pluginSource {
+			intakeSource = trackerPlugin.Name
+		}
 	}
 	startAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "", intakeSource, "read-ticket")
 	if err = save(r); err != nil {
@@ -488,6 +496,7 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 		issue, err = reader(ctx, w.Repo, ref.Number, w.SourceRoot)
 	} else {
 		issue, err = o.ReadIssueKey(ctx, w.Repo, key, w.SourceRoot)
+		absorbPluginCalls(&r, o.PluginCalls)
 	}
 	if err != nil {
 		observeAtomAction(&r, r.Atoms[roles.atoms[formula.IntakeRole]].ID, "intake", "read-ticket", "read-failed")
@@ -917,7 +926,30 @@ func resumeByPolicy(ctx context.Context, o Options, expected formula.Loaded, num
 	return resumeApproved(ctx, o, expected, number, repo, true)
 }
 
+// resumeKeyed is resume for a keyed Issue: the pending Molecule must record
+// exactly key (Number 0) in repo, and the Issue is read again through
+// o.ReadIssueKey.
+func resumeKeyed(ctx context.Context, o Options, expected formula.Loaded, key, repo string) (Record, error) {
+	return resumeApprovedIssue(ctx, o, expected, Issue{Key: key, Repo: repo}, false)
+}
+
+// resumeByPolicyKeyed is resumeByPolicy for a keyed Issue, with resumeKeyed's
+// identity rules.
+func resumeByPolicyKeyed(ctx context.Context, o Options, expected formula.Loaded, key, repo string) (Record, error) {
+	return resumeApprovedIssue(ctx, o, expected, Issue{Key: key, Repo: repo}, true)
+}
+
 func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, number int64, repo string, byPolicy bool) (r Record, err error) {
+	return resumeApprovedIssue(ctx, o, expected, Issue{Number: number, Repo: repo}, byPolicy)
+}
+
+// resumeApprovedIssue is the approval transaction for the Issue want names: a
+// GitHub Issue by Number and Repo, or a keyed Issue by Key and Repo.
+func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded, want Issue, byPolicy bool) (r Record, err error) {
+	repo := want.Repo
+	if want.IsKeyed() && o.ReadIssueKey == nil {
+		return r, fmt.Errorf("a keyed run needs an Issue key reader")
+	}
 	f := expected.Formula
 	r, err = findPending(o.LabDir, o.Approve)
 	if err != nil {
@@ -953,7 +985,13 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if err != nil {
 		return r, err
 	}
-	if r.Issue.Number != number || r.Issue.Repo != repo || r.FormulaID != f.ID || r.FormulaSnapshot.SHA256 != f.SHA256 {
+	// A numeric approval never resumes a record that carries a Key, even one
+	// whose ledger also holds a matching number.
+	sameIssue := r.Issue.Number == want.Number && r.Issue.Key == ""
+	if want.IsKeyed() {
+		sameIssue = r.Issue.Key == want.Key && r.Issue.Number == 0
+	}
+	if !sameIssue || r.Issue.Repo != repo || r.FormulaID != f.ID || r.FormulaSnapshot.SHA256 != f.SHA256 {
 		return r, fmt.Errorf("issue or Formula changed; refresh intake")
 	}
 	var decision PolicyDecision
@@ -1027,11 +1065,26 @@ func resumeApproved(ctx context.Context, o Options, expected formula.Loaded, num
 	if err != nil || len(captured.Violations) > 0 || (p.Revision == 1 && len(captured.Changes) > 0) || (p.Revision > 1 && (captured.Tree != p.PausedTree || (p.PausedArtifactsSHA256 != "" && artifactHash(captured) != p.PausedArtifactsSHA256))) {
 		return r, fmt.Errorf("pending workspace changed; no coding was started")
 	}
-	reader := o.ReadIssue
-	if reader == nil {
-		reader = readIssue
+	var issue Issue
+	if want.IsKeyed() {
+		issue, err = o.ReadIssueKey(ctx, repo, want.Key, r.Workspace.Path)
+		// The calls are recorded at once, under the Molecule lock, whatever the
+		// approval's outcome.
+		if absorbPluginCalls(&r, o.PluginCalls) {
+			if saveErr := save(r); saveErr != nil {
+				return r, saveErr
+			}
+		}
+		if err == nil && !readKeyedIssueMatches(issue, repo, want.Key) {
+			err = fmt.Errorf("Issue is closed or does not match the requested repository and key.")
+		}
+	} else {
+		reader := o.ReadIssue
+		if reader == nil {
+			reader = readIssue
+		}
+		issue, err = reader(ctx, repo, want.Number, r.Workspace.Path)
 	}
-	issue, err := reader(ctx, repo, number, r.Workspace.Path)
 	if err != nil {
 		return r, err
 	}
