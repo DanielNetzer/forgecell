@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "v1",
+  "kind": "forge",
+  "name": "gitlab",
+  "contract": "forgecell.forge/v1",
+  "server": {
+    "executable": {"path": "{{SERVER_PATH}}", "sha256": "{{SERVER_SHA256}}"},
+    "args": []
+  },
+  "tools": [
+    {"name": "forge_describe", "access": "read-only"},
+    {"name": "forge_policy", "access": "read-only"},
+    {"name": "forge_find_change", "access": "read-only"},
+    {"name": "forge_publish_draft", "access": "read-write"},
+    {"name": "forge_change", "access": "read-only"},
+    {"name": "forge_checks", "access": "read-only"},
+    {"name": "forge_comments", "access": "read-only"}
+  ],
+  "roles": [],
+  "needs": {
+    "env": ["GITLAB_TOKEN", "GITLAB_URL", "GITLAB_CA_FILE"],
+    "network": ["gitlab.com"],
+    "minPollSeconds": 60
+  },
+  "dependencies": [],
+  "limitations": "Serves forgecell.forge/v1 over the GitLab REST API v4. It never pushes. Protection is read for the exact branch name only, so wildcard protection rules read as unprotected. requiredChecks is the single aggregate check pipeline when the project only allows a merge after a successful pipeline. Listings follow at most five pages of 100."
+}
