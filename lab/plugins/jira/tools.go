@@ -55,6 +55,8 @@ var (
 	// notPlanned holds the lowercase resolution names that close an Issue as
 	// not planned.
 	notPlanned = map[string]bool{"won't do": true, "won't fix": true, "duplicate": true, "cannot reproduce": true, "declined": true}
+	// statusCategories are the Jira status category keys stateOf knows.
+	statusCategories = map[string]bool{"new": true, "indeterminate": true, "done": true, "undefined": true}
 	// jiraTimes are the layouts Jira writes timestamps in.
 	jiraTimes = []string{"2006-01-02T15:04:05.000-0700", "2006-01-02T15:04:05-0700", time.RFC3339Nano}
 )
@@ -150,19 +152,25 @@ func (tr *tracker) parseConfig(raw json.RawMessage, required bool) (siteConfig, 
 	return c, nil
 }
 
-// validSite accepts a lowercase dotted host name; without JIRA_CA_FILE it must
-// end in .atlassian.net.
+// validSite accepts a lowercase dotted host name whose last label is not all
+// digits, so it is never an IP literal or a short numeric form such as 127.1;
+// without JIRA_CA_FILE it must end in .atlassian.net.
 func (tr *tracker) validSite(s string) bool {
 	if len(s) > 253 || !sitePattern.MatchString(s) {
+		return false
+	}
+	last := s[strings.LastIndexByte(s, '.')+1:]
+	if strings.Trim(last, "0123456789") == "" {
 		return false
 	}
 	return tr.customCA || (strings.HasSuffix(s, ".atlassian.net") && s != "atlassian.net")
 }
 
 // validJQL accepts a reviewed filter of at most maxJQLRunes runes with no
-// control or format characters, whose quotes close and whose parentheses
-// balance outside quotes, so it can never close the parentheses it is wrapped
-// in.
+// control or format characters and no backslash outside quotes, whose quotes
+// close and whose parentheses balance outside quotes, so it can never close
+// the parentheses it is wrapped in and the check never disagrees with Jira's
+// lexer about where a string ends.
 func validJQL(s string) bool {
 	if strings.TrimSpace(s) == "" || utf8.RuneCountInString(s) > maxJQLRunes || !utf8.ValidString(s) {
 		return false
@@ -184,6 +192,8 @@ func validJQL(s string) bool {
 			case r == quote:
 				quote = 0
 			}
+		case r == '\\':
+			return false
 		case r == '"' || r == '\'':
 			quote = r
 		case r == '(':
@@ -291,9 +301,13 @@ func jiraTime(s string) (string, bool) {
 }
 
 // stateOf maps a status category and resolution: done is closed, as not
-// planned for the resolutions that say so and completed otherwise; every other
-// category is open.
+// planned for the resolutions that say so and completed otherwise; new,
+// indeterminate and undefined are open. Any other category, including a
+// missing or empty one, is a malformed answer and has no state ("").
 func stateOf(category string, resolution *jiraNamed) (state string, reason *string) {
+	if !statusCategories[category] {
+		return "", nil
+	}
 	if category != "done" {
 		return "open", nil
 	}
@@ -414,6 +428,11 @@ func (tr *tracker) list(ctx context.Context, raw json.RawMessage) (any, error) {
 			return nil, malformed("a malformed update time")
 		}
 		state, _ := stateOf(is.Fields.Status.StatusCategory.Key, nil)
+		if state == "" {
+			// The query lists only Issues not done, so an Issue whose category
+			// Jira does not name is open here, as before.
+			state = "open"
+		}
 		out.Items = append(out.Items, contract.TrackerItem{
 			Key:       is.Key,
 			Title:     cutLine(is.Fields.Summary, maxTitleRunes),
@@ -454,6 +473,10 @@ func (tr *tracker) get(ctx context.Context, raw json.RawMessage) (any, error) {
 	if is.Fields.Status == nil {
 		return nil, malformed("an issue with no status")
 	}
+	state, reason := stateOf(is.Fields.Status.StatusCategory.Key, is.Fields.Resolution)
+	if state == "" {
+		return nil, malformed("an issue with an unknown status category")
+	}
 	updated, ok := jiraTime(is.Fields.Updated)
 	if !ok {
 		return nil, malformed("a malformed update time")
@@ -462,7 +485,6 @@ func (tr *tracker) get(ctx context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	state, reason := stateOf(is.Fields.Status.StatusCategory.Key, is.Fields.Resolution)
 	return contract.TrackerIssue{
 		Key:         is.Key,
 		Title:       cutLine(is.Fields.Summary, maxTitleRunes),
@@ -529,6 +551,11 @@ func (tr *tracker) states(ctx context.Context, raw json.RawMessage) (any, error)
 			return nil, malformed("an issue with no status")
 		}
 		state, reason := stateOf(is.Fields.Status.StatusCategory.Key, is.Fields.Resolution)
+		if state == "" {
+			// An unknown category is a malformed answer for that key, which is
+			// left out rather than reported open.
+			continue
+		}
 		s := contract.TrackerState{State: state, StateReason: reason}
 		if state == "closed" && is.Fields.ResolutionDate != nil {
 			at, ok := jiraTime(*is.Fields.ResolutionDate)

@@ -30,6 +30,7 @@ type adfNode struct {
 		URL       string `json:"url"`
 		Title     string `json:"title"`
 		Order     *int64 `json:"order"`
+		State     string `json:"state"`
 	} `json:"attrs"`
 }
 
@@ -58,14 +59,16 @@ func descriptionText(raw json.RawMessage, limit int) (string, error) {
 // flattenADF renders an ADF document as plain text of at most limit runes:
 // paragraphs and headings become lines, lists become indented "- " or "1. "
 // items, code blocks keep their lines, quotes get "> ", table rows join their
-// cells with " | ", and text marks are dropped. Unknown nodes are skipped.
-// Content past the depth, node or size bound is left out and the text ends in
-// the truncated mark.
+// cells with " | ", task lists become "- [ ] " or "- [x] " items, decision
+// lists "- " items, and text marks are dropped. Unknown inline nodes are
+// skipped; an unknown block node is skipped too and the text ends in the
+// truncated mark, so the skip is visible. Content past the depth, node or size
+// bound is left out and the text ends in the truncated mark.
 func flattenADF(doc *adfNode, limit int) string {
 	r := &adfRenderer{limit: limit - utf8.RuneCountInString(truncatedMark)}
 	r.block(doc, "", 0)
 	text := strings.TrimRight(r.b.String(), "\n")
-	if r.cut {
+	if r.cut || r.skipped {
 		text += truncatedMark
 	}
 	return text
@@ -77,6 +80,9 @@ type adfRenderer struct {
 	limit int
 	nodes int
 	cut   bool
+	// skipped records an unknown block node that was left out; unlike cut,
+	// rendering goes on after it.
+	skipped bool
 }
 
 // visit counts a node against the node and depth bounds; false means the node
@@ -168,13 +174,56 @@ func (r *adfRenderer) block(n *adfNode, prefix string, depth int) {
 		for i := range n.Content {
 			r.tableRow(&n.Content[i], prefix, depth+1)
 		}
+	case "taskList", "decisionList":
+		r.actionList(n, prefix, depth+1)
+	default:
+		r.skipped = true
+	}
+}
+
+// actionList writes a task list's items as "- [ ] " or "- [x] " lines, by
+// attrs.state, and a decision list's items as "- " lines. A task list nested
+// in a task list is indented under the item before it.
+func (r *adfRenderer) actionList(n *adfNode, prefix string, depth int) {
+	item := "decisionItem"
+	if n.Type == "taskList" {
+		item = "taskItem"
+	}
+	for i := range n.Content {
+		c := &n.Content[i]
+		if !r.visit(depth) {
+			return
+		}
+		switch {
+		case c.Type == item:
+			marker := "- "
+			if item == "taskItem" {
+				marker = "- [ ] "
+				if c.Attrs.State == "DONE" {
+					marker = "- [x] "
+				}
+			}
+			head, tail, more := strings.Cut(r.inline(c.Content, depth+1), "\n")
+			r.line(prefix+marker, head)
+			if more {
+				r.line(prefix+strings.Repeat(" ", utf8.RuneCountInString(marker)), tail)
+			}
+		case n.Type == "taskList" && c.Type == "taskList":
+			r.actionList(c, prefix+strings.Repeat(" ", utf8.RuneCountInString("- [ ] ")), depth+1)
+		default:
+			r.skipped = true
+		}
 	}
 }
 
 // listItem writes one list item: its first paragraph after the marker, and
 // every other block indented under it.
 func (r *adfRenderer) listItem(n *adfNode, prefix, marker string, depth int) {
-	if !r.visit(depth) || n.Type != "listItem" {
+	if !r.visit(depth) {
+		return
+	}
+	if n.Type != "listItem" {
+		r.skipped = true
 		return
 	}
 	rest := prefix + strings.Repeat(" ", utf8.RuneCountInString(marker))
@@ -207,13 +256,21 @@ func (r *adfRenderer) listItem(n *adfNode, prefix, marker string, depth int) {
 
 // tableRow writes one table row as its cells' text joined by " | ".
 func (r *adfRenderer) tableRow(n *adfNode, prefix string, depth int) {
-	if !r.visit(depth) || n.Type != "tableRow" {
+	if !r.visit(depth) {
+		return
+	}
+	if n.Type != "tableRow" {
+		r.skipped = true
 		return
 	}
 	var cells []string
 	for i := range n.Content {
 		c := &n.Content[i]
-		if !r.visit(depth+1) || (c.Type != "tableCell" && c.Type != "tableHeader") {
+		if !r.visit(depth + 1) {
+			continue
+		}
+		if c.Type != "tableCell" && c.Type != "tableHeader" {
+			r.skipped = true
 			continue
 		}
 		var parts []string
