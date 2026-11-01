@@ -192,18 +192,35 @@ func baselineChanges(current, derived []formula.RequiredCheck, r Repository) []s
 // An unchanged baseline saves nothing; an empty one never replaces checks.
 func proposeBaselineRefresh(ctx context.Context, o InitOptions, out Outcome, active formula.Loaded) (Outcome, error) {
 	f := active.Formula
-	derived, err := bootstrapBaseline(ctx, out.Repository)
+	// A plugin forge's CI kind selects the derivation; GitHub keeps every word.
+	source := "pull-request workflows"
+	if o.ciKind == gitlabCIKind {
+		source = gitlabCIFile
+	}
+	derived, err := bootstrapBaselineFor(ctx, out.Repository, o.ciKind)
 	if err != nil {
 		return out, err
 	}
 	current := f.RequiredChecks
+	if o.ciKind == ciKindNone {
+		if len(current) > 0 {
+			return out, fmt.Errorf("the forge plugin reports no CI (CI kind %s), so there is no baseline to derive, and the approved Formula has %d requiredChecks; refusing to propose dropping every protected check; no proposal saved", ciKindNone, len(current))
+		}
+		out.BeforeYAML = f.YAML
+		out.Status = "unchanged"
+		out.Note = fmt.Sprintf("Baseline unchanged: the forge plugin reports no CI (CI kind %s), so there is no baseline to derive; no proposal saved.", ciKindNone)
+		return out, nil
+	}
 	if len(derived) == 0 && len(current) > 0 {
-		return out, fmt.Errorf("the current pull-request workflows yield no recognized baseline check, and the approved Formula has %d requiredChecks; refusing to propose dropping every protected check; no proposal saved", len(current))
+		if o.ciKind == gitlabCIKind {
+			return out, fmt.Errorf("the current %s yields no recognized baseline check, and the approved Formula has %d requiredChecks; refusing to propose dropping every protected check; no proposal saved", source, len(current))
+		}
+		return out, fmt.Errorf("the current %s yield no recognized baseline check, and the approved Formula has %d requiredChecks; refusing to propose dropping every protected check; no proposal saved", source, len(current))
 	}
 	out.BeforeYAML = f.YAML
 	if slices.EqualFunc(current, derived, sameRequiredCheck) {
 		out.Status = "unchanged"
-		out.Note = fmt.Sprintf("Baseline unchanged: the CI baseline derived from the current pull-request workflows equals the approved requiredChecks (%d check(s)); no proposal saved.", len(current))
+		out.Note = fmt.Sprintf("Baseline unchanged: the CI baseline derived from the current %s equals the approved requiredChecks (%d check(s)); no proposal saved.", source, len(current))
 		return out, nil
 	}
 
@@ -215,7 +232,7 @@ func proposeBaselineRefresh(ctx context.Context, o InitOptions, out Outcome, act
 		return out, err
 	}
 
-	note := fmt.Sprintf("Proposes only a requiredChecks baseline refresh, derived read-only from the pull-request workflows at revision %s. Changes: %s.", out.Repository.Revision, strings.Join(baselineChanges(current, derived, out.Repository), "; "))
+	note := fmt.Sprintf("Proposes only a requiredChecks baseline refresh, derived read-only from the %s at revision %s. Changes: %s.", source, out.Repository.Revision, strings.Join(baselineChanges(current, derived, out.Repository), "; "))
 	note += " Only the top-level requiredChecks key changes; atoms, instructions, harness bindings, model pins, timeouts and learned guidance are preserved. Every later plan must include the new baseline. Review the exact YAML before approval."
 
 	probed := ProbeBinding(ctx, f.Harness, out.Repository.Root, o.Runner)

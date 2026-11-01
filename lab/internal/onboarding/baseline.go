@@ -385,6 +385,15 @@ func bootstrapBaseline(ctx context.Context, r Repository) ([]formula.RequiredChe
 	if len(r.Workflows) == 0 {
 		return nil, nil
 	}
+	tracked, err := committedFiles(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return DeriveBaseline(r, tracked)
+}
+
+// committedFiles lists the committed regular files of r's revision.
+func committedFiles(ctx context.Context, r Repository) (map[string]bool, error) {
 	snapshot, err := readiness.Collect(ctx, r.Root, r.Revision)
 	if err != nil {
 		return nil, err
@@ -395,5 +404,42 @@ func bootstrapBaseline(ctx context.Context, r Repository) ([]formula.RequiredChe
 			tracked[file.Path] = true
 		}
 	}
-	return DeriveBaseline(r, tracked)
+	return tracked, nil
+}
+
+// ciKindNone is a forge's CI kind when it runs no CI Forgecell can read.
+const ciKindNone = "none"
+
+// bootstrapBaselineFor derives the baseline for a forge's CI kind. GitHub
+// Actions, and an empty kind, is bootstrapBaseline unchanged. GitLab CI reads
+// the root .gitlab-ci.yml the repository evidence holds, and returns nothing
+// when none is committed. none returns no baseline, and any other kind is
+// refused.
+func bootstrapBaselineFor(ctx context.Context, r Repository, ciKind string) ([]formula.RequiredCheck, error) {
+	switch ciKind {
+	case "", githubActionKind:
+		return bootstrapBaseline(ctx, r)
+	case ciKindNone:
+		return nil, nil
+	case gitlabCIKind:
+	default:
+		return nil, fmt.Errorf("the forge's CI kind must be %s, %s or %s", githubActionKind, gitlabCIKind, ciKindNone)
+	}
+	if !r.GitLabCI {
+		return nil, nil
+	}
+	content, found := "", false
+	for _, e := range r.Evidence {
+		if e.Path == gitlabCIFile {
+			content, found = e.Content, true
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("the committed %s was not collected as evidence; no baseline derived", gitlabCIFile)
+	}
+	tracked, err := committedFiles(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return DeriveBaselineFor(ciKind, r, tracked, content)
 }

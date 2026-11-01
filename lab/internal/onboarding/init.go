@@ -36,6 +36,17 @@ type InitOptions struct {
 	// EnableReview proposes an insert-only change: one review Atom after the check
 	// Atom of the approved Formula.
 	EnableReview bool
+	// ForgePlugin and TrackerPlugin are Lab-relative plugin manifests, Project the
+	// forge project and TrackerConfig a JSON object file read as intake.config.
+	// Together they propose a bootstrap Formula whose forge and tracker are those
+	// plugins (see init_plugins.go); all empty keeps the GitHub bootstrap.
+	ForgePlugin, Project, TrackerPlugin, TrackerConfig string
+	// Describer describes the pinned plugins read-only; nil starts them through
+	// mcpadapter.
+	Describer PluginDescriber
+	// ciKind is the approved plugin forge's CI kind during a baseline refresh; empty
+	// keeps the GitHub derivation.
+	ciKind string
 }
 
 // Bootstrap budgets: a 15-minute default coding attempt that intake may raise,
@@ -421,6 +432,9 @@ func learnCommand(f formula.Formula) []string {
 }
 
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
+	if o.pluginInitRequested() {
+		return preparePluginInit(ctx, o)
+	}
 	budgetRequested := o.HarnessTimeoutMS != 0 || o.MaxTimeoutMS != 0
 	if budgetRequested {
 		if _, _, err = harnessBudget(o); err != nil {
@@ -455,7 +469,15 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			}
 		}
 	}
-	out.Repository, err = ReadRepository(ctx, o.Cwd, o.Runner)
+	pluginForge := false
+	if o.RefreshBaseline {
+		if out.Repository, o.ciKind, pluginForge, err = readPluginForgeRepository(ctx, o); err != nil {
+			return out, err
+		}
+	}
+	if !pluginForge {
+		out.Repository, err = ReadRepository(ctx, o.Cwd, o.Runner)
+	}
 	if err != nil {
 		return out, err
 	}

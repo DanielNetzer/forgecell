@@ -410,6 +410,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		role := flags.String("role", "", "With --model, limit the pin to one declared harnesses.ROLE override (analysis, coding, meta or review)")
 		refreshBaseline := flags.Bool("refresh-baseline", false, "Propose a baseline-only requiredChecks refresh of the approved Formula, derived from the current CI workflows, for review")
 		enableReview := flags.Bool("enable-review", false, "Propose inserting the adversarial review Atom after the check Atom of the approved Formula, for review")
+		forgePlugin := flags.String("forge-plugin", "", "Lab-relative manifest of a forge plugin; with --project, --tracker-plugin and --tracker-config, propose a bootstrap Formula whose forge and tracker are plugins")
+		project := flags.String("project", "", "With --forge-plugin, the forge project as owner/repo")
+		trackerPlugin := flags.String("tracker-plugin", "", "With --forge-plugin, the Lab-relative manifest of a tracker plugin")
+		trackerConfig := flags.String("tracker-config", "", "With --forge-plugin, a JSON object file of at most 4 KiB used as intake.config")
 		review := flags.String("review", "", "Inspect exact saved proposal without activation")
 		approve := flags.String("approve", "", "Approve exact saved proposal")
 		dismiss := flags.String("dismiss", "", "Dismiss exact saved proposal")
@@ -422,13 +426,29 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		var metaCommand []string
 		metaRequested, rebindRequested, modelRequested := false, false, false
+		pluginRequested, explicitLabFlag := false, false
 		flags.Visit(func(f *flag.Flag) {
 			if f.Name == "meta-harness" || f.Name == "meta-command" {
 				metaRequested = true
 			}
 			rebindRequested = rebindRequested || f.Name == "rebind"
 			modelRequested = modelRequested || f.Name == "model"
+			pluginRequested = pluginRequested || f.Name == "forge-plugin" || f.Name == "project" || f.Name == "tracker-plugin" || f.Name == "tracker-config"
+			explicitLabFlag = explicitLabFlag || f.Name == "lab"
 		})
+		if pluginRequested {
+			const pluginFlags = "--forge-plugin, --project, --tracker-plugin and --tracker-config"
+			switch {
+			case *forgePlugin == "" || *project == "" || *trackerPlugin == "" || *trackerConfig == "":
+				return fail(fmt.Errorf("%s always come together; give all four", pluginFlags))
+			case !explicitLabFlag:
+				return fail(fmt.Errorf("%s need an explicit --lab for the new Lab", pluginFlags))
+			case rebindRequested || modelRequested || *role != "" || *enableReview || *refreshBaseline:
+				return fail(fmt.Errorf("%s propose a new bootstrap Formula; do not combine them with --rebind, --model, --role, --enable-review or --refresh-baseline", pluginFlags))
+			case *review != "" || *approve != "" || *dismiss != "":
+				return fail(fmt.Errorf("%s propose a change; review, approve or dismiss the saved proposal in a separate command", pluginFlags))
+			}
+		}
 		if *enableReview {
 			switch {
 			case *preferred != "":
@@ -576,7 +596,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		for _, key := range []string{"CODEX_THREAD_ID", "CLAUDECODE", "CURSOR_AGENT", "TERM_PROGRAM"} {
 			env[key] = os.Getenv(key)
 		}
-		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Rebind: *rebind, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand, HarnessTimeoutMS: *timeoutMS, MaxTimeoutMS: *maxTimeoutMS, Model: *model, ModelSet: modelRequested, Role: *role, RefreshBaseline: *refreshBaseline, EnableReview: *enableReview})
+		result, err := onboarding.Prepare(ctx, onboarding.InitOptions{Cwd: cwd, LabDir: dir, Launcher: launcher, Preferred: *preferred, Rebind: *rebind, Env: env, MetaHarness: *metaHarness, MetaCommand: metaCommand, HarnessTimeoutMS: *timeoutMS, MaxTimeoutMS: *maxTimeoutMS, Model: *model, ModelSet: modelRequested, Role: *role, RefreshBaseline: *refreshBaseline, EnableReview: *enableReview, ForgePlugin: *forgePlugin, Project: *project, TrackerPlugin: *trackerPlugin, TrackerConfig: *trackerConfig})
 		if err != nil {
 			return fail(err)
 		}
@@ -698,7 +718,14 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 		}
 		selection := onboarding.Select(candidates, *preferred, existing, env)
 		git := doctorRun(ctx, process.Options{Argv: []string{"git", "--version"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
-		gh := doctorRun(ctx, process.Options{Argv: []string{"gh", "auth", "status"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
+		// A Lab whose forge and tracker are both plugins never calls gh, so gh is
+		// neither run nor required; every other Lab keeps the gh auth check.
+		ghRequired := !doctorPluginForgeAndTracker(active.Formula)
+		var gh process.Result
+		if ghRequired {
+			gh = doctorRun(ctx, process.Options{Argv: []string{"gh", "auth", "status"}, Dir: cwd, Stdin: []byte{}, Timeout: 5 * time.Second})
+		}
+		ghReady := gh.OK || !ghRequired
 		var meta onboarding.MetaReport
 		if unapproved {
 			meta = onboarding.DescribeFormulaMeta(active.Formula)
@@ -709,7 +736,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			meta = onboarding.InspectMeta(ctx, probed, cwd, doctorRun)
 		}
 		workflow := selectedWorkflow(candidates, selection.ID)
-		ready := !unapproved && workflow.State == "conditional" && git.OK && gh.OK && selection.Status == "ready" && (saved == nil || saved.Readiness == "ready")
+		ready := !unapproved && workflow.State == "conditional" && git.OK && ghReady && selection.Status == "ready" && (saved == nil || saved.Readiness == "ready")
 		labDir := *lab
 		if abs, e := filepath.Abs(labDir); e == nil {
 			labDir = abs
@@ -741,7 +768,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			}
 		}
 		if len(active.Formula.Harnesses) > 0 {
-			ready = !unapproved && git.OK && gh.OK && rolesReady
+			ready = !unapproved && git.OK && ghReady && rolesReady
 		}
 		withSteps := *verbose && structured
 		views := make([]doctorCandidate, len(candidates))
@@ -779,6 +806,9 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			if next != "" {
 				report["nextCommand"] = next
 			}
+			if !ghRequired {
+				report["githubRequired"] = false
+			}
 			if len(extensions) > 0 {
 				report["extensions"] = extensions
 			}
@@ -810,7 +840,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				return fail(err)
 			}
 		} else {
-			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr, Queued: queued, QueuedTruncated: queuedTruncated, Loop: loopState, Plugins: plugins})
+			renderDoctor(out, doctorView{Meta: &meta, Lab: *lab, FormulaID: active.Formula.ID, Git: git.OK, GitHub: gh.OK, GitHubNotRequired: !ghRequired, Selection: selection, Workflow: workflow, Saved: savedView, Candidates: views, Roles: roles, Extensions: extensions, ExtensionLocks: extensionLocks, Isolation: isolation, Next: next, Note: note, LearnPending: learnNoticeLines(labDir, learnItems), LearnError: learnErr, RecoveryProposals: proposals, RecoveryError: proposalErr, Queued: queued, QueuedTruncated: queuedTruncated, Loop: loopState, Plugins: plugins})
 			renderResources(out, machine)
 		}
 		if !ready {
@@ -1821,20 +1851,23 @@ type doctorView struct {
 	Meta                       *onboarding.MetaReport
 	Lab, FormulaID, Next, Note string
 	Git, GitHub                bool
-	Selection                  onboarding.Selection
-	Workflow                   harness.Capability
-	Saved                      *doctorCandidate
-	Candidates                 []doctorCandidate
-	Roles                      []onboarding.RoleReadiness
-	Extensions                 []doctorExtension
-	ExtensionLocks             []doctorExtensionLock
-	Isolation                  doctorIsolation
-	LearnPending               []string
-	LearnError                 error
-	RecoveryProposals          []molecule.RecoveryProposal
-	RecoveryError              error
-	Queued                     []string
-	QueuedTruncated            bool
+	// GitHubNotRequired marks a Lab whose forge and tracker are both plugins, so
+	// the gh line reads "not required" instead of an authentication result.
+	GitHubNotRequired bool
+	Selection         onboarding.Selection
+	Workflow          harness.Capability
+	Saved             *doctorCandidate
+	Candidates        []doctorCandidate
+	Roles             []onboarding.RoleReadiness
+	Extensions        []doctorExtension
+	ExtensionLocks    []doctorExtensionLock
+	Isolation         doctorIsolation
+	LearnPending      []string
+	LearnError        error
+	RecoveryProposals []molecule.RecoveryProposal
+	RecoveryError     error
+	Queued            []string
+	QueuedTruncated   bool
 	// Loop is the Lab's loop marker as molecule.ReadLoopStatus read it; a zero
 	// value renders nothing.
 	Loop molecule.LoopMarkerState
@@ -2006,8 +2039,20 @@ func (x doctorCommands) overall(saved *doctorCandidate, views []doctorCandidate,
 	return x.recheck(id)
 }
 
+// doctorPluginForgeAndTracker reports whether f's forge and tracker are both
+// declared plugins, so no part of a run calls gh.
+func doctorPluginForgeAndTracker(f formula.Formula) bool {
+	_, _, forgePlugin := f.ForgePlugin()
+	_, trackerPlugin := f.TrackerPlugin()
+	return forgePlugin && trackerPlugin
+}
+
 func renderDoctor(out io.Writer, v doctorView) {
-	fmt.Fprintf(out, "Forgecell doctor (schemaVersion %s)\nLab: %s\nActive Formula: %s\nGit ready: %t · GitHub CLI authenticated: %t\nSelection: %s %s — %s\nGitHub Issue workflow: %s — %s\n", doctorSchemaVersion, v.Lab, orNone(v.FormulaID), v.Git, v.GitHub, v.Selection.Status, v.Selection.ID, v.Selection.Reason, v.Workflow.State, v.Workflow.Reason)
+	github := fmt.Sprint(v.GitHub)
+	if v.GitHubNotRequired {
+		github = "not required (the forge and tracker are plugins)"
+	}
+	fmt.Fprintf(out, "Forgecell doctor (schemaVersion %s)\nLab: %s\nActive Formula: %s\nGit ready: %t · GitHub CLI authenticated: %s\nSelection: %s %s — %s\nGitHub Issue workflow: %s — %s\n", doctorSchemaVersion, v.Lab, orNone(v.FormulaID), v.Git, github, v.Selection.Status, v.Selection.ID, v.Selection.Reason, v.Workflow.State, v.Workflow.Reason)
 	if v.Saved != nil {
 		renderDoctorCandidate(out, "Saved binding", *v.Saved)
 	}

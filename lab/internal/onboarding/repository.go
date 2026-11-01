@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"path"
@@ -91,6 +92,72 @@ func ReadRepository(ctx context.Context, cwd string, runner Runner) (Repository,
 	if err != nil {
 		return repo, err
 	}
+	return describeSnapshot(repo, snapshot)
+}
+
+// ForgeIdentity is what a plugin forge described about its project: the
+// lower-case host/path identity the checkout's origin must resolve to, the
+// default branch, and the CI kind, which decides whether the root
+// .gitlab-ci.yml is collected as evidence.
+type ForgeIdentity struct {
+	Identity, DefaultBranch, CIKind string
+}
+
+// ReadRepositoryWith reads the checkout of a plugin-forge project without
+// GitHub: it skips the GitHub origin check and gh repo view, and instead
+// requires the origin remote's ForgeIdentityFromRemote to equal id.Identity, so
+// the checkout is the project the forge described. Repo is left empty for the
+// caller, which knows the forge project.
+func ReadRepositoryWith(ctx context.Context, cwd string, runner Runner, id ForgeIdentity) (Repository, error) {
+	if runner == nil {
+		runner = process.Run
+	}
+	var repo Repository
+	if why := formula.ValidForgeIdentity(id.Identity); why != "" {
+		return repo, fmt.Errorf("the described forge identity %s", why)
+	}
+	if id.DefaultBranch == "" {
+		return repo, fmt.Errorf("the forge described no default branch")
+	}
+	call := func(args ...string) (string, error) {
+		r := runner(ctx, process.Options{Argv: args, Dir: cwd, Stdin: []byte{}, Timeout: 20 * time.Second, MaxOutputBytes: 2_000_000})
+		if !r.OK {
+			return "", fmt.Errorf("repository discovery failed for %s: %s %s", args[0], r.Error, r.Stderr)
+		}
+		return strings.TrimSpace(r.Stdout), nil
+	}
+	root, err := call("git", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return repo, err
+	}
+	repo.Root = root
+	repo.Revision, err = call("git", "rev-parse", "HEAD")
+	if err != nil {
+		return repo, err
+	}
+	origin, err := call("git", "remote", "get-url", "origin")
+	if err != nil {
+		return repo, err
+	}
+	identity, err := ForgeIdentityFromRemote(origin)
+	if err != nil {
+		return repo, err
+	}
+	if identity != id.Identity {
+		return repo, fmt.Errorf("the origin remote resolves to %s, but the forge plugin describes %s; run init from a checkout of the described project", identity, id.Identity)
+	}
+	repo.DefaultBranch = id.DefaultBranch
+	snapshot, err := readiness.CollectFor(ctx, root, repo.Revision, readiness.CollectOptions{GitLabCI: id.CIKind == gitlabCIKind})
+	if err != nil {
+		return repo, err
+	}
+	return describeSnapshot(repo, snapshot)
+}
+
+// describeSnapshot records the committed evidence, workflows, policy files and
+// component manifests of snapshot in repo.
+func describeSnapshot(repo Repository, snapshot readiness.RepositorySnapshot) (Repository, error) {
+	var err error
 	repo.Evidence = snapshot.Evidence
 	repo.EvidenceSHA256, err = snapshot.Digest()
 	if err != nil {
