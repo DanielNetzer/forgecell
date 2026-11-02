@@ -1,15 +1,31 @@
 package contract
 
-import "errors"
+import (
+	"errors"
+	"slices"
+)
 
 // The forgecell.reviewer/v1 outputs (design §4.3). Findings are untrusted
 // evidence: they never approve, and their text is sanitized after decoding.
+
+// The reviewer capabilities that gate reviewer_findings' optional inputs: the
+// engine sends comments only to a reviewer whose reviewer_describe lists
+// ReviewerForgeComments, and checks only for ReviewerForgeChecks.
+const (
+	ReviewerForgeComments = "forge-comments"
+	ReviewerForgeChecks   = "forge-checks"
+)
 
 // ReviewerDescription is the output of reviewer_describe.
 type ReviewerDescription struct {
 	DisplayName  string   `json:"displayName" text:"100"`
 	Severities   []string `json:"severities"`
 	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// Has reports whether the description lists capability exactly.
+func (d ReviewerDescription) Has(capability string) bool {
+	return slices.Contains(d.Capabilities, capability)
 }
 
 func (d *ReviewerDescription) check() error {
