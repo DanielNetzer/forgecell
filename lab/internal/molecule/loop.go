@@ -62,6 +62,23 @@ type LoopOptions struct {
 	// it. Without a Marker RunLoop takes none, but still refuses to run while
 	// another loop holds this Lab's marker.
 	Marker *LoopMarker
+	// Tracker lists and reads the Issues of a keyed loop: one whose approved
+	// Formula's intake.source is a declared tracker plugin. When it is nil such a
+	// loop builds the plugin tracker with mcpadapter.TrackerFor, one per listing
+	// and one per Molecule, so each Molecule records its own plugin calls. A
+	// GitHub Issues Formula never uses it.
+	Tracker tracker.Keyed
+	// TrackerSelect is a keyed loop's raw selector (for example oldest, label:x
+	// or filter:123), passed to the tracker's List unchanged for the plugin to
+	// validate. Empty means oldest. Select is not used by a keyed loop.
+	TrackerSelect string
+	// TrackerLookupEnv is the environment lookup of the plugin trackers a keyed
+	// loop builds; nil means os.LookupEnv.
+	TrackerLookupEnv func(string) (string, bool)
+	// AllowKeyed opts a caller in to the keyed loop. Without it a Formula whose
+	// intake.source is a tracker plugin is refused as an unsupported intake
+	// source, as before the keyed loop existed, and Tracker is not used.
+	AllowKeyed bool
 }
 
 // TransientLoopError marks a pass failure that a later pass may not repeat: the
@@ -83,6 +100,9 @@ func IsTransientLoopError(err error) bool {
 type LoopItem struct {
 	Repository string
 	Issue      int64
+	// Key is a tracker plugin's Issue key for an item of a keyed loop, whose
+	// Issue is 0; it is empty for a GitHub Issue.
+	Key        string `json:"Key,omitempty"`
 	MoleculeID string
 	Started    bool
 	Approved   bool
@@ -111,6 +131,8 @@ type LoopPass struct {
 type LoopReport struct {
 	Repository string
 	Passes     []LoopPass
+	// TrackerSelect is a keyed loop's raw selector, or empty for GitHub Issues.
+	TrackerSelect string `json:",omitempty"`
 }
 
 func (r LoopReport) Failed() bool {
@@ -160,6 +182,8 @@ type loopRun struct {
 	repo   string
 	loaded formula.Loaded
 	marker *LoopMarker
+	// keyed is set for a loop over a tracker plugin.
+	keyed *keyedLoop
 }
 
 // RunLoop starts intake for eligible open Issues and advances a Molecule through
@@ -174,6 +198,12 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 	lab, err := filepath.Abs(lo.Template.LabDir)
 	if err != nil {
 		return report, err
+	}
+	// A Formula reading Issues from a tracker plugin runs the keyed loop for a
+	// caller that opted in; every other Formula and caller keeps this path,
+	// refusals included.
+	if lo.AllowKeyed && (lo.Tracker != nil || formulaUsesTrackerPlugin(lab, lo.Template.FormulaID)) {
+		return runLoopKeyed(ctx, lo, lab)
 	}
 	loaded, err := loadLoopFormula(lab, lo.Template.FormulaID)
 	if err != nil {
@@ -200,13 +230,19 @@ func RunLoop(ctx context.Context, lo LoopOptions) (LoopReport, error) {
 		l.work = lo.Work
 	}
 	report.Repository = l.repo
+	return l.passes(ctx, report)
+}
+
+// passes runs passes until one is the last: under Once, while draining, after
+// a stop, or once a pass starts and approves nothing.
+func (l *loopRun) passes(ctx context.Context, report LoopReport) (LoopReport, error) {
 	for {
 		pass, err := l.pass(ctx)
 		if err != nil {
 			return report, err
 		}
 		report.Passes = append(report.Passes, pass)
-		if lo.Once || l.draining(ctx) || pass.Stopped != "" || !pass.progressed() {
+		if l.o.Once || l.draining(ctx) || pass.Stopped != "" || !pass.progressed() {
 			return report, nil
 		}
 	}
@@ -235,6 +271,9 @@ func loadLoopFormula(lab, id string) (formula.Loaded, error) {
 // to match that snapshot, so a Formula approved again during a long run must be
 // the one later approvals compare against. The run stays bound to one repository.
 func (l *loopRun) reloadFormula() error {
+	if l.keyed != nil {
+		return l.reloadFormulaKeyed()
+	}
 	loaded, err := loadLoopFormula(l.lab, l.o.Template.FormulaID)
 	if err != nil {
 		return fmt.Errorf("the approved Formula could not be reloaded, so nothing was started or advanced: %w", err)
@@ -247,6 +286,9 @@ func (l *loopRun) reloadFormula() error {
 }
 
 func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
+	if l.keyed != nil {
+		return l.passKeyed(ctx)
+	}
 	var pass LoopPass
 	l.marker.beginPass()
 	listed, err := l.o.ListIssues(ctx, l.repo)
@@ -268,7 +310,19 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 		return pass, TransientLoopError{fmt.Errorf("the local ledger inventory is incomplete, so no Molecule was started or advanced: %s", inventoryCause(inventory))}
 	}
 	pruneRecoveryProposals(l.lab, l.analysisTimeout())
-	pass.Items = make([]LoopItem, len(eligible))
+	l.dispatch(ctx, &pass, len(eligible), func(i int) LoopItem {
+		return LoopItem{Repository: eligible[i].Repository, Issue: eligible[i].Number}
+	}, func(ctx context.Context, i int) LoopItem {
+		return l.process(ctx, inventory, eligible[i])
+	})
+	return pass, nil
+}
+
+// dispatch processes the pass's n eligible Issues on at most MaxConcurrent
+// workers, in order. identity(i) is the bare report of Issue i, for an Issue
+// that is never processed; process(ctx, i) processes it on the work context.
+func (l *loopRun) dispatch(ctx context.Context, pass *LoopPass, n int, identity func(int) LoopItem, process func(context.Context, int) LoopItem) {
+	pass.Items = make([]LoopItem, n)
 	work := make(chan int)
 	// authStop closes after the first Molecule this pass started or approved ends on a
 	// harness authentication failure (#244): every later Issue would hit the same
@@ -276,11 +330,13 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 	authStop := make(chan struct{})
 	var authOnce sync.Once
 	authHint := ""
-	notDispatched := func(issue intake.OpenIssue) LoopItem {
-		return LoopItem{Repository: issue.Repository, Issue: issue.Number, State: LoopNotDispatched, Reason: authHint + "; the loop dispatched nothing further in this pass"}
+	notDispatched := func(i int) LoopItem {
+		item := identity(i)
+		item.State, item.Reason = LoopNotDispatched, authHint+"; the loop dispatched nothing further in this pass"
+		return item
 	}
 	var wg sync.WaitGroup
-	for range min(l.o.MaxConcurrent, len(eligible)) {
+	for range min(l.o.MaxConcurrent, n) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -288,10 +344,10 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 				// The dispatcher may hand over an Issue in the same instant the stop
 				// closes, so the worker checks again before it starts anything.
 				if stopped(authStop) {
-					pass.Items[i] = notDispatched(eligible[i])
+					pass.Items[i] = notDispatched(i)
 					continue
 				}
-				item := l.process(l.work, inventory, eligible[i])
+				item := process(l.work, i)
 				pass.Items[i] = item
 				if item.Failed && item.FailureClass == harness.HarnessNotAuthenticated {
 					authOnce.Do(func() {
@@ -302,7 +358,7 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 			}
 		}()
 	}
-	for i, issue := range eligible {
+	for i := range n {
 		if !l.draining(ctx) && !stopped(authStop) {
 			select {
 			case work <- i:
@@ -313,17 +369,18 @@ func (l *loopRun) pass(ctx context.Context) (LoopPass, error) {
 			}
 		}
 		if stopped(authStop) {
-			pass.Items[i] = notDispatched(issue)
+			pass.Items[i] = notDispatched(i)
 			continue
 		}
-		pass.Items[i] = LoopItem{Repository: issue.Repository, Issue: issue.Number, State: LoopInterrupted, Reason: "the loop was interrupted before this Issue was started"}
+		item := identity(i)
+		item.State, item.Reason = LoopInterrupted, "the loop was interrupted before this Issue was started"
+		pass.Items[i] = item
 	}
 	close(work)
 	wg.Wait()
 	if stopped(authStop) {
 		pass.Stopped = authHint + "; the loop dispatched no further Issue in this pass and starts no further pass"
 	}
-	return pass, nil
 }
 
 func stopped(c <-chan struct{}) bool {
@@ -421,7 +478,7 @@ func (l *loopRun) interruptedLedger(a QueueAttempt, item LoopItem) (string, bool
 	if a.Phase != "" {
 		return interruptedApprovalReason(a, timeout), true
 	}
-	unlock, err := lockIssue(l.lab, item.Repository, item.Issue)
+	unlock, err := probeStartLock(l.lab, item)
 	if err != nil {
 		return "", false
 	}
@@ -593,6 +650,9 @@ func (l *loopRun) advance(ctx context.Context, item LoopItem) LoopItem {
 	applyErr := func() error {
 		l.marker.Track(r.ID)
 		defer l.marker.Untrack(r.ID)
+		if r.Issue.IsKeyed() {
+			return l.approveKeyed(ctx, o, r)
+		}
 		_, err := resumeByPolicy(ctx, o, l.loaded, r.Issue.Number, r.Issue.Repo)
 		return err
 	}()
@@ -670,7 +730,11 @@ func classify(r Record) (state, reason string, stopped bool) {
 		return LoopWaiting, "waiting (readiness phase " + oneLine(phase) + ")", false
 	case "blocked", "failed":
 		if r.Readiness == nil && r.Analysis != nil && len(r.Analysis.Questions) > 0 {
-			return LoopWaiting, fmt.Sprintf("clarification required: the analysis has %d open question(s); update the Issue body, then run forgecell run %d", len(r.Analysis.Questions), r.Issue.Number), false
+			next := fmt.Sprintf("forgecell run %d", r.Issue.Number)
+			if r.Issue.IsKeyed() {
+				next = keyedRunHint(r.Issue.Key)
+			}
+			return LoopWaiting, fmt.Sprintf("clarification required: the analysis has %d open question(s); update the Issue body, then run %s", len(r.Analysis.Questions), next), false
 		}
 		return LoopStopped, stoppedReason(r), true
 	case StatusRetired:

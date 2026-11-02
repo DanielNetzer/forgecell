@@ -210,9 +210,10 @@ func TestRunRefusesTheOtherArgumentForm(t *testing.T) {
 	}
 }
 
-// TestAmendRunRefusesAKeyedMolecule: amend --run on a keyed Molecule is
-// refused with a plain reason before it amends, never "unsupported intake
-// source"; presentAmend refuses the run of a keyed amendment as well.
+// TestAmendRunRefusesAKeyedMolecule (declared delta, slice 4b): amend --run on
+// a keyed Molecule now amends and reruns the same keyed Molecule through its
+// tracker plugin, approving the amended digest; presentAmend still refuses the
+// run of a keyed amendment whose Formula reads no tracker plugin.
 func TestAmendRunRefusesAKeyedMolecule(t *testing.T) {
 	usePluginDoctorSeams(t)
 	server := plugintest.Server(t)
@@ -222,13 +223,29 @@ func TestAmendRunRefusesAKeyedMolecule(t *testing.T) {
 	}
 	r := keyedLedgers(t, lab)[0]
 	code, out, errOut := runCLI("amend", r.ID, "--lab", lab, "--note", "retry", "--run")
-	want := "forgecell: " + errKeyedAmendRun.Error() + "\n"
-	if code != 1 || out != "" || errOut != want || strings.Contains(errOut, "unsupported intake source") {
+	if code != 0 || *started != 2 || strings.Contains(errOut, "unsupported intake source") || strings.Contains(errOut, errKeyedAmendRun.Error()) {
 		t.Fatalf("amend --run: exit %d\n%s%s", code, out, errOut)
 	}
-	if after := keyedLedgers(t, lab)[0]; len(after.Readiness.Plans) != len(r.Readiness.Plans) || len(after.HarnessAttempts) != 0 || *started != 1 {
-		t.Fatalf("a refused amend --run changed the Molecule: plans %d attempts %d", len(after.Readiness.Plans), len(after.HarnessAttempts))
+	ledgers := keyedLedgers(t, lab)
+	if len(ledgers) != 1 || ledgers[0].ID != r.ID {
+		t.Fatalf("amend --run made another Molecule: %d", len(ledgers))
 	}
+	after := ledgers[0]
+	if len(after.Readiness.Plans) != len(r.Readiness.Plans)+1 || len(after.HarnessAttempts) != 1 || after.Readiness.Phase == "scope-waiting" {
+		t.Fatalf("amend --run: plans %d attempts %d phase %q notes %q", len(after.Readiness.Plans), len(after.HarnessAttempts), after.Readiness.Phase, after.Notes)
+	}
+	amended := after.Readiness.Plans[len(after.Readiness.Plans)-1].Digest
+	approved := false
+	for _, e := range after.Readiness.Events {
+		approved = approved || e.Kind == "approved" && e.Digest == amended
+	}
+	if !approved || !strings.Contains(out, "Amended "+r.ID+" to revision 2") || !strings.Contains(out, "--approve "+amended+"\n") {
+		t.Fatalf("the amended digest was not approved:\n%s%s", out, errOut)
+	}
+	if strings.Contains(out, "run 0 ") || strings.Contains(out, "#0") || strings.Contains(out, plugintest.PlantedSecret) {
+		t.Fatalf("amend output:\n%s", out)
+	}
+	requireRunRootEmpty(t, lab)
 
 	plan := readiness.Plan{Revision: 2, Inputs: readiness.Inputs{BaseCommit: "base", TargetBranch: "main"}}
 	keyed := molecule.Record{ID: "mol-eng-7-a", Status: "waiting", LabDir: "/lab", Issue: molecule.Issue{Key: "ENG-7", Repo: "acme/widgets"},

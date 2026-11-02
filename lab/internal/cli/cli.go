@@ -926,9 +926,6 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			presentRun(out, r)
 			return 0
 		}
-		if *runAfter && amendTargetKeyed(*lab, args[1]) {
-			return fail(errKeyedAmendRun)
-		}
 		if *file != "" && builder {
 			return fail(fmt.Errorf("--plan takes no --from-latest, --add-scope, --add-acceptance, --note, --continuation or --accept-protected-failures; edit the plan file instead"))
 		}
@@ -1186,28 +1183,15 @@ func runKeyedIssue(ctx context.Context, loaded formula.Loaded, arg string, o mol
 	if err != nil {
 		return molecule.Record{}, err
 	}
-	d, err := keyed.Describe(ctx)
+	pattern, err := molecule.TrackerKeyPattern(ctx, keyed)
 	if err != nil {
 		return molecule.Record{}, err
-	}
-	pattern := d.KeyPattern
-	if !strings.HasPrefix(pattern, "^") || !strings.HasSuffix(pattern, "$") {
-		// The adapter always matches keyPattern whole; ParseIssueKey wants it written so.
-		pattern = "^(?:" + pattern + ")$"
 	}
 	key, err := intake.ParseIssueKey(arg, pattern)
 	if err != nil {
 		return molecule.Record{}, err
 	}
-	o.ReadIssueKey = func(ctx context.Context, repo, key, _ string) (molecule.Issue, error) {
-		issue, err := keyed.Get(ctx, key)
-		if err != nil {
-			calls.Fail(err)
-			return molecule.Issue{}, err
-		}
-		state := map[string]string{"open": "OPEN", "closed": "CLOSED"}[issue.State]
-		return molecule.Issue{Key: issue.Key, Number: 0, Repo: repo, Title: issue.Title, Body: issue.Body, State: state, URL: issue.URL, UpdatedAt: issue.UpdatedAt}, nil
-	}
+	o.ReadIssueKey = molecule.KeyedReader(keyed, calls)
 	o.Issue, o.PluginCalls, o.AllowKeyedApproval = "", calls, true
 	return runKeyed(ctx, o, key)
 }
@@ -1232,18 +1216,28 @@ func doctorPluginSummary(f formula.Formula) string {
 	return fmt.Sprintf("Plugins: %d declared (%d tracker, %d forge, %d reviewer, %d unused); none started here. Run forgecell plugin doctor to start and check them.", len(f.Plugins), counts["tracker"], counts["forge"], counts["reviewer"], unused)
 }
 
-// errKeyedAmendRun is the plain reason amend --run refuses a keyed Molecule.
-var errKeyedAmendRun = fmt.Errorf("amend --run does not run a keyed Molecule yet (that lands in a later slice); amend without --run, then approve the new digest with forgecell run KEY --approve DIGEST")
+// errKeyedAmendRun is the plain reason amend --run does not run a keyed
+// amendment: the Molecule's Formula cannot be loaded approved, or no longer
+// reads Issues from a tracker plugin, so there is no tracker to read the key.
+var errKeyedAmendRun = fmt.Errorf("amend --run runs a keyed Molecule only while its approved Formula reads Issues from a tracker plugin; approve the new digest with forgecell run KEY --approve DIGEST once it does")
 
-// amendTargetKeyed reports a Molecule whose ledger reads as a keyed Issue. A
-// ledger that cannot be read is left for the amend itself to report.
-func amendTargetKeyed(lab, id string) bool {
-	dir, err := filepath.Abs(lab)
+// runKeyedAmend approves and runs a keyed amendment through the Molecule's
+// tracker plugin, as `forgecell run KEY --approve DIGEST` does: runKeyedIssue
+// validates the recorded key against the tracker's keyPattern and RunKeyed
+// re-reads the Issue with tracker_get before coding.
+func runKeyedAmend(ctx context.Context, r molecule.Record, o molecule.Options) (molecule.Record, error) {
+	dir, err := filepath.Abs(o.LabDir)
 	if err != nil {
-		return false
+		return molecule.Record{}, errKeyedAmendRun
 	}
-	r, err := molecule.ReadRecord(dir, id)
-	return err == nil && r.Issue.IsKeyed()
+	loaded, err := formula.Load(dir, r.FormulaID)
+	if err != nil || !loaded.Approved {
+		return molecule.Record{}, errKeyedAmendRun
+	}
+	if _, ok := loaded.Formula.TrackerPlugin(); !ok {
+		return molecule.Record{}, errKeyedAmendRun
+	}
+	return runKeyedIssue(ctx, loaded, r.Issue.Key, o)
 }
 
 // presentAmend prints the one-line diff summary and the exact --approve digest of
@@ -1257,12 +1251,6 @@ func presentAmend(ctx context.Context, out, stderr io.Writer, lab string, r mole
 	if !run {
 		presentRun(out, r)
 		return 0
-	}
-	if r.Issue.IsKeyed() {
-		// The amendment is recorded; only its run is refused, before anything starts.
-		presentRun(out, r)
-		fmt.Fprintln(stderr, "forgecell: the amendment is recorded, but its run did not start:", errKeyedAmendRun)
-		return 1
 	}
 	if len(p.ExpectedProtectedDeltas) > 0 {
 		// The exact declared failures are shown before --run approves this digest.
@@ -1278,7 +1266,13 @@ func presentAmend(ctx context.Context, out, stderr io.Writer, lab string, r mole
 		fmt.Fprintln(stderr, "forgecell:", err)
 		return 1
 	}
-	done, err := molecule.Run(ctx, molecule.Options{LabDir: lab, SourceRoot: cwd, Issue: fmt.Sprint(r.Issue.Number), FormulaID: r.FormulaID, Base: p.Inputs.BaseCommit, Approve: latest.Digest, TargetBranch: p.Inputs.TargetBranch, Resources: guard})
+	var done molecule.Record
+	if r.Issue.IsKeyed() {
+		// A keyed amendment reruns the same keyed Molecule through its tracker plugin.
+		done, err = runKeyedAmend(ctx, r, molecule.Options{LabDir: lab, SourceRoot: cwd, FormulaID: r.FormulaID, Base: p.Inputs.BaseCommit, Approve: latest.Digest, TargetBranch: p.Inputs.TargetBranch, Resources: guard})
+	} else {
+		done, err = molecule.Run(ctx, molecule.Options{LabDir: lab, SourceRoot: cwd, Issue: fmt.Sprint(r.Issue.Number), FormulaID: r.FormulaID, Base: p.Inputs.BaseCommit, Approve: latest.Digest, TargetBranch: p.Inputs.TargetBranch, Resources: guard})
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "forgecell: the amendment is recorded, but its run did not start:", err)
 		return 1
@@ -1895,6 +1889,11 @@ func renderDoctorLoop(out io.Writer, l molecule.LoopMarkerState) {
 			fmt.Fprintf(out, "  Last pass %d at %s\n", s.Passes, s.LastPassAt.UTC().Format(time.RFC3339))
 		}
 		for _, in := range s.Intake {
+			// A tracker plugin's Issue is named by its key, never as Issue #0.
+			if in.Key != "" {
+				fmt.Fprintf(out, "  Issue %s · %s\n", flatten(in.Key), flatten(in.Phase))
+				continue
+			}
 			fmt.Fprintf(out, "  Issue #%d · %s\n", in.Issue, flatten(in.Phase))
 		}
 		for _, id := range s.InFlight {
