@@ -22,7 +22,8 @@ type SeverityGroup struct {
 // round is complete. Resolved holds the findings the reviewer marked resolved
 // and those inferred resolved. Pending and Failed name, by reviewer identity,
 // that round's reviewers without a complete answer; NewerIncomplete is set
-// when a later round is incomplete, so it was not summarized.
+// when a later round is incomplete, so it was not summarized. Dismissed counts
+// that round's open findings left out because the operator dismissed them.
 type FindingsSummary struct {
 	Round           int              `json:"round"`
 	Commit          string           `json:"commit,omitempty"`
@@ -31,6 +32,7 @@ type FindingsSummary struct {
 	Pending         []string         `json:"pending"`
 	Failed          []string         `json:"failed"`
 	NewerIncomplete bool             `json:"newerIncomplete,omitempty"`
+	Dismissed       int              `json:"dismissed,omitempty"`
 }
 
 // OpenCount is the number of open findings.
@@ -48,7 +50,7 @@ func (s FindingsSummary) OpenCount() int {
 // above it is marked. A finding of an earlier complete round on another commit
 // is inferred resolved when the later round's complete answer from the same
 // reviewer identity no longer holds its fingerprint. An incomplete round never
-// infers resolution.
+// infers resolution. A dismissed open finding is left out and counted.
 func Summarize(record FindingsRecord, autoFix map[string]string) FindingsSummary {
 	s := FindingsSummary{Round: -1, Open: []SeverityGroup{}, Resolved: []SummaryFinding{}, Pending: []string{}, Failed: []string{}}
 	for i := len(record.Rounds) - 1; i >= 0; i-- {
@@ -67,6 +69,7 @@ func Summarize(record FindingsRecord, autoFix map[string]string) FindingsSummary
 		level, ok := severityRank[autoFix[entry.Reviewer]]
 		return SummaryFinding{Plugin: entry.Plugin, Reviewer: entry.Reviewer, Finding: f, AutoFix: ok && severityRank[f.Severity] >= level}
 	}
+	dismissed := record.DismissedSet()
 	groups := map[string][]SummaryFinding{}
 	present := map[string]bool{}
 	answered := map[string]bool{}
@@ -83,6 +86,10 @@ func Summarize(record FindingsRecord, autoFix map[string]string) FindingsSummary
 			present[entry.Reviewer+"\x00"+f.Fingerprint] = true
 			if f.Resolved {
 				s.Resolved = append(s.Resolved, mark(entry, f))
+				continue
+			}
+			if dismissed[f.Fingerprint] {
+				s.Dismissed++
 				continue
 			}
 			groups[f.Severity] = append(groups[f.Severity], mark(entry, f))

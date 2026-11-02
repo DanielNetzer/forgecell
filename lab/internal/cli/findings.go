@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/fixround"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
-	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 	"github.com/DanielNetzer/forgecell/lab/internal/safetext"
 )
 
@@ -53,6 +53,9 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 	approve := flags.String("approve", "", "With --push, push exactly this fix round preview digest")
 	confirm := flags.Bool("confirm", false, "With --push, explicitly confirm a push whose acceptance is unverified or whose review is not green")
 	title := flags.String("title", "", "With --push, the fix round commit message")
+	dismiss := flags.String("dismiss", "", "Dismiss this finding fingerprint with --reason, so it is no longer open or proposed")
+	reason := flags.String("reason", "", "With --dismiss, why the finding is dismissed (plain text, at most 500 characters)")
+	undismiss := flags.String("undismiss", "", "Remove the dismissal of this finding fingerprint")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 1
 	}
@@ -71,6 +74,23 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 	if (*approve != "" || *confirm || *title != "") && !*push {
 		return fail(fmt.Errorf("--approve, --confirm and --title require --push"))
 	}
+	// A flag given an empty value still counts as given, so it is refused
+	// instead of silently showing the findings.
+	given := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	dismissing, undismissing := given["dismiss"], given["undismiss"]
+	if (dismissing || undismissing) && (dismissing && undismissing || *collect || *jsonMode || *propose || *push) {
+		return fail(fmt.Errorf("--dismiss and --undismiss are used alone, without --collect, --json, --propose or --push"))
+	}
+	if *reason != "" && !dismissing {
+		return fail(fmt.Errorf("--reason requires --dismiss"))
+	}
+	if dismissing && *reason == "" {
+		return fail(fmt.Errorf("--dismiss requires --reason"))
+	}
+	if (dismissing && !findingFingerprint.MatchString(*dismiss)) || (undismissing && !findingFingerprint.MatchString(*undismiss)) {
+		return fail(fmt.Errorf("--dismiss and --undismiss take a finding fingerprint: 64 lower-case hex characters"))
+	}
 	abs, err := filepath.Abs(*lab)
 	if err != nil {
 		return fail(fmt.Errorf("the Lab directory cannot be resolved"))
@@ -83,6 +103,9 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 	if *push {
 		return runFindingsPush(ctx, resolved, id, *approve, *title, *confirm, out, stderr)
 	}
+	if dismissing || undismissing {
+		return runFindingsDismiss(resolved, id, *dismiss, *undismiss, *reason, out, stderr)
+	}
 	loaded, err := formula.Load(resolved, "")
 	if err != nil || !loaded.Approved {
 		return fail(fmt.Errorf("the Lab has no approved active Formula, so its reviewers are unknown"))
@@ -93,14 +116,14 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 		return 0
 	}
 	if *propose {
-		return runFindingsPropose(ctx, resolved, *lab, id, loaded.Formula, refs, includes, out, stderr)
+		return runFindingsPropose(ctx, resolved, *lab, id, loaded.Formula, includes, out, stderr)
 	}
 	var record delivery.FindingsRecord
 	if *collect {
 		if err := delivery.RefuseDemoLab(resolved); err != nil {
 			return fail(err)
 		}
-		record, err = collectFindings(ctx, resolved, id, loaded.Formula, refs)
+		record, err = collectFindings(ctx, resolved, id, loaded.Formula)
 	} else {
 		record, err = delivery.ReadFindings(resolved, id)
 	}
@@ -120,31 +143,29 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 
 // collectFindings starts the Formula's reviewers, and its forge plugin when it
 // declares one, with one call log, and collects a round.
-func collectFindings(ctx context.Context, lab, id string, f formula.Formula, refs []formula.ReviewerRef) (delivery.FindingsRecord, error) {
-	calls := &delivery.PluginCallLog{}
-	opts := mcpadapter.Options{LookupEnv: pluginLookupEnv, Observer: calls.Observe}
-	list, err := mcpadapter.ReviewersFor(lab, f, opts)
-	if err != nil {
-		return delivery.FindingsRecord{}, err
+func collectFindings(ctx context.Context, lab, id string, f formula.Formula) (delivery.FindingsRecord, error) {
+	return fixround.Collect(ctx, lab, id, f, fixround.Options{LookupEnv: pluginLookupEnv})
+}
+
+// runFindingsDismiss is findings --dismiss and --undismiss: it records or
+// removes one dismissal, which only changes what is shown and proposed.
+func runFindingsDismiss(lab, id, dismiss, undismiss, reason string, out, stderr io.Writer) int {
+	fail := func(err error) int { fmt.Fprintln(stderr, "forgecell:", err); return 1 }
+	if err := delivery.RefuseDemoLab(lab); err != nil {
+		return fail(err)
 	}
-	if len(list) != len(refs) {
-		return delivery.FindingsRecord{}, fmt.Errorf("the Formula's reviewers could not be started")
-	}
-	reviewers := make([]delivery.FindingsReviewer, len(list))
-	for i, r := range list {
-		reviewers[i] = delivery.FindingsReviewer{Plugin: refs[i].Plugin, Reviewer: r}
-	}
-	o := delivery.FindingsOptions{LabDir: lab, MoleculeID: id, Repo: f.Intake.Repo, Reviewers: reviewers, Calls: calls}
-	if c, ok, err := mcpadapter.ForgeFor(lab, f, opts); err != nil {
-		return delivery.FindingsRecord{}, err
-	} else if ok {
-		p, project, declared := f.ForgePlugin()
-		if !declared {
-			return delivery.FindingsRecord{}, fmt.Errorf("the Formula's forge plugin is not declared")
+	if undismiss != "" {
+		if err := delivery.UndismissFinding(lab, id, undismiss); err != nil {
+			return fail(err)
 		}
-		o.Changes, o.ForgePlugin, o.ForgeProject = c, p.Name, project
+		fmt.Fprintf(out, "Finding %s is no longer dismissed.\n", undismiss)
+		return 0
 	}
-	return delivery.Collect(ctx, o)
+	if err := delivery.DismissFinding(lab, id, dismiss, reason, nil); err != nil {
+		return fail(err)
+	}
+	fmt.Fprintf(out, "Finding %s dismissed; it is left out of the open findings and of fix-round proposals until --undismiss.\n", dismiss)
+	return 0
 }
 
 // presentFindings prints one line per open finding of the latest complete
@@ -181,6 +202,9 @@ func presentFindings(out io.Writer, id string, record delivery.FindingsRecord, s
 		fmt.Fprintf(out, "; failed: %s", strings.Join(flattenAll(s.Failed), ", "))
 	}
 	fmt.Fprintln(out)
+	if s.Dismissed > 0 {
+		fmt.Fprintf(out, "dismissed: %d\n", s.Dismissed)
+	}
 	if s.NewerIncomplete {
 		fmt.Fprintln(out, "A newer round is incomplete (a bound cut its findings or input), so it is not summarized; see --json.")
 	}
