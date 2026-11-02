@@ -32,6 +32,27 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 	lab := flags.String("lab", defaultLab, "Lab directory")
 	collect := flags.Bool("collect", false, "Collect one findings round from the Formula's reviewers first")
 	jsonMode := flags.Bool("json", false, "Print the findings record as JSON")
+	propose := flags.Bool("propose", false, "Propose the next fix round from the latest complete findings round on the head")
+	var includes []string
+	flags.Func("include", "With --propose, also propose this below-threshold finding fingerprint (repeatable)", func(value string) error {
+		if !findingFingerprint.MatchString(value) {
+			return fmt.Errorf("--include takes a finding fingerprint: 64 lower-case hex characters")
+		}
+		if len(includes) >= maxFixRoundIncludes {
+			return fmt.Errorf("--include may be given at most %d times", maxFixRoundIncludes)
+		}
+		for _, fp := range includes {
+			if fp == value {
+				return nil
+			}
+		}
+		includes = append(includes, value)
+		return nil
+	})
+	push := flags.Bool("push", false, "Push the verified fix round to the same change request (preview without --approve)")
+	approve := flags.String("approve", "", "With --push, push exactly this fix round preview digest")
+	confirm := flags.Bool("confirm", false, "With --push, explicitly confirm a push whose acceptance is unverified or whose review is not green")
+	title := flags.String("title", "", "With --push, the fix round commit message")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 1
 	}
@@ -40,6 +61,15 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 	}
 	if !safeID.MatchString(id) {
 		return fail(fmt.Errorf("invalid Molecule id"))
+	}
+	if (*propose || *push) && (*collect || *jsonMode || (*propose && *push)) {
+		return fail(fmt.Errorf("--propose and --push are used alone, without --collect or --json"))
+	}
+	if len(includes) > 0 && !*propose {
+		return fail(fmt.Errorf("--include requires --propose"))
+	}
+	if (*approve != "" || *confirm || *title != "") && !*push {
+		return fail(fmt.Errorf("--approve, --confirm and --title require --push"))
 	}
 	abs, err := filepath.Abs(*lab)
 	if err != nil {
@@ -50,6 +80,9 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 	if err != nil {
 		return fail(fmt.Errorf("the Lab directory cannot be resolved"))
 	}
+	if *push {
+		return runFindingsPush(ctx, resolved, id, *approve, *title, *confirm, out, stderr)
+	}
 	loaded, err := formula.Load(resolved, "")
 	if err != nil || !loaded.Approved {
 		return fail(fmt.Errorf("the Lab has no approved active Formula, so its reviewers are unknown"))
@@ -58,6 +91,9 @@ func runFindings(ctx context.Context, args []string, defaultLab string, out, std
 	if len(refs) == 0 {
 		fmt.Fprintln(out, delivery.ErrNoReviewers.Error())
 		return 0
+	}
+	if *propose {
+		return runFindingsPropose(ctx, resolved, *lab, id, loaded.Formula, refs, includes, out, stderr)
 	}
 	var record delivery.FindingsRecord
 	if *collect {
