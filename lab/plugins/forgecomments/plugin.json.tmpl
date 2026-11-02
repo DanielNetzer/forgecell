@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "v1",
+  "kind": "reviewer",
+  "name": "forgecomments",
+  "contract": "forgecell.reviewer/v1",
+  "server": {
+    "executable": {"path": "{{SERVER_PATH}}", "sha256": "{{SERVER_SHA256}}"},
+    "args": []
+  },
+  "tools": [
+    {"name": "reviewer_describe", "access": "read-only"},
+    {"name": "reviewer_findings", "access": "read-only"}
+  ],
+  "roles": [],
+  "needs": {
+    "env": [],
+    "network": [],
+    "minPollSeconds": 60
+  },
+  "dependencies": [],
+  "limitations": "Serves forgecell.reviewer/v1 offline from the review comments the engine passes in each call; it reads no environment and makes no request. Each bot comment becomes one unresolved finding whose severity comes from a marker in its first five lines or the configured default. At most 500 findings are kept, highest severity and latest first, and long bodies are cut."
+}
