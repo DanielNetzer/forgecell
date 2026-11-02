@@ -2,104 +2,30 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/fixround"
 	"github.com/DanielNetzer/forgecell/lab/internal/forge"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
-	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 )
 
 // maxForgeLedgerBytes bounds the ledger read that finds a Molecule's forge.
-const maxForgeLedgerBytes = 8_000_000
+const maxForgeLedgerBytes = fixround.MaxForgeLedgerBytes
 
 // moleculeForgeFormula returns the Formula snapshot a Molecule ran with when it
-// declares a plugin forge (true), or false for GitHub. Only an invalid id, a
-// missing ledger, or a ledger with no Formula snapshot or no forge block is
-// GitHub, whose path reports them as it always has. A ledger that is present
-// but unreadable, not a regular file, oversized or malformed, or whose Formula
-// snapshot does not parse, is an error: forge selection never fails open to
-// GitHub.
+// declares a plugin forge (true), or false for GitHub; see
+// fixround.SnapshotFormula. Forge selection never fails open to GitHub.
 func moleculeForgeFormula(lab, id string) (formula.Formula, bool, error) {
-	if !safeID.MatchString(id) {
-		return formula.Formula{}, false, nil
-	}
-	unreadable := fmt.Errorf("the Molecule ledger cannot be read, so its forge is unknown; nothing was published or collected")
-	file := filepath.Join(lab, "ledgers", id+".json")
-	info, err := os.Lstat(file)
-	if os.IsNotExist(err) {
-		return formula.Formula{}, false, nil
-	}
-	if err != nil || !info.Mode().IsRegular() {
-		return formula.Formula{}, false, unreadable
-	}
-	if info.Size() > maxForgeLedgerBytes {
-		return formula.Formula{}, false, fmt.Errorf("the Molecule ledger exceeds its size bound, so its forge is unknown; nothing was published or collected")
-	}
-	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return formula.Formula{}, false, unreadable
-	}
-	defer f.Close()
-	if stat, err := f.Stat(); err != nil || !os.SameFile(info, stat) {
-		return formula.Formula{}, false, unreadable
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxForgeLedgerBytes+1))
-	if err != nil {
-		return formula.Formula{}, false, unreadable
-	}
-	if len(raw) > maxForgeLedgerBytes {
-		return formula.Formula{}, false, fmt.Errorf("the Molecule ledger exceeds its size bound, so its forge is unknown; nothing was published or collected")
-	}
-	var ledger struct {
-		FormulaSnapshot struct {
-			YAML string `json:"yaml"`
-		} `json:"formulaSnapshot"`
-	}
-	if json.Unmarshal(raw, &ledger) != nil {
-		return formula.Formula{}, false, fmt.Errorf("the Molecule ledger is malformed, so its forge is unknown; nothing was published or collected")
-	}
-	if ledger.FormulaSnapshot.YAML == "" {
-		return formula.Formula{}, false, nil
-	}
-	parsed, err := formula.Parse([]byte(ledger.FormulaSnapshot.YAML))
-	if err != nil {
-		return formula.Formula{}, false, fmt.Errorf("the Molecule ledger's Formula snapshot does not parse, so its forge is unknown; nothing was published or collected")
-	}
-	if parsed.Forge == nil {
-		return formula.Formula{}, false, nil
-	}
-	return parsed, true, nil
+	return fixround.SnapshotFormula(lab, id)
 }
 
 // newPluginForge selects the Formula's forge plugin for the Lab, with a call
 // log the delivery records keep.
 func newPluginForge(lab string, f formula.Formula) (forge.Changes, delivery.PluginForge, error) {
-	abs, err := filepath.Abs(lab)
-	if err != nil {
-		return nil, delivery.PluginForge{}, fmt.Errorf("the Lab directory cannot be resolved")
-	}
-	// The adapter needs the Lab's real path.
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return nil, delivery.PluginForge{}, fmt.Errorf("the Lab directory cannot be resolved")
-	}
-	calls := &delivery.PluginCallLog{}
-	changes, ok, err := mcpadapter.ForgeFor(resolved, f, mcpadapter.Options{LookupEnv: pluginLookupEnv, Observer: calls.Observe})
-	if err != nil {
-		return nil, delivery.PluginForge{}, err
-	}
-	if !ok {
-		return nil, delivery.PluginForge{}, fmt.Errorf("the Formula declares no forge plugin")
-	}
-	p, project, _ := f.ForgePlugin()
-	return changes, delivery.PluginForge{Name: p.Name, Project: project, Calls: calls}, nil
+	return fixround.PluginForge(lab, f, pluginLookupEnv)
 }
 
 // deliverPlugin publishes through the Molecule's forge plugin. The receipt is

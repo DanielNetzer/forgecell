@@ -127,12 +127,14 @@ type FindingsRound struct {
 
 // FindingsRecord is deliveries/<id>.findings.json: untrusted evidence beside
 // the receipt, which it never changes. RoundsDropped counts the oldest rounds
-// dropped by a bound.
+// dropped by a bound. Dismissed holds the operator's dismissals, omitted when
+// there are none.
 type FindingsRecord struct {
 	SchemaVersion string          `json:"schemaVersion"`
 	MoleculeID    string          `json:"moleculeId"`
 	Rounds        []FindingsRound `json:"rounds"`
 	RoundsDropped int             `json:"roundsDropped,omitempty"`
+	Dismissed     []Dismissal     `json:"dismissed,omitempty"`
 }
 
 // FindingsReviewer is one Formula reviewer: its plugin name and the reviewer.
@@ -184,11 +186,11 @@ func Collect(ctx context.Context, o FindingsOptions) (FindingsRecord, error) {
 	if len(o.Reviewers) > formula.MaxReviewers {
 		return FindingsRecord{}, fmt.Errorf("at most %d reviewers are collected", formula.MaxReviewers)
 	}
-	lock := filepath.Join(o.LabDir, ".delivery-lock")
-	if err := os.Mkdir(lock, 0700); err != nil {
-		return FindingsRecord{}, fmt.Errorf("delivery/findings collection conflict: another delivery operation holds the lock")
+	unlock, err := lockFindings(o.LabDir, "collection")
+	if err != nil {
+		return FindingsRecord{}, err
 	}
-	defer os.Remove(lock)
+	defer unlock()
 	r, err := readPublishedReceipt(o.LabDir, o.MoleculeID)
 	if err != nil {
 		return FindingsRecord{}, err
@@ -494,7 +496,7 @@ func checkFindings(id string, record FindingsRecord) error {
 	if record.SchemaVersion != findingsVersion || record.MoleculeID != id {
 		return fmt.Errorf("findings record identity mismatch")
 	}
-	if len(record.Rounds) > MaxFindingsRounds || record.RoundsDropped < 0 {
+	if len(record.Rounds) > MaxFindingsRounds || record.RoundsDropped < 0 || !checkDismissals(record.Dismissed) {
 		return bad
 	}
 	for _, round := range record.Rounds {
