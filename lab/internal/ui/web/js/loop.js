@@ -5,13 +5,13 @@
 // state is read back and never resubmitted. A run shows as started only once
 // the server's ledger read-back finds its Molecule; the loop's report comes
 // from the engine.
-import { $, el, fill, state, ctx, notRecorded, SessionError, tabSession, api, failed, setText, setAttr } from './core.js';
+import { $, el, uid, fill, state, ctx, notRecorded, issueLabel, SessionError, tabSession, api, failed, setText, setAttr } from './core.js';
 import { reasonText, refusalText } from './core-gates.js';
 
 // where names the form (run or loop) whose status shows the pending note and
 // whose inline error shows the last message; it changes only what is displayed
 // where. announce moves focus to that error once, when a message is set.
-const drive = { panel: null, controls: null, loaded: false, pending: false, where: 'run', message: '', announce: false, mode: 'milestone', modeChosen: false, defaultSelect: null, runIssue: null, run: null, loop: null, timer: null, token: 0, closed: null, closedReport: null, closedConfirm: false };
+const drive = { panel: null, controls: null, loaded: false, pending: false, where: 'run', message: '', announce: false, mode: 'milestone', modeChosen: false, defaultSelect: null, runIssue: null, runKey: null, keyed: false, keyPattern: '', run: null, loop: null, timer: null, token: 0, closed: null, closedReport: null, closedConfirm: false };
 
 // driveMessage shows text as the inline error of the form drive.where names,
 // and moves focus to it.
@@ -66,6 +66,10 @@ async function readDrive() {
     if (drive.runIssue) {
       const runRes = await api('/api/runs/' + drive.runIssue);
       run = runRes.ok ? await runRes.json() : null;
+    } else if (drive.runKey) {
+      // A tracker key may not fit a path segment, so it is a query parameter.
+      const runRes = await api('/api/runs?key=' + encodeURIComponent(drive.runKey));
+      run = runRes.ok ? await runRes.json() : null;
     }
   } catch (error) { failed(error); }
   if (token !== drive.token) return;
@@ -77,13 +81,42 @@ async function readDrive() {
 }
 
 async function startRun(text) {
+  // A Lab whose Issues are tracker keys starts intake from the Issue key field.
+  if (drive.keyed) { startKeyedRun(drive.controls.key.value); return; }
   const value = String(text).trim();
   if (!drive.pending) drive.where = 'run';
   if (!/^[1-9][0-9]{0,9}$/.test(value)) { driveMessage('Enter an Issue number, such as 245.'); return; }
   drive.runIssue = Number(value);
+  drive.runKey = null;
   drive.run = null;
   const job = await submitDrive('/api/runs', JSON.stringify({ issue: drive.runIssue }));
   if (job) { drive.run = job; readDrive(); }
+}
+
+// startKeyedRun posts {key}; the server checks it against the tracker's key
+// pattern again, so the field only bounds its length.
+async function startKeyedRun(text) {
+  const value = String(text).trim();
+  if (!drive.pending) drive.where = 'run';
+  if (!value || [...value].length > 128 || /[\u0000-\u001f\u007f]/.test(value)) { driveMessage('Enter the tracker’s Issue key, such as ENG-123.'); return; }
+  drive.runKey = value;
+  drive.runIssue = null;
+  drive.run = null;
+  const job = await submitDrive('/api/runs', JSON.stringify({ key: drive.runKey }));
+  if (job) { drive.run = job; readDrive(); }
+}
+
+// showKeyed shows the Issue key field instead of the Issue number field when
+// GET /api/lab says this Lab's Issues are tracker keys, with the tracker's key
+// pattern as text.
+function showKeyed(intake) {
+  const c = drive.controls;
+  drive.keyed = Boolean(intake && intake.keyed === true);
+  drive.keyPattern = drive.keyed && typeof intake.keyPattern === 'string' && intake.keyPattern.length <= 256 ? intake.keyPattern : '';
+  c.issueField.hidden = drive.keyed;
+  c.keyField.hidden = !drive.keyed;
+  setText(c.keyPattern, drive.keyPattern ? 'Keys match ' + drive.keyPattern : '');
+  c.keyPattern.hidden = !drive.keyPattern;
 }
 
 async function startLoop(select, max) {
@@ -244,6 +277,13 @@ function ensureDrive() {
   const loopError = el('p', { class: 'drive-error', id: 'drive-loop-error', tabindex: '-1', hidden: true });
   const loopStatus = el('div', { class: 'drive-status', role: 'status' });
   const issue = el('input', { type: 'text', id: 'drive-issue', name: 'issue', inputmode: 'numeric', maxlength: '10', autocomplete: 'off', placeholder: '245…', 'aria-describedby': 'drive-run-error', dataset: { drive: 'issue' } });
+  const issueField = el('div', { class: 'drive-field' }, el('label', { class: 'field-label', for: 'drive-issue' }, 'Issue number'), issue);
+  // A Lab whose Issues are tracker keys shows the Issue key field instead
+  // (showKeyed); the same form and button start intake with {key}.
+  const keyId = uid('drive-key'), patternId = uid('drive-key-pattern');
+  const key = el('input', { type: 'text', id: keyId, name: 'key', maxlength: '128', autocomplete: 'off', spellcheck: 'false', placeholder: 'ENG-123…', 'aria-describedby': 'drive-run-error ' + patternId, dataset: { drive: 'key' } });
+  const keyField = el('div', { class: 'drive-field', hidden: true }, el('label', { class: 'field-label', for: keyId }, 'Issue key'), key);
+  const keyPattern = el('p', { class: 'drive-help', id: patternId, hidden: true });
   const run = el('button', { type: 'submit', class: 'btn btn-secondary', dataset: { drive: 'run' } }, 'Start intake');
   const runError = el('p', { class: 'drive-error', id: 'drive-run-error', tabindex: '-1', hidden: true });
   const runStatus = el('div', { class: 'drive-status', role: 'status' });
@@ -255,7 +295,7 @@ function ensureDrive() {
     el('h2', { class: 'drive-title', id: 'drive-closed-title' }, 'Retire attempts for closed Issues'),
     el('p', { class: 'drive-help' }, 'Lists every attempt that is not running, has no delivery in progress and whose Issue GitHub reports closed.'),
     closedList, closedError, closedStatus);
-  drive.controls = { modes: modes, value: value, valueLabel: valueLabel, valueField: valueField, max: max, start: start, loopError: loopError, loopStatus: loopStatus, issue: issue, run: run, runError: runError, runStatus: runStatus, selectNote: selectNote, closedForm: closedForm, closedList: closedList, closedError: closedError, closedStatus: closedStatus };
+  drive.controls = { modes: modes, value: value, valueLabel: valueLabel, valueField: valueField, max: max, start: start, loopError: loopError, loopStatus: loopStatus, issue: issue, issueField: issueField, key: key, keyField: keyField, keyPattern: keyPattern, run: run, runError: runError, runStatus: runStatus, selectNote: selectNote, closedForm: closedForm, closedList: closedList, closedError: closedError, closedStatus: closedStatus };
   drive.panel = el('div', { class: 'drive-forms', id: 'drive-panel' },
     el('form', { class: 'drive-panel drive-form', id: 'drive-loop', tabindex: '-1', 'aria-labelledby': 'drive-loop-title', novalidate: true, onsubmit: submitLoop },
       el('div', null,
@@ -271,10 +311,8 @@ function ensureDrive() {
       el('p', { class: 'drive-help' }, 'Coding runs in parallel. Checks wait their turn, one at a time. The loop approves only what the Formula policy approves.')),
     el('form', { class: 'drive-panel drive-form', id: 'drive-run', 'aria-labelledby': 'drive-run-title', novalidate: true, onsubmit: submitRun },
       el('h2', { class: 'drive-title', id: 'drive-run-title' }, 'Start intake'),
-      el('div', { class: 'drive-row' },
-        el('div', { class: 'drive-field' }, el('label', { class: 'field-label', for: 'drive-issue' }, 'Issue number'), issue),
-        run),
-      runError, runStatus,
+      el('div', { class: 'drive-row' }, issueField, keyField, run),
+      keyPattern, runError, runStatus,
       el('p', { class: 'drive-help' }, 'Intake plans one Issue and stops at the scope gate for your approval.')),
     closedForm);
   fill($('#drive-slot'), drive.panel);
@@ -290,7 +328,7 @@ function runText(run) {
   else if (run.state === 'running') status = 'Running. Not shown as started until a ledger for this Issue appears' + (c.incomplete ? '; the ledger inventory is incomplete' : '') + '.';
   else status = 'No ledger from this run was found' + (c.incomplete ? '; the ledger inventory is incomplete' : '') + '.';
   return el('div', { class: 'gate-job' },
-    el('strong', null, 'Intake · Issue #' + notRecorded(run.issue) + ' · ' + notRecorded(run.state)),
+    el('strong', null, 'Intake · Issue ' + notRecorded(issueLabel({ key: run.key, number: run.issue })) + ' · ' + notRecorded(run.state)),
     el('p', { class: 'scope-note' }, status),
     run.error ? el('p', { class: 'scope-note' }, (run.category ? run.category + ': ' : '') + run.error + '.' + reasonText(run)) : null,
     run.committed && c.moleculeId ? el('button', { type: 'button', class: 'text-button', dataset: { drive: 'open' }, onclick: () => ctx.openMolecule(c.moleculeId) }, 'Open Molecule') : null);
@@ -401,6 +439,7 @@ export function update(state) {
   if (!drives) $('#loop-pill').hidden = true;
   if (drives) {
     ensureDrive();
+    showKeyed(lab.intake);
     renderDrive();
     if (!drive.loaded) { drive.loaded = true; readDrive(); }
   }

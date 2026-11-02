@@ -2,7 +2,7 @@
 // The Atom list, evidence and logs, as before: the origin links, the totals,
 // the Formula snapshot, each Atom's record, the readiness revisions and the
 // harness attempts.
-import { $, el, fill, state, ctx, ISSUE_URL, PULL_URL, externalLink, notRecorded, short, durationLabel, elapsed, api, failed, show } from './core.js';
+import { $, el, fill, state, ctx, ISSUE_URL, TRACKER_URL, PULL_URL, issueLabel, externalLink, notRecorded, short, durationLabel, elapsed, api, failed, show } from './core.js';
 import { mv } from './molecule-decision.js';
 
 function attemptsById(d) { return new Map((d.attempts || []).map((a) => [a.id, a])); }
@@ -19,10 +19,12 @@ export function renderTimeline(d) {
   if (panel.contains(document.activeElement) && mv.timelineId === d.id) { mv.timelineDirty = true; return; }
   mv.timelineDirty = false;
   mv.timelineId = d.id;
-  const issueLink = externalLink(d.issue.url, ISSUE_URL, 'Issue #' + d.issue.number + ' ↗');
+  // A keyed Issue links to its recorded tracker URL, a GitHub Issue to GitHub.
+  const label = issueLabel(d.issue);
+  const issueLink = externalLink(d.issue.url, d.issue.key ? TRACKER_URL : ISSUE_URL, 'Issue ' + label + ' ↗');
   const pullLink = d.delivery ? externalLink(d.delivery.url, PULL_URL, 'Pull request ↗') : null;
   fill($('#run-origin'),
-    el('span', null, notRecorded(d.issue.repository) + ' #' + d.issue.number + (d.issue.state ? ' · ' + d.issue.state : '')),
+    el('span', null, notRecorded(d.issue.repository) + ' ' + label + (d.issue.state ? ' · ' + d.issue.state : '')),
     issueLink || el('span', { class: 'muted' }, 'Issue link unavailable'),
     pullLink || el('span', { class: 'muted' }, d.delivery ? 'PR link unavailable' : 'PR · not created'),
     el('button', { type: 'button', class: 'text-button', dataset: { origin: 'issue-text' }, onclick: () => show('Issue text · ' + d.id, d.issue.body || 'No Issue text recorded.') }, 'Issue text ↗'),

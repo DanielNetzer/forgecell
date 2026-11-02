@@ -4,7 +4,7 @@
 // and its outcome shows as committed only from the server's ledger read-back.
 // Retire stays in the Danger zone. It also holds the small form helpers the
 // decision card shares.
-import { $, el, uid, fill, state, ctx, ISSUE_URL, notRecorded, api, failed, plainText, count, counted, SessionError } from './core.js';
+import { $, el, uid, fill, state, ctx, ISSUE_URL, TRACKER_URL, notRecorded, api, failed, plainText, count, counted, SessionError } from './core.js';
 import { refusalText, postJSON } from './core-gates.js';
 
 export function hasAction(name) { return Boolean(state.lab && Array.isArray(state.lab.actions) && state.lab.actions.includes(name)); }
@@ -120,6 +120,8 @@ function actionItem(d, a) {
     const questions = Array.isArray(a.questions) ? a.questions : [];
     if (questions.length) parts.push(el('ul', { class: 'diagnostics' }, questions.map((q) => el('li', null, plainText(q, '')))));
     if (typeof a.issueUrl === 'string' && ISSUE_URL.test(a.issueUrl)) parts.push(el('a', { class: 'mv-issue-link', href: a.issueUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Edit the Issue on GitHub ↗'));
+    // A keyed Issue is edited in its tracker, at the recorded https URL.
+    else if (freshKey(a) && typeof a.issueUrl === 'string' && TRACKER_URL.test(a.issueUrl)) parts.push(el('a', { class: 'mv-issue-link', href: a.issueUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Edit the Issue ' + a.issueKey + ' in the tracker ↗'));
   }
   if (a.confirmStopped) {
     const id = actionId('confirm-' + a.kind);
@@ -133,6 +135,10 @@ function actionItem(d, a) {
   return el('form', { class: 'decision-form mv-action', novalidate: true, onsubmit: (e) => { e.preventDefault(); submitAction(d, a); } }, ...parts);
 }
 
+// freshKey reports a fresh intake the server offered for a keyed record: it
+// carries the record's exact tracker key.
+function freshKey(a) { return typeof a.issueKey === 'string' && a.issueKey.length > 0 && a.issueKey.length <= 512; }
+
 // submitAction posts once with the shown digest; after an ambiguous response
 // it reads the Molecule back and never resubmits.
 async function submitAction(d, a) {
@@ -140,6 +146,8 @@ async function submitAction(d, a) {
   let path = '/api/molecules/' + encodeURIComponent(d.id) + '/actions/' + encodeURIComponent(a.kind);
   let body = { digest: a.digest };
   if (a.kind === 'fresh-intake') { path = '/api/runs'; body = { issue: a.issue }; }
+  // A keyed record's fresh intake posts its exact tracker key instead.
+  if (a.kind === 'fresh-intake' && freshKey(a)) body = { key: a.issueKey };
   // Accept-failures binds the exact tests listed: the server derives them again.
   if (a.kind === 'accept-failures') body.deltas = a.deltasDigest;
   if (a.kind === 'scope-change') {

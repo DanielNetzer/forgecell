@@ -31,6 +31,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
+	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/onboarding"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -210,6 +211,16 @@ type handler struct {
 	runIssue func(context.Context, molecule.Options) (molecule.Record, error)
 	runLoop  func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error)
 	loop     *driveLoop
+	// trackerFor, runKeyedIssue and runKeyedScope are the keyed engine calls
+	// (drive_keyed.go): the active Formula's tracker plugin, the keyed intake and
+	// the keyed scope approval. keyedFormula reads the active Formula and
+	// keyedPatterns caches its tracker's keyPattern. Tests replace the seams, so no
+	// plugin process starts.
+	trackerFor    func(string, formula.Formula, mcpadapter.Options) (tracker.Keyed, bool, error)
+	runKeyedIssue func(context.Context, molecule.Options, string) (molecule.Record, error)
+	runKeyedScope func(context.Context, molecule.Options, string) (molecule.Record, error)
+	keyedFormula  func(string) (keyedActiveFormula, bool)
+	keyedPatterns keyedDescribeCache
 	// listIssues is the loop's open Issue listing, the engine's default; the UI
 	// wraps it to learn which Molecules each loop pass works on. Tests replace it.
 	listIssues func(context.Context, string, intake.Selector) (intake.OpenIssues, error)
@@ -354,7 +365,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, retire: molecule.Retire, listIssues: tracker.GitHub{}.List, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, trackerFor: mcpadapter.TrackerFor, runKeyedIssue: molecule.RunIntakeKeyed, runKeyedScope: molecule.RunKeyed, keyedFormula: loadKeyedFormula, retire: molecule.Retire, listIssues: tracker.GitHub{}.List, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -467,6 +478,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.formulaGet(w)
 	case strings.HasPrefix(path, "/api/runs/"):
 		h.runStatus(w, strings.TrimPrefix(path, "/api/runs/"))
+	case path == "/api/runs" && r.URL.Query().Has("key"):
+		// A bare GET /api/runs stays not found.
+		h.runKeyedStatus(w, r)
 	case path == "/api/molecules":
 		h.molecules(w, r)
 	case path == "/api/analytics":
@@ -569,6 +583,9 @@ type LabView struct {
 	Unavailable []string         `json:"unavailable"`
 	// Operator is read-only display text for the avatar; it is never an email.
 	Operator OperatorView `json:"operator"`
+	// Intake is set only when the active Formula reads Issues from a tracker
+	// plugin (drive_keyed.go); a GitHub Lab's view is unchanged.
+	Intake *KeyedIntakeView `json:"intake,omitempty"`
 }
 
 func (h *handler) lab(w http.ResponseWriter) {
@@ -583,7 +600,7 @@ func (h *handler) lab(w http.ResponseWriter) {
 	if h.opts.SourceRoot != "" {
 		actions = append(append([]string{}, DriveActions...), UnblockAction, BulkRetireAction, AmendAction)
 	}
-	h.json(w, http.StatusOK, LabView{Gates: Gates, Actions: actions, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable, Operator: operatorView(h.opts.Operator)})
+	h.json(w, http.StatusOK, LabView{Gates: Gates, Actions: actions, Name: filepath.Base(h.opts.LabDir), Version: h.opts.Version, Repository: id.Repository, Binding: id.Binding, Model: id.Model, Formula: id, Unavailable: unavailable, Operator: operatorView(h.opts.Operator), Intake: h.keyedIntake()})
 }
 
 func (h *handler) molecules(w http.ResponseWriter, r *http.Request) {

@@ -3,7 +3,7 @@
 // back, the state pill, the seven steps, the plan in plain words and a sticky
 // decision card with one primary action, bound to the exact digest the plan
 // shows. The plan, the decision card and the Timeline are its sub-modules.
-import { $, add, el, fill, state, ctx, newGate, ISSUE_URL, laneLabel, cells, molecules, api, failed, keepFocus, VIEWS, navigate, showView, moleculeHref, moleculeFromURL, setText, setAttr, plainText, whenText, dateTitle, dayText, withAttempt, STEPS, syncOf, syncNotes } from './core.js';
+import { $, add, el, fill, state, ctx, newGate, issueLabel, issueURL, laneLabel, cells, molecules, api, failed, keepFocus, VIEWS, navigate, showView, moleculeHref, moleculeFromURL, setText, setAttr, plainText, whenText, dateTitle, dayText, withAttempt, STEPS, syncOf, syncNotes } from './core.js';
 import { mv, ensureMoleculeView, renderDecision, renderRoles, loadStats, mergedOf, mergeText } from './molecule-decision.js';
 import { renderPlan, copyDigest } from './molecule-plan.js';
 import { renderTimeline, mountTimeline } from './molecule-timeline.js';
@@ -52,7 +52,7 @@ function select(id) {
   showMoleculeView(true);
   cells().forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
   const m = molecules().find((x) => x.id === id);
-  $('#selection-label').textContent = m ? 'Selected #' + m.number + ' · ' + (m.title || m.id) : 'Selected ' + id;
+  $('#selection-label').textContent = m ? 'Selected ' + issueLabel(m) + ' · ' + (m.title || m.id) : 'Selected ' + id;
   renderLoadingDetail(id);
   ctx.applyFilter();
   loadDetail(id, true);
@@ -130,8 +130,8 @@ function renderBack() {
 }
 function crumbText(d) {
   const kind = d.view && d.view.decision && d.view.decision.kind;
-  const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number + ' · ' : '';
-  return number + ({ scope: 'Review plan', delivery: 'Review & publish' }[kind] || 'Molecule');
+  const label = issueLabel(d.issue);
+  return (label ? label + ' · ' : '') + ({ scope: 'Review plan', delivery: 'Review & publish' }[kind] || 'Molecule');
 }
 // SYNC_TONES are the pill tones of the server's sync buckets.
 const SYNC_TONES = { running: 'running', decision: 'needs', blocked: 'blocked', 'draft-pr': 'running', merged: 'merged' };
@@ -154,8 +154,9 @@ function renderHeader(d) {
   renderBack();
   setAttr($('#mv-state'), 'data-tone', sync ? SYNC_TONES[sync.bucket] || 'neutral' : TONES.includes(s.tone) ? s.tone : 'neutral');
   setText($('#mv-state-text'), pillText(d));
-  const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number : '';
-  const url = d.issue && typeof d.issue.url === 'string' && ISSUE_URL.test(d.issue.url) ? d.issue.url : '';
+  // A keyed Issue links to its recorded tracker URL, a GitHub Issue to GitHub.
+  const number = issueLabel(d.issue);
+  const url = issueURL(d.issue);
   c.issue.hidden = !url;
   c.issueText.hidden = Boolean(url) || !number;
   if (url) setAttr(c.issue, 'href', url);
@@ -181,7 +182,7 @@ function renderIssueSync(d) {
   const s = syncOf(d.id), line = $('#mv-sync');
   line.hidden = !state.sync;
   if (!state.sync) return;
-  const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number : 'Issue';
+  const number = issueLabel(d.issue) || 'Issue';
   const recorded = d.issue && RECORDED_STATE.test(d.issue.state || '') ? d.issue.state : 'OPEN';
   const at = dayText(d.startedAt);
   setText($('#mv-sync-issue'), s && s.checked

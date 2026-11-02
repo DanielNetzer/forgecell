@@ -23,7 +23,9 @@ import (
 // Fetch Metadata and one strict JSON object):
 //
 //	POST /api/runs                 {"issue"}                  → molecule.RunIntake (intake) as a job
+//	POST /api/runs                 {"key"}                    → molecule.RunIntakeKeyed for a tracker key (drive_keyed.go)
 //	GET  /api/runs/{issue}                                    → the job and its ledger read-back
+//	GET  /api/runs?key=KEY                                    → a keyed job and its ledger read-back
 //	POST /api/loop/start           {"select","maxConcurrent"} → molecule.RunLoop, one per Lab
 //	POST /api/loop/stop            {}                         → closes Drain; in-flight work finishes
 //	GET  /api/loop                                            → this UI's loop, its last report and any Lab loop
@@ -87,8 +89,11 @@ func driveRoute(path string) (id, action string, ok bool) {
 	return "", "", false
 }
 
+// runRequest is Start intake: an Issue number, or for a Lab whose Issues are
+// tracker keys, the Key (drive_keyed.go). An empty Key keeps the numeric path.
 type runRequest struct {
-	Issue int64 `json:"issue"`
+	Issue int64  `json:"issue"`
+	Key   string `json:"key"`
 }
 
 type loopRequest struct {
@@ -133,6 +138,13 @@ func (h *handler) drive(w http.ResponseWriter, r *http.Request, id, action strin
 	}
 	switch action {
 	case "run":
+		if run.Key != "" {
+			h.startKeyedRun(r.Context(), w, run)
+			return
+		}
+		if h.refuseNumericOnKeyedLab(w, run.Issue) {
+			return
+		}
 		if h.refuseIssueNotOpen(r.Context(), w, run.Issue) {
 			return
 		}
@@ -348,9 +360,11 @@ func (h *handler) moleculeState(id string) MoleculeState {
 
 // RunJobView is GET /api/runs/{issue} and every accepted run response.
 // Committed comes only from the ledger read-back: a ledger for the Issue started
-// by this job exists.
+// by this job exists. Key is a keyed run's tracker key (Issue is then 0); it is
+// absent for a numeric run, whose view is unchanged.
 type RunJobView struct {
 	Issue     int64         `json:"issue"`
+	Key       string        `json:"key,omitempty"`
 	State     string        `json:"state"`
 	Category  string        `json:"category,omitempty"`
 	Error     string        `json:"error,omitempty"`
@@ -461,6 +475,10 @@ func (h *handler) runner(record molecule.Record, cancel bool) string {
 			}
 		}
 	}
+	// A keyed record is matched by its raw Key, never by the display text.
+	if h.keyedRunner(record, owned) {
+		return RunnerRun
+	}
 	if h.loop.works(record) {
 		return RunnerLoop
 	}
@@ -508,7 +526,11 @@ func (l *driveLoop) works(record molecule.Record) bool {
 	if !l.running {
 		return false
 	}
-	alone, ok := l.pass[issueKey(record.Issue.Repo, record.Issue.Number)]
+	pass := issueKey(record.Issue.Repo, record.Issue.Number)
+	if record.Issue.IsKeyed() {
+		pass = keyedPassKey(record.Issue.Repo, record.Issue.Key)
+	}
+	alone, ok := l.pass[pass]
 	return ok && !alone[record.ID]
 }
 

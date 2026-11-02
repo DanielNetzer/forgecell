@@ -4,7 +4,7 @@
 // performs in each Atom role, a weekly chart and where the time goes. Every
 // value comes from GET /api/analytics; a missing one reads "not reported",
 // never 0, and every total carries its coverage.
-import { $, el, fill, add, state, ctx, LANES, ALL_LANES, RETIRED, notRecorded, molecules, live, money, wholeNumber, plural, hoursText, queryParam, setQueryParam, keepFocus } from './core.js';
+import { $, el, fill, add, state, ctx, LANES, ALL_LANES, RETIRED, notRecorded, issueLabel, molecules, live, money, wholeNumber, plural, hoursText, queryParam, setQueryParam, keepFocus } from './core.js';
 
 function renderOverview() {
   const all = molecules().filter(live);
@@ -15,7 +15,7 @@ function renderOverview() {
   const waiting = all.filter((m) => m.lane === 'decision');
   fill($('#review-queue'), (waiting.length
     ? waiting.slice(0, 5).map((m) => el('button', { type: 'button', class: 'review-row', dataset: { review: m.id }, onclick: () => ctx.openMolecule(m.id) },
-      el('span', { class: 'review-id' }, '#' + m.number), el('strong', null, m.title || m.id), el('span', null, notRecorded(m.phase)), el('span', { 'aria-hidden': 'true' }, '→')))
+      el('span', { class: 'review-id' }, issueLabel(m)), el('strong', null, m.title || m.id), el('span', null, notRecorded(m.phase)), el('span', { 'aria-hidden': 'true' }, '→')))
     : [el('p', { class: 'scope-note' }, 'No Molecules wait at a human gate.')]));
   if (waiting.length > 5) add($('#review-queue'), el('p', { class: 'scope-note' }, (waiting.length - 5) + ' more under Needs my decision.'));
   fill($('#outcome-bars'), Object.entries(LANES).map(([id, lane]) => {
