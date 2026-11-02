@@ -11,7 +11,7 @@ import { reasonText, refusalText } from './core-gates.js';
 // where names the form (run or loop) whose status shows the pending note and
 // whose inline error shows the last message; it changes only what is displayed
 // where. announce moves focus to that error once, when a message is set.
-const drive = { panel: null, controls: null, loaded: false, pending: false, where: 'run', message: '', announce: false, mode: 'milestone', modeChosen: false, defaultSelect: null, runIssue: null, runKey: null, keyed: false, keyPattern: '', run: null, loop: null, timer: null, token: 0, closed: null, closedReport: null, closedConfirm: false };
+const drive = { panel: null, controls: null, loaded: false, pending: false, where: 'run', message: '', announce: false, mode: 'milestone', modeChosen: false, defaultSelect: null, runIssue: null, runKey: null, keyed: false, keyPattern: '', run: null, loop: null, timer: null, token: 0, closed: null, closedReport: null, closedConfirm: false, loopKeyed: false, selectors: null, keyedSelect: 'oldest' };
 
 // driveMessage shows text as the inline error of the form drive.where names,
 // and moves focus to it.
@@ -186,7 +186,8 @@ function closedText() {
 // once, when it started and what it has in flight.
 function labLoopText(lab) {
   if (!lab || !lab.running) return null;
-  const inFlight = (Array.isArray(lab.inFlight) ? lab.inFlight : []).concat((Array.isArray(lab.intake) ? lab.intake : []).map((i) => 'issue #' + notRecorded(i.issue) + ' · planning'));
+  // A keyed loop's intake entry is named by its key (issueLabel).
+  const inFlight = (Array.isArray(lab.inFlight) ? lab.inFlight : []).concat((Array.isArray(lab.intake) ? lab.intake : []).map((i) => (i.key ? 'issue ' + issueLabel({ key: i.key }) + ' · planning' : 'issue #' + notRecorded(i.issue) + ' · planning')));
   return el('div', { class: 'gate-job' },
     el('strong', null, notRecorded(lab.ownerText) + (lab.maxConcurrent ? ' · ' + lab.maxConcurrent + ' at once' : '') + (lab.startedAt ? ' · started ' + lab.startedAt : '')),
     inFlight.length ? el('ul', { class: 'diagnostics' }, inFlight.map((x) => el('li', null, x))) : el('p', { class: 'scope-note' }, 'Nothing in flight.'),
@@ -203,12 +204,45 @@ const LOOP_MODES = {
 };
 function loopSelector(mode, value) { return mode === 'oldest' ? 'oldest' : mode + ':' + String(value).trim(); }
 
+// A keyed Lab's Run-the-loop choices are the tracker's described selectors,
+// served by GET /api/loop, instead of LOOP_MODES: one ending in ':' takes the
+// value field, as label:NAME does. The server admits only a described one.
+function keyedSelectors(loop) {
+  const list = loop && Array.isArray(loop.selectors) ? loop.selectors.filter((s) => typeof s === 'string' && s && s !== ':' && s.length <= 200 && !/[\u0000-\u001f\u007f]/.test(s)) : [];
+  return (list.length ? list : ['oldest']).slice(0, 32);
+}
+function showKeyedModes(loop) {
+  const c = drive.controls;
+  const keyed = Boolean(loop && loop.keyed === true);
+  const list = keyed ? keyedSelectors(loop) : null;
+  if (keyed === drive.loopKeyed && JSON.stringify(list) === JSON.stringify(drive.selectors)) return;
+  drive.loopKeyed = keyed;
+  drive.selectors = list;
+  if (!keyed) { fill(c.modeGroup, c.modes); showMode(drive.mode); return; }
+  fill(c.modeGroup, list.map((s) => el('button', { type: 'button', class: 'seg', 'aria-pressed': 'false', dataset: { select: s }, onclick: () => { drive.modeChosen = true; showKeyedSelect(s); } }, s.endsWith(':') ? s.slice(0, -1) : s)));
+  showKeyedSelect(list.includes(drive.keyedSelect) ? drive.keyedSelect : list.includes('oldest') ? 'oldest' : list[0]);
+}
+function showKeyedSelect(s) {
+  const c = drive.controls;
+  drive.keyedSelect = s;
+  for (const b of c.modeGroup.children) b.setAttribute('aria-pressed', String(b.dataset.select === s));
+  c.valueField.hidden = !s.endsWith(':');
+  setText(c.valueLabel, 'Value');
+  c.value.placeholder = '';
+}
+
 // submitLoop is the Run-the-loop form's submit handler, so Enter submits. The
 // CSP sets form-action 'none': the form never navigates, it posts through
 // startLoop exactly as before.
 function submitLoop(e) {
   e.preventDefault();
   const c = drive.controls;
+  if (drive.loopKeyed) {
+    const s = drive.keyedSelect, value = c.value.value.trim();
+    if (s.endsWith(':') && !value) { if (!drive.pending) drive.where = 'loop'; driveMessage('Enter a value for ' + s + ', or choose another selector.'); return; }
+    startLoop(s.endsWith(':') ? s + value : s, c.max.value);
+    return;
+  }
   if (drive.mode !== 'oldest' && !c.value.value.trim()) {
     if (!drive.pending) drive.where = 'loop';
     driveMessage('Enter a ' + LOOP_MODES[drive.mode].field.toLowerCase() + ', or choose Oldest.');
@@ -236,6 +270,7 @@ function chooseMode(mode) {
 // operator chooses or types a selector.
 function applyDefaultSelect(loop) {
   const c = drive.controls;
+  if (drive.loopKeyed) return;
   if (!c || drive.modeChosen || !loop || typeof loop.defaultSelect !== 'string' || loop.defaultSelect === drive.defaultSelect) return;
   drive.defaultSelect = loop.defaultSelect;
   if (loop.defaultSelect === 'oldest') { showMode('oldest'); return; }
@@ -246,7 +281,7 @@ function applyDefaultSelect(loop) {
 
 function showMode(mode) {
   const c = drive.controls, m = LOOP_MODES[mode];
-  if (!c || !m) return;
+  if (!c || !m || drive.loopKeyed) return;
   drive.mode = mode;
   for (const b of c.modes) b.setAttribute('aria-pressed', String(b.dataset.drive === 'mode-' + mode));
   c.valueField.hidden = mode === 'oldest';
@@ -316,6 +351,8 @@ function ensureDrive() {
       el('p', { class: 'drive-help' }, 'Intake plans one Issue and stops at the scope gate for your approval.')),
     closedForm);
   fill($('#drive-slot'), drive.panel);
+  // The scope group holds LOOP_MODES, or a keyed Lab's selectors (showKeyedModes).
+  drive.controls.modeGroup = modes[0].parentNode;
   showMode(drive.mode);
 }
 
@@ -349,7 +386,7 @@ function loopText(loop) {
     el('strong', null, 'Loop · ' + notRecorded(loop.state) + (loop.select ? ' · select ' + loop.select : '') + (loop.maxConcurrent ? ' · ' + loop.maxConcurrent + ' at once' : '')),
     status ? el('p', { class: 'scope-note' }, status) : null,
     loop.error ? el('p', { class: 'scope-note' }, (loop.category ? loop.category + ': ' : '') + loop.error + '.' + reasonText(loop)) : null,
-    items.length ? el('ul', { class: 'diagnostics' }, items.slice(0, 20).map((i) => el('li', null, '#' + notRecorded(i.issue) + ' · ' + notRecorded(i.state) + (i.started ? ' · started intake' : '') + (i.approved ? ' · approved by policy' : '')))) : null);
+    items.length ? el('ul', { class: 'diagnostics' }, items.slice(0, 20).map((i) => el('li', null, notRecorded(issueLabel({ key: i.key, number: i.issue })) + ' · ' + notRecorded(i.state) + (i.started ? ' · started intake' : '') + (i.approved ? ' · approved by policy' : '')))) : null);
 }
 
 function renderDrive() {
@@ -366,6 +403,7 @@ function renderDrive() {
   // The message is the inline error of the form it belongs to, linked from its
   // inputs by aria-describedby; focus moves to it once when it is set.
   if (loop && typeof loop.defaultSelectNote === 'string' && loop.defaultSelectNote) setText(c.selectNote, loop.defaultSelectNote);
+  if (loop) showKeyedModes(loop);
   applyDefaultSelect(loop);
   c.closedForm.hidden = !(state.lab && Array.isArray(state.lab.actions) && state.lab.actions.includes('retire closed Issues'));
   c.closedList.disabled = drive.pending;

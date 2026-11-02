@@ -479,6 +479,10 @@ func (h *handler) runner(record molecule.Record, cancel bool) string {
 	if h.keyedRunner(record, owned) {
 		return RunnerRun
 	}
+	// A keyed loop's pass is read from the Lab's loop status when it is asked.
+	if record.Issue.IsKeyed() {
+		h.observeKeyedPass()
+	}
 	if h.loop.works(record) {
 		return RunnerLoop
 	}
@@ -606,6 +610,9 @@ type driveLoop struct {
 	freed func()
 	// pass is what the running loop's current pass works on (observePass).
 	pass loopPass
+	// keyed marks a keyed loop (LoopOptions.AllowKeyed): its pass is read from
+	// the Lab's loop status (observeKeyedPass).
+	keyed bool
 }
 
 // start refuses while runsBusy reports a UI run job running; the check and the
@@ -638,6 +645,10 @@ func (l *driveLoop) start(o molecule.LoopOptions, runsBusy func() bool, run func
 	o.Drain, o.Work, o.Marker = drained, ctx, marker
 	l.running, l.drain, l.drained, l.cancel, l.done = true, false, drained, cancel, done
 	l.selector, l.max, l.report, l.token, l.pass = o.Select.String(), o.MaxConcurrent, nil, marker.Token(), nil
+	// A keyed loop's selector is the tracker's raw one; Select is unused.
+	if l.keyed = o.AllowKeyed; l.keyed {
+		l.selector = o.TrackerSelect
+	}
 	l.state, l.category, l.message, l.reason = "running", "", "", ""
 	freed := l.freed
 	go func() {
@@ -715,6 +726,10 @@ func (h *handler) stopWork(grace time.Duration) {
 }
 
 func (h *handler) startLoop(w http.ResponseWriter, req loopRequest) {
+	if f, keyed := h.keyedFormula(h.opts.LabDir); keyed {
+		h.startKeyedLoop(w, req, f)
+		return
+	}
 	selector, err := intake.ParseSelector(req.Select)
 	if len(req.Select) > maxSelectBytes || !validTitle(req.Select) || err != nil {
 		h.refuseGate(w, http.StatusBadRequest, "invalid", "give select as oldest, label:NAME or milestone:TITLE")
@@ -739,7 +754,12 @@ func (h *handler) startLoop(w http.ResponseWriter, req loopRequest) {
 		h.observePass(eligible)
 		return listed, err
 	}
-	switch err := h.loop.start(o, func() bool { return h.jobs.running("run") }, h.runLoop); {
+	h.loopStarted(w, h.loop.start(o, func() bool { return h.jobs.running("run") }, h.runLoop))
+}
+
+// loopStarted answers a loop start, numeric or keyed, with the same texts.
+func (h *handler) loopStarted(w http.ResponseWriter, err error) {
+	switch {
 	case errors.Is(err, errLoopBusy):
 		h.refuseGate(w, http.StatusConflict, "busy", "a loop is already running in this Lab UI; this submission was not started")
 	case errors.Is(err, errRunsBusy):
@@ -753,6 +773,42 @@ func (h *handler) startLoop(w http.ResponseWriter, req loopRequest) {
 	default:
 		h.json(w, http.StatusAccepted, h.loopView())
 	}
+}
+
+// startKeyedLoop starts the keyed loop of a tracker-plugin Lab, as forgecell
+// loop does for one: the raw select (oldest when empty) must be a selector the
+// tracker described (issuesKeyedAdmits), and the engine lists and reads Issues
+// through the plugin itself, each Molecule recording its own calls; Tracker is
+// left unset for that reason. The refusals that need no plugin come first.
+func (h *handler) startKeyedLoop(w http.ResponseWriter, req loopRequest, f keyedActiveFormula) {
+	selector := req.Select
+	if selector == "" {
+		selector = intake.SelectOldest
+	}
+	if !issuesKeyedSelectorText(selector) {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "give select as one of the tracker's selectors, one line of at most 200 characters; nothing was started")
+		return
+	}
+	if req.MaxConcurrent < 1 || req.MaxConcurrent > maxLoopConcurrent {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "give maxConcurrent from 1 to "+strconv.Itoa(maxLoopConcurrent))
+		return
+	}
+	if h.sourceMissing(w) || h.belowFloor(w) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(h.jobs.ctx, keyedDescribeTimeout)
+	described, ok := h.issuesKeyedSelectors(ctx, f, true)
+	cancel()
+	if !ok {
+		h.refuseGate(w, http.StatusConflict, "tracker", "the tracker plugin could not describe its selectors; nothing was started")
+		return
+	}
+	if !issuesKeyedAdmits(described, selector) {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "the tracker does not describe this selector; nothing was started")
+		return
+	}
+	o := molecule.LoopOptions{Template: molecule.Options{LabDir: h.opts.LabDir, SourceRoot: h.opts.SourceRoot, Resources: h.opts.Resources}, MaxConcurrent: req.MaxConcurrent, AllowKeyed: true, TrackerSelect: selector}
+	h.loopStarted(w, h.loop.start(o, func() bool { return h.jobs.running("run") }, h.runLoop))
 }
 
 // stopLoop drains only the loop this UI started. A loop started in a terminal or
@@ -816,7 +872,15 @@ type LoopView struct {
 	// selector and its plain explanation.
 	DefaultSelect     string `json:"defaultSelect"`
 	DefaultSelectNote string `json:"defaultSelectNote"`
+	// Keyed marks a tracker-plugin Lab, whose Start loop form offers the
+	// tracker's described Selectors (absent until described) instead of the
+	// GitHub modes. Both are absent for a GitHub Lab, whose view is unchanged.
+	Keyed     bool     `json:"keyed,omitempty"`
+	Selectors []string `json:"selectors,omitempty"`
 }
+
+// keyedOldestNote explains a keyed Lab's default selector.
+const keyedOldestNote = "Oldest: the tracker's oldest open Issues first."
 
 // LabLoopView is the Lab's loop marker as molecule.ReadLoopStatus read it.
 // State is running, not-running, stale (a status left by a loop that ended) or
@@ -918,9 +982,11 @@ func activeMilestoneSelect(snap *forgesync.Snapshot) (string, string) {
 	return intake.SelectMilestone + ":" + best, "Milestone " + best + ": the open milestone with the most open Issues (" + strconv.Itoa(bestCount.n) + "). " + DefaultOldestNote
 }
 
-// LabLoopIntakeView is an Issue in flight by number.
+// LabLoopIntakeView is an Issue in flight by number, or for a keyed loop by its
+// tracker Key (Issue is then 0); Key is absent for a GitHub Issue.
 type LabLoopIntakeView struct {
 	Issue int64  `json:"issue"`
+	Key   string `json:"key,omitempty"`
 	Phase string `json:"phase"`
 }
 
@@ -979,6 +1045,9 @@ func labLoopView(lab molecule.LoopMarkerState, ownToken string, stoppable bool) 
 		}
 		if in.Issue > 0 && in.Phase == molecule.LoopIntakePlanning {
 			v.Intake = append(v.Intake, LabLoopIntakeView{Issue: in.Issue, Phase: in.Phase})
+		} else if key := issuesKeyedKeyText(in.Key); in.Issue == 0 && key != "" && in.Phase == molecule.LoopIntakePlanning {
+			// A keyed loop's intake entry is shown by its key.
+			v.Intake = append(v.Intake, LabLoopIntakeView{Key: key, Phase: in.Phase})
 		}
 	}
 	v.InFlightTruncated = v.InFlightTruncated || s.InFlightTruncated
@@ -998,6 +1067,8 @@ type LoopReportView struct {
 type LoopItemView struct {
 	Repository string `json:"repository,omitempty"`
 	Issue      int64  `json:"issue"`
+	// Key is a keyed loop item's tracker key (Issue is then 0).
+	Key        string `json:"key,omitempty"`
 	MoleculeID string `json:"moleculeId,omitempty"`
 	State      string `json:"state,omitempty"`
 	Status     string `json:"status,omitempty"`
@@ -1018,6 +1089,16 @@ func checked(s string) string {
 // loopView copies the bounded, validated parts of the report; reasons, which
 // can name local paths and lock files, are never served.
 func (h *handler) loopView() LoopView {
+	// A keyed Lab's selectors are the cached describe, never read per poll; a
+	// Lab that can drive describes once in the background.
+	f, keyed := h.keyedFormula(h.opts.LabDir)
+	var selectors []string
+	if keyed {
+		var tried bool
+		if selectors, tried = h.keyedSelectors.cached(f.identity); !tried && h.opts.SourceRoot != "" {
+			h.issuesKeyedSelectorsInBackground(f)
+		}
+	}
 	l := h.loop
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1031,6 +1112,10 @@ func (h *handler) loopView() LoopView {
 	}
 	v := LoopView{State: l.state, Category: l.category, Error: l.message, Reason: l.reason, Select: l.selector, MaxConcurrent: l.max, Limit: maxLoopConcurrent, LabLoop: labLoopView(lab, own, l.running && !l.drain)}
 	v.DefaultSelect, v.DefaultSelectNote = activeMilestoneSelect(h.forge.currentSnapshot(h.syncRepository()))
+	if keyed {
+		v.Keyed, v.Selectors = true, append([]string(nil), selectors...)
+		v.DefaultSelect, v.DefaultSelectNote = intake.SelectOldest, keyedOldestNote
+	}
 	if v.State == "" {
 		v.State = "idle"
 	}
@@ -1042,7 +1127,7 @@ func (h *handler) loopView() LoopView {
 					rv.Truncated = true
 					break
 				}
-				rv.Items = append(rv.Items, LoopItemView{Repository: repository(item.Repository), Issue: item.Issue, MoleculeID: checked(item.MoleculeID), State: stateText(item.State), Status: stateText(item.Status), Phase: stateText(item.Phase), Started: item.Started, Approved: item.Approved, Failed: item.Failed})
+				rv.Items = append(rv.Items, LoopItemView{Repository: repository(item.Repository), Issue: item.Issue, Key: issuesKeyedKeyText(item.Key), MoleculeID: checked(item.MoleculeID), State: stateText(item.State), Status: stateText(item.Status), Phase: stateText(item.Phase), Started: item.Started, Approved: item.Approved, Failed: item.Failed})
 			}
 		}
 		v.Report = rv

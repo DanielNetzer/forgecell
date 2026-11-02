@@ -52,10 +52,11 @@ func (h *handler) syncStates(w http.ResponseWriter, r *http.Request) {
 	for _, s := range work.list.Molecules {
 		m, ok := work.inputs[s.ID]
 		var issue *forgesync.Issue
-		if ok && strings.EqualFold(s.Repository, repo) {
+		if ok && strings.EqualFold(s.Repository, repo) && s.Key == "" && s.Number > 0 {
 			issue = snap.Issue(s.Number)
 		} else {
-			// Another repository's Molecule is never checked against this one.
+			// Another repository's Molecule is never checked against this one, and
+			// a keyed Molecule (Number 0) is never GitHub Issue 0.
 			m = forgesync.Molecule{ID: s.ID, Lane: s.Lane, StartedAt: s.StartedAt}
 		}
 		d := forgesync.ForMolecule(issue, prs, m)

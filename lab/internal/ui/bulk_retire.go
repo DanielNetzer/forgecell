@@ -137,6 +137,10 @@ func (h *handler) retireClosedList(r *http.Request) (RetireClosedView, error) {
 		if !strings.EqualFold(s.Repository, repo) || s.Lane == LaneRetired || active(s.Status) || !moleculeID.MatchString(s.ID) {
 			continue
 		}
+		// A keyed Molecule (Key set, Number 0) is never GitHub Issue 0.
+		if s.Key != "" || s.Number < 1 {
+			continue
+		}
 		issue := res.Snapshot.Issue(s.Number)
 		if issue == nil || !issue.Found || issue.State != forgesync.IssueClosed {
 			continue

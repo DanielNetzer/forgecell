@@ -221,6 +221,13 @@ type handler struct {
 	runKeyedScope func(context.Context, molecule.Options, string) (molecule.Record, error)
 	keyedFormula  func(string) (keyedActiveFormula, bool)
 	keyedPatterns keyedDescribeCache
+	// issuesKeyed caches a tracker-plugin Lab's open Issue listing and
+	// keyedSelectors its tracker's described loop selectors (issues_keyed.go);
+	// issuesKeyedPoll reads the listing's cache time from the pinned manifest.
+	// Tests may replace issuesKeyedPoll.
+	issuesKeyed     issuesKeyedCache
+	keyedSelectors  issuesKeyedSelectorCache
+	issuesKeyedPoll func(lab string, f formula.Formula) time.Duration
 	// listIssues is the loop's open Issue listing, the engine's default; the UI
 	// wraps it to learn which Molecules each loop pass works on. Tests replace it.
 	listIssues func(context.Context, string, intake.Selector) (intake.OpenIssues, error)
@@ -365,7 +372,7 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, trackerFor: mcpadapter.TrackerFor, runKeyedIssue: molecule.RunIntakeKeyed, runKeyedScope: molecule.RunKeyed, keyedFormula: loadKeyedFormula, retire: molecule.Retire, listIssues: tracker.GitHub{}.List, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
+	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, trackerFor: mcpadapter.TrackerFor, runKeyedIssue: molecule.RunIntakeKeyed, runKeyedScope: molecule.RunKeyed, keyedFormula: loadKeyedFormula, issuesKeyedPoll: issuesKeyedPoll, retire: molecule.Retire, listIssues: tracker.GitHub{}.List, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
