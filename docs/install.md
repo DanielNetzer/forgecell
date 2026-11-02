@@ -23,7 +23,8 @@ The four words you will see everywhere:
 
 You need Git, the GitHub CLI signed in (`gh auth login`), and one coding agent signed in
 with its own CLI: Claude Code, Codex or Cursor. Forgecell never asks for those
-credentials. GitLab and Jira are not supported yet (post-v1, #259).
+credentials. GitLab and Jira are available in the source on `main` and not yet in a
+release.
 
 1. **Install.** Run the command above. Make sure `~/.local/bin` is on your PATH; the
    installer does not edit shell profiles.
@@ -85,8 +86,49 @@ credentials. GitLab and Jira are not supported yet (post-v1, #259).
      weekly chart. A value the agent did not report reads "not reported", never 0.
 
 Learning is not driven from the UI yet: proposing and approving Formula suggestions from
-finished ledgers still uses `forgecell learn` and `forgecell suggestion`. Outside
-reviewers are not supported yet (post-v1, #260).
+finished ledgers still uses `forgecell learn` and `forgecell suggestion`.
+
+### Outside reviewers and fix rounds
+
+Outside reviewers (review bots and other reviewer plugins) are available in the source on
+`main`, not yet in a release. Declare them in the Formula under `reviewers:`, each with
+its plugin and the `autoFix` level that decides which findings a fix round takes on its
+own, and pin the plugin under `plugins:` (see the
+[review bot comments plugin](../lab/plugins/forgecomments/README.md) for an example):
+
+```yaml
+reviewers:
+  - plugin: forgecomments
+    autoFix: high
+```
+
+After a Molecule's draft is published, work its findings from the CLI or from the
+Molecule view's **Findings** tab, which shows only for a Formula that declares reviewers:
+
+```sh
+forgecell findings MOLECULE_ID --collect                  # read every reviewer once for the current head
+forgecell findings MOLECULE_ID --propose [--include FP]   # propose the next fix round
+forgecell findings MOLECULE_ID --dismiss FP --reason "…"  # leave a finding out (--undismiss FP undoes it)
+forgecell findings MOLECULE_ID --push                     # preview the verified fix round's push
+forgecell findings MOLECULE_ID --push --approve DIGEST    # push exactly that preview
+```
+
+The Findings tab shows the same steps: Collect now, the open findings by severity with
+Dismiss… and a box to include a finding below the `autoFix` level, Propose a fix round,
+the pending fix round with Push to the change request, the rounds pushed and the
+dismissed findings. A proposed fix round is a new version of the plan, which you approve
+on the Plan tab as any other; it is then coded and verified like the first change.
+
+The push gate: a push needs no extra confirmation only when Forgecell's review Atom is
+green on the exact change and its acceptance was verified independently. Otherwise the
+push waits for one explicit confirmation (`--confirm`, or the confirmation in the
+Findings tab).
+
+The limits: at most 3 fix rounds per change request; a finding that comes back after a
+fix round addressed it is not proposed again, and Forgecell stops and asks you. Nothing
+ever merges the change request or marks it ready for review. GitHub Labs can't serve
+review comments to reviewer plugins in v1, so a plugin that reads them, such as the
+review bot comments plugin, needs a plugin forge such as GitLab.
 
 ### Try the demo first
 
