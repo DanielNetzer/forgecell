@@ -52,6 +52,22 @@ export function externalLink(url, pattern, label) {
   return el('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, label);
 }
 
+// A keyed Issue (a tracker plugin's, such as ENG-123) has no GitHub number: its
+// link is the recorded https tracker URL the server served, checked again here.
+export const TRACKER_URL = /^https:\/\/[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?(?:[/?#][^\s"<>\\^`{|}]{0,2000})?$/;
+// issueLabel is how an Issue is named: its tracker key when it has one,
+// otherwise '#' + its GitHub number, or '' when neither was recorded.
+export function issueLabel(m) {
+  if (m && typeof m.key === 'string' && m.key) return m.key;
+  return m && Number.isInteger(m.number) ? '#' + m.number : '';
+}
+// issueURL is the recorded Issue link, or '': GitHub's for a numbered Issue,
+// the tracker's for a keyed one.
+export function issueURL(issue) {
+  const url = issue && typeof issue.url === 'string' ? issue.url : '';
+  return url && (issue.key ? TRACKER_URL : ISSUE_URL).test(url) ? url : '';
+}
+
 // One lane per Molecule, assigned by the server; Paused has no engine semantics.
 export const LANES = {
   running: { label: 'Running', short: 'running', symbol: '', cls: 'working' },

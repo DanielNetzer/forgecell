@@ -1,7 +1,7 @@
 // ---- Work: grid, filters and search -------------------------------------------
 // The contribution-style Molecule grid under Work, its lane bar, search and
 // tooltip. A cell opens the Molecule view, which ctx.openMolecule owns.
-import { $, el, fill, add, state, LANES, RETIRED, notRecorded, molecules, laneOf, live, laneLabel, cells, syncOf, inHistory, historyFromURL, historyRow, followHistory, syncCountsText } from './core.js';
+import { $, el, fill, add, state, LANES, RETIRED, notRecorded, issueLabel, molecules, laneOf, live, laneLabel, cells, syncOf, inHistory, historyFromURL, historyRow, followHistory, syncCountsText } from './core.js';
 
 // The lane bar. Paused is not a filter: the engine has no pause semantics.
 const FILTERS = [
@@ -23,7 +23,7 @@ function matches(m) {
   const inLane = state.filter === 'all' ? live(m) : m.lane === state.filter;
   const collapsed = state.filter === 'all' && !historyFromURL() && inHistory(m);
   const terms = state.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const haystack = ('#' + m.number + ' ' + (m.title || '') + ' ' + (m.formulaId || '') + ' ' + m.id).toLowerCase();
+  const haystack = (issueLabel(m) + ' ' + (m.title || '') + ' ' + (m.formulaId || '') + ' ' + m.id).toLowerCase();
   return inLane && !collapsed && terms.every((term) => haystack.includes(term));
 }
 
@@ -43,7 +43,7 @@ function renderGrid() {
     const button = el('button', {
       type: 'button', class: 'cube-button ' + lane.cls, dataset: { id: m.id },
       'aria-pressed': String(m.id === state.selectedId),
-      'aria-label': 'Molecule ' + m.id + ': #' + m.number + ' ' + (m.title || 'untitled') + ', ' + statusLabel(m),
+      'aria-label': 'Molecule ' + m.id + ': ' + issueLabel(m) + ' ' + (m.title || 'untitled') + ', ' + statusLabel(m),
       tabindex: '-1',
     }, el('span', { class: 'micro-cube', 'aria-hidden': 'true' }, lane.symbol));
     button.style.setProperty('--delay', '-' + ((i % 9) * 0.47).toFixed(2) + 's');
@@ -141,7 +141,7 @@ function showTip(button) {
   if (tipAnchor) tipAnchor.removeAttribute('aria-describedby');
   tipAnchor = button;
   fill(tip,
-    el('span', { class: 'label' }, 'MOLECULE #' + m.number + ' · ' + m.id),
+    el('span', { class: 'label' }, 'MOLECULE ' + issueLabel(m) + ' · ' + m.id),
     el('strong', null, m.title || 'Untitled'),
     el('dl', null, el('dt', null, 'Current Atom'), el('dd', null, m.currentAtom || 'None'), el('dt', null, 'Lane'), el('dd', null, laneOf(m).label), el('dt', null, 'Status'), el('dd', null, notRecorded(m.status) + (m.phase ? ' · ' + m.phase : ''))));
   tip.hidden = false;

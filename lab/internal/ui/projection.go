@@ -12,6 +12,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -207,8 +209,12 @@ type IssueView struct {
 	Body      string `json:"body"`
 	State     string `json:"state"`
 	UpdatedAt string `json:"updatedAt"`
-	// URL is set only when the recorded URL names this exact Issue on GitHub.
+	// URL is set only when the recorded URL names this exact Issue on GitHub, or
+	// for a keyed Issue when it is the recorded https tracker URL.
 	URL string `json:"url,omitempty"`
+	// Key is a keyed Issue's tracker key as display text (Number is then 0); it
+	// is absent for a GitHub Issue.
+	Key string `json:"key,omitempty"`
 }
 
 type WorkspaceView struct {
@@ -377,6 +383,28 @@ func issueURL(issue molecule.Issue) string {
 		return ""
 	}
 	return fmt.Sprintf("https://github.com/%s/%s/issues/%d", ref.Owner, ref.Repo, ref.Number)
+}
+
+// keyedIssueURL is a keyed Issue's recorded tracker URL when it is an absolute
+// https URL with a host, no user information, no space or control character
+// and nothing redaction would change, bounded; "" otherwise. A ledger is
+// untrusted, so nothing else is linked.
+func keyedIssueURL(x redactor, issue molecule.Issue) string {
+	raw := issue.URL
+	if raw == "" || len(raw) > maxKeyedURLBytes || !utf8.ValidString(raw) || strings.IndexFunc(raw, func(r rune) bool { return r <= ' ' || r == 0x7f || unicode.IsControl(r) || unicode.IsSpace(r) }) >= 0 {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || x.text(raw) != raw {
+		return ""
+	}
+	return raw
+}
+
+// keyedDisplayKey is a keyed Issue's key as Summary.Key shows it: redacted,
+// bounded and control-free display text, never matched against.
+func keyedDisplayKey(x redactor, issue molecule.Issue) string {
+	return harness.ReviewDisplayText(x.text(issue.DisplayKey()), uiIssueKeyRunes)
 }
 
 // redactor replaces the record's local directories, and the user's home, in free
@@ -594,7 +622,7 @@ func summarize(lab string, r molecule.Record, read receiptReader) Summary {
 	s := Summary{ID: r.ID, Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), FormulaID: r.FormulaID, Status: r.Status, Phase: phase(r), CurrentAtom: currentAtom(r), StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Lane: Lane(r.Status, phase(r), d)}
 	if r.Issue.IsKeyed() {
 		// A ledger is untrusted: the key is shown redacted, bounded and control-free.
-		s.Key = harness.ReviewDisplayText(x.text(r.Issue.DisplayKey()), uiIssueKeyRunes)
+		s.Key = keyedDisplayKey(x, r.Issue)
 	}
 	s.Activity = Activity(s.Lane, molecule.QueuedForChecks(r))
 	if view != nil {
@@ -620,7 +648,13 @@ func project(lab string, r molecule.Record, read receiptReader, withYAML bool) D
 		out.Retired = &RetiredView{At: stateText(rt.At), PriorStatus: stateText(rt.PriorStatus), Reason: harness.ReviewDisplayText(x.text(rt.Reason), molecule.MaxRetireReason)}
 	}
 	out.Issue = IssueView{Repository: r.Issue.Repo, Number: r.Issue.Number, Title: x.text(r.Issue.Title), Body: x.text(r.Issue.Body), State: r.Issue.State, UpdatedAt: r.Issue.UpdatedAt, URL: issueURL(r.Issue)}
-	if r.Issue.URL != "" && out.Issue.URL == "" {
+	if r.Issue.IsKeyed() {
+		// A keyed Issue is not on GitHub: its link is the recorded tracker URL.
+		out.Issue.Key, out.Issue.URL = keyedDisplayKey(x, r.Issue), keyedIssueURL(x, r.Issue)
+		if r.Issue.URL != "" && out.Issue.URL == "" {
+			out.Diagnostics = append(out.Diagnostics, "recorded Issue URL is not an https link to the tracker; no link is shown")
+		}
+	} else if r.Issue.URL != "" && out.Issue.URL == "" {
 		out.Diagnostics = append(out.Diagnostics, "recorded Issue URL does not name this Issue on GitHub; no link is shown")
 	}
 	out.Workspace = WorkspaceView{Repository: r.Workspace.Repo, Branch: r.Workspace.Branch, BaseCommit: r.Workspace.BaseCommit}

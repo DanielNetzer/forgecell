@@ -13,6 +13,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
@@ -43,7 +44,8 @@ import (
 // the tests derived again differ; scope-change sends the ledger's exact paths.
 // When re-run checks recovered first and the amend after it fails, the refusal
 // is recovered-not-amended: the recovery stays recorded. Fresh intake reuses POST
-// /api/runs and retire the retire route; demo refuses every action.
+// /api/runs ({"issue"}, or {"key"} for a keyed record) and retire the retire
+// route; demo refuses every action.
 
 // UnblockAction is the action name /api/lab lists for the next-action routes.
 const UnblockAction = "unblock Molecule"
@@ -112,7 +114,15 @@ type NextActionView struct {
 	Questions      []string    `json:"questions,omitempty"`
 	Issue          int64       `json:"issue,omitempty"`
 	IssueURL       string      `json:"issueUrl,omitempty"`
+	// IssueKey is a keyed record's exact tracker key, which a fresh intake POSTs
+	// back as {"key"}; it is absent for a GitHub Issue. IssueURL is then the
+	// recorded https tracker URL.
+	IssueKey string `json:"issueKey,omitempty"`
 }
+
+// freshIntakeKeyNotShown is why a keyed fresh intake whose key cannot be shown
+// exactly is not offered: the POST sends the key it showed.
+const freshIntakeKeyNotShown = "The Issue key cannot be shown exactly as the tracker recorded it, so this page does not offer a fresh intake; start it with forgecell run and the key."
 
 // DeltasDigest is the SHA-256 of the exact protected deltas an
 // accept-failures preview lists, in order: package, test, check and declaring
@@ -245,6 +255,16 @@ func (h *handler) actionsView(ctx context.Context, record molecule.Record) Actio
 				av.Questions = append(av.Questions, actionText(x, q))
 			}
 			av.Issue, av.IssueURL = record.Issue.Number, issueURL(record.Issue)
+			if record.Issue.IsKeyed() {
+				// The POST sends the ledger's exact key back, so a key that is not
+				// shown exactly as itself is not offered.
+				key := record.Issue.Key
+				if intake.ValidateIssueKey(key) != nil || keyedDisplayKey(x, record.Issue) != key {
+					v.NotOffered = append(v.NotOffered, NotOfferedView{Kind: kind, Label: text[0], Reason: freshIntakeKeyNotShown})
+					continue
+				}
+				av.Issue, av.IssueKey, av.IssueURL = 0, key, keyedIssueURL(x, record.Issue)
+			}
 		}
 		v.Actions = append(v.Actions, av)
 	}

@@ -24,6 +24,7 @@ import (
 // (drive.go adds starting and stopping work, behind the same protection):
 //
 //	POST /api/molecules/{id}/scope              {"digest"}  → molecule.Run(Approve) as a job
+//	                                                        (molecule.RunKeyed for a keyed Molecule)
 //	POST /api/molecules/{id}/delivery/preview   {}          → delivery.Preview
 //	POST /api/molecules/{id}/delivery/publish   {"digest","title","acceptUnverified"}
 //	                                                        → delivery.Publish (draft PR) as a job
@@ -224,6 +225,11 @@ func (h *handler) approveScope(w http.ResponseWriter, r molecule.Record, req sco
 		return
 	}
 	opts := scopeOptions(h.opts.LabDir, r, digest)
+	if r.Issue.IsKeyed() {
+		// A keyed Molecule resumes through molecule.RunKeyed, never by number.
+		h.approveKeyedScope(w, r, opts, digest)
+		return
+	}
 	run := h.runScope
 	h.startJob(w, r.ID, "scope", digest, func(ctx context.Context) error {
 		_, err := run(ctx, opts)
@@ -408,6 +414,9 @@ var categoryReasons = map[string]string{
 	"confirm-stopped":       "Tick I confirm it is stopped once no Lab process works on this Molecule, then submit again",
 	"issue-state":           "Refresh the Issues view so GitHub Issue state is current, then list the closed Issues again",
 	"recovered-not-amended": "Reload this Molecule: it is recovered now, and What you can do lists the actions the engine accepts next",
+	"keyed":                 "Enter the tracker's Issue key under Issue key, such as ENG-123, then start intake again",
+	"not-keyed":             "This Lab reads GitHub Issues: enter the Issue number under Issue number, then start intake again",
+	"tracker":               "Check the tracker plugin with forgecell plugin doctor, then try again",
 }
 
 // engineReasons are exact next steps for engine errors the UI recognises,

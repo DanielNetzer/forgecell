@@ -4,7 +4,7 @@
 // no phase code, id, digest or timestamp is turned into text here. Polling
 // patches entries in place, keyed by Molecule id: an entry already shown keeps
 // its node and has only its changed text and attributes updated.
-import { $, el, fill, state, molecules, live, inboxOf, newestFirst, needsYou, needsYouText, moleculeHref, setText, setAttr, plainText, count, counted, ago, dateTitle, STEPS, withAttempt, syncOf, syncNotes, closedInProgress, inHistory, historyFromURL, historyRow, followHistory, syncCounts, syncCountsText } from './core.js';
+import { $, el, fill, state, issueLabel, molecules, live, inboxOf, newestFirst, needsYou, needsYouText, moleculeHref, setText, setAttr, plainText, count, counted, ago, dateTitle, STEPS, withAttempt, syncOf, syncNotes, closedInProgress, inHistory, historyFromURL, historyRow, followHistory, syncCounts, syncCountsText } from './core.js';
 
 const CARD_KINDS = { scope: ['is-needs', '◇'], publish: ['is-ready', '✓'], blocked: ['is-blocked', '!'], closed: ['is-needs', '◇'] };
 
@@ -18,7 +18,7 @@ function closedView(m) {
 // Bounds: at most this many cards or rows each, and the last five recorded.
 const MAX_ENTRIES = 20, MAX_RECENT = 5;
 
-function numberText(m) { return Number.isInteger(m.number) ? '#' + m.number : ''; }
+function numberText(m) { return issueLabel(m); }
 function titleText(m) { return (state.list && state.list.sample ? '[Sample] ' : '') + plainText(m.title, 'Untitled'); }
 
 function stepIndex(v) { return Number.isInteger(v.step) && v.step >= 0 && v.step < STEPS.length ? v.step : 0; }

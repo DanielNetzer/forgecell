@@ -4,7 +4,7 @@
 // anymore? block, each behind a confirmation that names the Molecule. Controls
 // are built once and patched in place, so a poll never rebuilds a form being
 // typed in, and the one live region changes only when its text does.
-import { $, el, uid, fill, state, ctx, newGate, RETIRED, PULL_URL, notRecorded, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show, syncOf } from './core.js';
+import { $, el, uid, fill, state, ctx, newGate, RETIRED, PULL_URL, notRecorded, issueLabel, api, failed, setText, setAttr, plainText, count, counted, wholeNumber, money, whenText, dateTitle, minutesText, STEPS, show, syncOf } from './core.js';
 import { submitGate, gateMessage, fetchJob, readBack, rerenderGate, jobText, approveScope, previewDelivery, publishDelivery, stopMolecule, retireMolecule } from './core-gates.js';
 import { hasAction, latestDigest, submitButton, field, fillKeyed, loadActions } from './molecule-actions.js';
 
@@ -53,8 +53,8 @@ function retireText(d, gate) {
 
 function moleculeName(d) {
   const title = plainText(d.issue && d.issue.title, 'Untitled');
-  const number = d.issue && Number.isInteger(d.issue.number) ? '#' + d.issue.number + ' · ' : '';
-  return number + ([...title].length > 80 ? [...title].slice(0, 79).join('') + '…' : title);
+  const label = issueLabel(d.issue);
+  return (label ? label + ' · ' : '') + ([...title].length > 80 ? [...title].slice(0, 79).join('') + '…' : title);
 }
 
 // ensureMoleculeView builds the decision card, the danger zone, the roles and
