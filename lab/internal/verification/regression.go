@@ -34,7 +34,10 @@ func ProtectedTree(ctx context.Context, source string, p readiness.Plan, candida
 			}
 		}
 	}
-	changed, err := git(ctx, source, "", nil, "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", p.Inputs.BaseCommit, candidate, "--")
+	// A fix round's protected reference is its delivered head, so the tests delivered
+	// before the round are what the protected view restores.
+	base := p.CaptureBase()
+	changed, err := git(ctx, source, "", nil, "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", base, candidate, "--")
 	if err != nil {
 		return "", err
 	}
@@ -65,7 +68,7 @@ func ProtectedTree(ctx context.Context, source string, p readiness.Plan, candida
 		return "", err
 	}
 	for _, file := range files {
-		raw, e := git(ctx, source, "", nil, "ls-tree", "-z", p.Inputs.BaseCommit, "--", file)
+		raw, e := git(ctx, source, "", nil, "ls-tree", "-z", base, "--", file)
 		if e != nil {
 			return "", e
 		}
@@ -114,10 +117,10 @@ func RunObserved(ctx context.Context, source, destination string, p readiness.Pl
 	// both views run fresh for it; on a git error each view decides, and fails, itself.
 	// Only validated object ids reach git here; runViewDeltas refuses anything else.
 	objectID := regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
-	validIDs := objectID.MatchString(c.Tree) && objectID.MatchString(p.Inputs.BaseCommit)
+	validIDs := objectID.MatchString(c.Tree) && objectID.MatchString(p.CaptureBase())
 	if validIDs {
 		endPhase := beginPhase(ctx, "", PhaseModuleCheck)
-		if nonModule, err := treeChangesOutsideModules(ctx, source, p.Inputs.BaseCommit, c.Tree); err == nil {
+		if nonModule, err := treeChangesOutsideModules(ctx, source, p.CaptureBase(), c.Tree); err == nil {
 			ctx = context.WithValue(ctx, nonModuleKey{}, nonModule)
 		}
 		endPhase()

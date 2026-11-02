@@ -55,6 +55,12 @@ func Amend(ctx context.Context, lab, id, parent string, next readiness.Plan, acc
 // amendLocked validates and records next as the successor of parent, the latest
 // plan of r. The caller holds the Molecule flock and the approval lock directory.
 func amendLocked(ctx context.Context, r Record, parent string, next readiness.Plan, acceptTree string) (Record, error) {
+	return amendLockedThen(ctx, r, parent, next, acceptTree, nil)
+}
+
+// amendLockedThen is amendLocked whose then, when set, records the caller's own
+// events and notes on the amended Record before the single ledger write.
+func amendLockedThen(ctx context.Context, r Record, parent string, next readiness.Plan, acceptTree string, then func(*Record)) (Record, error) {
 	id := r.ID
 	if err := refuseRetired(r); err != nil {
 		return r, err
@@ -123,11 +129,18 @@ func amendLocked(ctx context.Context, r Record, parent string, next readiness.Pl
 	for _, s := range previous.Analysis.Scope {
 		allowed = append(allowed, s.Path)
 	}
-	capture, err := verification.Capture(ctx, r.Workspace.Path, previous.Inputs.BaseCommit, allowed, previous.Artifacts)
+	// The retained tree is captured from the capture base of the plan that keeps it:
+	// a fix round's delivered head, else the previous plan's base. A forged head is
+	// refused by Capture, and the fix-round chain is checked before the write.
+	base := previous.CaptureBase()
+	if next.FixRound != nil {
+		base = next.CaptureBase()
+	}
+	capture, err := verification.Capture(ctx, r.Workspace.Path, base, allowed, previous.Artifacts)
 	if err != nil {
 		return r, err
 	}
-	nextCapture, err := verification.Capture(ctx, r.Workspace.Path, previous.Inputs.BaseCommit, allowed, next.Artifacts)
+	nextCapture, err := verification.Capture(ctx, r.Workspace.Path, base, allowed, next.Artifacts)
 	if err != nil {
 		return r, err
 	}
@@ -169,7 +182,7 @@ func amendLocked(ctx context.Context, r Record, parent string, next readiness.Pl
 		for _, path := range next.Analysis.Scope {
 			approved = append(approved, path.Path)
 		}
-		adopted, err := verification.Capture(ctx, r.Workspace.Path, previous.Inputs.BaseCommit, approved, next.Artifacts)
+		adopted, err := verification.Capture(ctx, r.Workspace.Path, base, approved, next.Artifacts)
 		if err != nil || len(adopted.Violations) > 0 {
 			return r, fmt.Errorf("adopted tree exceeds successor exact scope")
 		}
@@ -195,6 +208,9 @@ func amendLocked(ctx context.Context, r Record, parent string, next readiness.Pl
 	if err != nil {
 		return r, err
 	}
+	if err = state.ValidateFixRounds(); err != nil {
+		return r, err
+	}
 	if err = archiveLegacyVerification(&r); err != nil {
 		return r, err
 	}
@@ -205,7 +221,7 @@ func amendLocked(ctx context.Context, r Record, parent string, next readiness.Pl
 		for _, s := range next.Analysis.Scope {
 			paths = append(paths, s.Path)
 		}
-		capture, err = verification.Capture(ctx, r.Workspace.Path, previous.Inputs.BaseCommit, paths, next.Artifacts)
+		capture, err = verification.Capture(ctx, r.Workspace.Path, base, paths, next.Artifacts)
 		if err != nil {
 			return r, err
 		}
@@ -226,6 +242,9 @@ func amendLocked(ctx context.Context, r Record, parent string, next readiness.Pl
 	}
 	if allowlistNote != "" {
 		r.Notes = append(r.Notes, allowlistNote)
+	}
+	if then != nil {
+		then(&r)
 	}
 	return r, save(r)
 }
@@ -582,6 +601,12 @@ func AmendDiffSummary(previous, next readiness.Plan) string {
 	if !reflect.DeepEqual(next.ExpectedProtectedDeltas, previous.ExpectedProtectedDeltas) {
 		parts = append(parts, fmt.Sprintf("expected protected failures: %d", len(next.ExpectedProtectedDeltas)))
 	}
+	if next.FixRound != nil && !reflect.DeepEqual(next.FixRound, previous.FixRound) {
+		parts = append(parts, fmt.Sprintf("fix round %d from head %s (%d finding(s))", next.FixRound.Round, next.FixRound.Head, len(next.FixRound.Findings)))
+		if next.FixRound.IssueChanged {
+			parts = append(parts, "Issue body changed since intake (intake acceptance kept)")
+		}
+	}
 	if next.Continuation != previous.Continuation {
 		if next.Continuation == "" {
 			parts = append(parts, "continuation: coding")
@@ -718,7 +743,7 @@ func RebaseFormula(ctx context.Context, lab, id, parent string) (Record, error) 
 	for _, s := range previous.Analysis.Scope {
 		allowed = append(allowed, s.Path)
 	}
-	capture, err := verification.Capture(ctx, r.Workspace.Path, previous.Inputs.BaseCommit, allowed, previous.Artifacts)
+	capture, err := verification.Capture(ctx, r.Workspace.Path, previous.CaptureBase(), allowed, previous.Artifacts)
 	if err != nil {
 		return r, err
 	}

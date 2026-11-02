@@ -1050,19 +1050,30 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 	if err = validateRepairHistory(r.Readiness.Plans); err != nil {
 		return r, err
 	}
+	if err = r.Readiness.ValidateFixRounds(); err != nil {
+		return r, err
+	}
 	if o.TargetBranch != "" && o.TargetBranch != p.Inputs.TargetBranch {
 		return r, fmt.Errorf("target branch changed")
 	}
-	base := o.Base
-	if base == "" {
-		base = "HEAD"
-	}
-	if strings.HasPrefix(base, "-") {
-		return r, fmt.Errorf("invalid base")
-	}
-	currentBase, err := git(ctx, r.Workspace.SourceRoot, "rev-parse", "--verify", "--end-of-options", base+"^{commit}")
-	if err != nil || currentBase != r.Workspace.BaseCommit {
-		return r, fmt.Errorf("source base changed; refresh intake")
+	if p.FixRound != nil {
+		// The branch stays rooted at the intake base on purpose, so the source checkout
+		// may have moved on; the workspace must still hold the delivered head instead.
+		if err = fixRoundHeadInPlace(ctx, r, p); err != nil {
+			return r, err
+		}
+	} else {
+		base := o.Base
+		if base == "" {
+			base = "HEAD"
+		}
+		if strings.HasPrefix(base, "-") {
+			return r, fmt.Errorf("invalid base")
+		}
+		currentBase, err := git(ctx, r.Workspace.SourceRoot, "rev-parse", "--verify", "--end-of-options", base+"^{commit}")
+		if err != nil || currentBase != r.Workspace.BaseCommit {
+			return r, fmt.Errorf("source base changed; refresh intake")
+		}
 	}
 	identity, err := ForgeOriginIdentity(f)
 	if err != nil {
@@ -1089,7 +1100,7 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 	for _, item := range p.Analysis.Scope {
 		allowed = append(allowed, item.Path)
 	}
-	captured, err := verification.Capture(ctx, r.Workspace.Path, p.Inputs.BaseCommit, allowed, p.Artifacts)
+	captured, err := verification.Capture(ctx, r.Workspace.Path, p.CaptureBase(), allowed, p.Artifacts)
 	if err != nil || len(captured.Violations) > 0 || (p.Revision == 1 && len(captured.Changes) > 0) || (p.Revision > 1 && (captured.Tree != p.PausedTree || (p.PausedArtifactsSHA256 != "" && artifactHash(captured) != p.PausedArtifactsSHA256))) {
 		return r, fmt.Errorf("pending workspace changed; no coding was started")
 	}
@@ -1103,6 +1114,9 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 				return r, saveErr
 			}
 		}
+		if err == nil && p.FixRound != nil && issue.State != "OPEN" {
+			err = errFixRoundIssueClosed
+		}
 		if err == nil && !readKeyedIssueMatches(issue, repo, want.Key) {
 			err = fmt.Errorf("Issue is closed or does not match the requested repository and key.")
 		}
@@ -1115,6 +1129,11 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 	}
 	if err != nil {
 		return r, err
+	}
+	if p.FixRound != nil {
+		if issue, err = fixRoundApprovalIssue(p, issue); err != nil {
+			return r, err
+		}
 	}
 	snapshot, err := readiness.CollectForTicketFor(ctx, r.Workspace.SourceRoot, r.Workspace.BaseCommit, issue.Title+"\n"+issue.Body, formulaCollectOptions(f))
 	if err != nil {
@@ -1336,7 +1355,7 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		}
 		captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		captureStarted := phaseClock()
-		capture, captureErr = verification.Capture(captureCtx, r.Workspace.Path, p.Inputs.BaseCommit, allowed, p.Artifacts)
+		capture, captureErr = verification.Capture(captureCtx, r.Workspace.Path, p.CaptureBase(), allowed, p.Artifacts)
 		captureTook = phaseClock().Sub(captureStarted)
 		cancelCapture()
 		// Claude Code hot-reloads project settings, so a run that created, edited or
@@ -1345,7 +1364,7 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		// own next tool call is allowed to do. The comparison is against the base commit
 		// itself, so it holds even for a path the approved scope would otherwise allow.
 		if harness.ClaudeBinding(codingBinding.Command) {
-			changed, e := harness.ClaudeTreeChanges(r.Workspace.Path, p.Inputs.BaseCommit)
+			changed, e := harness.ClaudeTreeChanges(r.Workspace.Path, p.CaptureBase())
 			switch {
 			case e != nil:
 				if captureErr == nil {
