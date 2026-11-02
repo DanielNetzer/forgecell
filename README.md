@@ -29,8 +29,8 @@ proposed improvements to the durable recipe that guides the next run.
 > **Early release.** The current Go source supports ticket analysis, approved execution,
 > verification and separately approved draft PRs, also available in the downloadable
 > `v0.3.1` release. Merge, deployment and issue closure
-> remain manual. GitHub is the only supported tracker; GitLab, Jira and outside
-> reviewers are post-v1.
+> remain manual. GitHub is the only tracker in a release; GitLab, Jira and outside
+> reviewers are available in the source on `main` and not yet in a release.
 
 ## How it works
 

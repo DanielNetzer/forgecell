@@ -297,6 +297,7 @@ var staticFiles = map[string]string{
 	"/js/molecule-decision.js": "js/molecule-decision.js",
 	"/js/molecule-actions.js":  "js/molecule-actions.js",
 	"/js/molecule-timeline.js": "js/molecule-timeline.js",
+	"/js/molecule-findings.js": "js/molecule-findings.js",
 	"/js/work.js":              "js/work.js",
 	"/js/issues.js":            "js/issues.js",
 	"/js/insights.js":          "js/insights.js",

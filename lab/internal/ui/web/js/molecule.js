@@ -2,11 +2,13 @@
 // The Molecule view (?view=work&m=…) replaces the grid under Work: a breadcrumb
 // back, the state pill, the seven steps, the plan in plain words and a sticky
 // decision card with one primary action, bound to the exact digest the plan
-// shows. The plan, the decision card and the Timeline are its sub-modules.
-import { $, add, el, fill, state, ctx, newGate, issueLabel, issueURL, laneLabel, cells, molecules, api, failed, keepFocus, VIEWS, navigate, showView, moleculeHref, moleculeFromURL, setText, setAttr, plainText, whenText, dateTitle, dayText, withAttempt, STEPS, syncOf, syncNotes } from './core.js';
+// shows. The plan, the decision card, the Timeline and the Findings tab are
+// its sub-modules.
+import { $, add, el, fill, state, ctx, newGate, issueLabel, issueURL, laneLabel, cells, molecules, inboxOf, api, failed, keepFocus, VIEWS, navigate, showView, moleculeHref, moleculeFromURL, setText, setAttr, plainText, whenText, dateTitle, dayText, withAttempt, STEPS, syncOf, syncNotes } from './core.js';
 import { mv, ensureMoleculeView, renderDecision, renderRoles, loadStats, mergedOf, mergeText } from './molecule-decision.js';
 import { renderPlan, copyDigest } from './molecule-plan.js';
 import { renderTimeline, mountTimeline } from './molecule-timeline.js';
+import { mountFindings, findingsSelect, findingsOpened, findingsTick } from './molecule-findings.js';
 
 const TONES = ['needs', 'running', 'blocked', 'merged', 'neutral'];
 const STEP_STATES = ['done', 'current', 'blocked', 'todo'];
@@ -56,6 +58,10 @@ function select(id) {
   renderLoadingDetail(id);
   ctx.applyFilter();
   loadDetail(id, true);
+  // An Inbox fix-round or findings entry opens on the Findings tab once the
+  // findings view says it shows; every other Molecule opens on Plan.
+  const kind = m && inboxOf(m) ? inboxOf(m).kind : '';
+  findingsSelect(id, kind === 'fix-round' || kind === 'findings');
 }
 
 function overview() {
@@ -77,7 +83,7 @@ function showMoleculeView(open) {
   $('#selected').hidden = !open;
   $('.shelf').hidden = open;
   $('.shell').classList.toggle('has-molecule', open);
-  if (!open) { mv.planKey = null; mv.statsKey = null; mv.stats = null; mv.lastDigest = null; chooseTab('plan', false); }
+  if (!open) { mv.planKey = null; mv.statsKey = null; mv.stats = null; mv.lastDigest = null; chooseTab('plan', false); findingsSelect(null, false); }
 }
 
 function renderLoadingDetail(id) {
@@ -216,18 +222,30 @@ function renderSteps(v, merged) {
   });
 }
 
-// The Plan and Timeline tabs. The Timeline keeps the Atom list, evidence and
-// logs unchanged.
+// The Plan and Timeline tabs, and the Findings tab while the Molecule's
+// findings view says it has reviewers. The Timeline keeps the Atom list,
+// evidence and logs unchanged.
+const TABS = [['plan', '#mv-tab-plan', '#mv-plan'], ['timeline', '#mv-tab-timeline', '#mv-timeline'], ['findings', '#mv-tab-findings', '#mv-findings']];
+// shownTabs are the tab names in order, without a hidden tab.
+function shownTabs() { return TABS.filter(([, tabId]) => !$(tabId).hidden).map(([name]) => name); }
 function chooseTab(tab, focus) {
-  const plan = tab !== 'timeline';
-  for (const [tabId, panelId, on] of [['#mv-tab-plan', '#mv-plan', plan], ['#mv-tab-timeline', '#mv-timeline', !plan]]) {
-    const button = $(tabId);
+  const pick = shownTabs().includes(tab) ? tab : 'plan';
+  for (const [name, tabId, panelId] of TABS) {
+    const button = $(tabId), on = name === pick;
     button.setAttribute('aria-selected', String(on));
     button.tabIndex = on ? 0 : -1;
     $(panelId).hidden = !on;
     if (on && focus) button.focus();
   }
-  if (!plan && mv.timelineDirty && state.detail) renderTimeline(state.detail);
+  if (pick === 'timeline' && mv.timelineDirty && state.detail) renderTimeline(state.detail);
+  if (pick === 'findings') findingsOpened();
+}
+// nextTab is the tab an arrow, Home or End key moves to among the shown tabs.
+function nextTab(key, from) {
+  const shown = shownTabs(), at = Math.max(0, shown.indexOf(from));
+  if (key === 'Home') return shown[0];
+  if (key === 'End') return shown[shown.length - 1];
+  return shown[(at + (key === 'ArrowLeft' ? shown.length - 1 : 1)) % shown.length];
 }
 
 // ---- Molecule links and history ----------------------------------------------------
@@ -275,14 +293,17 @@ export function mount(root, ctx) {
     const b = e.target.closest('[data-tab]');
     if (!b || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    chooseTab(e.key === 'Home' ? 'plan' : e.key === 'End' ? 'timeline' : b.dataset.tab === 'plan' ? 'timeline' : 'plan', true);
+    chooseTab(nextTab(e.key, b.dataset.tab), true);
   });
+  mountFindings(chooseTab);
   $('#mv-timeline').addEventListener('focusout', (e) => {
     if (mv.timelineDirty && state.detail && !$('#mv-timeline').contains(e.relatedTarget)) renderTimeline(state.detail);
   });
   $('#mv-copy-digest').addEventListener('click', copyDigest);
-  // A running step's minutes move on without a ledger change.
-  setInterval(() => { if (!document.hidden && state.detail && !$('#selected').hidden) setText($('#mv-state-text'), pillText(state.detail)); }, 30000);
+  // A running step's minutes move on without a ledger change. The same tick
+  // reads the findings view again, at most once per 30 s and only while the
+  // Findings tab is visible.
+  setInterval(() => { if (!document.hidden && state.detail && !$('#selected').hidden) { setText($('#mv-state-text'), pillText(state.detail)); findingsTick(); } }, 30000);
   mountTimeline();
 }
 

@@ -161,6 +161,7 @@
   <div id="mv-tabs" class="mv-tabs" role="tablist" aria-label="Molecule sections">
     <button type="button" role="tab" id="mv-tab-plan" class="mv-tab" aria-controls="mv-plan" aria-selected="true" data-tab="plan">Plan</button>
     <button type="button" role="tab" id="mv-tab-timeline" class="mv-tab" aria-controls="mv-timeline" aria-selected="false" tabindex="-1" data-tab="timeline">Timeline</button>
+    <button type="button" role="tab" id="mv-tab-findings" class="mv-tab" aria-controls="mv-findings" aria-selected="false" tabindex="-1" data-tab="findings" hidden>Findings</button>
   </div>
   <div class="mv-layout">
     <div class="mv-main">
@@ -218,6 +219,7 @@
           <p class="scope-note">Open the ledger record, or an evidence file from an Atom, as bounded text with secrets and local paths redacted. Only files the ledger lists with a matching SHA-256 are served; a longer file shows its first part and says so.</p>
         </div>
       </div>
+      <div id="mv-findings" class="mv-findings" role="tabpanel" aria-labelledby="mv-tab-findings" hidden></div>
     </div>
     <aside id="mv-aside" class="mv-aside" aria-label="Your decision">
       <section id="mv-decision" class="decision-card" aria-labelledby="mv-decision-title"></section>

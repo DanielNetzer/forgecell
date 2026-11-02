@@ -73,6 +73,9 @@ review comments in every `reviewer_findings` call.
 GitHub Labs can't serve review comments in v1. This plugin works with a plugin forge that
 serves `forge_comments`, such as GitLab.
 
+To triage the findings, propose a fix round and push it to the same change request, see
+[Outside reviewers and fix rounds](../../../docs/install.md#outside-reviewers-and-fix-rounds).
+
 ## Behaviour
 
 - **Describe.** `reviewer_describe` checks the config and answers `displayName`
