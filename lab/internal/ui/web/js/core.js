@@ -163,6 +163,8 @@ function queued(m) { return m.lane === 'running' && m.activity === QUEUED; }
 export function laneLabel(m) { return queued(m) ? 'Queued for checks' : laneOf(m).label; }
 
 const NEEDS_KINDS = ['scope', 'publish', 'blocked'];
+// The reviewer findings decisions: a fix round to push, findings to triage.
+NEEDS_KINDS.push('fix-round', 'findings');
 export function inboxOf(m) {
   const v = m && m.inbox;
   return v && typeof v === 'object' && typeof v.kind === 'string' && v.kind && MOLECULE_ID.test(m.id) ? v : null;

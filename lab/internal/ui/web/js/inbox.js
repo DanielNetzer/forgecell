@@ -6,7 +6,7 @@
 // its node and has only its changed text and attributes updated.
 import { $, el, fill, state, issueLabel, molecules, live, inboxOf, newestFirst, needsYou, needsYouText, moleculeHref, setText, setAttr, plainText, count, counted, ago, dateTitle, STEPS, withAttempt, syncOf, syncNotes, closedInProgress, inHistory, historyFromURL, historyRow, followHistory, syncCounts, syncCountsText } from './core.js';
 
-const CARD_KINDS = { scope: ['is-needs', '◇'], publish: ['is-ready', '✓'], blocked: ['is-blocked', '!'], closed: ['is-needs', '◇'] };
+const CARD_KINDS = { scope: ['is-needs', '◇'], publish: ['is-ready', '✓'], blocked: ['is-blocked', '!'], closed: ['is-needs', '◇'], 'fix-round': ['is-ready', '✓'], findings: ['is-needs', '◇'] };
 
 // closedView is the Needs-you card of a row-14 Molecule (its Issue closed while
 // it was live): the server's label and fixed notes, never an Inbox kind of its own.
