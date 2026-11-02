@@ -49,6 +49,10 @@ type Receipt struct {
 	Ref                string                  `json:"ref,omitempty"`
 	PluginCalls        []mcpadapter.CallRecord `json:"pluginCalls,omitempty"`
 	PluginCallsDropped int                     `json:"pluginCallsDropped,omitempty"`
+	// FixRounds records commits pushed to the published change request after
+	// Commit; ReceiptHead names the current head. A receipt without fix rounds
+	// never writes it.
+	FixRounds []FixRound `json:"fixRounds,omitempty"`
 }
 type PublishOptions struct {
 	Options
@@ -150,6 +154,9 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 	if readErr == nil {
 		if err = json.Unmarshal(raw, &r); err != nil {
 			return r, err
+		}
+		if len(r.FixRounds) > 0 {
+			return r, fmt.Errorf("this change request was already published and has fix rounds")
 		}
 		files := append([]string(nil), o.Files...)
 		sort.Strings(files)

@@ -84,12 +84,15 @@ func classifyEvidence(lab string, r molecule.Record) (EvidenceOutcome, error) {
 		e.Outcome = "draft-published"
 	}
 	e.Lifecycle = receipt.Lifecycle
-	e.Commit = receipt.Commit
+	// The change request's current head; CI recorded for an earlier commit stays
+	// listed but never classifies the head.
+	head, _ := delivery.ReceiptHead(receipt)
+	e.Commit = head
 	e.URL = receipt.URL
 	e.CIObservations, err = delivery.ReadCI(delivery.Options{LabDir: lab, MoleculeID: r.ID})
 	if err != nil {
 		return e, err
 	}
-	e.CIClassification = delivery.CIClassification(e.CIObservations)
+	e.CIClassification = delivery.CIClassification(delivery.HeadCI(e.CIObservations, head))
 	return e, nil
 }
