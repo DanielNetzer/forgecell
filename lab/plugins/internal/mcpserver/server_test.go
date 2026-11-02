@@ -528,6 +528,42 @@ func TestHandlersNeverOverlap(t *testing.T) {
 	ss.close()
 }
 
+func TestBackToBackCallsAreNeverRefusedAsStillRunning(t *testing.T) {
+	s := newEchoServer()
+	// Two sessions on one server: a finished handler must not block the next
+	// call in the same session or in a later one.
+	for session := 0; session < 2; session++ {
+		ss := serve(t, s)
+		for i := 0; i < 200; i++ {
+			id := strconv.Itoa(i + 1)
+			tool, args := "echo", `{"word":"w`+id+`"}`
+			if i%2 == 1 {
+				tool, args = "fail", `{"reason":"auth-missing"}`
+			}
+			r := ss.call(id, tool, args)
+			// The response is read after run returned, so the handler must
+			// already be marked finished.
+			select {
+			case <-s.running:
+			default:
+				t.Fatalf("session %d call %s: the handler is still marked running after its response", session, id)
+			}
+			if tool == "echo" && (r.IsError || string(r.StructuredContent) != `{"word":"w`+id+`"}`) {
+				t.Fatalf("session %d call %s: %+v", session, id, r)
+			}
+			if tool == "fail" {
+				if reason, _ := failure(t, r); reason != "auth-missing" {
+					t.Fatalf("session %d call %s: reason %q, want auth-missing", session, id, reason)
+				}
+			}
+		}
+		ss.close()
+		if strings.Contains(ss.stderr.String(), "earlier handler still runs") {
+			t.Fatalf("session %d refused a call as still running:\n%s", session, ss.stderr)
+		}
+	}
+}
+
 func TestEndOfInputIsACleanExit(t *testing.T) {
 	ss := serve(t, newEchoServer())
 	ss.close()

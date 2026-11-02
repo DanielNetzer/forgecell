@@ -427,15 +427,19 @@ func (s *Server) run(ctx context.Context, t tool, args json.RawMessage) map[stri
 	done := make(chan outcome, 1)
 	running := make(chan struct{})
 	s.running = running
+	// The handler is marked finished before its outcome is sent, so once run
+	// receives the outcome a later call never finds it still running.
 	go func() {
-		defer close(running)
+		var o outcome
 		defer func() {
 			if r := recover(); r != nil {
-				done <- outcome{err: errors.New("the handler panicked")}
+				o = outcome{err: errors.New("the handler panicked")}
 			}
+			close(running)
+			done <- o
 		}()
 		result, err := t.handler(hctx, args)
-		done <- outcome{result, err}
+		o = outcome{result, err}
 	}()
 	var o outcome
 	select {
