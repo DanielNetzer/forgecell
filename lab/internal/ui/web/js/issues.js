@@ -5,8 +5,10 @@
 // action Start intake only when the server says it is startable, otherwise Open
 // Molecule. Nothing here derives a state. The filter, label, milestone and
 // search live in the URL; polling patches rows in place, keyed by Issue number,
-// and never rewrites an input being typed in.
-import { $, el, fill, state, ISSUE_URL, MOLECULE_ID, moleculeHref, setText, setAttr, plainText, wholeNumber, counted, freshnessText, syncNotes, syncCountsText, dateTitle } from './core.js';
+// and never rewrites an input being typed in. A Lab whose Issues are tracker
+// keys lists them through its tracker plugin: rows are keyed and named by
+// their key (issueLabel), and Start intake starts the key.
+import { $, el, fill, state, ISSUE_URL, TRACKER_URL, MOLECULE_ID, issueLabel, moleculeHref, setText, setAttr, plainText, wholeNumber, counted, freshnessText, syncNotes, syncCountsText, dateTitle } from './core.js';
 
 // The filters map the server's bucket only; All shows every row.
 const FILTERS = [
@@ -58,7 +60,7 @@ function matchesIssue(row, q) {
   if (q.label && !labelsOf(row).some((l) => l.toLowerCase() === q.label.toLowerCase())) return false;
   if (q.milestone && (typeof row.milestone !== 'string' || row.milestone.toLowerCase() !== q.milestone.toLowerCase())) return false;
   const terms = q.q.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const haystack = ('#' + row.number + ' ' + plainText(row.title, '')).toLowerCase();
+  const haystack = ((row.key ? issueLabel(row) : '#' + row.number) + ' ' + plainText(row.title, '')).toLowerCase();
   return terms.every((t) => haystack.includes(t));
 }
 
@@ -77,6 +79,20 @@ function startIntake(number) {
   input.focus({ preventScroll: true });
 }
 
+// startKeyedIntake is startIntake for a tracker key: the side panel's Issue key
+// field posts {key} through the keyed run path, and the server checks the key
+// against the tracker again.
+function startKeyedIntake(key) {
+  const form = $('#drive-run'), input = $('#drive-run [data-drive="key"]');
+  if (!form || !input || typeof key !== 'string' || !key) return;
+  input.value = key;
+  form.requestSubmit();
+  input.focus({ preventScroll: true });
+}
+
+// rowKey is a row's key in the table: its tracker key, or its Issue number.
+function rowKey(row) { return row.key || String(row.number); }
+
 // runLoopOnThese fills the side panel's Run-the-loop selector with the current
 // milestone or label filter. It never starts the loop: Start loop does.
 function runLoopOnThese() {
@@ -92,7 +108,7 @@ function slot(node, name) { return node.querySelector('[data-slot="' + name + '"
 
 function createIssueRow() {
   const start = el('button', { type: 'button', class: 'btn btn-primary issue-action', dataset: { slot: 'start' }, hidden: true });
-  start.addEventListener('click', () => startIntake(Number(start.dataset.issue)));
+  start.addEventListener('click', () => (start.dataset.key ? startKeyedIntake(start.dataset.key) : startIntake(Number(start.dataset.issue))));
   return el('div', { class: 'issue-row', role: 'row' },
     el('span', { class: 'issue-number', role: 'cell', dataset: { slot: 'number' } }),
     el('div', { class: 'issue-main', role: 'cell' },
@@ -112,8 +128,17 @@ function createIssueRow() {
 // server's freshness and completeness and this Lab UI's drive forms.
 function reasonText(s) {
   const v = state.issues;
+  if (v && v.keyed) return keyedReasonText(v, s);
   if (!v || !v.checked) return 'Can’t start until GitHub state is checked';
   if (v.stale) return 'Can’t start until GitHub state is current';
+  if (v.complete === false) return 'Can’t start while some ledgers are unreadable';
+  if (s.startable === true && !drives()) return 'Start intake from the command line; this Lab UI doesn’t start work';
+  return 'Nothing to start here · ' + s.label;
+}
+// keyedReasonText is reasonText for a tracker-plugin Lab, whose listing comes
+// from the tracker, not GitHub.
+function keyedReasonText(v, s) {
+  if (v.stale) return 'Can’t start until the tracker listing is current';
   if (v.complete === false) return 'Can’t start while some ledgers are unreadable';
   if (s.startable === true && !drives()) return 'Start intake from the command line; this Lab UI doesn’t start work';
   return 'Nothing to start here · ' + s.label;
@@ -123,11 +148,12 @@ function reasonText(s) {
 // is set only as text; links only from the validated URL patterns.
 function updateIssueRow(node, row) {
   const s = stateOf(row) || { label: 'Not checked', bucket: 'issues', notes: [] };
-  const number = '#' + row.number, title = plainText(row.title, 'Untitled');
+  const keyed = typeof row.key === 'string' && row.key !== '';
+  const number = keyed ? issueLabel(row) : '#' + row.number, title = plainText(row.title, 'Untitled');
   const cell = slot(node, 'number');
-  const url = typeof row.url === 'string' && ISSUE_URL.test(row.url) ? row.url : '';
+  const url = typeof row.url === 'string' && (keyed ? TRACKER_URL : ISSUE_URL).test(row.url) ? row.url : '';
   const link = cell.firstElementChild;
-  if (url && (!link || link.getAttribute('href') !== url)) fill(cell, el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Issue ' + number + ' on GitHub' }, number));
+  if (url && (!link || link.getAttribute('href') !== url)) fill(cell, el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Issue ' + number + (keyed ? ' on the tracker' : ' on GitHub') }, number));
   else if (!url) setText(cell, number);
   setText(slot(node, 'title'), title);
   const labels = labelsOf(row).slice(0, MAX_LABELS), shown = slot(node, 'labels');
@@ -146,6 +172,8 @@ function updateIssueRow(node, row) {
   const refocus = !startable && !start.hidden && start === document.activeElement;
   start.hidden = !startable;
   if (start.dataset.issue !== String(row.number)) start.dataset.issue = String(row.number);
+  if (keyed && start.dataset.key !== row.key) start.dataset.key = row.key;
+  else if (!keyed && 'key' in start.dataset) delete start.dataset.key;
   setText(start, 'Start intake');
   setAttr(start, 'aria-label', 'Start intake: ' + number + ' ' + title);
   const id = !startable && typeof row.latestMolecule === 'string' && MOLECULE_ID.test(row.latestMolecule) ? row.latestMolecule : '';
@@ -161,12 +189,13 @@ function updateIssueRow(node, row) {
   if (refocus) (id ? open : $('#issues-title')).focus({ preventScroll: true });
 }
 
-// patchRows keeps the table body in order, keyed by Issue number: a shown row
-// keeps its node, so focus on its action survives a poll. Rows no longer shown
-// go first, so every node left is placed below; the node holding focus is never
-// moved: the rows before it in the new order are moved past it instead.
+// patchRows keeps the table body in order, keyed by Issue number (or tracker
+// key, rowKey): a shown row keeps its node, so focus on its action survives a
+// poll. Rows no longer shown go first, so every node left is placed below; the
+// node holding focus is never moved: the rows before it in the new order are
+// moved past it instead.
 function patchRows(container, items) {
-  const keys = new Set(items.map((row) => String(row.number)));
+  const keys = new Set(items.map((row) => rowKey(row)));
   for (const node of [...container.children]) {
     if (keys.has(node.dataset.issue)) continue;
     if (node.contains(document.activeElement)) $('#issues-title').focus({ preventScroll: true });
@@ -175,7 +204,7 @@ function patchRows(container, items) {
   const existing = new Map([...container.children].map((node) => [node.dataset.issue, node]));
   let at = container.firstElementChild;
   for (const row of items) {
-    const key = String(row.number);
+    const key = rowKey(row);
     let node = existing.get(key);
     existing.delete(key);
     if (!node) { node = createIssueRow(); node.dataset.issue = key; }
@@ -213,11 +242,23 @@ function syncInputs(q) {
 
 function noteText(v) {
   if (!v) return '';
+  if (v.keyed) return keyedNoteText(v);
   const parts = [];
   if (typeof v.note === 'string' && v.truncated) parts.push(v.note.charAt(0).toUpperCase() + v.note.slice(1) + ' open Issues; the rest are not shown.');
   if (v.stale) parts.push('Couldn’t check GitHub just now, so nothing can be started until GitHub state is current.');
   if (v.checked && v.complete === false) parts.push('Some ledgers could not be read, so no Issue can be started right now.');
   if (!v.checked) parts.push('GitHub state was not checked, so no Issue is listed. Use Refresh to try again.');
+  return parts.join(' ');
+}
+// keyedNoteText is noteText for a tracker-plugin Lab: the server lists through
+// the tracker at most once a minute, so a poll may show the cached listing.
+function keyedNoteText(v) {
+  const parts = [];
+  if (v.loading) parts.push('Reading the tracker’s open Issues…');
+  if (v.truncated) parts.push('Showing the first ' + wholeNumber.format(Number(v.shown) || 0) + ' open Issues; the rest are not shown.');
+  if (v.stale) parts.push(v.reason ? 'Couldn’t list the tracker’s Issues just now, so nothing can be started until the listing is current.' : 'The tracker listing is being read again, so nothing can be started until it is current.');
+  else if (!v.checked && v.reason) parts.push('Couldn’t list the tracker’s Issues just now.');
+  if (v.checked && v.complete === false) parts.push('Some ledgers could not be read, so no Issue can be started right now.');
   return parts.join(' ');
 }
 
@@ -227,7 +268,8 @@ function renderIssues() {
   const v = state.issues, q = query(), all = rows();
   syncInputs(q);
   renderIssueFilters(q, all);
-  const shown = all.filter((r) => Number.isInteger(r.number) && r.number > 0 && inFilter(r, q.filter) && matchesIssue(r, q));
+  // A keyed row (Number 0) is kept by its key.
+  const shown = all.filter((r) => ((Number.isInteger(r.number) && r.number > 0) || (typeof r.key === 'string' && r.key !== '')) && inFilter(r, q.filter) && matchesIssue(r, q));
   patchRows(c.body, shown);
   const repo = v && typeof v.repository === 'string' && v.repository ? 'Open Issues in ' + v.repository + ' · ' : '';
   setText(c.fresh, repo + freshnessText(v));

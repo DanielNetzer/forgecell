@@ -175,7 +175,8 @@ func (h *handler) syncWork(repo string) syncWork {
 	w := syncWork{list: h.list(ledgerETag(h.opts.LabDir)), inputs: map[string]forgesync.Molecule{}, byIssue: map[int64][]forgesync.Molecule{}, want: forgesync.Want{Repository: repo}}
 	seenIssue, seenPR := map[int64]bool{}, map[int64]bool{}
 	for _, s := range w.list.Molecules {
-		if repo == "" || !strings.EqualFold(s.Repository, repo) {
+		// A keyed Molecule (Key set, Number 0) is never GitHub Issue 0.
+		if repo == "" || !strings.EqualFold(s.Repository, repo) || s.Key != "" || s.Number < 1 {
 			continue
 		}
 		m := h.syncMolecule(s, repo)
@@ -194,8 +195,14 @@ func (h *handler) syncWork(repo string) syncWork {
 }
 
 // syncRepository is the active Formula's repository when it is a valid
-// owner/name, and "" otherwise.
+// owner/name, and "" otherwise. A Formula that reads Issues from a tracker
+// plugin has no GitHub sync, so it is "" too (issues_keyed.go).
 func (h *handler) syncRepository() string {
+	if h.keyedFormula != nil {
+		if _, keyed := h.keyedFormula(h.opts.LabDir); keyed {
+			return ""
+		}
+	}
 	return repository(h.forge.repository(h.opts.LabDir))
 }
 
@@ -241,12 +248,20 @@ type IssuesView struct {
 	// Issue is startable.
 	Complete bool       `json:"complete"`
 	Issues   []IssueRow `json:"issues"`
+	// Keyed marks a tracker-plugin Lab's view, listed through the plugin
+	// (issues_keyed.go); Loading means its first listing has not finished yet.
+	// Both are absent for a GitHub Lab, whose view is unchanged.
+	Keyed   bool `json:"keyed,omitempty"`
+	Loading bool `json:"loading,omitempty"`
 }
 
 // IssueRow is one open Issue. Startable is the sync's rule; SummaryStartable is
 // the loop's own (molecule.QueueSummary.Startable), which the loop keeps.
 type IssueRow struct {
-	Number           int64                  `json:"number"`
+	Number int64 `json:"number"`
+	// Key is a tracker plugin's Issue key (Number is then 0); it is absent for
+	// a GitHub Issue, whose row is unchanged.
+	Key              string                 `json:"key,omitempty"`
 	Title            string                 `json:"title"`
 	URL              string                 `json:"url"`
 	Labels           []string               `json:"labels"`
@@ -264,6 +279,10 @@ type IssueRow struct {
 func (h *handler) issues(w http.ResponseWriter, r *http.Request) {
 	if h.opts.Demo {
 		h.json(w, http.StatusOK, demoIssues())
+		return
+	}
+	if f, keyed := h.keyedFormula(h.opts.LabDir); keyed {
+		h.issuesKeyedView(w, f)
 		return
 	}
 	repo := h.syncRepository()
