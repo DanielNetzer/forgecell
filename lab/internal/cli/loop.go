@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/learning"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
@@ -79,8 +80,15 @@ func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, 
 	if flags.NArg() != 0 {
 		return fail(fmt.Errorf("loop accepts flags only"))
 	}
-	selector, err := intake.ParseSelector(*selection)
-	if err != nil {
+	// A tracker plugin validates its own selectors, so --select reaches it raw;
+	// GitHub Issues keep oldest, label:NAME and milestone:TITLE.
+	keyed := loopTrackerPlugin(*lab)
+	var selector intake.Selector
+	var err error
+	trackerSelect := ""
+	if keyed {
+		trackerSelect = *selection
+	} else if selector, err = intake.ParseSelector(*selection); err != nil {
 		return fail(err)
 	}
 	if *concurrent < 1 {
@@ -115,6 +123,9 @@ func runLoopCommand(ctx context.Context, args []string, defaultLab string, out, 
 	marker := molecule.NewLoopMarker(molecule.LoopStarterCLI, watchInterval)
 	defer marker.Release()
 	options := molecule.LoopOptions{Template: molecule.Options{LabDir: *lab, SourceRoot: cwd, Resources: guard}, Select: selector, MaxConcurrent: *concurrent, Once: *once, Marker: marker}
+	if keyed {
+		options.TrackerSelect, options.TrackerLookupEnv, options.AllowKeyed = trackerSelect, pluginLookupEnv, true
+	}
 	if *watch {
 		return watchLoop(ctx, options, *interval, *learn, *lab, out, stderr)
 	}
@@ -237,6 +248,22 @@ func runLearnAfterPass(ctx context.Context, lab string, interval time.Duration, 
 	}
 }
 
+// loopTrackerPlugin reports a Lab whose active approved Formula reads Issues
+// from a declared tracker plugin, so loop runs keyed. A Formula that cannot be
+// loaded or is not approved is false, so the loop reports it as it always has.
+func loopTrackerPlugin(lab string) bool {
+	dir, err := filepath.Abs(lab)
+	if err != nil {
+		return false
+	}
+	loaded, err := formula.Load(dir, "")
+	if err != nil || !loaded.Approved {
+		return false
+	}
+	_, ok := loaded.Formula.TrackerPlugin()
+	return ok
+}
+
 func loopExitCode(report molecule.LoopReport) int {
 	if report.Failed() {
 		return 2
@@ -251,7 +278,12 @@ func renderLoop(out io.Writer, report molecule.LoopReport, selector intake.Selec
 	if report.Repository == "" {
 		return
 	}
-	fmt.Fprintf(out, "Lab loop for %s · select %s · max concurrent %d\n", report.Repository, selector, concurrent)
+	shown := selector.String()
+	if report.TrackerSelect != "" {
+		// A keyed loop names the tracker selector it passed through raw.
+		shown = flatten(report.TrackerSelect)
+	}
+	fmt.Fprintf(out, "Lab loop for %s · select %s · max concurrent %d\n", report.Repository, shown, concurrent)
 	for n, pass := range report.Passes {
 		fmt.Fprintf(out, "Pass %d: %d eligible Issue(s)\n", n+1, len(pass.Items))
 		for _, note := range pass.Notes {
@@ -269,7 +301,11 @@ func renderLoop(out io.Writer, report molecule.LoopReport, selector intake.Selec
 			if item.Approved {
 				actions += " · approved by policy"
 			}
-			fmt.Fprintf(out, "%s#%d · %s · Molecule %s%s\n  %s\n", item.Repository, item.Issue, item.State, id, actions, item.Reason)
+			if item.Key != "" {
+				fmt.Fprintf(out, "%s %s · %s · Molecule %s%s\n  %s\n", item.Repository, flatten(item.Key), item.State, id, actions, item.Reason)
+			} else {
+				fmt.Fprintf(out, "%s#%d · %s · Molecule %s%s\n  %s\n", item.Repository, item.Issue, item.State, id, actions, item.Reason)
+			}
 			if p := item.Proposal; p != nil {
 				saved := "saved"
 				if p.Existing {

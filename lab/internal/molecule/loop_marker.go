@@ -93,11 +93,32 @@ type LoopStatus struct {
 // LoopIntakePlanning is the phase of an Issue whose intake is still running.
 const LoopIntakePlanning = "planning"
 
-// LoopIntake is an Issue in flight by number, while its intake has not yet
-// named a Molecule.
+// LoopIntake is an Issue in flight while its intake has not yet named a
+// Molecule: a GitHub Issue by number, or a tracker plugin's Issue by Key, never
+// both.
 type LoopIntake struct {
-	Issue int64  `json:"issue"`
+	Issue int64  `json:"issue,omitempty"`
+	Key   string `json:"key,omitempty"`
 	Phase string `json:"phase"`
+}
+
+// maxLoopStatusKeyBytes bounds the keyed intake entries of one status by their
+// marshalled JSON, escapes included, so a status of long keys stays under
+// maxLoopStatusBytes; the overflow sets InFlightTruncated. loopStatusKeySlack
+// is the room kept for the fields a keyed entry can add around itself.
+const (
+	maxLoopStatusKeyBytes = 8 << 10
+	loopStatusKeySlack    = 64
+)
+
+// loopIntakeKeyBytes is the marshalled size of key's intake entry with its
+// separating comma; a key that cannot be marshalled never fits.
+func loopIntakeKeyBytes(key string) int {
+	raw, err := json.Marshal(LoopIntake{Key: key, Phase: LoopIntakePlanning})
+	if err != nil {
+		return maxLoopStatusBytes + 1
+	}
+	return len(raw) + 1
 }
 
 // loopStatusRecord is the status file: the status with its schema and token.
@@ -130,6 +151,10 @@ type LoopMarker struct {
 	status   LoopStatus
 	inFlight map[string]int
 	intake   map[int64]int
+	keys     map[string]int
+	// writeErr is the first status write refused or failed since a keyed loop
+	// last reported one.
+	writeErr error
 }
 
 // NewLoopMarker prepares a marker for a loop started by starter (LoopStarterCLI
@@ -183,8 +208,17 @@ func (m *LoopMarker) Acquire(lab string, sel intake.Selector, maxConcurrent int)
 		release()
 		return fmt.Errorf("the Lab's loop status could not be written, so no loop was started: %w", pathlessErr(err))
 	}
-	m.lab, m.release, m.status, m.inFlight, m.intake = abs, release, status, map[string]int{}, map[int64]int{}
+	m.lab, m.release, m.status, m.inFlight, m.intake, m.keys = abs, release, status, map[string]int{}, map[int64]int{}, map[string]int{}
 	return nil
+}
+
+// recordTrackerSelector replaces the status's selector with a tracker plugin's
+// raw selector, bounded as Acquire bounds a GitHub selector. A keyed loop
+// acquires the marker with a zero intake.Selector and then records its own.
+func (m *LoopMarker) recordTrackerSelector(raw string) {
+	m.update(func(s *LoopStatus) {
+		s.Selector, s.SelectorTruncated = boundedSelector(raw)
+	})
 }
 
 // Release removes the loop's own status and drops the marker.
@@ -268,6 +302,26 @@ func (m *LoopMarker) UntrackIntake(issue int64) {
 	})
 }
 
+// TrackIntakeKey is TrackIntake for a tracker plugin's Issue key; a key that is
+// not a valid Issue key is never listed. UntrackIntakeKey removes it.
+func (m *LoopMarker) TrackIntakeKey(key string) {
+	m.update(func(*LoopStatus) {
+		if validLoopKey(key) {
+			m.keys[key]++
+		}
+	})
+}
+
+func (m *LoopMarker) UntrackIntakeKey(key string) {
+	m.update(func(*LoopStatus) {
+		if m.keys[key] > 1 {
+			m.keys[key]--
+		} else {
+			delete(m.keys, key)
+		}
+	})
+}
+
 func (m *LoopMarker) update(change func(*LoopStatus)) {
 	if m == nil {
 		return
@@ -288,13 +342,59 @@ func (m *LoopMarker) update(change func(*LoopStatus)) {
 		issues = append(issues, issue)
 	}
 	slices.Sort(issues)
-	m.status.InFlightTruncated = len(ids) > MaxLoopStatusInFlight || len(issues) > MaxLoopStatusInFlight
+	keys := make([]string, 0, len(m.keys))
+	for key := range m.keys {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	m.status.InFlightTruncated = len(ids) > MaxLoopStatusInFlight || len(issues)+len(keys) > MaxLoopStatusInFlight
 	m.status.InFlight = ids[:min(len(ids), MaxLoopStatusInFlight)]
 	m.status.Intake = nil
 	for _, issue := range issues[:min(len(issues), MaxLoopStatusInFlight)] {
 		m.status.Intake = append(m.status.Intake, LoopIntake{Issue: issue, Phase: LoopIntakePlanning})
 	}
-	_ = writeLoopStatus(m.lab, m.status)
+	// Keyed entries follow the numeric ones within the same bound, by their
+	// marshalled size within maxLoopStatusKeyBytes and within what the rest of the
+	// status leaves of maxLoopStatusBytes; a numeric-only loop writes what it
+	// always has.
+	if len(keys) > 0 {
+		room := maxLoopStatusKeyBytes
+		if raw, err := json.Marshal(loopStatusRecord{SchemaVersion: loopStatusSchema, Token: m.status.Token, LoopStatus: m.status}); err != nil {
+			room = 0
+		} else {
+			room = min(room, maxLoopStatusBytes-loopStatusKeySlack-len(raw))
+		}
+		for _, key := range keys {
+			n := loopIntakeKeyBytes(key)
+			if len(m.status.Intake) >= MaxLoopStatusInFlight || n > room {
+				m.status.InFlightTruncated = true
+				break
+			}
+			room -= n
+			m.status.Intake = append(m.status.Intake, LoopIntake{Key: key, Phase: LoopIntakePlanning})
+		}
+	}
+	// A refused or failed write leaves the previous status in place; it is kept
+	// so a keyed loop reports it rather than leave the status stale unnoticed.
+	if err := writeLoopStatus(m.lab, m.status); err != nil && m.writeErr == nil {
+		m.writeErr = err
+	}
+}
+
+// takeStatusWriteError returns the first status write refused or failed since
+// the last call, without its local path, and forgets it.
+func (m *LoopMarker) takeStatusWriteError() error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	err := m.writeErr
+	m.writeErr = nil
+	if err == nil {
+		return nil
+	}
+	return pathlessErr(err)
 }
 
 // ReadLoopStatus reports whether a loop holds lab's marker, with its bounded
@@ -540,10 +640,20 @@ func (r loopStatusRecord) validate() error {
 			return fmt.Errorf("invalid in-flight Molecule id")
 		}
 	}
+	keyBytes := 0
 	for _, in := range s.Intake {
-		if !validLoopIssue(in.Issue) || in.Phase != LoopIntakePlanning {
+		// Exactly one of a valid Issue number or a valid Key.
+		numbered := in.Key == "" && validLoopIssue(in.Issue)
+		keyed := in.Issue == 0 && validLoopKey(in.Key)
+		if numbered == keyed || in.Phase != LoopIntakePlanning {
 			return fmt.Errorf("invalid in-flight intake")
 		}
+		if keyed {
+			keyBytes += loopIntakeKeyBytes(in.Key)
+		}
+	}
+	if keyBytes > maxLoopStatusKeyBytes {
+		return fmt.Errorf("invalid in-flight intake")
 	}
 	return nil
 }
@@ -551,6 +661,12 @@ func (r loopStatusRecord) validate() error {
 // validLoopIssue bounds an Issue number as GitHub's API does.
 func validLoopIssue(n int64) bool {
 	return n > 0 && n <= maxLoopCount
+}
+
+// validLoopKey admits a tracker Issue key that intake.ValidateIssueKey accepts
+// and that names a Molecule (a non-empty slug).
+func validLoopKey(key string) bool {
+	return intake.ValidateIssueKey(key) == nil && (Issue{Key: key}).KeySlug() != ""
 }
 
 func validLoopToken(s string) bool {
@@ -604,6 +720,28 @@ const (
 // lockIssueAs is lockIssue that records owner in the lock file.
 func lockIssueAs(lab, repository string, number int64, owner string) (func(), error) {
 	name, err := issueLockName(repository, number)
+	if err != nil {
+		return nil, err
+	}
+	file, release, err := flockLedgerHandle(lab, name)
+	if err != nil {
+		return nil, err
+	}
+	if err = writeMarkerNote(file, owner); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+// lockIssueKeyAs is lockIssueAs for a keyed Issue: it takes the key's start
+// lock, issueProjectKeyLockName, the lock RunIntakeKeyed takes, and records
+// owner in it.
+func lockIssueKeyAs(lab, repository, key, owner string) (func(), error) {
+	if err := intake.ValidateIssueKey(key); err != nil {
+		return nil, err
+	}
+	name, err := issueProjectKeyLockName(repository, key)
 	if err != nil {
 		return nil, err
 	}
