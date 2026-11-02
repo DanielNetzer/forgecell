@@ -39,7 +39,41 @@
         "properties": {
           "forge": {"type": "object", "additionalProperties": true, "maxProperties": 16},
           "ref": {"type": "string", "minLength": 1, "maxLength": 200, "format": "identifier"},
-          "commit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+          "commit": {"type": "string", "maxLength": 64, "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+          "config": {"type": "object", "additionalProperties": true, "maxProperties": 64},
+          "comments": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "author", "isBot", "body", "createdAt"],
+              "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 100, "format": "identifier"},
+                "author": {"type": "string", "maxLength": 100},
+                "isBot": {"type": "boolean"},
+                "body": {"type": "string", "maxLength": 65536},
+                "path": {"type": "string", "minLength": 1, "maxLength": 4096, "format": "identifier"},
+                "line": {"type": "integer", "minimum": 1, "maximum": 10000000},
+                "createdAt": {"type": "string", "maxLength": 40, "format": "date-time"}
+              }
+            }
+          },
+          "checks": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "status", "conclusion"],
+              "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                "status": {"type": "string", "enum": ["queued", "in_progress", "completed"]},
+                "conclusion": {"type": "string", "enum": ["", "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale"]},
+                "url": {"type": "string", "minLength": 1, "maxLength": 2048, "format": "uri"}
+              }
+            }
+          }
         }
       },
       "output": {

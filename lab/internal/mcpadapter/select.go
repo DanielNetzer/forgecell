@@ -13,6 +13,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/contract"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/mcp"
+	"github.com/DanielNetzer/forgecell/lab/internal/reviewer"
 	"github.com/DanielNetzer/forgecell/lab/internal/tracker"
 )
 
@@ -105,6 +106,46 @@ func ForgeFor(labDir string, f formula.Formula, opts Options) (forge.Changes, bo
 		return nil, true, err
 	}
 	return fg, true, nil
+}
+
+// ReviewersFor returns the Formula's reviewer plugins in Formula order, at most
+// formula.MaxReviewers, each with its reviewers[].config as the {config} of
+// every call, or none when the Formula declares no reviewers, so no run root is
+// made. A reviewer that names no declared plugin is refused. It sets opts'
+// LabDir, Ref and RunRoot itself, as TrackerFor does.
+func ReviewersFor(labDir string, f formula.Formula, opts Options) ([]reviewer.Reviewer, error) {
+	refs := f.Reviewers()
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if len(refs) > formula.MaxReviewers {
+		return nil, refuse("", stepOptions, mcp.Failed, "the Formula declares more reviewers than allowed")
+	}
+	pins := map[string]formula.PluginRef{}
+	for _, p := range f.Plugins {
+		pins[p.Name] = p
+	}
+	for _, ref := range refs {
+		if _, ok := pins[ref.Plugin]; !ok {
+			return nil, refuse("", stepOptions, mcp.Failed, "a reviewer names no declared plugin")
+		}
+	}
+	root, err := PrepareRunRoot(labDir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]reviewer.Reviewer, 0, len(refs))
+	for _, ref := range refs {
+		p := pins[ref.Plugin]
+		o := opts
+		o.LabDir, o.Ref, o.RunRoot = labDir, Ref{Manifest: p.Manifest, SHA256: p.SHA256}, root
+		r, err := NewReviewer(o, ref)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // DescribeReviewer runs reviewer_describe on a reviewer plugin with config, a

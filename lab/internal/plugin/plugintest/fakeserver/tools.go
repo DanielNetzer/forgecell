@@ -25,9 +25,35 @@ var outputs = map[string]map[string]any{
 	"reviewer_findings":   {"status": "complete", "findings": []any{}},
 }
 
+// recordEnv names the file the server appends every tools/call's name and
+// received arguments to, one JSON line each, when it is set; tests pass it
+// through the manifest's needs.env.
+const recordEnv = "FAKE_RECORD"
+
+// scripted maps a reviewer tool to the config key whose object value the
+// server answers with in place of its canned output, so a test scripts the
+// description and findings through the Formula reviewer's config.
+var scripted = map[string]string{"reviewer_describe": "describe", "reviewer_findings": "findings"}
+
+// record appends one received call to the FAKE_RECORD file.
+func record(name string, arguments json.RawMessage) {
+	path := os.Getenv(recordEnv)
+	if path == "" {
+		return
+	}
+	line, _ := json.Marshal(map[string]any{"tool": name, "arguments": arguments})
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return
+	}
+	f.Write(append(line, '\n'))
+	f.Close()
+}
+
 // call answers tools/call. Arguments that fail the contract input schema get a
 // JSON-RPC invalid-params error (or a crash in bad-input-crash mode); a config
-// {"fail": REASON} gets an isError result naming that reason.
+// {"fail": REASON} gets an isError result naming that reason. A reviewer
+// config {"describe": {...}} or {"findings": {...}} is that tool's output.
 func (s *server) call(id, params json.RawMessage) {
 	var p struct {
 		Name      string          `json:"name"`
@@ -57,6 +83,7 @@ func (s *server) call(id, params json.RawMessage) {
 		s.fail(id, -32602, "invalid arguments")
 		return
 	}
+	record(p.Name, p.Arguments)
 	var args struct {
 		Config map[string]any `json:"config"`
 	}
@@ -66,6 +93,9 @@ func (s *server) call(id, params json.RawMessage) {
 		return
 	}
 	out := outputs[p.Name]
+	if script, ok := args.Config[scripted[p.Name]].(map[string]any); ok && scripted[p.Name] != "" {
+		out = script
+	}
 	if s.mode == "oversized" && strings.HasSuffix(p.Name, "_describe") {
 		out = map[string]any{"displayName": strings.Repeat("x", 5<<20)}
 	}
