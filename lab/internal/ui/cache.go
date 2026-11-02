@@ -38,9 +38,11 @@ func stamp(path string) (s fileStamp, ok bool) {
 	return fileStamp{present: true, dev: uint64(st.Dev), ino: st.Ino, size: info.Size(), mtime: info.ModTime().UnixNano()}, true
 }
 
-// summaryKey is a Molecule's ledger and receipt stamps: a Summary depends on
-// nothing else in the Lab.
-type summaryKey struct{ ledger, receipt fileStamp }
+// summaryKey is a Molecule's ledger, receipt and findings record stamps: a
+// Summary depends on nothing else in the Lab. The findings stamp lets a
+// collection, dismissal or fix-round push made outside the UI change its Inbox
+// entry; a Molecule without a findings record stamps it absent, as before.
+type summaryKey struct{ ledger, receipt, findings fileStamp }
 
 // cachedSummary keeps a Molecule's analytics facts with its Summary: both come from
 // the same ledger read, so they share its stamp.
@@ -50,8 +52,8 @@ type cachedSummary struct {
 	facts   *moleculeFacts
 }
 
-// listCache keeps each Molecule's Summary while its ledger and receipt are
-// unchanged, and lets concurrent requests for one ETag share a single build.
+// listCache keeps each Molecule's Summary while its ledger, receipt and
+// findings record are unchanged, and lets concurrent requests for one ETag share a single build.
 type listCache struct {
 	mu      sync.Mutex
 	entries map[string]cachedSummary
@@ -118,7 +120,7 @@ func (h *handler) inventory(etag string) inventory {
 }
 
 // build reads the Lab once, reusing the cached Summary of every Molecule whose
-// ledger and receipt stamps are unchanged. Stamps are taken before reading, so a
+// ledger, receipt and findings stamps are unchanged. Stamps are taken before reading, so a
 // write during the read is cached under the older stamp and re-read next time.
 func (h *handler) build(etag string) inventory {
 	lab := h.opts.LabDir
@@ -128,7 +130,8 @@ func (h *handler) build(etag string) inventory {
 	inv := molecule.ListLedgers(lab, func(id string) error {
 		ledger, ledgerOK := stamp(filepath.Join(lab, "ledgers", id+".json"))
 		receipt, receiptOK := stamp(filepath.Join(lab, "deliveries", id+".json"))
-		key, cacheable := summaryKey{ledger, receipt}, ledgerOK && receiptOK && ledger.present
+		findings, findingsOK := stamp(filepath.Join(lab, "deliveries", id+".findings.json"))
+		key, cacheable := summaryKey{ledger, receipt, findings}, ledgerOK && receiptOK && findingsOK && ledger.present
 		if cacheable {
 			if e, ok := h.cache.get(id, key); ok {
 				out.Molecules = append(out.Molecules, e.summary)

@@ -629,6 +629,7 @@ func summarize(lab string, r molecule.Record, read receiptReader) Summary {
 		s.Delivery = view.Label
 	}
 	s.Inbox = inboxView(x, r, s.Lane, s.Activity, d)
+	inboxFindingsOverlay(lab, r, &s.Inbox)
 	return s
 }
 

@@ -68,9 +68,12 @@ func (h *handler) syncStates(w http.ResponseWriter, r *http.Request) {
 		if d.Bucket != forgesync.BucketRetired {
 			out.Counts[d.Bucket]++
 		}
-		if needsYou(d) {
+		if needsYou(d) || s.Inbox.Kind == InboxFixRound || s.Inbox.Kind == InboxFindings {
 			out.NeedsYou[s.ID] = true
 		}
 	}
+	// The background findings collection (findings_sync.go) starts from here; it
+	// never waits and never proposes, dismisses or pushes.
+	h.findingsSyncKick(work.list.Molecules)
 	h.json(w, http.StatusOK, out)
 }

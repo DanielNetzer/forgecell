@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/fixround"
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
@@ -263,6 +264,21 @@ type handler struct {
 	formulaRunner     onboarding.Runner
 	formulaCandidates []onboarding.Candidate
 	formulaMu         sync.Mutex
+	// findingsCollect, fixRoundPropose, fixRoundPreview, fixRoundPush,
+	// findingsDismiss and findingsUndismiss are the engine calls behind the
+	// findings routes (findings.go); findingsNow is their clock and the
+	// background pass's, findingsPoll its collection wait, and findingsSync its
+	// state (findings_sync.go). Tests replace the seams, so no plugin, git or
+	// forge process starts.
+	findingsCollect   func(ctx context.Context, lab, id string, f formula.Formula) (delivery.FindingsRecord, error)
+	fixRoundPropose   func(ctx context.Context, lab, id string, includes []string) (fixround.Proposal, error)
+	fixRoundPreview   func(ctx context.Context, lab, id string) (delivery.FixRoundPreview, error)
+	fixRoundPush      func(ctx context.Context, lab, id, approve string, confirm bool) error
+	findingsDismiss   func(lab, id, fingerprint, reason string) error
+	findingsUndismiss func(lab, id, fingerprint string) error
+	findingsNow       func() time.Time
+	findingsPoll      func(lab string, f formula.Formula) time.Duration
+	findingsSync      *findingsSyncState
 }
 
 // staticFiles are the only embedded files served, with their content types.
@@ -372,7 +388,9 @@ func NewHandler(o Options, token, host string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, trackerFor: mcpadapter.TrackerFor, runKeyedIssue: molecule.RunIntakeKeyed, runKeyedScope: molecule.RunKeyed, keyedFormula: loadKeyedFormula, issuesKeyedPoll: issuesKeyedPoll, retire: molecule.Retire, listIssues: tracker.GitHub{}.List, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}, nil
+	h := &handler{opts: o, token: token, exchanged: make(chan struct{}), session: session, tab: tab, host: host, origin: "http://" + host, cookie: "forgecell_ui_" + port, static: static, records: molecule.ReadRecord, receipts: delivery.ReadReceiptStatus, cache: newListCache(), runScope: molecule.Run, preview: delivery.Preview, publish: delivery.Publish, jobs: newGateJobs(), runIssue: molecule.RunIntake, runLoop: molecule.RunLoop, loop: &driveLoop{}, trackerFor: mcpadapter.TrackerFor, runKeyedIssue: molecule.RunIntakeKeyed, runKeyedScope: molecule.RunKeyed, keyedFormula: loadKeyedFormula, issuesKeyedPoll: issuesKeyedPoll, retire: molecule.Retire, listIssues: tracker.GitHub{}.List, amend: molecule.AmendFromLatest, numstat: molecule.DiffNumstat, diffs: newDiffCache(), forge: newIssueSync(nil, nil), setup: newSetupState(o.Setup, o.LabDir), recover: molecule.Recover, deriveActions: molecule.NextActions, prepare: onboarding.Prepare}
+	findingsSeams(h)
+	return h, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -409,8 +427,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setupAction, setup := setupRoute(r.URL.Path)
 	actionID, actionKind, action := actionRoute(r.URL.Path)
 	formulaID, formulaAction, formulaWrite := formulaRoute(r.URL.Path)
-	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive || setup || action || formulaWrite)) {
-		if gate || drive || setup || action || formulaWrite {
+	findingsID, findingsAction, findingsWrite := findingsRoute(r.URL.Path)
+	if r.Method != http.MethodGet && (r.Method != http.MethodPost || !(gate || drive || setup || action || formulaWrite || findingsWrite)) {
+		if gate || drive || setup || action || formulaWrite || findingsWrite {
 			header.Set("Allow", http.MethodPost)
 		} else {
 			header.Set("Allow", http.MethodGet)
@@ -468,6 +487,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.formulaPost(w, r, formulaID, formulaAction)
 			return
 		}
+		if findingsWrite {
+			h.findingsPost(w, r, findingsID, findingsAction)
+			return
+		}
 		if h.refuseRetiredScope(w, gateID, gateAction) {
 			return
 		}
@@ -498,6 +521,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.syncStates(w, r)
 	case path == "/api/retire-closed":
 		h.retireClosedStatus(w, r)
+	case findingsGetPath(path):
+		id, _ := findingsGetRoute(path)
+		h.findingsGet(w, r, id)
 	case strings.HasPrefix(path, "/api/molecules/"):
 		h.molecule(w, r, strings.TrimPrefix(path, "/api/molecules/"))
 	case staticFiles[path] != "":

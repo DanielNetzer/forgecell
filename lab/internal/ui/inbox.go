@@ -18,6 +18,12 @@ const (
 	InboxBlocked  = "blocked"
 	InboxProgress = "progress"
 	InboxRecorded = "recorded"
+	// InboxFixRound and InboxFindings are the reviewer findings decisions of a
+	// published Molecule (findings.go: inboxFindingsOverlay), both Needs-you
+	// cards: a verified fix round waiting for an explicit push confirmation, and
+	// open findings to triage.
+	InboxFixRound = "fix-round"
+	InboxFindings = "findings"
 )
 
 // The seven progress steps, in order. Steps before Step are complete; Step is the
