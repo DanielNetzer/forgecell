@@ -804,6 +804,27 @@ func issueKeyLockName(repository, key string) (string, error) {
 	return "issue-" + hex.EncodeToString(sum[:16]) + "-" + slug + loopLockSuffix, nil
 }
 
+// issueProjectKeyLockName is issueKeyLockName for a keyed Issue whose project
+// may be a nested path (intake.ValidProjectPath). A two-segment project is
+// exactly issueKeyLockName, so its lock name is unchanged. A nested project
+// hashes the same preimage, the full lower-cased path included, so its name
+// stays one flat issue-<hash>-<slug> file under ledgers/ that no path segment
+// reaches, and two projects never share it.
+func issueProjectKeyLockName(repository, key string) (string, error) {
+	if !intake.IsNestedProjectPath(repository) {
+		return issueKeyLockName(repository, key)
+	}
+	if err := intake.ValidProjectPath(repository); err != nil {
+		return "", fmt.Errorf("invalid Issue identity")
+	}
+	slug, err := keySlug(Issue{Key: key})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte("forgecell keyed issue lock\x00" + strings.ToLower(repository) + "\x00" + key))
+	return "issue-" + hex.EncodeToString(sum[:16]) + "-" + slug + loopLockSuffix, nil
+}
+
 // flockLedgerFile never blocks. The operating system drops the lock when the file
 // is closed or the process exits, including on a crash, so no stale lock can
 // outlive its holder. Lock files are never removed: unlinking one while another

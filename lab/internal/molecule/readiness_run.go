@@ -439,12 +439,16 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 			return resume(ctx, o, loaded, ref.Number, ref.Owner+"/"+ref.Repo)
 		}
 		repo = ref.Owner + "/" + ref.Repo
-	} else if repo, err = intake.BindKeyRepository(f.Intake.Repo); err != nil {
+	} else if repo, err = intake.BindKeyProject(f.Intake.Repo, f.NestedProjectAllowed()); err != nil {
 		return r, err
 	} else if o.Approve != "" {
 		return resumeKeyed(ctx, o, loaded, key, repo)
 	}
-	w, err := resolveSource(ctx, o, repo)
+	identity, err := ForgeOriginIdentity(f)
+	if err != nil {
+		return r, err
+	}
+	w, err := resolveSourceFor(ctx, o, repo, identity)
 	if err != nil {
 		return r, err
 	}
@@ -1060,7 +1064,17 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 	if err != nil || currentBase != r.Workspace.BaseCommit {
 		return r, fmt.Errorf("source base changed; refresh intake")
 	}
+	identity, err := ForgeOriginIdentity(f)
+	if err != nil {
+		return r, err
+	}
 	for _, dir := range []string{r.Workspace.SourceRoot, r.Workspace.Path} {
+		if identity != "" {
+			if !originURLsHaveIdentity(ctx, dir, identity) {
+				return r, fmt.Errorf("repository origin changed")
+			}
+			continue
+		}
 		origin, e := git(ctx, dir, "remote", "get-url", "origin")
 		m := originPattern.FindStringSubmatch(origin)
 		if e != nil || m == nil || !strings.EqualFold(strings.TrimSuffix(m[1], ".git"), repo) {

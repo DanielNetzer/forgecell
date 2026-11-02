@@ -55,10 +55,10 @@ func TestInitPluginFlagsReachPrepare(t *testing.T) {
 	lab := t.TempDir()
 	t.Chdir(t.TempDir())
 	t.Setenv("FORGECELL_LAB", lab)
-	// Prepare refuses the nested group before it reads any manifest, so the
-	// refusal proves the flags arrived.
-	code, _, errOut := gsRun([]string{"init", "--lab", lab, "--forge-plugin", "plugins/gitlab/plugin.json", "--project", "group/sub/backend", "--tracker-plugin", "plugins/jira/plugin.json", "--tracker-config", "tracker.json"})
-	if code != 1 || !strings.Contains(errOut, "nested groups such as group/subgroup/repo are not supported yet") {
+	// Prepare refuses the traversing project before it reads any manifest, so
+	// the refusal proves the flags arrived.
+	code, _, errOut := gsRun([]string{"init", "--lab", lab, "--forge-plugin", "plugins/gitlab/plugin.json", "--project", "acme/..", "--tracker-plugin", "plugins/jira/plugin.json", "--tracker-config", "tracker.json"})
+	if code != 1 || !strings.Contains(errOut, "--project must be exactly owner/repo") {
 		t.Fatalf("exit %d stderr %q", code, errOut)
 	}
 }

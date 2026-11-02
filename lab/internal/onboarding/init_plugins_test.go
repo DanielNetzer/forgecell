@@ -288,9 +288,9 @@ func TestPluginInitRefusals(t *testing.T) {
 		"enable review":   {func(_ *testing.T, _ pluginFixture, o *InitOptions, _ *fakeDescriber) { o.EnableReview = true }, "--enable-review"},
 		"refresh":         {func(_ *testing.T, _ pluginFixture, o *InitOptions, _ *fakeDescriber) { o.RefreshBaseline = true }, "--refresh-baseline"},
 		"meta":            {func(_ *testing.T, _ pluginFixture, o *InitOptions, _ *fakeDescriber) { o.MetaHarness = "codex" }, "--meta-harness"},
-		"nested group": {func(_ *testing.T, _ pluginFixture, o *InitOptions, _ *fakeDescriber) {
-			o.Project = "acme/platform/backend"
-		}, "nested groups such as group/subgroup/repo are not supported yet"},
+		"bad nested group": {func(_ *testing.T, _ pluginFixture, o *InitOptions, _ *fakeDescriber) {
+			o.Project = "acme//backend"
+		}, "--project must be exactly owner/repo or group/subgroup/.../repo"},
 		"bad project": {func(_ *testing.T, _ pluginFixture, o *InitOptions, _ *fakeDescriber) { o.Project = "acme/.." }, "--project must be exactly owner/repo"},
 		"traversing manifest": {func(_ *testing.T, _ pluginFixture, o *InitOptions, _ *fakeDescriber) {
 			o.ForgePlugin = "../plugin.json"
@@ -362,6 +362,64 @@ func TestPluginInitRefusals(t *testing.T) {
 				t.Fatalf("gh ran %d times", *f.ghCalls)
 			}
 		})
+	}
+}
+
+// TestPluginInitAcceptsANestedGroup: a nested --project on a gitlab.com origin
+// writes the full path to intake.repo and forge.project, names the Formula by
+// its last segment, and approves into a Formula that allows the nested binding.
+func TestPluginInitAcceptsANestedGroup(t *testing.T) {
+	f := newPluginFixture(t, pluginGitLabCI)
+	pluginGit(t, f.root, "remote", "set-url", "origin", "https://gitlab.com/welltech-com/platform/backend.git")
+	d := gitlabDescriber()
+	d.forge.Identity, d.forge.Host, d.forge.WebURL = "gitlab.com/welltech-com/platform/backend", "gitlab.com", "https://gitlab.com/welltech-com/platform/backend"
+	o := f.options(d)
+	o.Project = "welltech-com/platform/backend"
+	out, err := Prepare(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "pending" || out.Proposal == nil || out.Repository.Repo != o.Project {
+		t.Fatalf("status %s, repo %s", out.Status, out.Repository.Repo)
+	}
+	got := decodeYAML(t, out.Proposal.YAML)
+	if got["id"] != "backend-fake-tracker" || got["name"] != "welltech-com/platform/backend issue workflow" {
+		t.Fatalf("id %v name %v", got["id"], got["name"])
+	}
+	if forge := got["forge"].(map[string]any); forge["project"] != o.Project || forge["identity"] != d.forge.Identity {
+		t.Fatalf("forge = %v", forge)
+	}
+	if in := got["intake"].(map[string]any); in["repo"] != o.Project {
+		t.Fatalf("intake = %v", in)
+	}
+	if _, err = Review(f.lab, out.Proposal.ID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := formula.Load(f.lab, "")
+	if err != nil || !approved.Approved || !approved.Formula.NestedProjectAllowed() {
+		t.Fatalf("approved nested Formula: %v", err)
+	}
+	// The last segment names the Formula, not the second.
+	for project, want := range map[string]string{"acme/backend": "backend", "a/b/Service.v2": "service.v2", "g/s1/s2/s3/api": "api"} {
+		if name := pluginProjectName(project); name != want {
+			t.Errorf("pluginProjectName(%q) = %q, want %q", project, name, want)
+		}
+	}
+}
+
+// TestCheckPluginProjectKeepsTwoSegmentShapes: a two-segment --project keeps the
+// owner/repo check exactly, so no shape it accepted is newly refused; only a
+// nested path must be an intake.ValidProjectPath.
+func TestCheckPluginProjectKeepsTwoSegmentShapes(t *testing.T) {
+	for _, project := range []string{"acme/widgets", "acme/-x", "acme/x.", "acme/x.git", "-acme/x", ".acme/x", "welltech-com/platform/backend"} {
+		if err := checkPluginProject(project); err != nil {
+			t.Errorf("checkPluginProject(%q) = %v", project, err)
+		}
+	}
+	for _, project := range []string{"acme/..", "./x", "acme", "acme/", "acme/wid gets", "acme//backend", "acme/-sub/backend", "acme/sub/backend.git", "acme/sub/.."} {
+		if err := checkPluginProject(project); err == nil || !strings.Contains(err.Error(), "--project must be exactly owner/repo") {
+			t.Errorf("checkPluginProject(%q) = %v", project, err)
+		}
 	}
 }
 

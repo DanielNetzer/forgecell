@@ -175,7 +175,7 @@ func installPluginForge(t *testing.T, o Options) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	yaml := string(recipe) + "plugins:\n  - name: gitlab\n    manifest: plugins/fake/plugin.json\n    sha256: " + hex.EncodeToString(sum[:]) + "\nforge:\n  plugin: gitlab\n  project: acme/widgets\n"
+	yaml := string(recipe) + "plugins:\n  - name: gitlab\n    manifest: plugins/fake/plugin.json\n    sha256: " + hex.EncodeToString(sum[:]) + "\nforge:\n  plugin: gitlab\n  project: acme/widgets\n  identity: github.com/acme/widgets\n"
 	// The activation writes the reviewed Formula itself.
 	approveFixture(t, o.LabDir, yaml, "plugin-forge")
 }

@@ -158,6 +158,12 @@ func readQueueInventory(lab string, wrap func(string, io.Reader) io.Reader) Queu
 func keyedQueueAttempt(header ledger.Header) (QueueAttempt, string) {
 	p := header.QueueProjection
 	repo, err := intake.BindKeyRepository(p.Issue.Repo)
+	if err != nil && intake.IsNestedProjectPath(p.Issue.Repo) && intake.ValidProjectPath(p.Issue.Repo) == nil {
+		// A nested project (group/subgroup/project) is a plugin Lab's keyed
+		// identity; a two-segment repo stays exactly BindKeyRepository, and
+		// numeric records stay owner/repo.
+		repo, err = p.Issue.Repo, nil
+	}
 	if err != nil || p.Issue.Number != 0 || intake.ValidateIssueKey(p.Issue.Key) != nil || (Issue{Key: p.Issue.Key}).KeySlug() == "" {
 		return QueueAttempt{}, "missing or invalid historical Issue key identity; unjoinable"
 	}

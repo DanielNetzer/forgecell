@@ -425,6 +425,13 @@ func git(ctx context.Context, cwd string, args ...string) (string, error) {
 var originPattern = regexp.MustCompile(`(?i)^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([a-z0-9_.-]+/[a-z0-9_.-]+?)/?$`)
 
 func resolveSource(ctx context.Context, o Options, repo string) (Workspace, error) {
+	return resolveSourceFor(ctx, o, repo, "")
+}
+
+// resolveSourceFor is resolveSource whose origin must resolve to the forge
+// identity when one is set (a plugin-forge Formula, see ForgeOriginIdentity),
+// and otherwise to the GitHub repository repo.
+func resolveSourceFor(ctx context.Context, o Options, repo, identity string) (Workspace, error) {
 	w := Workspace{Repo: repo}
 	root, err := git(ctx, o.SourceRoot, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -435,8 +442,11 @@ func resolveSource(ctx context.Context, o Options, repo string) (Workspace, erro
 	if err != nil {
 		return w, err
 	}
-	m := originPattern.FindStringSubmatch(origin)
-	if m == nil || !strings.EqualFold(strings.TrimSuffix(strings.ToLower(m[1]), ".git"), strings.ToLower(repo)) {
+	if identity != "" {
+		if !OriginHasIdentity(origin, identity) {
+			return w, fmt.Errorf("Git origin does not match the issue repository")
+		}
+	} else if m := originPattern.FindStringSubmatch(origin); m == nil || !strings.EqualFold(strings.TrimSuffix(strings.ToLower(m[1]), ".git"), strings.ToLower(repo)) {
 		return w, fmt.Errorf("Git origin does not match the issue repository")
 	}
 	base := o.Base
