@@ -34,11 +34,11 @@ func RunIntakeKeyed(ctx context.Context, o Options, key string) (Record, error) 
 	if !loaded.Approved {
 		return Record{}, fmt.Errorf("approve a Formula with init before running")
 	}
-	repository, err := intake.BindKeyRepository(loaded.Formula.Intake.Repo)
+	repository, err := intake.BindKeyProject(loaded.Formula.Intake.Repo, loaded.Formula.NestedProjectAllowed())
 	if err != nil {
 		return Record{}, err
 	}
-	name, err := issueKeyLockName(repository, key)
+	name, err := issueProjectKeyLockName(repository, key)
 	if err != nil {
 		return Record{}, err
 	}

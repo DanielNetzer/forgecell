@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
+	"github.com/DanielNetzer/forgecell/lab/internal/intake"
 	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
 	"github.com/DanielNetzer/forgecell/lab/internal/pinned"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin"
@@ -109,17 +110,29 @@ func checkPluginManifestPath(flag, manifest string) error {
 	return nil
 }
 
-// checkPluginProject requires exactly owner/repo, intake.repo's shape. A nested
-// group is a documented limit, refused with a plain reason.
+// checkPluginProject requires exactly owner/repo, intake.repo's shape, or a
+// nested group such as group/subgroup/repo, which must be an
+// intake.ValidProjectPath. A two-segment project keeps the owner/repo check
+// unchanged. Both intake.repo and forge.project hold it in full, which
+// NestedProjectAllowed requires.
 func checkPluginProject(project string) error {
-	if strings.Count(project, "/") > 1 {
-		return fmt.Errorf("--project must be exactly owner/repo; nested groups such as group/subgroup/repo are not supported yet")
+	if !intake.IsNestedProjectPath(project) {
+		m := pluginProject.FindStringSubmatch(project)
+		if m == nil || m[1] == "." || m[1] == ".." || m[2] == "." || m[2] == ".." {
+			return fmt.Errorf("--project must be exactly owner/repo: letters, digits, '.', '_' and '-' in each of the two segments")
+		}
+		return nil
 	}
-	m := pluginProject.FindStringSubmatch(project)
-	if m == nil || m[1] == "." || m[1] == ".." || m[2] == "." || m[2] == ".." {
-		return fmt.Errorf("--project must be exactly owner/repo: letters, digits, '.', '_' and '-' in each of the two segments")
+	if err := intake.ValidProjectPath(project); err != nil {
+		return fmt.Errorf("--project must be exactly owner/repo or group/subgroup/.../repo: %w", err)
 	}
 	return nil
+}
+
+// pluginProjectName is the project path's last segment, lower-cased: the
+// project's own name, which names the Formula.
+func pluginProjectName(project string) string {
+	return strings.ToLower(project[strings.LastIndex(project, "/")+1:])
 }
 
 // readTrackerConfig reads the --tracker-config file: a regular file, never a
@@ -401,7 +414,7 @@ func preparePluginInit(ctx context.Context, o InitOptions) (out Outcome, err err
 	case forgeInfo.CIKind == githubActionKind:
 		workflows = append(workflows, out.Repository.Workflows...)
 	}
-	repoName := strings.ToLower(strings.Split(o.Project, "/")[1])
+	repoName := pluginProjectName(o.Project)
 	recipe := map[string]any{
 		"schemaVersion": "v0", "kind": "formula",
 		"id":     repoName + "-" + trackerPin.Name,

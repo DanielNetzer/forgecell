@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/verification"
@@ -75,6 +76,12 @@ func validatedHead(ctx context.Context, o Options, expected string) (molecule.Re
 	if r.ID != o.MoleculeID || r.Kind != "molecule" || r.SchemaVersion != "v0" || !r.FormulaApproved || r.FinishedAt == "" || (r.Status != "waiting" && r.Status != "recorded") {
 		return r, fmt.Errorf("delivery requires a finished approved Molecule")
 	}
+	// Read the forge first, so a missing or unbound snapshot is refused with its
+	// own reason before any check that would otherwise read it as GitHub.
+	identity, err := snapshotForgeIdentity(r)
+	if err != nil {
+		return r, err
+	}
 	ran := molecule.CompletedCoding(r)
 	if r.Readiness != nil && len(r.Readiness.Plans) > 0 && r.Readiness.Plans[len(r.Readiness.Plans)-1].Plan.Continuation == "adopt-failed-tree" && !molecule.FailedTreeAdopted(r) {
 		return r, fmt.Errorf("invalid failed-tree adoption evidence")
@@ -116,6 +123,12 @@ func validatedHead(ctx context.Context, o Options, expected string) (molecule.Re
 			return r, err
 		}
 		for _, url := range strings.Split(strings.TrimSpace(urls), "\n") {
+			if identity != "" {
+				if !molecule.OriginHasIdentity(url, identity) {
+					return r, fmt.Errorf("Git origin or push destination differs from intake")
+				}
+				continue
+			}
 			m := origin.FindStringSubmatch(url)
 			if m == nil || !strings.EqualFold(strings.TrimSuffix(strings.ToLower(m[1]), ".git"), w.Repo) {
 				return r, fmt.Errorf("Git origin or push destination differs from intake")
@@ -162,6 +175,36 @@ func validatedHead(ctx context.Context, o Options, expected string) (molecule.Re
 	}
 	return r, nil
 }
+
+// snapshotForgeIdentity returns the forge identity the Molecule's approved
+// Formula snapshot requires of every origin and push URL, or "" for a Formula
+// without forge:, whose URLs keep the GitHub check against the workspace
+// repository. A snapshot that does not parse, or a plugin-forge snapshot whose
+// bytes no longer hash to the recorded SHA-256, is refused rather than read as
+// GitHub; a forge block without an identity is molecule.ErrNoForgeIdentity.
+// A record that names a Formula (its SHA-256 or id) but carries no snapshot
+// bytes is refused too: its forge is unknown, so it never falls back to the
+// GitHub check. Only a record with no Formula information at all keeps it.
+func snapshotForgeIdentity(r molecule.Record) (string, error) {
+	if r.FormulaSnapshot.YAML == "" {
+		if r.FormulaSnapshot.SHA256 != "" || r.FormulaID != "" {
+			return "", fmt.Errorf("the Molecule's Formula snapshot is missing; nothing was published")
+		}
+		return "", nil
+	}
+	f, err := formula.Parse([]byte(r.FormulaSnapshot.YAML))
+	if err != nil {
+		return "", fmt.Errorf("the Molecule's approved Formula snapshot does not parse, so its forge is unknown")
+	}
+	if f.Forge == nil {
+		return "", nil
+	}
+	if f.SHA256 != r.FormulaSnapshot.SHA256 {
+		return "", fmt.Errorf("the Molecule's approved Formula snapshot changed, so its forge is unknown")
+	}
+	return molecule.ForgeOriginIdentity(f)
+}
+
 func expectedHeadForReadiness(expected, base string) string {
 	if expected == base {
 		return ""

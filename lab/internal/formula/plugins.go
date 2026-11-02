@@ -398,6 +398,18 @@ func (f Formula) ForgePlugin() (PluginRef, string, bool) {
 	return p, f.Forge.Project, true
 }
 
+// NestedProjectAllowed reports whether intake.repo may be a nested project path
+// such as group/subgroup/project: only when both the tracker and the forge are
+// plugins and intake.repo names the forge's project, ignoring case. A GitHub
+// side keeps intake.repo exactly owner/repo.
+func (f Formula) NestedProjectAllowed() bool {
+	if _, ok := f.TrackerPlugin(); !ok {
+		return false
+	}
+	_, project, ok := f.ForgePlugin()
+	return ok && project != "" && strings.EqualFold(f.Intake.Repo, project)
+}
+
 // Reviewers returns a copy of the declared reviewer plugins, in order.
 func (f Formula) Reviewers() []ReviewerRef {
 	if len(f.ReviewerPlugins) == 0 {
