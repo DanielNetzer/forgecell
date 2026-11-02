@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,15 +28,24 @@ func TestUIKeyedLoopStartsWithADescribedSelector(t *testing.T) {
 		{Repository: "o/r", Key: "ENG-5", MoleculeID: "mol-eng-5-a", State: molecule.LoopWaiting, Started: true},
 		{Repository: "o/r", Key: "bad\nkey", State: molecule.LoopWaiting},
 	}}}}
-	d := &fakeDrive{loop: func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error) { return report, nil }}
+	// The first loop holds until the accepted view is checked, so the view is
+	// still running however fast the machine is.
+	release := make(chan struct{})
+	var first sync.Once
+	d := &fakeDrive{loop: func(context.Context, molecule.LoopOptions) (molecule.LoopReport, error) {
+		first.Do(func() { <-release })
+		return report, nil
+	}}
 	fake := newIssuesListFake(nil)
 	fake.selectors = []string{"oldest", "label:", "filter:", "bad\x00", ":"}
 	h, _, _ := keyedLoopHandler(t, fake, d)
 
 	v := viewOf[LoopView](t, do(t, h, gatePost("/api/loop/start", `{"select":"label:bug","maxConcurrent":2}`)), http.StatusAccepted)
 	if v.State != "running" || v.Select != "label:bug" || !v.Keyed {
+		close(release)
 		t.Fatalf("accepted keyed loop %+v", v)
 	}
+	close(release)
 	waitLoop(t, h)
 	if d.calls() != 1 {
 		t.Fatalf("loop engine calls %d", d.calls())
