@@ -36,6 +36,9 @@ import (
 // an https tracker URL). A listing past the page bound is
 // marked truncated; a failed one keeps the last good view, marked stale, until
 // the TTL has passed again, so a poll never retries the plugin sooner. Each
+// further consecutive failure doubles that TTL, up to issuesKeyedMaxPoll, and
+// a good listing resets it. A Lab UI started without a source checkout runs
+// no plugin: it serves an empty keyed view with a plain reason. Each
 // row's startability is the loop's own (molecule.QueueInventory.SummarizeKey).
 // Plugin error text is never served.
 
@@ -61,8 +64,9 @@ const (
 
 // Fixed texts of the keyed Issues view; none carries plugin output.
 const (
-	issuesKeyedReasonFailed = "The tracker plugin could not list open Issues just now; check it with forgecell plugin doctor."
-	issuesKeyedNoteStale    = "the tracker listing is not current; nothing is startable until it is"
+	issuesKeyedReasonFailed   = "The tracker plugin could not list open Issues just now; check it with forgecell plugin doctor."
+	issuesKeyedReasonReadOnly = "This Lab UI was started without a source checkout, so it does not run the tracker plugin to list open Issues."
+	issuesKeyedNoteStale      = "the tracker listing is not current; nothing is startable until it is"
 )
 
 var errIssuesKeyedCursor = errors.New("the tracker's next cursor does not advance the listing")
@@ -88,7 +92,8 @@ type issuesKeyedCache struct {
 	identity string
 	listing  *issuesKeyedListing
 	// finished is when the latest listing for identity ended, failed or not;
-	// failed reports that it failed. ttl is that listing's cache time.
+	// failed reports that it failed. ttl is that listing's cache time, doubled
+	// for each failure that followed another (issuesKeyedBackoff).
 	finished time.Time
 	failed   bool
 	ttl      time.Duration
@@ -168,12 +173,28 @@ func (h *handler) issuesKeyedStart(f keyedActiveFormula) {
 		if c.identity != f.identity {
 			return
 		}
-		c.finished, c.ttl, c.failed = h.forge.now(), ttl, err != nil
+		c.ttl = issuesKeyedBackoff(ttl, c.ttl, c.failed, err != nil)
+		c.finished, c.failed = h.forge.now(), err != nil
 		if err == nil {
 			listing.fetchedAt = c.finished
 			c.listing = &listing
 		}
 	}()
+}
+
+// issuesKeyedBackoff is the cache time stored after a listing whose own cache
+// time is ttl: ttl after a good listing or a first failure, and for a failure
+// that follows another, double the stored prev, never below ttl and never
+// above issuesKeyedMaxPoll.
+func issuesKeyedBackoff(ttl, prev time.Duration, prevFailed, failed bool) time.Duration {
+	if !failed || !prevFailed {
+		return ttl
+	}
+	next := issuesKeyedMaxPoll
+	if prev < issuesKeyedMaxPoll/2 {
+		next = 2 * prev
+	}
+	return max(next, ttl)
 }
 
 // issuesKeyedList prepares f's tracker through the trackerFor seam and lists
@@ -226,10 +247,9 @@ func issuesKeyedPages(ctx context.Context, t tracker.Keyed) (issuesKeyedListing,
 			out.items = append(out.items, issuesKeyedItemOf(item))
 		}
 		if page.NextCursor == nil {
+			// The total counts the open items kept: a tracker's Total may count
+			// closed Issues too, so it never marks a whole listing truncated.
 			out.total = len(out.items)
-			if page.Total != nil && *page.Total > int64(out.total) && *page.Total < 1<<31 {
-				out.total = int(*page.Total)
-			}
 			return out, nil
 		}
 		next := *page.NextCursor
@@ -288,10 +308,16 @@ func issuesKeyedRepository(f formula.Formula) string {
 	return repo
 }
 
-// issuesKeyedView serves GET /api/issues for a tracker-plugin Lab.
+// issuesKeyedView serves GET /api/issues for a tracker-plugin Lab. A Lab that
+// cannot drive (no source checkout) runs no plugin, as the background describe.
 func (h *handler) issuesKeyedView(w http.ResponseWriter, f keyedActiveFormula) {
 	repo := issuesKeyedRepository(f.formula)
 	out := IssuesView{Repository: repo, Keyed: true, Issues: []IssueRow{}}
+	if h.opts.SourceRoot == "" {
+		out.Reason = issuesKeyedReasonReadOnly
+		h.json(w, http.StatusOK, out)
+		return
+	}
 	st := h.issuesKeyedCurrent(f)
 	out.Loading = st.listing == nil && st.running
 	if st.failed {
@@ -305,12 +331,9 @@ func (h *handler) issuesKeyedView(w http.ResponseWriter, f keyedActiveFormula) {
 	out.Checked, out.Stale = true, st.running || st.failed
 	out.FetchedAt = l.fetchedAt.UTC().Format(time.RFC3339)
 	out.AgeSeconds = max(int64(h.forge.now().Sub(l.fetchedAt)/time.Second), 0)
-	out.Total, out.Shown, out.Truncated = l.total, len(l.items), l.truncated || l.total > len(l.items)
+	out.Total, out.Shown, out.Truncated = l.total, len(l.items), l.truncated
 	if out.Truncated {
-		out.Note = "showing " + strconv.Itoa(out.Shown) + " of " + strconv.Itoa(out.Total)
-		if l.truncated {
-			out.Note = "showing the first " + strconv.Itoa(out.Shown)
-		}
+		out.Note = "showing the first " + strconv.Itoa(out.Shown)
 	}
 	queue := molecule.ReadQueueInventory(h.opts.LabDir)
 	list := h.list(ledgerETag(h.opts.LabDir))
