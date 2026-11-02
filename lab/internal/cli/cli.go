@@ -1102,9 +1102,15 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 			return fail(err)
 		}
 		renderLearnNotices(stderr, stderr, *lab)
+		if code := fixRoundAfterRun(ctx, stderr, stderr, *lab, r); code != 0 {
+			return code
+		}
 	} else {
 		presentRun(out, r)
 		renderLearnNotices(out, stderr, *lab)
+		if code := fixRoundAfterRun(ctx, out, stderr, *lab, r); code != 0 {
+			return code
+		}
 	}
 	if r.Status == "failed" || r.Status == "blocked" {
 		return 2
@@ -1283,6 +1289,9 @@ func presentAmend(ctx context.Context, out, stderr io.Writer, lab string, r mole
 	}
 	presentRun(out, done)
 	renderLearnNotices(out, stderr, lab)
+	if code := fixRoundAfterRun(ctx, out, stderr, lab, done); code != 0 {
+		return code
+	}
 	if done.Status == "failed" || done.Status == "blocked" {
 		return 2
 	}
