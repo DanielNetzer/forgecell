@@ -102,7 +102,9 @@ func validateReadiness(ctx context.Context, o Options, r molecule.Record, expect
 // MatchesPublishedEvidence validates local provenance only. Publication does not
 // prove merge, deployment, current remote PR state, or production health.
 // Lifecycle observations do not alter this historical provenance predicate.
+// With fix rounds, the verified source tree is the last round's verification
+// tree and the fix-round history must be valid.
 func MatchesPublishedEvidence(receipt Receipt, r molecule.Record) bool {
 	p := receipt.Preview
-	return receipt.State == "published" && validURL(p.Repo, receipt.URL) && len(receipt.Commit) == 40 && strings.Trim(receipt.Commit, "0123456789abcdef") == "" && digest(p) == p.Digest && p.MoleculeID == r.ID && p.Repo == r.Issue.Repo && p.BaseCommit == r.Workspace.BaseCommit && p.Branch == r.Workspace.Branch && r.Verification != nil && p.Tree == r.Verification.SourceTree
+	return receipt.State == "published" && validURL(p.Repo, receipt.URL) && len(receipt.Commit) == 40 && strings.Trim(receipt.Commit, "0123456789abcdef") == "" && digest(p) == p.Digest && p.MoleculeID == r.ID && p.Repo == r.Issue.Repo && p.BaseCommit == r.Workspace.BaseCommit && p.Branch == r.Workspace.Branch && r.Verification != nil && checkFixRounds(receipt) == nil && verifiedTree(receipt) == r.Verification.SourceTree
 }

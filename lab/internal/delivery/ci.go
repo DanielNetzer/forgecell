@@ -73,38 +73,67 @@ func ciReadFile(path string, limit int64) ([]byte, error) {
 	}
 	return raw, nil
 }
+
+// ciIdentity is the CI identity of the change request's current head
+// (ReceiptHead), so CI is collected and validated for that commit only.
 func ciIdentity(o Options) (CIIdentity, error) {
+	id, _, err := ciIdentityCommits(o)
+	return id, err
+}
+
+// ciIdentityCommits is ciIdentity with every commit the receipt records, in
+// push order; the last is the identity's commit.
+func ciIdentityCommits(o Options) (CIIdentity, []string, error) {
 	var id CIIdentity
 	if !safeID.MatchString(o.MoleculeID) {
-		return id, fmt.Errorf("invalid Molecule id")
+		return id, nil, fmt.Errorf("invalid Molecule id")
 	}
 	raw, err := ciReadFile(filepath.Join(o.LabDir, "deliveries", o.MoleculeID+".json"), 8_000_000)
 	if err != nil {
-		return id, err
+		return id, nil, err
 	}
 	var r Receipt
 	if err = json.Unmarshal(raw, &r); err != nil {
-		return id, err
+		return id, nil, err
 	}
 	raw, err = ciReadFile(filepath.Join(o.LabDir, "ledgers", o.MoleculeID+".json"), 8_000_000)
 	if err != nil {
-		return id, err
+		return id, nil, err
 	}
 	var record molecule.Record
 	if err = json.Unmarshal(raw, &record); err != nil {
-		return id, err
+		return id, nil, err
 	}
 	if r.Forge != "" && record.ID == o.MoleculeID {
-		return pluginCIIdentity(o, r, record)
+		id, err = pluginCIIdentity(o, r, record)
+		if err != nil {
+			return id, nil, err
+		}
+		return id, receiptCommits(r), nil
 	}
 	if record.ID != o.MoleculeID || !MatchesPublishedEvidence(r, record) {
-		return id, fmt.Errorf("CI requires a matching published delivery receipt and ledger")
+		return id, nil, fmt.Errorf("CI requires a matching published delivery receipt and ledger")
 	}
 	number, err := strconv.Atoi(r.URL[len("https://github.com/"+r.Preview.Repo+"/pull/"):])
 	if err != nil {
-		return id, err
+		return id, nil, err
 	}
-	return CIIdentity{MoleculeID: o.MoleculeID, PreviewDigest: r.Preview.Digest, Repo: r.Preview.Repo, PR: number, URL: r.URL, Commit: r.Commit}, nil
+	head, _ := ReceiptHead(r)
+	return CIIdentity{MoleculeID: o.MoleculeID, PreviewDigest: r.Preview.Digest, Repo: r.Preview.Repo, PR: number, URL: r.URL, Commit: head}, receiptCommits(r), nil
+}
+
+// ciRecordedIdentity returns the position in commits of an observation's
+// identity commit when the identity is id except for an earlier recorded
+// commit, or -1.
+func ciRecordedIdentity(id CIIdentity, commits []string, got CIIdentity) int {
+	for i, c := range commits {
+		want := id
+		want.Commit = c
+		if got == want {
+			return i
+		}
+	}
+	return -1
 }
 func ciValidate(id CIIdentity, s checks.Snapshot) error {
 	if id.Ref != "" {
@@ -163,7 +192,7 @@ func ReadCI(o Options) ([]CIObservation, error) {
 	if err != nil {
 		return nil, err
 	}
-	id, err := ciIdentity(o)
+	id, commits, err := ciIdentityCommits(o)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +213,9 @@ func ReadCI(o Options) ([]CIObservation, error) {
 	history := []CIObservation{}
 	previous := ""
 	total := 0
+	// Observations for an earlier recorded commit stay readable, in push order:
+	// a later link never names a commit pushed before an earlier link's.
+	position := 0
 	for i, name := range names {
 		raw, err := ciReadFile(filepath.Join(dir, name), maxCIRecordBytes)
 		if err != nil {
@@ -197,10 +229,12 @@ func ReadCI(o Options) ([]CIObservation, error) {
 		if err = json.Unmarshal(raw, &a); err != nil {
 			return nil, err
 		}
-		if a.SchemaVersion != "v1" || a.Sequence != i+1 || a.Previous != previous || a.Identity != id || a.SHA256 != ciHash(a) || name != fmt.Sprintf("%06d-%s.json", a.Sequence, a.SHA256) || !validCIPluginCalls(id, a) {
+		at := ciRecordedIdentity(id, commits, a.Identity)
+		if a.SchemaVersion != "v1" || a.Sequence != i+1 || a.Previous != previous || at < position || a.SHA256 != ciHash(a) || name != fmt.Sprintf("%06d-%s.json", a.Sequence, a.SHA256) || !validCIPluginCalls(id, a) {
 			return nil, fmt.Errorf("invalid CI history identity or hash link")
 		}
-		if err = ciValidate(id, a.Snapshot); err != nil {
+		position = at
+		if err = ciValidate(a.Identity, a.Snapshot); err != nil {
 			return nil, err
 		}
 		history = append(history, a)
@@ -332,7 +366,8 @@ func appendCIWith(o Options, s checks.Snapshot, calls []mcpadapter.CallRecord, d
 
 // CIClassification describes the latest serialized observation. Regressing times
 // make ordering ambiguous (including legacy overlapping lookups), hence unknown.
-// CI never proves delivery lifecycle.
+// CI never proves delivery lifecycle. Callers pass HeadCI's observations, so
+// only the change request's current head is classified.
 func CIClassification(history []CIObservation) string {
 	if len(history) == 0 {
 		return "unknown"

@@ -205,10 +205,12 @@ func Collect(ctx context.Context, o FindingsOptions) (FindingsRecord, error) {
 	if o.Now != nil {
 		now = o.Now
 	}
-	round := FindingsRound{Commit: r.Commit, Ref: ref, CollectedAt: now().UTC().Format(time.RFC3339), Complete: true, Reviewers: []ReviewerRound{}}
-	in := &forgeInputs{o: o, ref: ref, pr: pr, commit: r.Commit}
+	// Reviewers read the change request's current head, the last fix round's commit.
+	head, _ := ReceiptHead(r)
+	round := FindingsRound{Commit: head, Ref: ref, CollectedAt: now().UTC().Format(time.RFC3339), Complete: true, Reviewers: []ReviewerRound{}}
+	in := &forgeInputs{o: o, ref: ref, pr: pr, commit: head}
 	for i, fr := range o.Reviewers {
-		entry := collectOne(ctx, ReviewerKey(i, fr.Plugin), fr, reviewer.Request{Ref: ref, Commit: r.Commit, Forge: forgeObject}, in)
+		entry := collectOne(ctx, ReviewerKey(i, fr.Plugin), fr, reviewer.Request{Ref: ref, Commit: head, Forge: forgeObject}, in)
 		if entry.Truncated || entry.InputDropped > 0 || entry.InputIncomplete {
 			round.Complete = false
 		}
@@ -254,6 +256,9 @@ func readPublishedReceipt(lab, id string) (Receipt, error) {
 	}
 	if r.State != "published" || !pluginCommit.MatchString(r.Commit) {
 		return Receipt{}, fmt.Errorf("findings are collected only for a published delivery with an exact commit")
+	}
+	if err := checkFixRounds(r); err != nil {
+		return Receipt{}, fmt.Errorf("delivery receipt fix rounds are invalid: %w", err)
 	}
 	return r, nil
 }

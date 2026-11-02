@@ -20,6 +20,9 @@ type ReceiptStatus struct {
 	MoleculeID string
 	// Commit is the commit Forgecell published, or "" before publication.
 	Commit string
+	// Head is the last fix round's commit, the change request's current head,
+	// or "" when the receipt has no fix rounds (the head is then Commit).
+	Head string
 }
 
 // ReadReceiptStatus reads deliveries/<id>.json for display without locking,
@@ -50,10 +53,14 @@ func ReadReceiptStatus(lab, id string) (s ReceiptStatus, found bool, err error) 
 	return s, true, nil
 }
 
-// decodeStatus walks one top-level object, keeping state, url, commit, lifecycle.state
-// and preview.moleculeId, and requires nothing but whitespace after it.
+// decodeStatus walks one top-level object, keeping state, url, commit, lifecycle.state,
+// preview.moleculeId and the fix rounds' head, and requires nothing but
+// whitespace after it. At most MaxFixRounds fix rounds are read, and each is
+// validated against the recorded history.
 func decodeStatus(dec *json.Decoder) (ReceiptStatus, error) {
 	var s ReceiptStatus
+	var rounds []FixRound
+	seenRounds := false
 	err := object(dec, func(key string) error {
 		switch key {
 		case "state":
@@ -62,6 +69,14 @@ func decodeStatus(dec *json.Decoder) (ReceiptStatus, error) {
 			return dec.Decode(&s.URL)
 		case "commit":
 			return dec.Decode(&s.Commit)
+		case "fixRounds":
+			if seenRounds {
+				return fmt.Errorf("repeated fix rounds")
+			}
+			seenRounds = true
+			var err error
+			rounds, err = decodeFixRounds(dec)
+			return err
 		case "lifecycle":
 			return nullableObject(dec, func(key string) error {
 				if key == "state" {
@@ -85,7 +100,41 @@ func decodeStatus(dec *json.Decoder) (ReceiptStatus, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return ReceiptStatus{}, fmt.Errorf("data after the receipt object")
 	}
+	if len(rounds) > 0 {
+		if err := checkFixRounds(Receipt{State: s.State, Commit: s.Commit, FixRounds: rounds}); err != nil {
+			return ReceiptStatus{}, err
+		}
+		s.Head = rounds[len(rounds)-1].Commit
+	}
 	return s, nil
+}
+
+// decodeFixRounds reads a fixRounds array, or null, holding at most
+// MaxFixRounds objects; a longer array is refused before its extra entries are
+// decoded.
+func decodeFixRounds(dec *json.Decoder) ([]FixRound, error) {
+	t, err := dec.Token()
+	switch {
+	case err != nil:
+		return nil, err
+	case t == nil:
+		return nil, nil
+	case t != json.Delim('['):
+		return nil, fmt.Errorf("expected a fix round list")
+	}
+	rounds := []FixRound{}
+	for dec.More() {
+		if len(rounds) >= MaxFixRounds {
+			return nil, fmt.Errorf("a change request has at most %d fix rounds", MaxFixRounds)
+		}
+		var fr FixRound
+		if err := dec.Decode(&fr); err != nil {
+			return nil, err
+		}
+		rounds = append(rounds, fr)
+	}
+	_, err = dec.Token()
+	return rounds, err
 }
 
 // object reads one JSON object, calling field for each key with the decoder

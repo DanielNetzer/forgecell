@@ -106,8 +106,13 @@ func (h *handler) published(id, repo string) published {
 		if m := pullNumber.FindStringSubmatch(receipt.URL); m != nil {
 			out.number, _ = strconv.ParseInt(m[1], 10, 64)
 		}
-		if publishedCommit.MatchString(receipt.Commit) {
-			out.commit = receipt.Commit
+		// The commit shown is the change request's current head.
+		head := receipt.Commit
+		if receipt.Head != "" {
+			head = receipt.Head
+		}
+		if publishedCommit.MatchString(head) {
+			out.commit = head
 		}
 	}
 	if cacheable {

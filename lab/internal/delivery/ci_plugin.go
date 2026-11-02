@@ -111,16 +111,18 @@ func ReadPluginChangeNoun(o Options) (string, error) {
 // Publication does not prove merge, deployment or current remote state.
 func MatchesPluginPublishedEvidence(receipt Receipt, r molecule.Record) bool {
 	p := receipt.Preview
-	return receipt.State == "published" && validPluginName(receipt.Forge) && cleanPluginText(receipt.Project, maxPluginProjectRunes) && validPluginRef(receipt.Ref) && validPluginURL(receipt.ForgeHost, receipt.URL) && len(receipt.Commit) == 40 && strings.Trim(receipt.Commit, "0123456789abcdef") == "" && digest(p) == p.Digest && p.MoleculeID == r.ID && p.Repo == r.Issue.Repo && p.BaseCommit == r.Workspace.BaseCommit && p.Branch == r.Workspace.Branch && r.Verification != nil && p.Tree == r.Verification.SourceTree
+	return receipt.State == "published" && validPluginName(receipt.Forge) && cleanPluginText(receipt.Project, maxPluginProjectRunes) && validPluginRef(receipt.Ref) && validPluginURL(receipt.ForgeHost, receipt.URL) && len(receipt.Commit) == 40 && strings.Trim(receipt.Commit, "0123456789abcdef") == "" && digest(p) == p.Digest && p.MoleculeID == r.ID && p.Repo == r.Issue.Repo && p.BaseCommit == r.Workspace.BaseCommit && p.Branch == r.Workspace.Branch && r.Verification != nil && checkFixRounds(receipt) == nil && verifiedTree(receipt) == r.Verification.SourceTree
 }
 
 // pluginCIIdentity is the CI identity of a plugin forge delivery: the forge
-// project stands in the repository, PR is 0 and Ref is the change ref.
+// project stands in the repository, PR is 0, Ref is the change ref and Commit
+// is the change request's current head.
 func pluginCIIdentity(o Options, r Receipt, record molecule.Record) (CIIdentity, error) {
 	if !MatchesPluginPublishedEvidence(r, record) {
 		return CIIdentity{}, fmt.Errorf("CI requires a matching published delivery receipt and ledger")
 	}
-	return CIIdentity{MoleculeID: o.MoleculeID, PreviewDigest: r.Preview.Digest, Repo: r.Project, PR: 0, URL: r.URL, Commit: r.Commit, Ref: r.Ref}, nil
+	head, _ := ReceiptHead(r)
+	return CIIdentity{MoleculeID: o.MoleculeID, PreviewDigest: r.Preview.Digest, Repo: r.Project, PR: 0, URL: r.URL, Commit: head, Ref: r.Ref}, nil
 }
 
 // validatePluginSnapshot binds a plugin snapshot to its identity and validates
