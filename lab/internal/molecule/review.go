@@ -427,7 +427,12 @@ func runReviewAtom(ctx context.Context, o Options, r Record, f formula.Formula, 
 	if diffFor == nil {
 		diffFor = defaultReviewDiff
 	}
-	diff, err := diffFor(ctx, r.Workspace, r.Workspace.BaseCommit, in.Capture.Tree)
+	// A fix round is reviewed as its own change from the delivered head.
+	base := r.Workspace.BaseCommit
+	if in.Plan.FixRound != nil {
+		base = in.Plan.CaptureBase()
+	}
+	diff, err := diffFor(ctx, r.Workspace, base, in.Capture.Tree)
 	if err != nil {
 		return record(ReviewFailed, "Review not run: "+err.Error())
 	}

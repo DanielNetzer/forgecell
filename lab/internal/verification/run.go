@@ -516,7 +516,10 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		allowed[s.Path] = true
 		allowedList = append(allowedList, s.Path)
 	}
-	changed, err := git(ctx, source, "", nil, "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", p.Inputs.BaseCommit, c.Tree, "--")
+	// A fix round compares against its delivered head; every other plan against the
+	// intake base commit. The frozen-identity checks below keep the intake base.
+	base := p.CaptureBase()
+	changed, err := git(ctx, source, "", nil, "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", base, c.Tree, "--")
 	if err != nil {
 		return fail(err)
 	}
@@ -529,7 +532,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	// decides once from the candidate tree, so the protected view follows it.
 	nonModule, decided := ctx.Value(nonModuleKey{}).(bool)
 	if !decided {
-		if nonModule, err = treeChangesOutsideModules(ctx, source, p.Inputs.BaseCommit, c.Tree); err != nil {
+		if nonModule, err = treeChangesOutsideModules(ctx, source, base, c.Tree); err != nil {
 			return fail(err)
 		}
 	}
@@ -563,7 +566,9 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 					return fail(fmt.Errorf("command %s has missing definition %s", command.ID, id))
 				}
 				// A new-file definition has no frozen bytes to hash. Its absence from the
-				// base commit is the only thing that makes it safe to run unhashed.
+				// base commit is the only thing that makes it safe to run unhashed. The
+				// intake base is checked even in a fix round: NewFiles is derived from the
+				// frozen intake tree, and the delivered head holds the file by design.
 				existing, lsErr := git(ctx, source, "", nil, "ls-tree", "-z", p.Inputs.BaseCommit, "--", id)
 				if lsErr != nil || existing != "" {
 					return fail(fmt.Errorf("command %s cites new file %s, but the base commit already contains it", command.ID, id))
@@ -587,6 +592,8 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 				if command.ReviewedAcceptance == "" || !allowed[e.Path] || reviewed[id].ID != "" || err != nil {
 					return fail(fmt.Errorf("command definition %s changed; review a scope/check amendment before execution", e.Path))
 				}
+				// The frozen evidence hash was taken at the intake base, so the baseline
+				// is read there, fix round or not.
 				baseline, baselineErr := git(ctx, source, "", nil, "cat-file", "blob", p.Inputs.BaseCommit+":"+e.Path)
 				if baselineErr != nil || fmt.Sprintf("%x", sha256.Sum256([]byte(baseline))) != e.SHA256 {
 					return fail(fmt.Errorf("protected command definition %s does not match frozen baseline", e.Path))
@@ -615,7 +622,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 	if err != nil {
 		return fail(err)
 	}
-	_, err = git(ctx, source, "", nil, "worktree", "add", "--no-checkout", "--detach", destination, p.Inputs.BaseCommit)
+	_, err = git(ctx, source, "", nil, "worktree", "add", "--no-checkout", "--detach", destination, base)
 	release()
 	if err != nil {
 		return fail(err)
@@ -760,7 +767,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 				s = fullSuite("the candidate view recorded no selection for this check directory")
 			}
 		} else {
-			s = computeSelection(ctx, source, p.Inputs.BaseCommit, c.Tree, destination, dir, env, p.FullSuiteTriggers)
+			s = computeSelection(ctx, source, base, c.Tree, destination, dir, env, p.FullSuiteTriggers)
 			if memo != nil {
 				memo.put(dir, s)
 			}
@@ -990,7 +997,7 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 		}
 		// Audit after every command. Artifacts remain bounded exceptions; no source,
 		// checker or index mutation can be treated as successful verification.
-		after, err := Capture(ctx, destination, p.Inputs.BaseCommit, allowedList, p.Artifacts)
+		after, err := Capture(ctx, destination, base, allowedList, p.Artifacts)
 		if err != nil {
 			return fail(err)
 		}

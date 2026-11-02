@@ -102,7 +102,8 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 	for _, s := range p.Analysis.Scope {
 		paths = append(paths, s.Path)
 	}
-	capture, err := verification.Capture(ctx, r.Workspace.Path, p.Inputs.BaseCommit, paths, p.Artifacts)
+	// A fix round's coding started from its delivered head, so it is captured there.
+	capture, err := verification.Capture(ctx, r.Workspace.Path, p.CaptureBase(), paths, p.Artifacts)
 	if err != nil {
 		return r, err
 	}

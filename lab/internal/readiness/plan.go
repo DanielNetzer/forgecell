@@ -343,6 +343,10 @@ type Plan struct {
 	// revision carries at most one, which replaces any earlier note. It joins the
 	// plan digest; empty keeps the digest of every earlier plan unchanged.
 	OperatorNote string `json:"operatorNote,omitempty"`
+	// FixRound marks a revision of a delivered Molecule whose capture base is the
+	// delivered head (CaptureBase). It joins the plan digest; absent keeps the bytes
+	// and digest of every earlier plan unchanged.
+	FixRound *FixRoundRef `json:"fixRound,omitempty"`
 }
 
 // MaxOperatorNoteBytes bounds an operator note so it stays reviewable.
@@ -688,11 +692,20 @@ func (p Plan) validateDigestible() error {
 			return fmt.Errorf("reviewed check input overlaps source scope: %s", input.Path)
 		}
 	}
-	for _, c := range append(append([]Criterion{}, a.Acceptance...), a.Impacts...) {
+	if err := p.validateFixRound(); err != nil {
+		return err
+	}
+	// Only an acceptance criterion may cite a finding of the plan's fix round.
+	citedAcceptance := citations(p.findingRefs(refs))
+	for i, c := range append(append([]Criterion{}, a.Acceptance...), a.Impacts...) {
 		if !textOK(c.Description) {
 			return fmt.Errorf("empty criterion/assessment")
 		}
-		if err := cited(c.Evidence); err != nil {
+		check := cited
+		if i < len(a.Acceptance) {
+			check = citedAcceptance
+		}
+		if err := check(c.Evidence); err != nil {
 			return err
 		}
 	}
