@@ -854,8 +854,13 @@ func TestTheTokenIsRedactedFromLogsAndErrors(t *testing.T) {
 		structured, _ := result["structuredContent"].(map[string]any)
 		reasons = append(reasons, structured["reason"].(string))
 	}
+	// A call refused because the previous handler was still marked running
+	// would also answer failed; the kit must never refuse a finished one.
+	if strings.Contains(stderr.String(), "earlier handler still runs") {
+		t.Fatalf("a call was refused as overlapping a finished handler:\n%s", stderr.String())
+	}
 	if !reflect.DeepEqual(reasons, []string{"failed", "failed", "auth-missing"}) {
-		t.Fatalf("reasons %v", reasons)
+		t.Fatalf("reasons %v\nstderr:\n%s", reasons, stderr.String())
 	}
 	for _, seen := range fake.seen() {
 		if seen.Token != fakeToken || seen.Authorization != "" {
