@@ -12,9 +12,13 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/plugintest"
 )
 
-// pluginUsageBeforeNew is the usage of plugin test, list and doctor, which the
-// new and pin commands extend without changing.
-const pluginUsageBeforeNew = "usage: forgecell plugin test <manifest> [--json] | forgecell plugin list [--lab DIR] [--lab-name NAME] [--json] | forgecell plugin doctor [NAME] [--lab DIR] [--lab-name NAME] [--json]"
+// pluginUsageAllCommands is the usage that names every plugin command: new,
+// pin, test with its live flags, list and doctor.
+const pluginUsageAllCommands = "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go|python|typescript [--dir DIR] <name>" +
+	" | forgecell plugin pin <dir> --server <path> [--interpreter <path>]" +
+	" | forgecell plugin test <manifest> [--json] [--live --target T [--config FILE] [--change REF --commit SHA] [--allow-write --head BRANCH --base BRANCH]]" +
+	" | forgecell plugin list [--lab DIR] [--lab-name NAME] [--json]" +
+	" | forgecell plugin doctor [NAME] [--lab DIR] [--lab-name NAME] [--json]"
 
 // noAbsolutePath fails when text names the temporary root or holds any
 // absolute path.
@@ -186,20 +190,20 @@ func TestPluginPinPrintsTheDigestAndFormulaLine(t *testing.T) {
 }
 
 func TestPluginUsageKeepsTestListAndDoctor(t *testing.T) {
-	if pluginUsage != pluginUsageBeforeNew {
-		t.Fatalf("the test, list and doctor usage changed:\n%s", pluginUsage)
+	if pluginUsage != pluginUsageAllCommands {
+		t.Fatalf("the plugin usage is not the all-commands line:\n%s", pluginUsage)
 	}
 	if pluginNewUsage != "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go|python|typescript [--dir DIR] <name>" ||
 		pluginPinUsage != "usage: forgecell plugin pin <dir> --server <path> [--interpreter <path>]" {
 		t.Fatalf("new and pin usage: %q, %q", pluginNewUsage, pluginPinUsage)
 	}
-	// Each usage error of plugin test, list and doctor prints the base text,
-	// byte for byte.
+	// Each usage error of plugin test, list and doctor prints the all-commands
+	// line, byte for byte.
 	for _, args := range [][]string{
 		{"plugin"}, {"plugin", "frobnicate"}, {"plugin", "test"}, {"plugin", "test", "a", "b"},
 		{"plugin", "list", "extra"}, {"plugin", "doctor", "a", "b"},
 	} {
-		if code, out, errOut := runCLI(args...); code != 1 || out != "" || errOut != "forgecell: "+pluginUsageBeforeNew+"\n" {
+		if code, out, errOut := runCLI(args...); code != 1 || out != "" || errOut != "forgecell: "+pluginUsageAllCommands+"\n" {
 			t.Errorf("%v: exit %d, %q%q", args, code, out, errOut)
 		}
 	}

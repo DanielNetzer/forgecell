@@ -16,13 +16,33 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/conformance"
 )
 
-const pluginUsage = "usage: forgecell plugin test <manifest> [--json] | forgecell plugin list [--lab DIR] [--lab-name NAME] [--json] | forgecell plugin doctor [NAME] [--lab DIR] [--lab-name NAME] [--json]"
-
-// The usage of plugin new and plugin pin, printed by those commands only, so
-// the usage that test, list and doctor print stays as it was.
+// The form of each plugin command, without "usage: forgecell ". pluginUsage,
+// the per-command usages and the --help lines are all built from these, so
+// they cannot drift apart.
 const (
-	pluginNewUsage = "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go|python|typescript [--dir DIR] <name>"
-	pluginPinUsage = "usage: forgecell plugin pin <dir> --server <path> [--interpreter <path>]"
+	pluginNewCommand    = "plugin new --kind tracker|forge|reviewer --lang go|python|typescript [--dir DIR] <name>"
+	pluginPinCommand    = "plugin pin <dir> --server <path> [--interpreter <path>]"
+	pluginTestCommand   = "plugin test <manifest> [--json] [--live --target T [--config FILE] [--change REF --commit SHA] [--allow-write --head BRANCH --base BRANCH]]"
+	pluginListCommand   = "plugin list [--lab DIR] [--lab-name NAME] [--json]"
+	pluginDoctorCommand = "plugin doctor [NAME] [--lab DIR] [--lab-name NAME] [--json]"
+)
+
+// pluginUsage names every plugin command, in the order new, pin, test, list
+// and doctor.
+const pluginUsage = "usage: forgecell " + pluginNewCommand +
+	" | forgecell " + pluginPinCommand +
+	" | forgecell " + pluginTestCommand +
+	" | forgecell " + pluginListCommand +
+	" | forgecell " + pluginDoctorCommand
+
+// pluginHelp is the plugin commands' lines of forgecell --help, one per line.
+const pluginHelp = pluginNewCommand + "\n" + pluginPinCommand + "\n" + pluginTestCommand + "\n" +
+	pluginListCommand + "\n" + pluginDoctorCommand
+
+// The usage of plugin new and plugin pin, printed by those commands only.
+const (
+	pluginNewUsage = "usage: forgecell " + pluginNewCommand
+	pluginPinUsage = "usage: forgecell " + pluginPinCommand
 )
 
 // pluginTestOptions configures plugin test runs; tests replace it to keep runs
@@ -101,9 +121,8 @@ func runPlugin(ctx context.Context, args []string, out, stderr io.Writer) int {
 	return 0
 }
 
-// pluginTestLiveUsage is printed only when live flags are refused, so the usage
-// that test, list and doctor print stays as it was.
-const pluginTestLiveUsage = "usage: forgecell plugin test <manifest> [--json] [--live --target T [--config FILE] [--change REF --commit SHA] [--allow-write --head BRANCH --base BRANCH]]"
+// pluginTestLiveUsage is printed when live flags are refused.
+const pluginTestLiveUsage = "usage: forgecell " + pluginTestCommand
 
 // Bounds of a --config file: the contract's config maxProperties, and 64 KiB.
 const (
