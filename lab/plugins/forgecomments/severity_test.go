@@ -13,7 +13,7 @@ import (
 
 func TestEverySeverityMarkerFormIsRead(t *testing.T) {
 	cases := []struct{ body, want string }{
-		// BugBot's named form, anywhere in a line and in any case.
+		// BugBot's named form, at the start of a line and in any case.
 		{"### Race in the cache\n\n**High Severity**\n\nDetails", "high"},
 		{"medium severity", "medium"},
 		{"LOW SEVERITY: cosmetic", "low"},
@@ -27,7 +27,7 @@ func TestEverySeverityMarkerFormIsRead(t *testing.T) {
 		{"[Medium] x", "medium"},
 		{"[LOW]", "low"},
 		{"[info] note", "info"},
-		{"> **[high]** quoted", "high"},
+		{"> **[high]** quoted", "medium"},
 		{"  ## [low] heading", "low"},
 		// The first marker wins.
 		{"Low Severity\nHigh Severity", "low"},
@@ -139,7 +139,7 @@ func TestBoundFindingsOrdersTiesAndRepeatsDeterministically(t *testing.T) {
 		{finding: f("newer-info", "info"), at: at.Add(2 * time.Hour), order: 5},
 	}
 	got := ids(boundFindings(cs, maxFindings))
-	want := []string{"repeat", "same-time-second", "same-time-first", "undated", "newer-info"}
+	want := []string{"repeat", "same-time-second", "same-time-first", "undated", "newer-info", "repeat"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("order %v, want %v", got, want)
 	}

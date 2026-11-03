@@ -85,7 +85,7 @@ type reviewConfig struct {
 }
 
 // parseConfig checks the reviewed config: a JSON object of at most 4 KiB
-// holding only bots, a list of at most 16 author names, and defaultSeverity, one
+// holding only bots, a list of at most 16 distinct author names, and defaultSeverity, one
 // of the contract severities. An absent config is the defaults. Its errors are
 // fixed text that never names a config value.
 func parseConfig(raw json.RawMessage) (reviewConfig, error) {
@@ -104,16 +104,21 @@ func parseConfig(raw json.RawMessage) (reviewConfig, error) {
 		}
 	}
 	if v, ok := keys["bots"]; ok {
+		// A null bots decodes to a nil list, which is refused like any other
+		// value that is not a list.
 		var bots []string
-		if json.Unmarshal(v, &bots) != nil {
+		if json.Unmarshal(v, &bots) != nil || bots == nil {
 			return reviewConfig{}, mcpserver.Fail(mcpserver.Failed, "the config bots must be a list of author names")
 		}
 		if len(bots) > maxBots {
 			return reviewConfig{}, mcpserver.Fail(mcpserver.Failed, "the config bots lists more than 16 author names")
 		}
-		for _, b := range bots {
+		for i, b := range bots {
 			if !validBot(b) {
 				return reviewConfig{}, mcpserver.Fail(mcpserver.Failed, "each config bot must be an author name of 1 to 100 characters with no control characters or surrounding spaces")
+			}
+			if slices.ContainsFunc(bots[:i], func(p string) bool { return strings.EqualFold(p, b) }) {
+				return reviewConfig{}, mcpserver.Fail(mcpserver.Failed, "the config bots lists an author name more than once, compared case-insensitively")
 			}
 		}
 		cfg.bots = bots
