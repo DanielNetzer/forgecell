@@ -1,9 +1,9 @@
 # Install Forgecell CLI
 
-Public CLI `v0.3.1` release; core source licensed under the [MIT License](../LICENSE). No repository access, Node or Go is needed to install.
+Public CLI `v0.4.0` release; core source licensed under the [MIT License](../LICENSE). No repository access, Node or Go is needed to install.
 
 ```sh
-sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.3.1/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
+sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.4.0/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
 ```
 
 The command downloads the bootstrap over HTTPS before executing it. A failed download
@@ -23,8 +23,8 @@ The four words you will see everywhere:
 
 You need Git, the GitHub CLI signed in (`gh auth login`), and one coding agent signed in
 with its own CLI: Claude Code, Codex or Cursor. Forgecell never asks for those
-credentials. GitLab and Jira are available in the source on `main` and not yet in a
-release.
+credentials. GitLab and Jira ship in the v0.4.0 release as bundled
+[plugins](../lab/plugins/README.md).
 
 1. **Install.** Run the command above. Make sure `~/.local/bin` is on your PATH; the
    installer does not edit shell profiles.
@@ -90,8 +90,8 @@ finished ledgers still uses `forgecell learn` and `forgecell suggestion`.
 
 ### Outside reviewers and fix rounds
 
-Outside reviewers (review bots and other reviewer plugins) are available in the source on
-`main`, not yet in a release. Declare them in the Formula under `reviewers:`, each with
+Outside reviewers (review bots and other reviewer plugins) ship in the v0.4.0 release.
+Declare them in the Formula under `reviewers:`, each with
 its plugin and the `autoFix` level that decides which findings a fix round takes on its
 own, and pin the plugin under `plugins:` (see the
 [review bot comments plugin](../lab/plugins/forgecomments/README.md) for an example):
@@ -171,7 +171,7 @@ a Molecule's delivery and exits nonzero unless they passed.
 and authentication checks; it does not prove model access or repository policy
 readiness. `forgecell --help` lists every command and flag.
 
-The `v0.3.1` release uses a distinct directory under `~/.forgecell/labs/`
+The `v0.4.0` release uses a distinct directory under `~/.forgecell/labs/`
 for each checkout by default; `forgecell doctor --json` reports the exact location.
 Existing preview.1 checkout Labs in the ignored `.forgecell` directory are left
 intact. Use the same `--lab .forgecell` path for every command to continue using one;
@@ -181,7 +181,7 @@ path such as the example above keeps records outside the checkout.
 
 ## Versions, upgrade and rollback
 
-The command above pins `v0.3.1`. v0.3.1 is the first release that drives the whole loop from `forgecell ui`. Repeating it safely reinstalls that version. For another GitHub release, use its matching versioned installer; `FORGECELL_VERSION` overrides require the generic `FORGECELL_RELEASE_BASE` layout. Review release notes before upgrading.
+The command above pins `v0.4.0`. v0.4.0 adds plugins: other trackers, forges and reviewers through pinned MCP plugins, and the `plugin new`/`pin`/`test` contributor kit. Repeating it safely reinstalls that version. For another GitHub release, use its matching versioned installer; `FORGECELL_VERSION` overrides require the generic `FORGECELL_RELEASE_BASE` layout. Review release notes before upgrading.
 
 `forgecell rollback` restores the previous verified installation when one exists. Installation preserves Formulas and ledgers, stores versioned executables under `~/.forgecell/releases`, and refuses conflicting unmanaged launchers.
 
@@ -255,7 +255,7 @@ Native maintainers use [the distribution design](design/native-cli-distribution.
 
 ## Published public-core release and legacy provenance
 
-The pinned installer uses `DanielNetzer/forgecell` and the `v0.3.1` tag.
+The pinned installer uses `DanielNetzer/forgecell` and the `v0.4.0` tag.
 The earlier published [v0.2.0-preview.2 prerelease](https://github.com/DanielNetzer/forgecell/releases/tag/v0.2.0-preview.2)
 was built from public-core source `801a9846fc9066dde985bb678348cac2bc89a249`.
 Installation requires no GitHub token, Git, gh, Go or Node.
