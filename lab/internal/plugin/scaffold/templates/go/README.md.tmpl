@@ -1,0 +1,74 @@
+# {{NAME}} {{KIND}} plugin
+
+`{{NAME}}` is a {{KIND}} plugin skeleton made by `forgecell plugin new`. It is an MCP server
+on stdio that serves the `{{CONTRACT}}` contract. It uses only the Go standard library.
+
+It runs offline. It reads no environment variables, makes no network request and needs no
+credentials.
+
+## What it does now
+
+- `tools.json` is the contract's tool table: every tool's name, access and input schema,
+  copied from the contract when the skeleton was made. The server lists these tools.
+- Every tool checks its arguments first, and checks exactly three things: that each
+  top-level required member is present, that no unknown top-level member is present when
+  the schema sets `additionalProperties: false`, and that each top-level member has the
+  JSON type its schema names. A mismatch fails with reason `failed`.
+- `{{KIND}}_describe` answers the example in `fixture.json`.
+- Every other tool fails with `not implemented yet: <tool>`.
+
+That check is not full schema validation. It does not check bounds (`minLength`,
+`maxLength`, `minimum`, `maximum`, `maxItems`), enums, patterns or formats, and it does not
+look inside nested objects or arrays. When you implement a tool, check those yourself in
+its handler before you use an argument.
+
+Replace the tools one at a time in `main.go`. Keep `tools.json` as it is: the engine checks
+the advertised schemas against the contract.
+
+## Build
+
+From this directory, build the server:
+
+```sh
+go build -o {{NAME}} .
+```
+
+The server takes no arguments.
+
+## Pin the manifest
+
+`plugin.json.tmpl` is the manifest with two placeholders: the server's absolute path and
+its digest. Write `plugin.json` from it:
+
+```sh
+forgecell plugin pin . --server ./{{NAME}}
+```
+
+The server must be executable by its owner and placed where the engine trusts it: owned by
+you or root, not group- or world-writable, with one hard link, and in no directory that
+another user owns or can write without the sticky bit. `plugin pin` refuses any other.
+
+It prints the manifest's own digest and the `plugins:` line for the Formula. Rebuilding the
+server changes its digest, so pin again after every build.
+
+The manifest declares no `needs.env`, no `needs.network` and no roles. Read tools are
+`read-only` and write tools are `read-write`, as the contract levels map.
+
+## Test it
+
+```sh
+forgecell plugin test plugin.json
+```
+
+The skeleton passes before you change anything. Run it again after every change.
+
+## Declare it in the Formula
+
+Put this directory in your Lab as `plugins/{{NAME}}`, pin it there, and add the line that
+`plugin pin` printed:
+
+```yaml
+{{ENABLE}}
+plugins:
+  {{NAME}}: {manifest: plugins/{{NAME}}/plugin.json, sha256: "<manifest hex>", required: false}
+```
