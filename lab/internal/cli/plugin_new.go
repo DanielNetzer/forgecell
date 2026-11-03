@@ -16,8 +16,10 @@ import (
 var pluginShownPath = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
 
 // runPluginNew runs `plugin new --kind K --lang L [--dir D] <name>`: it writes a
-// plugin skeleton into D (./<name> by default) and prints the next three
-// commands with relative paths only. It exits 0 on success and 1 otherwise.
+// plugin skeleton into D (./<name> by default) and prints the next commands
+// with relative paths only: for python and typescript they name python3 or node
+// and the --interpreter flag of plugin pin. It exits 0 on success and 1
+// otherwise.
 func runPluginNew(args []string, out, stderr io.Writer) int {
 	usage := func() int {
 		fmt.Fprintln(stderr, "forgecell:", pluginNewUsage)
@@ -53,10 +55,26 @@ func runPluginNew(args []string, out, stderr io.Writer) int {
 		return 1
 	}
 	shown := pluginRelativeDir(dir)
-	fmt.Fprintf(out, "Wrote the %s plugin skeleton %s.\nNext, build the server, pin the manifest to it and test it:\n", flags["--kind"], name)
-	fmt.Fprintf(out, "  go -C %s build -o %s .\n", shown, name)
-	fmt.Fprintf(out, "  forgecell plugin pin %s --server %s/%s\n", shown, shown, name)
-	fmt.Fprintf(out, "  forgecell plugin test %s/%s\n", shown, scaffold.ManifestFile)
+	switch flags["--lang"] {
+	case "python":
+		fmt.Fprintf(out, "Wrote the %s plugin skeleton %s.\nNext, pin the manifest to server.py and python3 (3.9 or later), and test it:\n", flags["--kind"], name)
+		fmt.Fprintf(out, "  forgecell plugin pin %s --server %s/server.py --interpreter <python3>\n", shown, shown)
+		fmt.Fprintf(out, "  forgecell plugin test %s/%s\n", shown, scaffold.ManifestFile)
+		fmt.Fprintf(out, "<python3> is python3's absolute path with every symlink resolved, as printed by:\n")
+		fmt.Fprintf(out, "  python3 -c 'import os, sys; print(os.path.realpath(sys.executable))'\n")
+	case "typescript":
+		fmt.Fprintf(out, "Wrote the %s plugin skeleton %s.\nNext, build server.js with node (22.18 or later), pin the manifest to it and node, and test it:\n", flags["--kind"], name)
+		fmt.Fprintf(out, "  node %s/build.mjs\n", shown)
+		fmt.Fprintf(out, "  forgecell plugin pin %s --server %s/server.js --interpreter <node>\n", shown, shown)
+		fmt.Fprintf(out, "  forgecell plugin test %s/%s\n", shown, scaffold.ManifestFile)
+		fmt.Fprintf(out, "<node> is node's absolute path with every symlink resolved, as printed by:\n")
+		fmt.Fprintf(out, "  node -p 'require(\"fs\").realpathSync(process.execPath)'\n")
+	default:
+		fmt.Fprintf(out, "Wrote the %s plugin skeleton %s.\nNext, build the server, pin the manifest to it and test it:\n", flags["--kind"], name)
+		fmt.Fprintf(out, "  go -C %s build -o %s .\n", shown, name)
+		fmt.Fprintf(out, "  forgecell plugin pin %s --server %s/%s\n", shown, shown, name)
+		fmt.Fprintf(out, "  forgecell plugin test %s/%s\n", shown, scaffold.ManifestFile)
+	}
 	return 0
 }
 

@@ -1,0 +1,376 @@
+# A Forgecell plugin skeleton: a Model Context Protocol server on stdio that
+# speaks newline-delimited JSON-RPC 2.0 (initialize, notifications/initialized,
+# ping, tools/list and tools/call). It uses only the Python standard library
+# and runs on Python 3.9 or later.
+#
+# TOOLS is the contract's tool table and FIXTURES holds the describe answer.
+# Both were embedded from tools.json and fixture.json when the skeleton was
+# made: the engine runs a private copy of this one file, so nothing next to it
+# is there at run time, and the server reads no file. The describe tool answers
+# the fixture, and every other tool fails with "not implemented yet". Replace
+# those tools one at a time.
+#
+# Every tool first runs accepts on its arguments, which checks exactly three
+# things: each top-level required member is present, no unknown top-level
+# member is present when additionalProperties is false, and each top-level
+# member has the JSON type its schema names (a JSON bool is not an integer).
+# It is not full schema validation: it does not check bounds (minLength,
+# maxLength, minimum, maximum, maxItems), enums, patterns or formats, and it
+# does not look inside nested objects or arrays. A handler you write must check
+# those itself before it uses an argument.
+#
+# Only protocol messages are written to stdout. Nothing is logged, least of all
+# a tool's arguments.
+
+import json
+import sys
+
+SERVER_NAME = {{SERVER_NAME}}
+SERVER_VERSION = "0.1.0"
+CONTRACT_ID = {{CONTRACT_ID}}
+PROTOCOL_VERSION = {{PROTOCOL_VERSION}}
+# MAX_MESSAGE_BYTES bounds one incoming message, excluding its newline.
+MAX_MESSAGE_BYTES = 1 << 20
+# MAX_ID_BYTES bounds a request id that is echoed back, by its JSON text as
+# written in the request.
+MAX_ID_BYTES = 256
+# MAX_INT_DIGITS bounds an integer literal (an int64 has at most 20 characters),
+# so no input makes the parser build a huge integer.
+MAX_INT_DIGITS = 20
+# READ_CHUNK_BYTES bounds one read from stdin.
+READ_CHUNK_BYTES = 64 << 10
+INT64_MIN = -(1 << 63)
+INT64_MAX = (1 << 63) - 1
+
+# JSON-RPC 2.0 error codes.
+PARSE_ERROR = -32700
+INVALID_REQUEST = -32600
+METHOD_NOT_FOUND = -32601
+INVALID_PARAMS = -32602
+INTERNAL_ERROR = -32603
+
+TOOLS = {{TOOLS}}
+
+FIXTURES = {{FIXTURES}}
+
+
+def load():
+    """Checks the embedded tool table and returns the tools by name."""
+    by_name = {}
+    for tool in TOOLS:
+        schema = tool.get("inputSchema")
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            raise ValueError("a tool's input schema is not an object schema")
+        by_name[tool["name"]] = tool
+    for value in FIXTURES.values():
+        if not isinstance(value, dict):
+            raise ValueError("a fixture is not an object")
+    return by_name
+
+
+def serve(stdin, stdout, by_name):
+    """Answers requests from stdin on stdout, one at a time, until stdin ends."""
+    while True:
+        read = read_line(stdin, MAX_MESSAGE_BYTES)
+        if read is None:
+            return
+        line, too_large = read
+        if too_large:
+            out = encode(error_message(None, INVALID_REQUEST, "the message exceeds the size bound"))
+        else:
+            out = respond(line, by_name)
+        if out is None:
+            continue
+        stdout.write(out)
+        stdout.flush()
+
+
+def encode(reply):
+    return json.dumps(reply, separators=(",", ":"), allow_nan=False).encode("ascii") + b"\n"
+
+
+def respond(line, by_name):
+    """Answers one message as the bytes to write, or None for no reply. An
+    unexpected exception becomes an internal error reply, never a traceback, so
+    one request cannot stop the server."""
+    try:
+        reply = handle(line, by_name)
+        return None if reply is None else encode(reply)
+    except Exception:
+        return encode(error_message(None, INTERNAL_ERROR, "internal error"))
+
+
+def read_line(stream, limit):
+    """Returns (line, too_large) for one message of at most limit bytes, without
+    its newline (and an optional carriage return), or None at the end of input.
+    A longer message is drained to its newline without being kept and reported
+    as too_large. A message cut off by the end of input is dropped."""
+    parts = []
+    size = 0
+    too_large = False
+    while True:
+        chunk = stream.readline(READ_CHUNK_BYTES)
+        if not chunk:
+            return None
+        ended = chunk.endswith(b"\n")
+        size += len(chunk) - (1 if ended else 0)
+        if size > limit:
+            too_large = True
+            parts = []
+        if not too_large:
+            parts.append(chunk)
+        if ended:
+            if too_large:
+                return b"", True
+            line = b"".join(parts)[:-1]
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            return line, False
+
+
+def _refuse_constant(name):
+    raise ValueError("not JSON: " + name)
+
+
+def _parse_int(text):
+    # A longer literal is refused before int() parses it.
+    if len(text) > MAX_INT_DIGITS:
+        raise ValueError("the integer literal is too long")
+    return int(text)
+
+
+def _parse_float(text):
+    value = float(text)
+    # inf - inf and nan - nan are nan, which is not equal to 0.
+    if value - value != 0.0:
+        raise ValueError("the number is not finite")
+    return value
+
+
+def decode(text):
+    """Parses strict JSON (no NaN or Infinity, no integer literal longer than
+    MAX_INT_DIGITS, no number too large to be finite) and reports whether any
+    object repeats a key, so a repeated "id", "method" or argument is never read
+    two ways."""
+    repeated = [False]
+
+    def pairs(items):
+        out = {}
+        for key, value in items:
+            if key in out:
+                repeated[0] = True
+            out[key] = value
+        return out
+
+    value = json.loads(text, object_pairs_hook=pairs, parse_constant=_refuse_constant,
+                       parse_int=_parse_int, parse_float=_parse_float)
+    return value, repeated[0]
+
+
+_SKIPPER = json.JSONDecoder(parse_constant=_refuse_constant, parse_int=_parse_int, parse_float=_parse_float)
+_WHITESPACE = " \t\n\r"
+
+
+def _skip(text, i):
+    while i < len(text) and text[i] in _WHITESPACE:
+        i += 1
+    return i
+
+
+def raw_member(text, wanted):
+    """Returns the JSON text of the top-level member wanted, exactly as written
+    in the object text that decode accepted, or None when it is absent."""
+    i = _skip(text, 0)
+    if text[i] != "{":
+        return None
+    i = _skip(text, i + 1)
+    while text[i] == '"':
+        key, i = json.decoder.scanstring(text, i + 1)
+        i = _skip(text, _skip(text, i) + 1)
+        start = i
+        _, i = _SKIPPER.raw_decode(text, i)
+        if key == wanted:
+            return text[start:i]
+        i = _skip(text, i)
+        if text[i] != ",":
+            return None
+        i = _skip(text, i + 1)
+    return None
+
+
+def handle(line, by_name):
+    """Answers one message; None means no reply."""
+    trimmed = line.strip()
+    if not trimmed:
+        return None
+    try:
+        text = trimmed.decode("utf-8")
+        message, repeated = decode(text)
+    except (ValueError, RecursionError):
+        return error_message(None, PARSE_ERROR, "parse error")
+    if not isinstance(message, dict) or repeated:
+        return error_message(None, INVALID_REQUEST, "invalid request")
+    request_id = message.get("id")
+    if request_id is not None and not valid_id(request_id, raw_member(text, "id")):
+        return error_message(None, INVALID_REQUEST, "invalid request")
+    if message.get("jsonrpc") != "2.0":
+        return error_message(request_id, INVALID_REQUEST, "invalid request")
+    method = message.get("method")
+    if not isinstance(method, str) or method == "":
+        return error_message(request_id, INVALID_REQUEST, "invalid request")
+    if request_id is None:
+        # A notification, such as notifications/initialized, gets no reply.
+        return None
+    params = message.get("params", {})
+    if not isinstance(params, dict):
+        return error_message(request_id, INVALID_PARAMS, "params is not an object")
+    if method == "initialize":
+        return result_message(request_id, {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {
+                "tools": {},
+                "experimental": {"forgecell": {"contract": CONTRACT_ID}},
+            },
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        })
+    if method == "ping":
+        return result_message(request_id, {})
+    if method == "tools/list":
+        return result_message(request_id, {
+            "tools": [{"name": t["name"], "inputSchema": t["inputSchema"]} for t in TOOLS],
+        })
+    if method == "tools/call":
+        return call(request_id, params, by_name)
+    return error_message(request_id, METHOD_NOT_FOUND, "method not found")
+
+
+def call(request_id, params, by_name):
+    """Checks a tools/call request and its arguments, then runs the tool."""
+    name = params.get("name")
+    if name is None:
+        name = ""
+    if not isinstance(name, str):
+        return error_message(request_id, INVALID_PARAMS, "the tool name is invalid")
+    tool = by_name.get(name)
+    if tool is None:
+        return error_message(request_id, INVALID_PARAMS, "unknown tool")
+    args = params.get("arguments")
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return error_message(request_id, INVALID_PARAMS, "arguments is not an object")
+    if not accepts(tool["inputSchema"], args):
+        return result_message(request_id, failure("the arguments do not match the input schema"))
+    if name.endswith("_describe") and name in FIXTURES:
+        describe = FIXTURES[name]
+        return result_message(request_id, {
+            "content": [{"type": "text", "text": json.dumps(describe, separators=(",", ":"), sort_keys=True)}],
+            "structuredContent": describe,
+        })
+    return result_message(request_id, failure("not implemented yet: " + name))
+
+
+def accepts(schema, args):
+    """Checks the top-level required members, unknown top-level members when
+    additionalProperties is false, and the JSON type of each top-level member,
+    and nothing else: bounds, enums, patterns and nested values are the
+    handler's to check."""
+    for name in schema.get("required", []):
+        if name not in args:
+            return False
+    closed = schema.get("additionalProperties") is False
+    properties = schema.get("properties", {})
+    for key, value in args.items():
+        prop = properties.get(key)
+        if prop is None:
+            if closed:
+                return False
+            continue
+        want = prop.get("type") if isinstance(prop, dict) else None
+        if want is not None and not type_allows(want, json_type(value)):
+            return False
+    return True
+
+
+def type_allows(schema_type, got):
+    """Reports whether a schema type (a string or a list of strings) accepts a
+    value of JSON type got. A number accepts integers."""
+    def ok(t):
+        return t == got or (t == "number" and got == "integer")
+    if isinstance(schema_type, str):
+        return ok(schema_type)
+    if isinstance(schema_type, list):
+        return any(ok(item) for item in schema_type)
+    return False
+
+
+def json_type(value):
+    # bool is checked before int: in Python True is an int, in JSON it is not.
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer" if INT64_MIN <= value <= INT64_MAX else "number"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return ""
+
+
+def valid_id(value, raw):
+    """Reports whether a request id is a JSON string of well-formed Unicode (no
+    lone surrogate escape such as "\\ud800") or an int64 integer, whose JSON
+    text as written, raw, is at most MAX_ID_BYTES, as the Go skeleton measures
+    it."""
+    if raw is None or len(raw.encode("utf-8")) > MAX_ID_BYTES or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+    if isinstance(value, int):
+        return INT64_MIN <= value <= INT64_MAX
+    return False
+
+
+def failure(message):
+    """An isError tool result with the reason failed and a fixed message."""
+    return {
+        "isError": True,
+        "content": [{"type": "text", "text": message}],
+        "structuredContent": {"reason": "failed", "message": message},
+    }
+
+
+def result_message(request_id, result):
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def error_message(request_id, code, message):
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def main():
+    try:
+        by_name = load()
+    except (ValueError, KeyError, TypeError):
+        sys.stderr.write(SERVER_NAME + ": the embedded tool table or fixture is invalid\n")
+        return 1
+    try:
+        serve(sys.stdin.buffer, sys.stdout.buffer, by_name)
+    except OSError:
+        sys.stderr.write(SERVER_NAME + ": reading a request or writing a response failed\n")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -78,7 +78,7 @@ func TestPluginNewRefusals(t *testing.T) {
 		want string
 	}{
 		{[]string{"--kind", "wiki", "--lang", "go", "x"}, "kind must be"},
-		{[]string{"--kind", "tracker", "--lang", "python", "x"}, "not supported yet"},
+		{[]string{"--kind", "tracker", "--lang", "rust", "x"}, "language must be go"},
 		{[]string{"--kind", "tracker", "--lang", "cobol", "x"}, "language must be go"},
 		{[]string{"--kind", "tracker", "--lang", "go", "Bad_Name"}, "plugin name must be"},
 		{[]string{"--kind", "tracker", "--lang", "go", "--dir", full, "x"}, "not empty"},
@@ -177,8 +177,8 @@ func TestPluginUsageKeepsTestListAndDoctor(t *testing.T) {
 	if pluginUsage != pluginUsageBeforeNew {
 		t.Fatalf("the test, list and doctor usage changed:\n%s", pluginUsage)
 	}
-	if pluginNewUsage != "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go [--dir DIR] <name>" ||
-		pluginPinUsage != "usage: forgecell plugin pin <dir> --server <path>" {
+	if pluginNewUsage != "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go|python|typescript [--dir DIR] <name>" ||
+		pluginPinUsage != "usage: forgecell plugin pin <dir> --server <path> [--interpreter <path>]" {
 		t.Fatalf("new and pin usage: %q, %q", pluginNewUsage, pluginPinUsage)
 	}
 	// Each usage error of plugin test, list and doctor prints the base text,
