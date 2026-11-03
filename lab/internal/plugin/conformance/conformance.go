@@ -68,6 +68,7 @@ func Run(ctx context.Context, manifestPath string, opts Options) Report {
 		return k.report(r)
 	}
 	k.run()
+	k.runLive()
 	grace := opts.Grace
 	if grace == nil {
 		grace = func() <-chan time.Time { return time.After(defaultGrace) }
