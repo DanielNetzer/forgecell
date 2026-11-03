@@ -43,10 +43,10 @@ reviewers:
   - plugin: forgecomments
     autoFix: high
     config:
-      bots: [cursor[bot], gitlab-duo]   # optional
+      bots: ["cursor[bot]", gitlab-duo] # optional
       defaultSeverity: medium           # optional
 plugins:
-  forgecomments: {manifest: plugins/forgecomments/plugin.json, sha256: "<manifest hex>", required: false}
+  - {name: forgecomments, manifest: plugins/forgecomments/plugin.json, sha256: "<manifest hex>"}
 ```
 
 The `config` object is reviewed with the Formula. It is a JSON object of at most 4 KiB:

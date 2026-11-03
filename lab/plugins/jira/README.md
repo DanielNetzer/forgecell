@@ -43,7 +43,7 @@ intake:
     project: ENG                  # required
     jql: component = Backend      # optional
 plugins:
-  jira: {manifest: plugins/jira/plugin.json, sha256: "<manifest hex>", required: true}
+  - {name: jira, manifest: plugins/jira/plugin.json, sha256: "<manifest hex>"}
 ```
 
 The `config` object is reviewed with the Formula:

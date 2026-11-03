@@ -130,6 +130,9 @@ ever merges the change request or marks it ready for review. GitHub Labs can't s
 review comments to reviewer plugins in v1, so a plugin that reads them, such as the
 review bot comments plugin, needs a plugin forge such as GitLab.
 
+To write your own tracker, forge or reviewer plugin, see the
+[plugin contributor guide](../lab/plugins/README.md).
+
 ### Try the demo first
 
 `forgecell demo` runs one complete Molecule against a built-in sample repository with a

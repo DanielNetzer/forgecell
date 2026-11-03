@@ -166,6 +166,7 @@ ledgers, explicit gates and provider-neutral orchestration.
 | Product and terminology | [Product bible](docs/product-bible.md) · [Ontology](docs/ontology.md) · [Atoms](docs/atoms.md) |
 | Onboarding and execution | [Agent onboarding](docs/agent-onboarding.md) · [Ticket readiness](docs/ticket-readiness.md) |
 | Learning and direction | [Learning](docs/learning.md) · [Pillars](docs/pillars.md) |
+| Plugins (trackers, forges, reviewers) | [Plugin contributor guide](lab/plugins/README.md) |
 
 ---
 

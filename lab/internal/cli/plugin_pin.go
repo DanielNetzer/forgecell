@@ -56,6 +56,12 @@ func runPluginPin(args []string, out, stderr io.Writer) int {
 	}
 	fmt.Fprintf(out, "Pinned %s for the plugin %s.\nManifest SHA-256: %s\n", scaffold.ManifestFile, p.Name, p.ManifestSHA256)
 	fmt.Fprintf(out, "Put the plugin in your Lab as plugins/%s, then add this line under the Formula's plugins:\n", p.Name)
-	fmt.Fprintf(out, "  %s: {manifest: plugins/%s/%s, sha256: \"%s\", required: false}\n", p.Name, p.Name, scaffold.ManifestFile, p.ManifestSHA256)
+	fmt.Fprintf(out, "%s\n", pluginPinFormulaEntry(p.Name, p.ManifestSHA256))
 	return 0
+}
+
+// pluginPinFormulaEntry is the Formula's plugins: list item for a plugin pinned
+// as plugins/<name>/plugin.json with the manifest digest.
+func pluginPinFormulaEntry(name, digest string) string {
+	return fmt.Sprintf("  - {name: %s, manifest: plugins/%s/%s, sha256: \"%s\"}", name, name, scaffold.ManifestFile, digest)
 }

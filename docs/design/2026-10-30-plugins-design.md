@@ -1,7 +1,7 @@
 # Forgecell plugins: engine-called MCP integrations for trackers, forges and reviewers
 
 Status: approved (operator, 2026-10-30)
-Slices 1-5 implemented on main (2026-11-02); slice 6 (contributor kit) pending.
+Slices 1-6 implemented on main (2026-11-03); the contributor guide is `lab/plugins/README.md`.
 Date: 2026-10-30
 Replaces the plan in #259 (GitLab + Jira). Absorbs #260 (outside code reviewers). Extends
 `docs/design/2026-10-11-extensions-design.md`, whose §10 named this direction.

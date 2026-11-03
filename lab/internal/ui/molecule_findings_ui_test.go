@@ -307,7 +307,7 @@ func TestMoleculeFindingsDocs(t *testing.T) {
 	if !strings.Contains(moleculeFindingsDocText(docs["README.md"]), "outside reviewers are available in the source on `main` and not yet in a release") {
 		t.Error("README.md does not say outside reviewers are on main and not yet released")
 	}
-	if !strings.Contains(read("docs/design/2026-10-30-plugins-design.md"), "\nSlices 1-5 implemented on main (2026-11-02); slice 6 (contributor kit) pending.\n") {
+	if !strings.Contains(read("docs/design/2026-10-30-plugins-design.md"), "\nSlices 1-6 implemented on main (2026-11-03); the contributor guide is `lab/plugins/README.md`.\n") {
 		t.Error("the plugins design doc lacks the slice status line")
 	}
 }
