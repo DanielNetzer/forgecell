@@ -263,7 +263,7 @@ func moleculeFindingsDocText(raw string) string {
 	return strings.ToLower(strings.Join(strings.Fields(strings.Join(lines, " ")), " "))
 }
 
-var moleculeFindingsGoneDocPhrases = []string{"outside reviewers are not supported yet", "outside reviewers are post-v1", "gitlab and jira are not supported yet", "(post-v1, #259)"}
+var moleculeFindingsGoneDocPhrases = []string{"outside reviewers are not supported yet", "outside reviewers are post-v1", "gitlab and jira are not supported yet", "(post-v1, #259)", "not yet in a release"}
 
 // The docs no longer say outside reviewers are unsupported: install.md has
 // the subsection, the plugin README links it, and the design doc records the
@@ -293,8 +293,11 @@ func TestMoleculeFindingsDocs(t *testing.T) {
 		}
 	}
 	install := docs["docs/install.md"]
-	if !strings.Contains(moleculeFindingsDocText(install), "gitlab and jira are available in the source on `main` and not yet in a release") {
-		t.Error("docs/install.md does not say GitLab and Jira are on main and not yet released")
+	if !strings.Contains(moleculeFindingsDocText(install), "gitlab and jira ship in the v0.4.0 release") {
+		t.Error("docs/install.md does not say GitLab and Jira ship in v0.4.0")
+	}
+	if !strings.Contains(moleculeFindingsDocText(install), "outside reviewers (review bots and other reviewer plugins) ship in the v0.4.0 release") {
+		t.Error("docs/install.md does not say outside reviewers ship in v0.4.0")
 	}
 	for _, want := range []string{"### Outside reviewers and fix rounds", "reviewers:", "--collect", "--propose", "--dismiss", "--push", "Findings", "at most 3 fix rounds", "GitHub Labs can't serve"} {
 		if !strings.Contains(install, want) {
@@ -304,8 +307,8 @@ func TestMoleculeFindingsDocs(t *testing.T) {
 	if !strings.Contains(docs["lab/plugins/forgecomments/README.md"], "docs/install.md#outside-reviewers-and-fix-rounds") {
 		t.Error("the forgecomments README does not link the install subsection")
 	}
-	if !strings.Contains(moleculeFindingsDocText(docs["README.md"]), "outside reviewers are available in the source on `main` and not yet in a release") {
-		t.Error("README.md does not say outside reviewers are on main and not yet released")
+	if !strings.Contains(moleculeFindingsDocText(docs["README.md"]), "v0.4.0 also ships the plugin runtime with bundled gitlab (forge), jira (tracker) and `forgecomments` (reviewer) plugins") {
+		t.Error("README.md does not say v0.4.0 ships the GitLab, Jira and forgecomments plugins")
 	}
 	if !strings.Contains(read("docs/design/2026-10-30-plugins-design.md"), "\nSlices 1-6 implemented on main (2026-11-03); the contributor guide is `lab/plugins/README.md`.\n") {
 		t.Error("the plugins design doc lacks the slice status line")

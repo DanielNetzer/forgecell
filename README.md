@@ -28,9 +28,9 @@ proposed improvements to the durable recipe that guides the next run.
 
 > **Early release.** The current Go source supports ticket analysis, approved execution,
 > verification and separately approved draft PRs, also available in the downloadable
-> `v0.3.1` release. Merge, deployment and issue closure
-> remain manual. GitHub is the only tracker in a release; GitLab, Jira and outside
-> reviewers are available in the source on `main` and not yet in a release.
+> `v0.4.0` release. Merge, deployment and issue closure
+> remain manual. v0.4.0 also ships the plugin runtime with bundled GitLab (forge), Jira
+> (tracker) and `forgecomments` (reviewer) plugins; see [plugins](lab/plugins/README.md).
 
 ## How it works
 
@@ -66,14 +66,14 @@ No Node, Go or source checkout is required to install it.
 **[Installation guide →](docs/install.md)** — prerequisites, PATH, upgrades and rollback.
 
 <details>
-<summary>One-line installer · pinned to v0.3.1</summary>
+<summary>One-line installer · pinned to v0.4.0</summary>
 
 ```sh
-sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.3.1/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
+sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.4.0/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
 ```
 
 The installer verifies the executable checksum and version before activation and
-preserves local Lab data. This command pins the published public-core v0.3.1 release.
+preserves local Lab data. This command pins the published public-core v0.4.0 release.
 Checksums share the binaries’ GitHub HTTPS endpoint; they are not independent signatures.
 
 </details>
@@ -110,7 +110,7 @@ sample repository with a deterministic stub harness. It needs only Git and Go on
 no API key, no GitHub token, no network and no repository of your own, and it publishes
 nothing.
 
-The `v0.3.1` release defaults to a distinct private Lab for each checkout
+The `v0.4.0` release defaults to a distinct private Lab for each checkout
 under `~/.forgecell/labs/`; `forgecell doctor --json` reports the exact location.
 Existing preview.1 checkout Labs remain intact: use the same `--lab .forgecell` path
 for every command to keep using one. Labs and saved bindings are not automatically

@@ -5,7 +5,7 @@ server on stdio that serves one of three contracts. You pin it by digest, and a 
 enables it. Forgecell starts it, calls its tools and stops it. A plugin never drives
 Forgecell.
 
-Plugins are available in the source on `main`, not yet in a release.
+Plugins ship in the v0.4.0 release.
 
 | Kind | Contract | What it does |
 |---|---|---|
