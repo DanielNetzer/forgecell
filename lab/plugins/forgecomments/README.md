@@ -53,7 +53,7 @@ The `config` object is reviewed with the Formula. It is a JSON object of at most
 
 | Key | Required | Meaning |
 |---|---|---|
-| `bots` | no | Up to 16 author names of at most 100 characters each, compared case-insensitively. A comment is a bot comment when the forge marks it as a bot's (`isBot`) or its author is listed. |
+| `bots` | no | A list of up to 16 author names of at most 100 characters each, compared case-insensitively. A comment is a bot comment when the forge marks it as a bot's (`isBot`) or its author is listed. `null` is refused, and so is a name listed twice, in any case. |
 | `defaultSeverity` | no | `high`, `medium`, `low` or `info`: the severity of a bot comment with no marker. It is `medium` when absent. |
 
 No other key is accepted. Both tools check the config and fail with reason `failed` and a
@@ -95,12 +95,25 @@ To triage the findings, propose a fix round and push it to the same change reque
     the start only, so a closing backtick or a trailing underscore stays. It is cut to 300 characters, ending in `…`. A comment with no text has the
     title `Review bot comment`.
   - `body`: the comment body, cut to 65536 characters and ending in `[truncated]` when cut.
-- **Severity.** The first explicit marker in the first five lines wins, in any case:
-  `High Severity`, `Medium Severity` or `Low Severity`; `severity: high`, `medium`, `low`
-  or `info`; or a line that starts with `[high]`, `[medium]`, `[low]` or `[info]`. Without
-  a marker, `defaultSeverity` applies.
+- **Severity.** The first explicit marker in the first five lines wins, in any case. The
+  markers are:
+  - `High Severity`, `Medium Severity` or `Low Severity` at the start of a line, after
+    leading markdown markers, or as the whole content of `**…**`.
+  - `severity: high`, `medium`, `low` or `info` anywhere in a line.
+  - A line that starts with `[high]`, `[medium]`, `[low]` or `[info]`, after leading
+    markdown markers, unless the tag starts a markdown link, as in `[High](…)`.
+
+  Within a line, the marker that starts first wins, whatever its form. A marker right after
+  the word `not` or `no` doesn't count. Lines inside a fenced code block (```` ``` ```` or
+  `~~~`) are never read. As in CommonMark, only a line holding a run of the opening
+  character at least as long as the opener, and nothing else, closes the fence, and a fence
+  left open hides the rest of the five lines. A line is a blockquote line, and never read,
+  when a `>` appears anywhere in its leading markdown markers, list bullets and spaces, as
+  in `> x` or `- > x`. A lone CR, U+0085, U+2028 and U+2029 each end a line, as LF does, and
+  CRLF is one break. Without a marker, `defaultSeverity` applies.
 - **Order and bounds.** Findings are ordered highest severity first, and latest comment
   first within a severity. At most 500 are kept, so the lowest-severity, oldest ones are
-  the ones left out. A repeated comment id is kept once. When the bodies would take the
+  the ones left out. Comments that share an id are kept as separate findings, since the
+  contract doesn't require unique ids. When the bodies would take the
   answer over its output bound, they are cut to equal shares, each ending in
   `[truncated]`. If even that does not fit, the call fails rather than dropping findings.
