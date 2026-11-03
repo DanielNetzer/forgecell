@@ -156,6 +156,12 @@ interpreter must be owned by you or root, not group- or world-writable, with one
 (a root-owned system interpreter may have more), and in no directory that another user
 owns or can write without the sticky bit. `plugin pin` refuses any other.
 
+On macOS, Homebrew's prefix (`/opt/homebrew`, or `/usr/local` on Intel) is group-writable
+by `admin`, so `plugin pin` refuses a Homebrew `python3` or `node`. What works instead: the
+system `/usr/bin/python3`, which resolves into the Command Line Tools; an interpreter under
+`$HOME` from pyenv, nvm or fnm; or `chmod g-w` on the Homebrew directories above the
+interpreter, accepting that this can affect other admin users of that Homebrew.
+
 ## Walkthrough
 
 1. **Make a skeleton.**

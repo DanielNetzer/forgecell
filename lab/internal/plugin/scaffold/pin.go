@@ -249,9 +249,15 @@ func checkPlacement(resolved string) error {
 	return checkPlacementOf("server", resolved)
 }
 
+// interpreterPlacementHint follows the interpreter's owner-or-ancestor refusal.
+// Package-manager prefixes such as Homebrew's are group-writable, so it names
+// what passes instead. It is fixed text and names no local path.
+const interpreterPlacementHint = "; package-manager prefixes such as Homebrew's are group-writable, so use the system interpreter, an interpreter installed under your home directory (pyenv, nvm or fnm), or remove group write from the directories above the interpreter"
+
 // checkPlacementOf is checkPlacement for the file what names (server or
 // interpreter). The interpreter launch.go runs is checked by the same
-// pinned.CheckPlacement, which trusts files and directories root owns.
+// pinned.CheckPlacement, which trusts files and directories root owns. Only the
+// interpreter's owner-or-ancestor refusal adds interpreterPlacementHint.
 func checkPlacementOf(what, resolved string) error {
 	if pinned.CheckPlacement(resolved) == nil {
 		return nil
@@ -266,7 +272,11 @@ func checkPlacementOf(what, resolved string) error {
 	if n, ok := pinned.LinkCount(info); ok && n > 1 {
 		return errors.New("the " + what + " has more than one hard link; copy it to a private location and pin that copy")
 	}
-	return errors.New("the " + what + " or a directory above it is owned by another user, or a directory above it is writable by others without the sticky bit")
+	reason := "the " + what + " or a directory above it is owned by another user, or a directory above it is writable by others without the sticky bit"
+	if what == "interpreter" {
+		reason += interpreterPlacementHint
+	}
+	return errors.New(reason)
 }
 
 // openOwnedDir opens dir as an os.Root after proving it is a directory the
