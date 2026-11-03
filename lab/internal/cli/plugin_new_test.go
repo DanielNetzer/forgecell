@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/plugintest"
 )
 
@@ -128,9 +129,20 @@ func TestPluginPinPrintsTheDigestAndFormulaLine(t *testing.T) {
 	}
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
+	entry := "  - {name: rv, manifest: plugins/rv/plugin.json, sha256: \"" + digest + "\"}"
 	if !strings.Contains(out, "Manifest SHA-256: "+digest+"\n") ||
-		!strings.Contains(out, "  rv: {manifest: plugins/rv/plugin.json, sha256: \""+digest+"\", required: false}\n") {
+		!strings.HasSuffix(out, " under the Formula's plugins:\n"+entry+"\n") {
 		t.Fatalf("output:\n%s", out)
+	}
+	// The printed entry is the Formula's own list form, so it parses as is.
+	recipe := "schemaVersion: v0\nkind: formula\nid: sample\nintake:\n  repo: acme/widgets\n" +
+		"atoms:\n  - id: intake\n    type: intake\n  - id: work\n    type: harness\nplugins:\n" + entry + "\n"
+	f, err := formula.Parse([]byte(recipe))
+	if err != nil {
+		t.Fatalf("the printed plugins: entry does not parse: %v", err)
+	}
+	if len(f.Plugins) != 1 || f.Plugins[0] != (formula.PluginRef{Name: "rv", Manifest: "plugins/rv/plugin.json", SHA256: digest}) {
+		t.Fatalf("the printed entry decoded as %+v", f.Plugins)
 	}
 	noAbsolutePath(t, "the output", out, root)
 	if !strings.Contains(string(raw), filepath.Join(root, "rv", "rv")) {

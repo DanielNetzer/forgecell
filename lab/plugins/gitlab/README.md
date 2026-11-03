@@ -38,7 +38,7 @@ forge:
   plugin: gitlab
   project: welltech-com/backend   # a GitLab namespace/project path or a numeric id
 plugins:
-  gitlab: {manifest: plugins/gitlab/plugin.json, sha256: "<manifest hex>", required: true}
+  - {name: gitlab, manifest: plugins/gitlab/plugin.json, sha256: "<manifest hex>"}
 ```
 
 ## Configuration
