@@ -1,0 +1,453 @@
+// Command server is a Forgecell plugin skeleton: a Model Context Protocol server
+// on stdio that speaks newline-delimited JSON-RPC 2.0 (initialize,
+// notifications/initialized, ping, tools/list and tools/call). It uses only the
+// standard library.
+//
+// tools.json is the contract's tool table and fixture.json holds the describe
+// answer; both are embedded. The describe tool answers the fixture, and every
+// other tool fails with "not implemented yet". Replace those tools one at a
+// time.
+//
+// Every tool first runs accepts on its arguments, which checks exactly three
+// things: each top-level required member is present, no unknown top-level
+// member is present when additionalProperties is false, and each top-level
+// member has the JSON type its schema names. It is not full schema
+// validation: it does not check bounds (minLength, maxLength, minimum,
+// maximum, maxItems), enums, patterns or formats, and it does not look inside
+// nested objects or arrays. A handler you write must check those itself before
+// it uses an argument.
+//
+// Only protocol messages are written to stdout. Nothing is logged, least of all
+// a tool's arguments.
+package main
+
+import (
+	"bufio"
+	"bytes"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+const (
+	serverName      = {{SERVER_NAME}}
+	serverVersion   = "0.1.0"
+	contractID      = {{CONTRACT_ID}}
+	protocolVersion = {{PROTOCOL_VERSION}}
+	// maxMessageBytes bounds one incoming message, excluding its newline.
+	maxMessageBytes = 1 << 20
+	// maxIDBytes bounds a request id that is echoed back.
+	maxIDBytes = 256
+)
+
+// JSON-RPC 2.0 error codes.
+const (
+	codeParseError     = -32700
+	codeInvalidRequest = -32600
+	codeMethodNotFound = -32601
+	codeInvalidParams  = -32602
+)
+
+//go:embed tools.json
+var toolsJSON []byte
+
+//go:embed fixture.json
+var fixtureJSON []byte
+
+// inputSchema is the part of a contract input schema the server checks: the
+// required properties, whether unknown members are refused, and the JSON type
+// of each top-level property.
+type inputSchema struct {
+	Type       string `json:"type"`
+	Properties map[string]struct {
+		Type any `json:"type"`
+	} `json:"properties"`
+	Required             []string        `json:"required"`
+	AdditionalProperties json.RawMessage `json:"additionalProperties"`
+}
+
+type tool struct {
+	Name        string          `json:"name"`
+	Access      string          `json:"access"`
+	InputSchema json.RawMessage `json:"inputSchema"`
+	schema      inputSchema
+}
+
+type server struct {
+	tools    []tool
+	byName   map[string]int
+	fixtures map[string]json.RawMessage
+}
+
+func main() {
+	s, err := load()
+	if err != nil {
+		io.WriteString(os.Stderr, serverName+": the embedded tool table or fixture is invalid\n")
+		os.Exit(1)
+	}
+	if err := s.serve(os.Stdin, os.Stdout); err != nil {
+		io.WriteString(os.Stderr, serverName+": "+err.Error()+"\n")
+		os.Exit(1)
+	}
+}
+
+// load reads the embedded tool table and fixtures.
+func load() (*server, error) {
+	var table struct {
+		Tools []tool `json:"tools"`
+	}
+	if err := json.Unmarshal(toolsJSON, &table); err != nil {
+		return nil, err
+	}
+	s := &server{byName: map[string]int{}}
+	if err := json.Unmarshal(fixtureJSON, &s.fixtures); err != nil {
+		return nil, err
+	}
+	for name, raw := range s.fixtures {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, raw); err != nil {
+			return nil, err
+		}
+		s.fixtures[name] = compact.Bytes()
+	}
+	for i, t := range table.Tools {
+		if err := json.Unmarshal(t.InputSchema, &t.schema); err != nil || t.schema.Type != "object" {
+			return nil, errors.New("a tool's input schema is not an object schema")
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, t.InputSchema); err != nil {
+			return nil, err
+		}
+		t.InputSchema = compact.Bytes()
+		s.tools = append(s.tools, t)
+		s.byName[t.Name] = i
+	}
+	return s, nil
+}
+
+// serve answers requests from in on out, one at a time, until in ends.
+func (s *server) serve(in io.Reader, out io.Writer) error {
+	r := bufio.NewReaderSize(in, 64<<10)
+	for {
+		line, tooLarge, err := readLine(r, maxMessageBytes)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return errors.New("reading a request failed")
+		}
+		var reply map[string]any
+		if tooLarge {
+			reply = errorMessage(nil, codeInvalidRequest, "the message exceeds the size bound")
+		} else {
+			reply = s.handle(line)
+		}
+		if reply == nil {
+			continue
+		}
+		raw, err := json.Marshal(reply)
+		if err != nil {
+			return errors.New("encoding a response failed")
+		}
+		if _, err := out.Write(append(raw, '\n')); err != nil {
+			return errors.New("writing a response failed")
+		}
+	}
+}
+
+// readLine returns one message of at most limit bytes, without its newline (and
+// an optional carriage return). A longer message is drained to its newline
+// without being kept and reported as tooLarge. A message cut off by the end of
+// input is dropped.
+func readLine(r *bufio.Reader, limit int) (line []byte, tooLarge bool, err error) {
+	var buf []byte
+	size := 0
+	for {
+		chunk, err := r.ReadSlice('\n')
+		n := len(chunk)
+		if err == nil {
+			n--
+		}
+		size += n
+		if size > limit {
+			tooLarge, buf = true, nil
+		}
+		if !tooLarge {
+			buf = append(buf, chunk...)
+		}
+		switch {
+		case err == nil:
+			if tooLarge {
+				return nil, true, nil
+			}
+			buf = buf[:len(buf)-1]
+			if n := len(buf); n > 0 && buf[n-1] == '\r' {
+				buf = buf[:n-1]
+			}
+			return buf, false, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		default:
+			return nil, false, err
+		}
+	}
+}
+
+// handle answers one message; nil means no reply.
+func (s *server) handle(line []byte) map[string]any {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if !utf8.Valid(trimmed) || !json.Valid(trimmed) {
+		return errorMessage(nil, codeParseError, "parse error")
+	}
+	if trimmed[0] != '{' || !uniqueKeys(trimmed) {
+		return errorMessage(nil, codeInvalidRequest, "invalid request")
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &members); err != nil {
+		return errorMessage(nil, codeParseError, "parse error")
+	}
+	var id json.RawMessage
+	if raw, ok := members["id"]; ok && string(raw) != "null" {
+		if id = validID(raw); id == nil {
+			return errorMessage(nil, codeInvalidRequest, "invalid request")
+		}
+	}
+	var version, method string
+	if json.Unmarshal(members["jsonrpc"], &version) != nil || version != "2.0" {
+		return errorMessage(id, codeInvalidRequest, "invalid request")
+	}
+	if json.Unmarshal(members["method"], &method) != nil || method == "" {
+		return errorMessage(id, codeInvalidRequest, "invalid request")
+	}
+	if id == nil {
+		// A notification, such as notifications/initialized, gets no reply.
+		return nil
+	}
+	params, ok := object(members["params"])
+	if !ok {
+		return errorMessage(id, codeInvalidParams, "params is not an object")
+	}
+	switch method {
+	case "initialize":
+		return resultMessage(id, map[string]any{
+			"protocolVersion": protocolVersion,
+			"capabilities": map[string]any{
+				"tools":        map[string]any{},
+				"experimental": map[string]any{"forgecell": map[string]any{"contract": contractID}},
+			},
+			"serverInfo": map[string]any{"name": serverName, "version": serverVersion},
+		})
+	case "ping":
+		return resultMessage(id, map[string]any{})
+	case "tools/list":
+		tools := make([]map[string]any, 0, len(s.tools))
+		for _, t := range s.tools {
+			tools = append(tools, map[string]any{"name": t.Name, "inputSchema": t.InputSchema})
+		}
+		return resultMessage(id, map[string]any{"tools": tools})
+	case "tools/call":
+		return s.call(id, params)
+	}
+	return errorMessage(id, codeMethodNotFound, "method not found")
+}
+
+// call checks a tools/call request and its arguments, then runs the tool.
+func (s *server) call(id json.RawMessage, params map[string]json.RawMessage) map[string]any {
+	var name string
+	if json.Unmarshal(params["name"], &name) != nil {
+		return errorMessage(id, codeInvalidParams, "the tool name is invalid")
+	}
+	index, ok := s.byName[name]
+	if !ok {
+		return errorMessage(id, codeInvalidParams, "unknown tool")
+	}
+	t := s.tools[index]
+	raw := params["arguments"]
+	if raw == nil || string(bytes.TrimSpace(raw)) == "null" {
+		raw = json.RawMessage("{}")
+	}
+	if _, ok := object(raw); !ok {
+		return errorMessage(id, codeInvalidParams, "arguments is not an object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var args map[string]any
+	if err := dec.Decode(&args); err != nil || !t.schema.accepts(args) {
+		return resultMessage(id, failure("the arguments do not match the input schema"))
+	}
+	if strings.HasSuffix(t.Name, "_describe") {
+		if describe, ok := s.fixtures[t.Name]; ok {
+			return resultMessage(id, map[string]any{
+				"content":           []any{map[string]any{"type": "text", "text": string(describe)}},
+				"structuredContent": describe,
+			})
+		}
+	}
+	return resultMessage(id, failure("not implemented yet: "+t.Name))
+}
+
+// accepts checks the top-level required members, unknown top-level members
+// when additionalProperties is false, and the JSON type of each top-level
+// member, and nothing else: bounds, enums, patterns and nested values are the
+// handler's to check.
+func (s inputSchema) accepts(args map[string]any) bool {
+	for _, name := range s.Required {
+		if _, ok := args[name]; !ok {
+			return false
+		}
+	}
+	closed := string(bytes.TrimSpace(s.AdditionalProperties)) == "false"
+	for key, value := range args {
+		p, ok := s.Properties[key]
+		if !ok {
+			if closed {
+				return false
+			}
+			continue
+		}
+		if p.Type != nil && !typeAllows(p.Type, jsonType(value)) {
+			return false
+		}
+	}
+	return true
+}
+
+// typeAllows reports whether a schema type (a string or a list of strings)
+// accepts a value of JSON type got. A number accepts integers.
+func typeAllows(schemaType any, got string) bool {
+	ok := func(t any) bool { return t == got || (t == "number" && got == "integer") }
+	switch t := schemaType.(type) {
+	case string:
+		return ok(t)
+	case []any:
+		for _, item := range t {
+			if ok(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func jsonType(v any) string {
+	switch n := v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "boolean"
+	case string:
+		return "string"
+	case json.Number:
+		if _, err := strconv.ParseInt(string(n), 10, 64); err == nil {
+			return "integer"
+		}
+		return "number"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	}
+	return ""
+}
+
+// failure is an isError tool result with the reason failed and a fixed message.
+func failure(message string) map[string]any {
+	return map[string]any{
+		"isError":           true,
+		"content":           []any{map[string]any{"type": "text", "text": message}},
+		"structuredContent": map[string]any{"reason": "failed", "message": message},
+	}
+}
+
+// uniqueKeys reports whether no object in raw repeats a key, so a repeated
+// "id", "method" or argument is never read two ways.
+func uniqueKeys(raw []byte) bool {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	var walk func() bool
+	walk = func() bool {
+		tok, err := d.Token()
+		if err != nil {
+			return false
+		}
+		delim, ok := tok.(json.Delim)
+		if !ok {
+			return true
+		}
+		seen := map[string]bool{}
+		for d.More() {
+			if delim == '{' {
+				key, err := d.Token()
+				if err != nil {
+					return false
+				}
+				k, _ := key.(string)
+				if seen[k] {
+					return false
+				}
+				seen[k] = true
+			}
+			if !walk() {
+				return false
+			}
+		}
+		_, err = d.Token()
+		return err == nil
+	}
+	return walk()
+}
+
+// validID returns id when it is a JSON string or integer of bounded size, and
+// nil otherwise.
+func validID(id json.RawMessage) json.RawMessage {
+	if len(id) == 0 || len(id) > maxIDBytes {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(id, &s) == nil {
+		return id
+	}
+	if _, err := strconv.ParseInt(string(id), 10, 64); err == nil {
+		return id
+	}
+	return nil
+}
+
+// object decodes a JSON object into its members. Absent params are an empty
+// object.
+func object(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	if raw == nil {
+		return map[string]json.RawMessage{}, true
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &members); err != nil {
+		return nil, false
+	}
+	return members, true
+}
+
+func nullID(id json.RawMessage) json.RawMessage {
+	if id == nil {
+		return json.RawMessage("null")
+	}
+	return id
+}
+
+func resultMessage(id json.RawMessage, result any) map[string]any {
+	return map[string]any{"jsonrpc": "2.0", "id": nullID(id), "result": result}
+}
+
+func errorMessage(id json.RawMessage, code int, message string) map[string]any {
+	return map[string]any{"jsonrpc": "2.0", "id": nullID(id), "error": map[string]any{"code": code, "message": message}}
+}

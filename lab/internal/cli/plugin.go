@@ -12,6 +12,13 @@ import (
 
 const pluginUsage = "usage: forgecell plugin test <manifest> [--json] | forgecell plugin list [--lab DIR] [--lab-name NAME] [--json] | forgecell plugin doctor [NAME] [--lab DIR] [--lab-name NAME] [--json]"
 
+// The usage of plugin new and plugin pin, printed by those commands only, so
+// the usage that test, list and doctor print stays as it was.
+const (
+	pluginNewUsage = "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go [--dir DIR] <name>"
+	pluginPinUsage = "usage: forgecell plugin pin <dir> --server <path>"
+)
+
 // pluginTestOptions configures plugin test runs; tests replace it to keep runs
 // under their temporary directory and to fire the shutdown grace at once.
 var pluginTestOptions = func() conformance.Options {
@@ -20,9 +27,16 @@ var pluginTestOptions = func() conformance.Options {
 
 // runPlugin runs `plugin test <manifest> [--json]`: the contract-mode
 // conformance kit, offline. It exits 0 when every check passes, 2 when one
-// fails and 1 on bad usage. It needs no Lab. `plugin list` is runPluginList and
-// `plugin doctor` is runPluginDoctor.
+// fails and 1 on bad usage. It needs no Lab. `plugin list` is runPluginList,
+// `plugin doctor` is runPluginDoctor, `plugin new` is runPluginNew and
+// `plugin pin` is runPluginPin.
 func runPlugin(ctx context.Context, args []string, out, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "new" {
+		return runPluginNew(args[1:], out, stderr)
+	}
+	if len(args) > 0 && args[0] == "pin" {
+		return runPluginPin(args[1:], out, stderr)
+	}
 	if len(args) > 0 && args[0] == "list" {
 		return runPluginList(ctx, args[1:], out, stderr)
 	}
