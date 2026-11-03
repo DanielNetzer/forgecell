@@ -276,8 +276,8 @@ func TestWriteRefusals(t *testing.T) {
 	}{
 		{"unknown kind", Options{Kind: "wiki", Lang: "go", Name: "good"}, nil, "kind must be"},
 		{"unknown lang", Options{Kind: "tracker", Lang: "rust", Name: "good"}, nil, "language must be go"},
-		{"python not yet", Options{Kind: "tracker", Lang: "python", Name: "good"}, nil, "not supported yet"},
-		{"typescript not yet", Options{Kind: "forge", Lang: "typescript", Name: "good"}, nil, "not supported yet"},
+		{"rust for a tracker", Options{Kind: "tracker", Lang: "rust", Name: "good"}, nil, "language must be go"},
+		{"rust for a forge", Options{Kind: "forge", Lang: "rust", Name: "good"}, nil, "language must be go"},
 		{"bad name", Options{Kind: "tracker", Lang: "go", Name: "Bad_Name"}, nil, "plugin name must be"},
 		{"long name", Options{Kind: "tracker", Lang: "go", Name: strings.Repeat("a", 33)}, nil, "plugin name must be"},
 		{"non-empty dir", good, func(t *testing.T, base string) string {

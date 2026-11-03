@@ -1,0 +1,456 @@
+// A Forgecell plugin skeleton: a Model Context Protocol server on stdio that
+// speaks newline-delimited JSON-RPC 2.0 (initialize, notifications/initialized,
+// ping, tools/list and tools/call). It has no npm dependencies and is written
+// as CommonJS in the erasable TypeScript subset (no enums, namespaces or
+// parameter properties), so `node build.mjs` only strips its types.
+//
+// TOOLS is the contract's tool table and FIXTURES holds the describe answer.
+// Both were embedded from tools.json and fixture.json when the skeleton was
+// made: the engine runs a private copy of the built server.js and nothing next
+// to it, so the server reads no file. The describe tool answers the fixture,
+// and every other tool fails with "not implemented yet". Replace those tools
+// one at a time.
+//
+// Every tool first runs accepts on its arguments, which checks exactly three
+// things: each top-level required member is present, no unknown top-level
+// member is present when additionalProperties is false, and each top-level
+// member has the JSON type its schema names (a JSON bool is not an integer,
+// and 1.0 is a number, not an integer). It is not full schema validation: it
+// does not check bounds (minLength, maxLength, minimum, maximum, maxItems),
+// enums, patterns or formats, and it does not look inside nested objects or
+// arrays. A handler you write must check those itself before it uses an
+// argument.
+//
+// Only protocol messages are written to stdout. Nothing is logged, least of all
+// a tool's arguments.
+"use strict";
+
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+type JsonObject = { [key: string]: Json };
+
+interface InputSchema {
+  type?: Json;
+  properties?: { [name: string]: { type?: Json } };
+  required?: string[];
+  additionalProperties?: Json;
+}
+
+interface Tool {
+  name: string;
+  access: string;
+  inputSchema: InputSchema;
+}
+
+interface Parsed {
+  value: Json;
+  // nonInteger holds, per parsed object or array, the members whose number was
+  // written with a fraction or an exponent or lies outside the int64 range.
+  nonInteger: WeakMap<object, Set<string>>;
+  // idSource holds, per parsed object, the JSON text of its "id" member as
+  // written, when that member is a string or a number.
+  idSource: WeakMap<object, string>;
+}
+
+const SERVER_NAME: string = {{SERVER_NAME}};
+const SERVER_VERSION: string = "0.1.0";
+const CONTRACT_ID: string = {{CONTRACT_ID}};
+const PROTOCOL_VERSION: string = {{PROTOCOL_VERSION}};
+// MAX_MESSAGE_BYTES bounds one incoming message, excluding its newline.
+const MAX_MESSAGE_BYTES = 1 << 20;
+// MAX_ID_BYTES bounds a request id that is echoed back, by its JSON text as
+// written in the request.
+const MAX_ID_BYTES = 256;
+const INT64_MIN = -(BigInt(1) << BigInt(63));
+const INT64_MAX = (BigInt(1) << BigInt(63)) - BigInt(1);
+
+// JSON-RPC 2.0 error codes.
+const PARSE_ERROR = -32700;
+const INVALID_REQUEST = -32600;
+const METHOD_NOT_FOUND = -32601;
+const INVALID_PARAMS = -32602;
+const INTERNAL_ERROR = -32603;
+
+const TOOLS: Tool[] = {{TOOLS}};
+
+const FIXTURES: { [name: string]: Json } = {{FIXTURES}};
+
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+function has(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// load checks the embedded tool table and returns the tools by name.
+function load(): Map<string, Tool> {
+  const byName = new Map<string, Tool>();
+  for (const tool of TOOLS) {
+    if (!isObject(tool.inputSchema) || tool.inputSchema.type !== "object") {
+      throw new Error("a tool's input schema is not an object schema");
+    }
+    byName.set(tool.name, tool);
+  }
+  return byName;
+}
+
+// serve answers requests from stdin on stdout, one at a time, until stdin
+// ends. A message longer than MAX_MESSAGE_BYTES is drained to its newline
+// without being kept and refused; a message cut off by the end of input is
+// dropped.
+function serve(byName: Map<string, Tool>): void {
+  let parts: Buffer[] = [];
+  let size = 0;
+  let tooLarge = false;
+  // waiting is set while one drain listener waits for stdout to empty, so a
+  // chunk of many requests adds no more than that one listener.
+  let waiting = false;
+  process.stdout.on("error", () => process.exit(1));
+  process.stdin.on("data", (chunk: Buffer) => {
+    let start = 0;
+    while (start < chunk.length) {
+      const newline = chunk.indexOf(10, start);
+      const end = newline < 0 ? chunk.length : newline;
+      size += end - start;
+      if (size > MAX_MESSAGE_BYTES) {
+        tooLarge = true;
+        parts = [];
+      }
+      if (!tooLarge && end > start) {
+        parts.push(chunk.subarray(start, end));
+      }
+      if (newline < 0) {
+        return;
+      }
+      let reply: JsonObject | null;
+      if (tooLarge) {
+        reply = errorMessage(null, INVALID_REQUEST, "the message exceeds the size bound");
+      } else {
+        let line = Buffer.concat(parts);
+        if (line.length > 0 && line[line.length - 1] === 13) {
+          line = line.subarray(0, line.length - 1);
+        }
+        reply = respond(line, byName);
+      }
+      parts = [];
+      size = 0;
+      tooLarge = false;
+      start = newline + 1;
+      if (reply !== null && !process.stdout.write(JSON.stringify(reply) + "\n") && !waiting) {
+        // Stop reading until the client has read the replies so far.
+        waiting = true;
+        process.stdin.pause();
+        process.stdout.once("drain", () => {
+          waiting = false;
+          process.stdin.resume();
+        });
+      }
+    }
+  });
+}
+
+// parse parses strict JSON and records which numbers are not int64 integers,
+// from their source text, so 1.0 is a number as in the Go skeleton, and the
+// source text of each "id" member, so an id is measured as Go measures it.
+function parse(text: string): Parsed {
+  const nonInteger = new WeakMap<object, Set<string>>();
+  const idSource = new WeakMap<object, string>();
+  const value = JSON.parse(text, function (this: object, key: string, item: Json, context?: { source?: string }): Json {
+    const source = context && typeof context.source === "string" ? context.source : undefined;
+    if (key === "id" && source !== undefined) {
+      idSource.set(this, source);
+    }
+    if (typeof item === "number") {
+      const integral = source !== undefined ? int64Text(source) : Number.isSafeInteger(item);
+      if (!integral) {
+        const keys = nonInteger.get(this) || new Set<string>();
+        keys.add(key);
+        nonInteger.set(this, keys);
+      }
+    }
+    return item;
+  }) as Json;
+  return { value, nonInteger, idSource };
+}
+
+// trimWhitespace trims only JSON's whitespace (space, tab, CR and LF), as the
+// Go and Python skeletons do, so a byte order mark or a no-break space before
+// a message is a parse error.
+function trimWhitespace(text: string): string {
+  let start = 0;
+  let end = text.length;
+  const ws = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
+  while (start < end && ws(text[start])) {
+    start++;
+  }
+  while (end > start && ws(text[end - 1])) {
+    end--;
+  }
+  return text.slice(start, end);
+}
+
+function int64Text(source: string): boolean {
+  if (!/^-?(0|[1-9][0-9]*)$/.test(source)) {
+    return false;
+  }
+  const n = BigInt(source);
+  return n >= INT64_MIN && n <= INT64_MAX;
+}
+
+// uniqueKeys reports whether no object in text, which JSON.parse accepted,
+// repeats a key, so a repeated "id", "method" or argument is never read two
+// ways.
+function uniqueKeys(text: string): boolean {
+  const stack: (Set<string> | null)[] = [];
+  let expectKey = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (text[j] !== '"') {
+        j += text[j] === "\\" ? 2 : 1;
+      }
+      const keys = stack.length > 0 ? stack[stack.length - 1] : null;
+      if (expectKey && keys !== null) {
+        const key = JSON.parse(text.slice(i, j + 1)) as string;
+        if (keys.has(key)) {
+          return false;
+        }
+        keys.add(key);
+        expectKey = false;
+      }
+      i = j;
+    } else if (ch === "{") {
+      stack.push(new Set<string>());
+      expectKey = true;
+    } else if (ch === "[") {
+      stack.push(null);
+      expectKey = false;
+    } else if (ch === "}" || ch === "]") {
+      stack.pop();
+      expectKey = false;
+    } else if (ch === ",") {
+      expectKey = stack.length > 0 && stack[stack.length - 1] !== null;
+    }
+  }
+  return true;
+}
+
+// respond answers one message; null means no reply. An unexpected exception
+// becomes an internal error reply, so one request cannot stop the server.
+function respond(line: Buffer, byName: Map<string, Tool>): JsonObject | null {
+  try {
+    return handle(line, byName);
+  } catch {
+    return errorMessage(null, INTERNAL_ERROR, "internal error");
+  }
+}
+
+// handle answers one message; null means no reply.
+function handle(line: Buffer, byName: Map<string, Tool>): JsonObject | null {
+  let text: string;
+  let parsed: Parsed;
+  try {
+    text = trimWhitespace(utf8.decode(line));
+    if (text === "") {
+      return null;
+    }
+    parsed = parse(text);
+  } catch {
+    return errorMessage(null, PARSE_ERROR, "parse error");
+  }
+  const message = parsed.value;
+  if (!isObject(message) || !uniqueKeys(text)) {
+    return errorMessage(null, INVALID_REQUEST, "invalid request");
+  }
+  let id: Json = null;
+  if (has(message, "id") && message.id !== null) {
+    if (!validID(message.id, parsed.idSource.get(message), parsed.nonInteger.get(message))) {
+      return errorMessage(null, INVALID_REQUEST, "invalid request");
+    }
+    id = message.id;
+  }
+  if (message.jsonrpc !== "2.0") {
+    return errorMessage(id, INVALID_REQUEST, "invalid request");
+  }
+  const method = message.method;
+  if (typeof method !== "string" || method === "") {
+    return errorMessage(id, INVALID_REQUEST, "invalid request");
+  }
+  if (id === null) {
+    // A notification, such as notifications/initialized, gets no reply.
+    return null;
+  }
+  const params: Json = has(message, "params") ? message.params : {};
+  if (!isObject(params)) {
+    return errorMessage(id, INVALID_PARAMS, "params is not an object");
+  }
+  switch (method) {
+    case "initialize":
+      return resultMessage(id, {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {
+          tools: {},
+          experimental: { forgecell: { contract: CONTRACT_ID } },
+        },
+        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+      });
+    case "ping":
+      return resultMessage(id, {});
+    case "tools/list":
+      return resultMessage(id, {
+        tools: TOOLS.map((t) => ({ name: t.name, inputSchema: t.inputSchema as JsonObject })),
+      });
+    case "tools/call":
+      return call(id, params, byName, parsed.nonInteger);
+  }
+  return errorMessage(id, METHOD_NOT_FOUND, "method not found");
+}
+
+// call checks a tools/call request and its arguments, then runs the tool.
+function call(id: Json, params: JsonObject, byName: Map<string, Tool>, nonInteger: WeakMap<object, Set<string>>): JsonObject {
+  const name: Json = has(params, "name") && params.name !== null ? params.name : "";
+  if (typeof name !== "string") {
+    return errorMessage(id, INVALID_PARAMS, "the tool name is invalid");
+  }
+  const tool = byName.get(name);
+  if (tool === undefined) {
+    return errorMessage(id, INVALID_PARAMS, "unknown tool");
+  }
+  const args: Json = has(params, "arguments") && params.arguments !== null ? params.arguments : {};
+  if (!isObject(args)) {
+    return errorMessage(id, INVALID_PARAMS, "arguments is not an object");
+  }
+  if (!accepts(tool.inputSchema, args, nonInteger.get(args))) {
+    return resultMessage(id, failure("the arguments do not match the input schema"));
+  }
+  if (name.endsWith("_describe") && has(FIXTURES, name)) {
+    const describe = FIXTURES[name];
+    return resultMessage(id, {
+      content: [{ type: "text", text: JSON.stringify(describe) }],
+      structuredContent: describe,
+    });
+  }
+  return resultMessage(id, failure("not implemented yet: " + name));
+}
+
+// accepts checks the top-level required members, unknown top-level members
+// when additionalProperties is false, and the JSON type of each top-level
+// member, and nothing else: bounds, enums, patterns and nested values are the
+// handler's to check.
+function accepts(schema: InputSchema, args: JsonObject, nonInteger: Set<string> | undefined): boolean {
+  for (const name of schema.required || []) {
+    if (!has(args, name)) {
+      return false;
+    }
+  }
+  const closed = schema.additionalProperties === false;
+  const properties = schema.properties || {};
+  for (const key of Object.keys(args)) {
+    if (!has(properties, key)) {
+      if (closed) {
+        return false;
+      }
+      continue;
+    }
+    const want = isObject(properties[key]) ? properties[key].type : undefined;
+    if (want !== undefined && !typeAllows(want, jsonType(args[key], nonInteger !== undefined && nonInteger.has(key)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// typeAllows reports whether a schema type (a string or a list of strings)
+// accepts a value of JSON type got. A number accepts integers.
+function typeAllows(schemaType: Json, got: string): boolean {
+  const ok = (t: Json) => t === got || (t === "number" && got === "integer");
+  if (typeof schemaType === "string") {
+    return ok(schemaType);
+  }
+  if (Array.isArray(schemaType)) {
+    return schemaType.some(ok);
+  }
+  return false;
+}
+
+function jsonType(value: Json, nonInteger: boolean): string {
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "boolean") {
+    return "boolean";
+  }
+  if (typeof value === "string") {
+    return "string";
+  }
+  if (typeof value === "number") {
+    return nonInteger ? "number" : "integer";
+  }
+  return Array.isArray(value) ? "array" : "object";
+}
+
+// validID reports whether a request id is a JSON string of well-formed Unicode
+// (no lone surrogate escape) or an integer that JavaScript echoes exactly (a
+// safe integer), whose JSON text as written, source, is at most MAX_ID_BYTES,
+// as the Go skeleton measures it.
+function validID(id: Json, source: string | undefined, nonInteger: Set<string> | undefined): boolean {
+  if (Buffer.byteLength(source !== undefined ? source : JSON.stringify(id)) > MAX_ID_BYTES) {
+    return false;
+  }
+  if (typeof id === "string") {
+    return wellFormed(id);
+  }
+  return typeof id === "number" && Number.isSafeInteger(id) && !(nonInteger !== undefined && nonInteger.has("id"));
+}
+
+// wellFormed reports whether s holds no lone surrogate.
+function wellFormed(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xdc00 && c <= 0xdfff) {
+      return false;
+    }
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = s.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      i++;
+    }
+  }
+  return true;
+}
+
+// failure is an isError tool result with the reason failed and a fixed message.
+function failure(message: string): JsonObject {
+  return {
+    isError: true,
+    content: [{ type: "text", text: message }],
+    structuredContent: { reason: "failed", message },
+  };
+}
+
+function resultMessage(id: Json, result: Json): JsonObject {
+  return { jsonrpc: "2.0", id, result };
+}
+
+function errorMessage(id: Json, code: number, message: string): JsonObject {
+  return { jsonrpc: "2.0", id, error: { code, message } };
+}
+
+function main(): void {
+  let byName: Map<string, Tool>;
+  try {
+    byName = load();
+  } catch {
+    process.stderr.write(SERVER_NAME + ": the embedded tool table or fixture is invalid\n");
+    process.exitCode = 1;
+    return;
+  }
+  serve(byName);
+}
+
+main();

@@ -1,0 +1,73 @@
+# {{NAME}} {{KIND}} plugin
+
+`{{NAME}}` is a {{KIND}} plugin skeleton made by `forgecell plugin new`. It is an MCP server
+on stdio that serves the `{{CONTRACT}}` contract. It is one Python file, `server.py`, that
+uses only the standard library and runs on Python 3.9 or later.
+
+It runs offline. It reads no environment variables, makes no network request and needs no
+credentials.
+
+## What it does now
+
+- `TOOLS` in `server.py` is the contract's tool table: every tool's name, access and input
+  schema, copied from the contract when the skeleton was made. `tools.json` holds the same
+  table for you to read. The server lists these tools.
+- Every tool checks its arguments first, and checks exactly three things: that each
+  top-level required member is present, that no unknown top-level member is present when
+  the schema sets `additionalProperties: false`, and that each top-level member has the
+  JSON type its schema names (a JSON bool is not an integer). A mismatch fails with reason
+  `failed`.
+- `{{KIND}}_describe` answers the example in `FIXTURES`, which `fixture.json` also holds.
+- Every other tool fails with `not implemented yet: <tool>`.
+
+That check is not full schema validation. It does not check bounds (`minLength`,
+`maxLength`, `minimum`, `maximum`, `maxItems`), enums, patterns or formats, and it does not
+look inside nested objects or arrays. When you implement a tool, check those yourself in
+its handler before you use an argument.
+
+The engine runs a private copy of `server.py` and nothing next to it, so the server must
+not read `tools.json`, `fixture.json` or any other file beside it. Replace the tools one at
+a time in `server.py`. Keep `TOOLS` as it is: the engine checks the advertised schemas
+against the contract. Write nothing but protocol messages to stdout.
+
+## Pin the manifest
+
+`plugin.json.tmpl` is the manifest with four placeholders: the absolute path and digest of
+`server.py`, and the absolute path and digest of the Python interpreter that runs it. Write
+`plugin.json` from it with the interpreter's real path, every symlink resolved:
+
+```sh
+forgecell plugin pin . --server ./server.py \
+  --interpreter "$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')"
+```
+
+`server.py` needs no exec bit, since the interpreter runs it. Both files must be placed
+where the engine trusts them: owned by you or root, not group- or world-writable, with one
+hard link (a root-owned system interpreter may have more), and in no directory that
+another user owns or can write without the sticky bit. The interpreter must also be
+executable by its owner. `plugin pin` refuses any other.
+
+It prints the manifest's own digest and the `plugins:` line for the Formula. Editing
+`server.py` or upgrading Python changes a digest, so pin again after every change.
+
+The manifest declares no `needs.env`, no `needs.network` and no roles. Read tools are
+`read-only` and write tools are `read-write`, as the contract levels map.
+
+## Test it
+
+```sh
+forgecell plugin test plugin.json
+```
+
+The skeleton passes before you change anything. Run it again after every change.
+
+## Declare it in the Formula
+
+Put this directory in your Lab as `plugins/{{NAME}}`, pin it there, and add the line that
+`plugin pin` printed:
+
+```yaml
+{{ENABLE}}
+plugins:
+  {{NAME}}: {manifest: plugins/{{NAME}}/plugin.json, sha256: "<manifest hex>", required: false}
+```

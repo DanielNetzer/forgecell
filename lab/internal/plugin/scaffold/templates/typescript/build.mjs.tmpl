@@ -1,0 +1,75 @@
+// build.mjs turns server.ts into server.js, next to this file, by stripping its
+// types with node:module stripTypeScriptTypes (Node 22.18 or later). It uses
+// only Node's standard library. Run it as `node build.mjs` after every change
+// to server.ts, then pin the new server.js again.
+//
+// server.ts is read through O_NOFOLLOW within a size bound, and server.js is
+// written to a fresh temporary file and renamed into place, so neither a
+// symlink nor a hard link next to this file is ever written through.
+import * as nodeModule from "node:module";
+import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// MAX_SOURCE_BYTES bounds server.ts.
+const MAX_SOURCE_BYTES = 16 << 20;
+
+function fail(message) {
+  process.stderr.write("build.mjs: " + message + "\n");
+  process.exit(1);
+}
+
+if (typeof nodeModule.stripTypeScriptTypes !== "function") {
+  fail("Node 22.18 or later is required: node:module has no stripTypeScriptTypes");
+}
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+let source;
+try {
+  const fd = openSync(join(here, "server.ts"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_SOURCE_BYTES) {
+      fail("server.ts must be a regular file of at most 16 MiB");
+    }
+    source = readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+} catch {
+  fail("server.ts is missing, unreadable or a symlink");
+}
+if (source.length > MAX_SOURCE_BYTES) {
+  fail("server.ts must be a regular file of at most 16 MiB");
+}
+
+let output;
+try {
+  output = nodeModule.stripTypeScriptTypes(source, { mode: "strip" });
+} catch {
+  fail("server.ts uses TypeScript beyond the erasable subset (no enums, namespaces or parameter properties) or does not parse");
+}
+
+const tmp = join(here, ".server.js." + randomBytes(8).toString("hex") + ".tmp");
+let fd;
+try {
+  fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+} catch {
+  fail("a temporary file for server.js cannot be created");
+}
+try {
+  writeSync(fd, output);
+  fsyncSync(fd);
+  closeSync(fd);
+  renameSync(tmp, join(here, "server.js"));
+} catch {
+  try {
+    unlinkSync(tmp);
+  } catch {
+    // The temporary file is already gone.
+  }
+  fail("writing server.js failed");
+}
+process.stdout.write("build.mjs: wrote server.js\n");

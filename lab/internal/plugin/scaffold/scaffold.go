@@ -5,13 +5,16 @@
 package scaffold
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,16 +55,20 @@ func Write(dir string, opts Options) error {
 		return errors.New("the kind must be tracker, forge or reviewer")
 	}
 	switch opts.Lang {
-	case "go":
-	case "python", "typescript":
-		return errors.New("that language is not supported yet; this version writes go skeletons only")
+	case "go", "python", "typescript":
 	default:
-		return errors.New("the language must be go")
+		return errors.New("the language must be go, python or typescript")
 	}
 	if !extension.ValidName(opts.Name) {
 		return errors.New("the plugin name must be lowercase letters, digits and dashes, starting with a letter, at most 32 characters")
 	}
-	files, err := render(c, opts.Name)
+	var files []skeletonFile
+	var err error
+	if opts.Lang == "go" {
+		files, err = render(c, opts.Name)
+	} else {
+		files, err = renderInterpreted(c, opts.Name, opts.Lang)
+	}
 	if err != nil {
 		return err
 	}
@@ -126,6 +133,226 @@ func render(c *contract.Contract, name string) ([]skeletonFile, error) {
 		{TemplateFile, manifest},
 		{"README.md", readme},
 	}, nil
+}
+
+// renderInterpreted builds a python or typescript skeleton. The engine runs a
+// private copy of the pinned script alone, so the tool table and the describe
+// fixture are embedded into the script as literals made from the same
+// tools.json and fixture.json bytes the skeleton holds for its author to read.
+func renderInterpreted(c *contract.Contract, name, lang string) ([]skeletonFile, error) {
+	tools, err := toolsJSON(c)
+	if err != nil {
+		return nil, err
+	}
+	fixture, err := fixtureJSON(c, name)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := manifestTemplate(c, name)
+	if err != nil {
+		return nil, err
+	}
+	if manifest, err = withInterpreter(manifest); err != nil {
+		return nil, err
+	}
+	str, key, value := pyString, pyString, pyValue
+	script, dir := "server.py", "templates/python/"
+	if lang == "typescript" {
+		str, key, value = jsString, jsString, jsValue
+		script, dir = "server.ts", "templates/typescript/"
+	}
+	toolsLit, fixturesLit, err := literals(tools, fixture, key, value)
+	if err != nil {
+		return nil, err
+	}
+	server, err := fill(dir+script+".tmpl", strings.NewReplacer(
+		"{{SERVER_NAME}}", str(name),
+		"{{CONTRACT_ID}}", str(c.ID),
+		"{{PROTOCOL_VERSION}}", str(mcp.ProtocolVersion),
+		"{{TOOLS}}", toolsLit,
+		"{{FIXTURES}}", fixturesLit,
+	))
+	if err != nil {
+		return nil, err
+	}
+	readme, err := fill(dir+"README.md.tmpl", strings.NewReplacer(
+		"{{NAME}}", name,
+		"{{KIND}}", c.Kind(),
+		"{{CONTRACT}}", c.ID,
+		"{{ENABLE}}", enableSnippet(c.Kind(), name),
+	))
+	if err != nil {
+		return nil, err
+	}
+	files := []skeletonFile{{script, server}}
+	if lang == "typescript" {
+		build, err := fill(dir+"build.mjs.tmpl", strings.NewReplacer())
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, skeletonFile{"build.mjs", build})
+	}
+	return append(files,
+		skeletonFile{"tools.json", tools},
+		skeletonFile{"fixture.json", fixture},
+		skeletonFile{TemplateFile, manifest},
+		skeletonFile{"README.md", readme},
+	), nil
+}
+
+// withInterpreter adds the server.interpreter line, with the two interpreter
+// placeholders, right after the server.executable line of a rendered manifest
+// template, so templates/plugin.json.tmpl itself stays as the Go skeleton uses
+// it.
+func withInterpreter(manifest []byte) ([]byte, error) {
+	executable := `    "executable": {"path": "` + serverPath + `", "sha256": "` + serverSHA256 + `"},` + "\n"
+	interpreter := `    "interpreter": {"path": "` + interpreterPath + `", "sha256": "` + interpreterSHA256 + `"},` + "\n"
+	s := string(manifest)
+	if strings.Count(s, executable) != 1 || strings.Contains(s, interpreterPath) || strings.Contains(s, interpreterSHA256) {
+		return nil, errors.New("the manifest template has no single server executable line")
+	}
+	return []byte(strings.Replace(s, executable, executable+interpreter, 1)), nil
+}
+
+// literals renders tools.json's tool list and fixture.json's object as source
+// literals, one tool or fixture per line, with the fixtures in sorted order.
+func literals(tools, fixture []byte, key func(string) string, value func(json.RawMessage) (string, error)) (string, string, error) {
+	var table struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(tools, &table); err != nil {
+		return "", "", errors.New("the tool table cannot be embedded")
+	}
+	lines := make([]string, 0, len(table.Tools))
+	for _, raw := range table.Tools {
+		v, err := value(raw)
+		if err != nil {
+			return "", "", err
+		}
+		lines = append(lines, "  "+v+",")
+	}
+	toolsLit := "[\n" + strings.Join(lines, "\n") + "\n]"
+	var fixtures map[string]json.RawMessage
+	if err := json.Unmarshal(fixture, &fixtures); err != nil {
+		return "", "", errors.New("the fixture cannot be embedded")
+	}
+	names := make([]string, 0, len(fixtures))
+	for name := range fixtures {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	lines = lines[:0]
+	for _, name := range names {
+		v, err := value(fixtures[name])
+		if err != nil {
+			return "", "", err
+		}
+		lines = append(lines, "  "+key(name)+": "+v+",")
+	}
+	return toolsLit, "{\n" + strings.Join(lines, "\n") + "\n}", nil
+}
+
+// jsValue renders a JSON value as a JavaScript literal: compact JSON, which is
+// valid JavaScript.
+func jsValue(raw json.RawMessage) (string, error) {
+	var b bytes.Buffer
+	if err := json.Compact(&b, raw); err != nil {
+		return "", errors.New("a value cannot be embedded")
+	}
+	return b.String(), nil
+}
+
+func jsString(s string) string {
+	raw, _ := json.Marshal(s)
+	return string(raw)
+}
+
+// pyValue renders a JSON value as a Python literal: objects as dicts with
+// sorted keys, arrays as lists, numbers as written, and true, false and null
+// as True, False and None.
+func pyValue(raw json.RawMessage) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return "", errors.New("a value cannot be embedded")
+	}
+	var b strings.Builder
+	if err := pyLiteral(&b, v); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func pyLiteral(b *strings.Builder, v any) error {
+	switch x := v.(type) {
+	case nil:
+		b.WriteString("None")
+	case bool:
+		if x {
+			b.WriteString("True")
+		} else {
+			b.WriteString("False")
+		}
+	case json.Number:
+		b.WriteString(x.String())
+	case string:
+		b.WriteString(pyString(x))
+	case []any:
+		b.WriteByte('[')
+		for i, item := range x {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if err := pyLiteral(b, item); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(pyString(k))
+			b.WriteString(": ")
+			if err := pyLiteral(b, x[k]); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	default:
+		return errors.New("a value cannot be embedded")
+	}
+	return nil
+}
+
+// pyString renders s as a double-quoted, ASCII-only Python string literal:
+// printable ASCII as itself, and every other character as a \u or \U escape.
+func pyString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r >= 0x20 && r < 0x7f:
+			b.WriteRune(r)
+		case r <= 0xffff:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			fmt.Fprintf(&b, `\U%08x`, r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // fill renders an embedded template and refuses one with a placeholder left.

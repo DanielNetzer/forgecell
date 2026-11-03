@@ -7,17 +7,18 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/plugin/scaffold"
 )
 
-// runPluginPin runs `plugin pin <dir> --server <path>`: it writes
-// <dir>/plugin.json from <dir>/plugin.json.tmpl, pinned to the server's
-// resolved path and digest, then prints the manifest's own SHA-256 and the
-// Formula's plugins: line. It prints no absolute path. It exits 0 on success
-// and 1 otherwise.
+// runPluginPin runs `plugin pin <dir> --server <path> [--interpreter <path>]`:
+// it writes <dir>/plugin.json from <dir>/plugin.json.tmpl, pinned to the
+// server's (and the interpreter's) resolved path and digest, then prints the
+// manifest's own SHA-256 and the Formula's plugins: line. --interpreter is
+// required for a python or typescript template and refused for a go one. It
+// prints no absolute path. It exits 0 on success and 1 otherwise.
 func runPluginPin(args []string, out, stderr io.Writer) int {
 	usage := func() int {
 		fmt.Fprintln(stderr, "forgecell:", pluginPinUsage)
 		return 1
 	}
-	dir, server := "", ""
+	dir, server, interpreter := "", "", ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -26,6 +27,12 @@ func runPluginPin(args []string, out, stderr io.Writer) int {
 				return usage()
 			}
 			server = args[i+1]
+			i++
+		case arg == "--interpreter":
+			if interpreter != "" || i+1 >= len(args) || args[i+1] == "" {
+				return usage()
+			}
+			interpreter = args[i+1]
 			i++
 		case dir == "" && arg != "" && arg[0] != '-':
 			dir = arg
@@ -36,7 +43,13 @@ func runPluginPin(args []string, out, stderr io.Writer) int {
 	if dir == "" || server == "" {
 		return usage()
 	}
-	p, err := scaffold.Pin(dir, server)
+	var p scaffold.Pinned
+	var err error
+	if interpreter == "" {
+		p, err = scaffold.Pin(dir, server)
+	} else {
+		p, err = scaffold.PinInterpreted(dir, server, interpreter)
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "forgecell:", err)
 		return 1

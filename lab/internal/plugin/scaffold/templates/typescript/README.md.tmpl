@@ -1,0 +1,88 @@
+# {{NAME}} {{KIND}} plugin
+
+`{{NAME}}` is a {{KIND}} plugin skeleton made by `forgecell plugin new`. It is an MCP server
+on stdio that serves the `{{CONTRACT}}` contract. It is one TypeScript file, `server.ts`,
+with no npm dependencies. It is written as CommonJS (`require`, no `import` or `export`) in
+the erasable TypeScript subset: no enums, namespaces or parameter properties.
+
+It runs offline. It reads no environment variables, makes no network request and needs no
+credentials.
+
+## What it does now
+
+- `TOOLS` in `server.ts` is the contract's tool table: every tool's name, access and input
+  schema, copied from the contract when the skeleton was made. `tools.json` holds the same
+  table for you to read. The server lists these tools.
+- Every tool checks its arguments first, and checks exactly three things: that each
+  top-level required member is present, that no unknown top-level member is present when
+  the schema sets `additionalProperties: false`, and that each top-level member has the
+  JSON type its schema names (a JSON bool is not an integer, and `1.0` is a number). A
+  mismatch fails with reason `failed`.
+- `{{KIND}}_describe` answers the example in `FIXTURES`, which `fixture.json` also holds.
+- Every other tool fails with `not implemented yet: <tool>`.
+
+That check is not full schema validation. It does not check bounds (`minLength`,
+`maxLength`, `minimum`, `maximum`, `maxItems`), enums, patterns or formats, and it does not
+look inside nested objects or arrays. When you implement a tool, check those yourself in
+its handler before you use an argument.
+
+The engine runs a private copy of the built `server.js` and nothing next to it, so the
+server must not read `tools.json`, `fixture.json` or any other file beside it, and it must
+not `require` anything outside Node's standard library. Replace the tools one at a time in
+`server.ts`. Keep `TOOLS` as it is: the engine checks the advertised schemas against the
+contract. Write nothing but protocol messages to stdout.
+
+## Build
+
+From this directory, with Node 22.18 or later:
+
+```sh
+node build.mjs
+```
+
+`build.mjs` strips the types from `server.ts` with `stripTypeScriptTypes` from
+`node:module` and writes `server.js` next to it. It does not type-check; run `tsc --noEmit`
+yourself if you want that. `server.js` is what you pin: the engine runs its private copy
+without an extension, which Node reads as CommonJS JavaScript.
+
+## Pin the manifest
+
+`plugin.json.tmpl` is the manifest with four placeholders: the absolute path and digest of
+`server.js`, and the absolute path and digest of the Node binary that runs it. Write
+`plugin.json` from it with Node's real path, every symlink resolved:
+
+```sh
+forgecell plugin pin . --server ./server.js \
+  --interpreter "$(node -p 'require("fs").realpathSync(process.execPath)')"
+```
+
+`server.js` needs no exec bit, since Node runs it. Both files must be placed where the
+engine trusts them: owned by you or root, not group- or world-writable, with one hard link
+(a root-owned system binary may have more), and in no directory that another user owns or
+can write without the sticky bit. Node must also be executable by its owner. `plugin pin`
+refuses any other.
+
+It prints the manifest's own digest and the `plugins:` line for the Formula. Rebuilding
+`server.js` or upgrading Node changes a digest, so pin again after every build.
+
+The manifest declares no `needs.env`, no `needs.network` and no roles. Read tools are
+`read-only` and write tools are `read-write`, as the contract levels map.
+
+## Test it
+
+```sh
+forgecell plugin test plugin.json
+```
+
+The skeleton passes before you change anything. Run it again after every change.
+
+## Declare it in the Formula
+
+Put this directory in your Lab as `plugins/{{NAME}}`, pin it there, and add the line that
+`plugin pin` printed:
+
+```yaml
+{{ENABLE}}
+plugins:
+  {{NAME}}: {manifest: plugins/{{NAME}}/plugin.json, sha256: "<manifest hex>", required: false}
+```

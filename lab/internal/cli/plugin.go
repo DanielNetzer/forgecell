@@ -21,8 +21,8 @@ const pluginUsage = "usage: forgecell plugin test <manifest> [--json] | forgecel
 // The usage of plugin new and plugin pin, printed by those commands only, so
 // the usage that test, list and doctor print stays as it was.
 const (
-	pluginNewUsage = "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go [--dir DIR] <name>"
-	pluginPinUsage = "usage: forgecell plugin pin <dir> --server <path>"
+	pluginNewUsage = "usage: forgecell plugin new --kind tracker|forge|reviewer --lang go|python|typescript [--dir DIR] <name>"
+	pluginPinUsage = "usage: forgecell plugin pin <dir> --server <path> [--interpreter <path>]"
 )
 
 // pluginTestOptions configures plugin test runs; tests replace it to keep runs
