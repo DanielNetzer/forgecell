@@ -30,6 +30,18 @@ const (
 
 var checkOrder = []string{CheckStart, CheckInitialize, CheckToolsList, CheckDescribe, CheckDeterministic, CheckMalformed, CheckOutputBound, CheckTimeoutBound}
 
+// Live check ids, appended after the contract ones in live mode only.
+const (
+	CheckLiveList     = "live-list"
+	CheckLiveGet      = "live-get"
+	CheckLiveStates   = "live-states"
+	CheckLiveDescribe = "live-describe"
+	CheckLivePolicy   = "live-policy"
+	CheckLiveChange   = "live-change"
+	CheckLivePublish  = "live-publish"
+	CheckLiveFindings = "live-findings"
+)
+
 // summaries say what each check verifies; they are fixed text.
 var summaries = map[string]string{
 	CheckStart:         "the manifest decodes, every pinned file matches its digest and the server starts",
@@ -40,6 +52,14 @@ var summaries = map[string]string{
 	CheckMalformed:     "malformed input to every read tool returns an MCP error and the server keeps serving",
 	CheckOutputBound:   "every response fit its tool's output bound",
 	CheckTimeoutBound:  "every call answered within its tool's timeout",
+	CheckLiveList:      "tracker_list pages with unique keys matching keyPattern and no repeated cursor",
+	CheckLiveGet:       "tracker_get returns each listed key with a described state",
+	CheckLiveStates:    "tracker_states agrees with tracker_get for the listed keys",
+	CheckLiveDescribe:  "forge_describe succeeds for the target project",
+	CheckLivePolicy:    "forge_policy succeeds for the target's default branch",
+	CheckLiveChange:    "forge_change, forge_checks and forge_comments decode for the named change",
+	CheckLivePublish:   "forge_publish_draft opens a draft at the commit that forge_change and forge_find_change report",
+	CheckLiveFindings:  "reviewer_findings decodes and two calls return the same findings",
 }
 
 // Result is one check in a report. Reason is a fixed reason, empty on pass.
@@ -50,19 +70,22 @@ type Result struct {
 	Summary string `json:"summary"`
 }
 
-// Report is the outcome of one contract-mode run. It holds only fixed text,
-// check ids, the plugin name and the manifest digest: never local paths,
-// environment values or plugin stderr.
+// Report is the outcome of one contract-mode or live run. It holds only fixed
+// text, check ids, the plugin name, the manifest digest and a live run's
+// cleaned target: never local paths, environment values, config values or
+// plugin stderr.
 type Report struct {
-	SchemaVersion  string   `json:"schemaVersion"`
-	Mode           string   `json:"mode"`
-	Manifest       string   `json:"manifest"`
-	Plugin         string   `json:"plugin,omitempty"`
-	Kind           string   `json:"kind,omitempty"`
-	Contract       string   `json:"contract,omitempty"`
-	ManifestSHA256 string   `json:"manifestSha256,omitempty"`
-	Passed         bool     `json:"passed"`
-	Checks         []Result `json:"checks"`
+	SchemaVersion  string `json:"schemaVersion"`
+	Mode           string `json:"mode"`
+	Manifest       string `json:"manifest"`
+	Plugin         string `json:"plugin,omitempty"`
+	Kind           string `json:"kind,omitempty"`
+	Contract       string `json:"contract,omitempty"`
+	ManifestSHA256 string `json:"manifestSha256,omitempty"`
+	// Target is the cleaned --target of a live run, empty in contract mode.
+	Target string   `json:"target,omitempty"`
+	Passed bool     `json:"passed"`
+	Checks []Result `json:"checks"`
 	// Cleanup is the fixed reason "run-directory-left" when the plugin's
 	// private run directory could not be removed after the run; the report
 	// then fails.
@@ -109,6 +132,10 @@ func (r Report) WriteText(w io.Writer) error {
 	verdict := "PASS"
 	if !r.Passed {
 		verdict = "FAIL"
+	}
+	if r.Mode == modeLive {
+		_, err := fmt.Fprintf(w, "Result: %s (%d of %d checks passed; live mode, target %s)\n", verdict, passed, len(r.Checks), r.Target)
+		return err
 	}
 	_, err := fmt.Fprintf(w, "Result: %s (%d of %d checks passed; contract mode, offline)\n", verdict, passed, len(r.Checks))
 	return err
