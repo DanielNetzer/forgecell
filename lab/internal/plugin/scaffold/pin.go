@@ -1,6 +1,7 @@
 package scaffold
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -45,8 +46,10 @@ type Pinned struct {
 // be a regular file with its owner exec bit, given by a path that is not itself
 // a symlink, and must pass the engine's placement rules: owned by the user or
 // root, not group- or world-writable, one hard link, and no ancestor that
-// another user owns or can write without the sticky bit. The manifest must load through plugin.LoadFile before it replaces
-// anything. Errors never name a local path.
+// another user owns or can write without the sticky bit. The manifest is read
+// back through the directory handle, hashed and decoded before it replaces
+// anything, and the digest returned is of those bytes. Errors never name a
+// local path.
 func Pin(dir, server string) (Pinned, error) {
 	if err := checkServerPath(server); err != nil {
 		return Pinned{}, err
@@ -338,16 +341,23 @@ func readTemplate(root *os.Root) (string, error) {
 	return string(raw), nil
 }
 
-// replaceManifest writes the manifest to a fresh temporary file in dir, loads
-// it through plugin.LoadFile and only then renames it over plugin.json. A
-// failure removes the temporary file and leaves plugin.json as it was.
+// afterTempWrite runs between writing the temporary manifest and reading it
+// back; a seam for tests that swap the file there. nil in normal use.
+var afterTempWrite func(root *os.Root, tmp string)
+
+// replaceManifest writes the manifest to a fresh temporary file in dir, reads
+// it back through the root handle, hashes and decodes those bytes, and only
+// then renames it over plugin.json. The file read back must be the one this
+// call wrote, hold exactly the manifest and pass the engine's placement rules,
+// so the digest returned describes the file renamed. A failure removes the
+// temporary file and leaves plugin.json as it was.
 func replaceManifest(root *os.Root, dirAbs string, manifest []byte) (Pinned, error) {
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return Pinned{}, errors.New("no random name for the temporary manifest")
 	}
 	tmp := ".plugin.json." + hex.EncodeToString(suffix[:]) + ".tmp"
-	made, err := writeExclusive(root, tmp, manifest)
+	made, written, err := writeExclusiveStat(root, tmp, manifest)
 	done := false
 	defer func() {
 		if made && !done {
@@ -357,13 +367,70 @@ func replaceManifest(root *os.Root, dirAbs string, manifest []byte) (Pinned, err
 	if err != nil {
 		return Pinned{}, errors.New("writing the manifest failed")
 	}
-	m, digest, err := plugin.LoadFile(filepath.Join(dirAbs, tmp))
+	if afterTempWrite != nil {
+		afterTempWrite(root, tmp)
+	}
+	f, err := openWritten(root, tmp, written)
 	if err != nil {
-		return Pinned{}, errors.New("the pinned manifest does not load: " + string(mcp.ReasonOf(err)))
+		return Pinned{}, err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, extension.MaxManifestBytes+1))
+	switch {
+	case err != nil:
+		return Pinned{}, errors.New("the pinned manifest does not load: " + string(mcp.NotInstalled))
+	case len(raw) > extension.MaxManifestBytes:
+		return Pinned{}, errors.New("the pinned manifest exceeds the manifest bound")
+	case !bytes.Equal(raw, manifest):
+		return Pinned{}, errors.New("the temporary manifest changed before it was read back")
+	}
+	if pinned.CheckPlacement(filepath.Join(dirAbs, tmp)) != nil {
+		return Pinned{}, errors.New("the pinned manifest does not load: " + string(mcp.NotInstalled))
+	}
+	sum := sha256.Sum256(raw)
+	m, err := plugin.Decode(raw)
+	if err != nil {
+		return Pinned{}, errors.New("the pinned manifest does not load: " + string(mcp.SchemaInvalid))
 	}
 	if err := root.Rename(tmp, ManifestFile); err != nil {
 		return Pinned{}, errors.New("replacing plugin.json failed")
 	}
 	done = true
-	return Pinned{Name: m.Name, ManifestSHA256: digest}, nil
+	if now, err := root.Lstat(ManifestFile); err != nil || !os.SameFile(now, written) {
+		return Pinned{}, errors.New("plugin.json changed while it was replaced")
+	}
+	return Pinned{Name: m.Name, ManifestSHA256: hex.EncodeToString(sum[:])}, nil
+}
+
+// openWritten opens the temporary manifest through the root handle without
+// following a symlink and proves it is still the file written: the same file,
+// a regular file of one hard link that only its owner, the user, can write.
+func openWritten(root *os.Root, tmp string, written fs.FileInfo) (*os.File, error) {
+	changed := errors.New("the temporary manifest changed before it was read back")
+	info, err := root.Lstat(tmp)
+	if err != nil || info.Mode()&fs.ModeSymlink != 0 || !os.SameFile(info, written) {
+		return nil, changed
+	}
+	f, err := root.OpenFile(tmp, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, changed
+	}
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(opened, written) || !opened.Mode().IsRegular() || !ownedByMe(opened) {
+		f.Close()
+		return nil, changed
+	}
+	if opened.Mode().Perm()&0o022 != 0 {
+		f.Close()
+		return nil, errors.New("the temporary manifest is group- or world-writable")
+	}
+	if n, ok := pinned.LinkCount(opened); ok && n > 1 {
+		f.Close()
+		return nil, errors.New("the temporary manifest has more than one hard link")
+	}
+	if opened.Size() > extension.MaxManifestBytes {
+		f.Close()
+		return nil, errors.New("the pinned manifest exceeds the manifest bound")
+	}
+	return f, nil
 }

@@ -46,7 +46,8 @@ const (
 var templates embed.FS
 
 // Write creates a skeleton in dir. dir must not exist yet (its parent must), or
-// be an empty directory the user owns; it is never a symlink. Files are created
+// be an empty directory the user owns that is not group- or world-writable; it
+// is never a symlink. Files are created
 // exclusively, never overwritten, and on any failure only the files this call
 // created are removed. Errors never name a local path.
 func Write(dir string, opts Options) error {
@@ -108,6 +109,7 @@ func render(c *contract.Contract, name string) ([]skeletonFile, error) {
 		"{{SERVER_NAME}}", quote(name),
 		"{{CONTRACT_ID}}", quote(c.ID),
 		"{{PROTOCOL_VERSION}}", quote(mcp.ProtocolVersion),
+		"{{LIMITS}}", limitsTable(c),
 	))
 	if err != nil {
 		return nil, err
@@ -121,6 +123,7 @@ func render(c *contract.Contract, name string) ([]skeletonFile, error) {
 		"{{KIND}}", c.Kind(),
 		"{{CONTRACT}}", c.ID,
 		"{{ENABLE}}", enableSnippet(c.Kind(), name),
+		"{{BUILD_ENV}}", GoBuildEnv,
 	))
 	if err != nil {
 		return nil, err
@@ -133,6 +136,28 @@ func render(c *contract.Contract, name string) ([]skeletonFile, error) {
 		{TemplateFile, manifest},
 		{"README.md", readme},
 	}, nil
+}
+
+// GoBuildEnv is the environment a Go skeleton is built with: no go.work above
+// the directory joins it to another module, and no GOFLAGS of the user's (such
+// as -mod=vendor) changes what is built.
+const GoBuildEnv = "GOWORK=off GOFLAGS="
+
+// GoBuildCommand is the command that builds a Go skeleton in dir into name, as
+// two shell lines joined by a backslash continuation: GoBuildEnv, then the go
+// build itself. dir and name are printed as given.
+func GoBuildCommand(dir, name string) []string {
+	return []string{GoBuildEnv + ` \`, "go -C " + dir + " build -o " + name + " ."}
+}
+
+// limitsTable renders main.go's per-tool limits from the contract: each tool's
+// name, maxOutputBytes and timeoutMs, one tool per line.
+func limitsTable(c *contract.Contract) string {
+	lines := make([]string, 0, len(c.Tools))
+	for _, t := range c.Tools {
+		lines = append(lines, fmt.Sprintf("\t{%s, %d, %d},", strconv.Quote(t.Name), t.MaxOutputBytes, t.TimeoutMS))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderInterpreted builds a python or typescript skeleton. The engine runs a
@@ -414,9 +439,9 @@ func enableSnippet(kind, name string) string {
 	case "tracker":
 		return "intake:\n  source: " + name
 	case "forge":
-		return "forge:\n  plugin: " + name
+		return "forge:\n  plugin: " + name + "\n  project: <project>"
 	}
-	return "reviewers:\n  - plugin: " + name
+	return "reviewers:\n  - plugin: " + name + "\n    autoFix: none"
 }
 
 // writeFiles creates dir (or adopts it when it is an empty directory the user
@@ -475,6 +500,11 @@ func writeFiles(abs string, files []skeletonFile) (err error) {
 	if !info.IsDir() || !ownedByMe(info) {
 		return errors.New("the directory must be a directory you own")
 	}
+	// An adopted directory must pass the placement rules plugin test applies
+	// later; one this call created is 0700.
+	if !created && info.Mode().Perm()&0o022 != 0 {
+		return errors.New("the directory is group- or world-writable; make it writable by its owner only")
+	}
 	if root, err = parent.OpenRoot(base); err != nil {
 		return errors.New("the directory cannot be opened")
 	}
@@ -519,19 +549,30 @@ func checkEmpty(root *os.Root, want fs.FileInfo) error {
 // or symlink is never written through. made reports whether this call created
 // the file, so a failure removes it and never a file it did not create.
 func writeExclusive(root *os.Root, name string, data []byte) (made bool, err error) {
+	made, _, err = writeExclusiveStat(root, name, data)
+	return made, err
+}
+
+// writeExclusiveStat is writeExclusive that also returns the identity of the
+// file written, taken from the handle it was written through.
+func writeExclusiveStat(root *os.Root, name string, data []byte) (made bool, info fs.FileInfo, err error) {
 	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, fileMode)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		return true, err
+		return true, nil, err
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return true, err
+		return true, nil, err
 	}
-	return true, f.Close()
+	if info, err = f.Stat(); err != nil {
+		f.Close()
+		return true, nil, err
+	}
+	return true, info, f.Close()
 }
 
 func ownedByMe(info fs.FileInfo) bool {

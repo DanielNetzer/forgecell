@@ -6,7 +6,14 @@
 // tools.json is the contract's tool table and fixture.json holds the describe
 // answer; both are embedded. The describe tool answers the fixture, and every
 // other tool fails with "not implemented yet". Replace those tools one at a
-// time.
+// time by adding a handler for each to handlers. A handler names why it failed
+// with fail: authMissing, rateLimited, network or failed.
+//
+// Each call runs under its tool's contract timeout (timeoutMs), and its
+// structured result is bounded by the tool's contract maxOutputBytes; both
+// come from limits. A larger result is never sent, and a call that times out
+// is answered with reason failed. A handler that ignores its context and
+// outlives its timeout makes every later call fail until it returns.
 //
 // Every tool first runs accepts on its arguments, which checks exactly three
 // things: each top-level required member is present, no unknown top-level
@@ -24,6 +31,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -31,6 +39,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -52,6 +61,48 @@ const (
 	codeMethodNotFound = -32601
 	codeInvalidParams  = -32602
 )
+
+// The reasons a failed tool call names: authMissing when a credential the
+// plugin needs is unset, expired or refused; rateLimited when the service asks
+// the plugin to slow down; network when the service cannot be reached; and
+// failed for anything else. The engine reads any other reason as failed.
+const (
+	authMissing = "auth-missing"
+	rateLimited = "rate-limited"
+	network     = "network"
+	failed      = "failed"
+)
+
+// maxFailureBytes bounds the message a failed call sends back.
+const maxFailureBytes = 200
+
+// limit is one tool's contract bounds: the most bytes of structured JSON one
+// result may hold, and how long one call may run, in milliseconds.
+type limit struct {
+	tool           string
+	maxOutputBytes int
+	timeoutMs      int
+}
+
+// limits are copied from the contract when the skeleton was made. Every tool
+// in tools.json needs one.
+var limits = []limit{
+{{LIMITS}}
+}
+
+// handler answers one tool call whose arguments passed accepts. It returns a
+// result that encodes as a JSON object, or an error: return fail(reason,
+// message) to name a reason; any other error is answered with reason failed and
+// a fixed message. It must stop when ctx ends.
+type handler func(ctx context.Context, args map[string]any) (any, error)
+
+// handlers serve the tools you have implemented, by tool name. A tool without
+// one answers its fixture when it is the describe tool, and fails with "not
+// implemented yet" otherwise.
+var handlers = map[string]handler{}
+
+// handlerContext derives one call's context from its timeout; a seam for tests.
+var handlerContext = context.WithTimeout
 
 //go:embed tools.json
 var toolsJSON []byte
@@ -76,12 +127,17 @@ type tool struct {
 	Access      string          `json:"access"`
 	InputSchema json.RawMessage `json:"inputSchema"`
 	schema      inputSchema
+	maxOutput   int
+	timeout     time.Duration
 }
 
 type server struct {
 	tools    []tool
 	byName   map[string]int
 	fixtures map[string]json.RawMessage
+
+	// running is closed when the last handler returns; nil when none ran.
+	running chan struct{}
 }
 
 func main() {
@@ -96,13 +152,22 @@ func main() {
 	}
 }
 
-// load reads the embedded tool table and fixtures.
+// load reads the embedded tool table and fixtures, and attaches each tool's
+// limits. A tool without limits, or a handler for a tool that is not listed, is
+// refused.
 func load() (*server, error) {
 	var table struct {
 		Tools []tool `json:"tools"`
 	}
 	if err := json.Unmarshal(toolsJSON, &table); err != nil {
 		return nil, err
+	}
+	bounds := map[string]limit{}
+	for _, l := range limits {
+		if l.maxOutputBytes < 1 || l.timeoutMs < 1 {
+			return nil, errors.New("a tool's limits are not positive")
+		}
+		bounds[l.tool] = l
 	}
 	s := &server{byName: map[string]int{}}
 	if err := json.Unmarshal(fixtureJSON, &s.fixtures); err != nil {
@@ -124,8 +189,18 @@ func load() (*server, error) {
 			return nil, err
 		}
 		t.InputSchema = compact.Bytes()
+		l, ok := bounds[t.Name]
+		if !ok {
+			return nil, errors.New("a tool has no limits")
+		}
+		t.maxOutput, t.timeout = l.maxOutputBytes, time.Duration(l.timeoutMs)*time.Millisecond
 		s.tools = append(s.tools, t)
 		s.byName[t.Name] = i
+	}
+	for name := range handlers {
+		if _, ok := s.byName[name]; !ok {
+			return nil, errors.New("a handler serves a tool that is not listed")
+		}
 	}
 	return s, nil
 }
@@ -198,13 +273,15 @@ func readLine(r *bufio.Reader, limit int) (line []byte, tooLarge bool, err error
 	}
 }
 
-// handle answers one message; nil means no reply.
+// handle answers one message; nil means no reply. The raw line must be valid
+// UTF-8 JSON, so only JSON whitespace may surround the object: a line that
+// starts with any other space, such as U+00A0 or U+0085, is a parse error.
 func (s *server) handle(line []byte) map[string]any {
 	trimmed := bytes.TrimSpace(line)
 	if len(trimmed) == 0 {
 		return nil
 	}
-	if !utf8.Valid(trimmed) || !json.Valid(trimmed) {
+	if !utf8.Valid(line) || !json.Valid(line) {
 		return errorMessage(nil, codeParseError, "parse error")
 	}
 	if trimmed[0] != '{' || !uniqueKeys(trimmed) {
@@ -281,17 +358,92 @@ func (s *server) call(id json.RawMessage, params map[string]json.RawMessage) map
 	dec.UseNumber()
 	var args map[string]any
 	if err := dec.Decode(&args); err != nil || !t.schema.accepts(args) {
-		return resultMessage(id, failure("the arguments do not match the input schema"))
+		return resultMessage(id, failure(failed, "the arguments do not match the input schema"))
 	}
-	if strings.HasSuffix(t.Name, "_describe") {
-		if describe, ok := s.fixtures[t.Name]; ok {
-			return resultMessage(id, map[string]any{
-				"content":           []any{map[string]any{"type": "text", "text": string(describe)}},
-				"structuredContent": describe,
-			})
+	return resultMessage(id, s.run(t, args))
+}
+
+// unimplemented serves a tool that has no handler: the describe tool answers
+// its fixture, and any other tool fails with "not implemented yet".
+func (s *server) unimplemented(t tool) handler {
+	return func(context.Context, map[string]any) (any, error) {
+		if strings.HasSuffix(t.Name, "_describe") {
+			if describe, ok := s.fixtures[t.Name]; ok {
+				return describe, nil
+			}
+		}
+		return nil, fail(failed, "not implemented yet: "+t.Name)
+	}
+}
+
+type outcome struct {
+	result any
+	err    error
+}
+
+// run calls the tool's handler under its timeout and renders the result. The
+// result must encode as a JSON object within the tool's output bound, or the
+// call fails with reason failed and nothing of it is sent. A handler that
+// ignores its context and outlives its timeout keeps the server from starting
+// another until it returns: later calls fail meanwhile, so handlers never
+// overlap.
+func (s *server) run(t tool, args map[string]any) map[string]any {
+	if s.running != nil {
+		select {
+		case <-s.running:
+		default:
+			return failure(failed, "an earlier call is still running")
 		}
 	}
-	return resultMessage(id, failure("not implemented yet: "+t.Name))
+	h := handlers[t.Name]
+	if h == nil {
+		h = s.unimplemented(t)
+	}
+	ctx, cancel := handlerContext(context.Background(), t.timeout)
+	defer cancel()
+	done := make(chan outcome, 1)
+	running := make(chan struct{})
+	s.running = running
+	// The handler is marked finished before its outcome is sent, so once run
+	// receives the outcome a later call never finds it still running.
+	go func() {
+		var o outcome
+		defer func() {
+			if recover() != nil {
+				o = outcome{err: errors.New("the handler panicked")}
+			}
+			close(running)
+			done <- o
+		}()
+		result, err := h(ctx, args)
+		o = outcome{result, err}
+	}()
+	var o outcome
+	select {
+	case o = <-done:
+	case <-ctx.Done():
+	}
+	if ctx.Err() != nil {
+		return failure(failed, "the call timed out")
+	}
+	if o.err != nil {
+		var e *toolError
+		if errors.As(o.err, &e) {
+			return failure(e.reason, e.message)
+		}
+		return failure(failed, "the tool failed")
+	}
+	structured, err := json.Marshal(o.result)
+	if _, ok := object(structured); err != nil || !ok {
+		return failure(failed, "the tool returned no JSON object")
+	}
+	if len(structured) > t.maxOutput {
+		return failure(failed, "the result exceeds the tool's output bound")
+	}
+	return map[string]any{
+		"content":           []any{map[string]any{"type": "text", "text": string(structured)}},
+		"structuredContent": json.RawMessage(structured),
+	}
 }
 
 // accepts checks the top-level required members, unknown top-level members
@@ -358,12 +510,46 @@ func jsonType(v any) string {
 	return ""
 }
 
-// failure is an isError tool result with the reason failed and a fixed message.
-func failure(message string) map[string]any {
+// toolError is a handler failure with a fixed reason and message.
+type toolError struct {
+	reason, message string
+}
+
+func (e *toolError) Error() string { return e.reason + ": " + e.message }
+
+// fail returns a handler error that names reason: authMissing, rateLimited or
+// network; any other reason becomes failed. Keep message short, fixed and free
+// of secrets and local paths. Forgecell shows only the reason.
+func fail(reason, message string) error {
+	return &toolError{reason: knownReason(reason), message: message}
+}
+
+// knownReason returns reason when it is one the engine reads, and failed
+// otherwise.
+func knownReason(reason string) string {
+	switch reason {
+	case authMissing, rateLimited, network:
+		return reason
+	}
+	return failed
+}
+
+// failure is an isError tool result with a known reason and a message cut to
+// maxFailureBytes.
+func failure(reason, message string) map[string]any {
+	reason = knownReason(reason)
+	message = strings.ToValidUTF8(message, "")
+	if len(message) > maxFailureBytes {
+		n := maxFailureBytes
+		for n > 0 && !utf8.RuneStart(message[n]) {
+			n--
+		}
+		message = message[:n]
+	}
 	return map[string]any{
 		"isError":           true,
 		"content":           []any{map[string]any{"type": "text", "text": message}},
-		"structuredContent": map[string]any{"reason": "failed", "message": message},
+		"structuredContent": map[string]any{"reason": reason, "message": message},
 	}
 }
 

@@ -69,5 +69,7 @@ Put this directory in your Lab as `plugins/{{NAME}}`, pin it there, and add the 
 ```yaml
 {{ENABLE}}
 plugins:
-  {{NAME}}: {manifest: plugins/{{NAME}}/plugin.json, sha256: "<manifest hex>", required: false}
+  - {name: {{NAME}}, manifest: plugins/{{NAME}}/plugin.json, sha256: "<manifest hex>"}
 ```
+
+`plugins:` takes exactly `name`, `manifest` and `sha256`; there is no `required` key.

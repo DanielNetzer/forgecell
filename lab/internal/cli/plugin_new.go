@@ -71,7 +71,11 @@ func runPluginNew(args []string, out, stderr io.Writer) int {
 		fmt.Fprintf(out, "  node -p 'require(\"fs\").realpathSync(process.execPath)'\n")
 	default:
 		fmt.Fprintf(out, "Wrote the %s plugin skeleton %s.\nNext, build the server, pin the manifest to it and test it:\n", flags["--kind"], name)
-		fmt.Fprintf(out, "  go -C %s build -o %s .\n", shown, name)
+		// GOWORK=off and an empty GOFLAGS keep a go.work above the directory
+		// and the user's GOFLAGS from changing what is built.
+		for _, line := range scaffold.GoBuildCommand(shown, name) {
+			fmt.Fprintf(out, "  %s\n", line)
+		}
 		fmt.Fprintf(out, "  forgecell plugin pin %s --server %s/%s\n", shown, shown, name)
 		fmt.Fprintf(out, "  forgecell plugin test %s/%s\n", shown, scaffold.ManifestFile)
 	}

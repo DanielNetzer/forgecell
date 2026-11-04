@@ -22,18 +22,42 @@ That check is not full schema validation. It does not check bounds (`minLength`,
 look inside nested objects or arrays. When you implement a tool, check those yourself in
 its handler before you use an argument.
 
-Replace the tools one at a time in `main.go`. Keep `tools.json` as it is: the engine checks
-the advertised schemas against the contract.
+Replace the tools one at a time in `main.go`: add a `handler` for each to `handlers`. Keep
+`tools.json` as it is: the engine checks the advertised schemas against the contract.
+
+## Errors, output bounds and timeouts
+
+A handler that can't answer returns `fail(reason, message)`. The reason is one of:
+
+| Reason | Constant | Use it when |
+|---|---|---|
+| `auth-missing` | `authMissing` | A credential the plugin needs is unset, expired or refused (for example HTTP 401 or 403). |
+| `rate-limited` | `rateLimited` | The service asks you to slow down (for example HTTP 429). |
+| `network` | `network` | The service can't be reached: DNS, connection, TLS or a timeout on the plugin's side. |
+| `failed` | `failed` | Anything else, including arguments your handler refuses. |
+
+`fail` turns any other reason into `failed`, and any error that is not from `fail` is
+answered with reason `failed` and a fixed message. Forgecell shows only the reason, so keep
+the message short and free of secrets and local paths; the server cuts it to 200 bytes.
+
+`limits` in `main.go` holds each tool's contract `maxOutputBytes` and `timeoutMs`, copied
+when the skeleton was made. The server enforces both itself: a result whose structured
+JSON is larger than the tool's `maxOutputBytes` is never sent, and a call that runs past
+its `timeoutMs` is answered when the timeout fires. Both fail with reason `failed`. A
+handler gets a context that ends at the timeout and must stop when it does: until a
+timed-out handler returns, every later call fails.
 
 ## Build
 
 From this directory, build the server:
 
 ```sh
-go build -o {{NAME}} .
+{{BUILD_ENV}} go build -o {{NAME}} .
 ```
 
-The server takes no arguments.
+`GOWORK=off` builds this module on its own even when a `go.work` file in a directory above
+would join it to other modules, and the empty `GOFLAGS` keeps flags from your environment,
+such as `-mod=vendor`, from changing what is built. The server takes no arguments.
 
 ## Pin the manifest
 
@@ -70,5 +94,7 @@ Put this directory in your Lab as `plugins/{{NAME}}`, pin it there, and add the 
 ```yaml
 {{ENABLE}}
 plugins:
-  {{NAME}}: {manifest: plugins/{{NAME}}/plugin.json, sha256: "<manifest hex>", required: false}
+  - {name: {{NAME}}, manifest: plugins/{{NAME}}/plugin.json, sha256: "<manifest hex>"}
 ```
+
+`plugins:` takes exactly `name`, `manifest` and `sha256`; there is no `required` key.
