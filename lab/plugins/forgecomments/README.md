@@ -101,15 +101,33 @@ To triage the findings, propose a fix round and push it to the same change reque
     leading markdown markers, or as the whole content of `**…**`.
   - `severity: high`, `medium`, `low` or `info` anywhere in a line.
   - A line that starts with `[high]`, `[medium]`, `[low]` or `[info]`, after leading
-    markdown markers, unless the tag starts a markdown link, as in `[High](…)`.
+    markdown markers, unless the tag starts a markdown link, as in `[High](…)`, a
+    reference link, as in `[high][ref]` or `[high][]`, or a link reference definition, as
+    in `[high]: http://x`.
 
-  Within a line, the marker that starts first wins, whatever its form. A marker right after
-  the word `not` or `no` doesn't count. Lines inside a fenced code block (```` ``` ```` or
-  `~~~`) are never read. As in CommonMark, only a line holding a run of the opening
-  character at least as long as the opener, and nothing else, closes the fence, and a fence
-  left open hides the rest of the five lines. A line is a blockquote line, and never read,
-  when a `>` appears anywhere in its leading markdown markers, list bullets and spaces, as
-  in `> x` or `- > x`. A lone CR, U+0085, U+2028 and U+2029 each end a line, as LF does, and
+  The severity word must end the word: one followed by a Unicode letter, mark or digit, as
+  in `severity: highé` or `High Severityé`, is not a marker, and neither is `severity`
+  right after a letter. Within a line, the marker that starts first wins, whatever its
+  form. A marker doesn't count when the text before it ends in the word `not` or `no`, or
+  in a word ending in `n't` or `n’t`, as in `isn't`, with only markdown markers,
+  punctuation and spaces between them, as in `not: severity: high` or `not, severity:
+  high`.
+
+  Text inside an inline code span, as in `` `High Severity` `` or ``` ``severity: high`` ```,
+  never counts. As in CommonMark, a run of backticks opens a span that the next run of
+  exactly the same length closes, even on a later line of the same paragraph, and a run
+  with no such closer is literal. A backslash does not escape a backtick here. Lines inside
+  a fenced code block (```` ``` ```` or `~~~`) are never read. As in CommonMark, only a line
+  holding a run of the opening character at least as long as the opener, and nothing
+  else, closes the fence, and a fence left open hides the rest of the five lines. Outside
+  a list, a line indented by four or more columns is an indented code line and is never
+  read; a tab reaches the next multiple of four columns. Such a line never opens or closes
+  a fence, so a marker on the line after an indented ```` ``` ```` is still read. A list
+  item starts a list, and an indented line in a list is list content and is read. Any
+  other line indented by less than four columns ends the list, even a lazy continuation,
+  so an indented line after it is code. A line is a blockquote line, and never read, when
+  a `>` appears anywhere in its leading markdown markers, list bullets and spaces, as in
+  `> x` or `- > x`. A lone CR, U+0085, U+2028 and U+2029 each end a line, as LF does, and
   CRLF is one break. Without a marker, `defaultSeverity` applies.
 - **Order and bounds.** Findings are ordered highest severity first, and latest comment
   first within a severity. At most 500 are kept, so the lowest-severity, oldest ones are
