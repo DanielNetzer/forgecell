@@ -333,6 +333,11 @@ type Plan struct {
 	// and verification re-checks the base commit. It joins the plan digest; empty keeps
 	// the digest of every earlier plan unchanged.
 	NewFiles []string `json:"newFiles,omitempty"`
+	// MarkdownNewFiles lists the new scope paths intake accepted by the Markdown rule
+	// (MarkdownRule) rather than by a component manifest. The Lab derives it from the
+	// frozen tree, never from model output. It joins the plan digest; empty keeps the
+	// digest of every earlier plan unchanged.
+	MarkdownNewFiles []string `json:"markdownNewFiles,omitempty"`
 	// FullSuiteTriggers are the Formula's repository paths or globs whose change makes
 	// every selecting check run its full suite. The Lab sets them from the Formula when
 	// a check declares Select. They join the plan digest; empty keeps the digest of
@@ -725,6 +730,13 @@ func (p Plan) validateDigestible() error {
 			return fmt.Errorf("new file %q must be a distinct scope path that is not frozen evidence", file)
 		}
 		newFiles[file] = true
+	}
+	markdownFiles := map[string]bool{}
+	for _, file := range p.MarkdownNewFiles {
+		if !paths[file] || markdownFiles[file] || evidencePaths[file] || refs[file] || !markdownRulePath(file) {
+			return fmt.Errorf("Markdown-rule file %q must be a distinct lower-case .md scope path outside dot-directories that is not frozen evidence", file)
+		}
+		markdownFiles[file] = true
 	}
 	ids := map[string]bool{}
 	required := false

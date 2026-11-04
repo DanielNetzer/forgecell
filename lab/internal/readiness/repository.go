@@ -225,6 +225,7 @@ func (s RepositorySnapshot) ValidateScope(scope []ScopedPath) error {
 	for _, f := range s.Files {
 		files[f.Path] = f
 	}
+	markdownDirs := s.trackedFileDirs()
 	refs := map[string]FileEvidence{}
 	for _, e := range s.Evidence {
 		refs[e.ID] = e
@@ -253,6 +254,9 @@ func (s RepositorySnapshot) ValidateScope(scope []ScopedPath) error {
 		if _, exists := files[file]; exists {
 			continue
 		}
+		if markdownDirs[path.Dir(file)] && markdownRulePath(file) {
+			continue
+		}
 		supported := false
 		for _, id := range item.Evidence {
 			e, ok := refs[id]
@@ -273,6 +277,81 @@ func (s RepositorySnapshot) ValidateScope(scope []ScopedPath) error {
 		}
 	}
 	return nil
+}
+
+// MarkdownRule names the reason ValidateScope accepts a new path without a
+// component manifest, for the plan, ledger and scope audit notes.
+const MarkdownRule = "Markdown rule: a new lower-case .md file outside dot-directories, next to a tracked file in the frozen snapshot"
+
+// markdownRulePath reports whether a new path's name qualifies for the Markdown
+// rule: a lower-case .md suffix and no path segment starting with '.', so
+// policy and agent configuration directories keep the manifest rule.
+func markdownRulePath(file string) bool {
+	if !strings.HasSuffix(file, ".md") {
+		return false
+	}
+	for _, part := range strings.Split(file, "/") {
+		if strings.HasPrefix(part, ".") {
+			return false
+		}
+	}
+	return true
+}
+
+// trackedFileDirs is the set of directories ("." for the root) that directly
+// hold a tracked regular file in the frozen snapshot. s.Files is bounded at
+// collection, so the set is too.
+func (s RepositorySnapshot) trackedFileDirs() map[string]bool {
+	dirs := map[string]bool{}
+	for _, f := range s.Files {
+		if f.Mode == "100644" || f.Mode == "100755" {
+			dirs[path.Dir(f.Path)] = true
+		}
+	}
+	return dirs
+}
+
+// MarkdownScopeFiles returns, in scope order, the new scope paths ValidateScope
+// accepts by the Markdown rule: valid, absent from the frozen snapshot, not
+// traversing a file, symlink or submodule, not a directory, and a Markdown-rule
+// name next to a tracked regular file. It does not validate the rest of the
+// scope; ValidateScope does that.
+func (s RepositorySnapshot) MarkdownScopeFiles(scope []ScopedPath) []string {
+	files := map[string]TreeFile{}
+	for _, f := range s.Files {
+		files[f.Path] = f
+	}
+	dirs := s.trackedFileDirs()
+	out := []string{}
+	seen := map[string]bool{}
+	for _, item := range scope {
+		file := item.Path
+		if ValidatePath(file) != nil || seen[file] {
+			continue
+		}
+		if _, exists := files[file]; exists || !markdownRulePath(file) || !dirs[path.Dir(file)] {
+			continue
+		}
+		traverses := false
+		for ancestor := path.Dir(file); ancestor != "."; ancestor = path.Dir(ancestor) {
+			if _, ok := files[ancestor]; ok {
+				traverses = true
+				break
+			}
+		}
+		for existing := range files {
+			if strings.HasPrefix(existing, file+"/") {
+				traverses = true
+				break
+			}
+		}
+		if traverses {
+			continue
+		}
+		seen[file] = true
+		out = append(out, file)
+	}
+	return out
 }
 
 // CollectForTicket selects exact paths named in ticket prose, including absent paths.

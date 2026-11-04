@@ -58,6 +58,18 @@ func refuseProjectClaudeConfig(command []string, root, base string) error {
 	return fmt.Errorf("coding refused: base commit %s carries Claude project configuration (%s) that a --setting-sources project run loads, and it can widen permissions or run hooks the Lab did not review; no coding harness was started. Remove it from the repository (for example git rm -r .claude/settings*.json .claude/hooks .claude/agents), commit that, and refresh intake; the Formula has no setting that allows project settings", base, listPaths(found))
 }
 
+// capturedMarkdownFiles returns the captured changes that the plan accepted by
+// the Markdown rule, in capture order.
+func capturedMarkdownFiles(p readiness.Plan, capture verification.CaptureResult) []string {
+	out := []string{}
+	for _, change := range capture.Changes {
+		if slices.Contains(p.MarkdownNewFiles, change) {
+			out = append(out, change)
+		}
+	}
+	return out
+}
+
 // listPaths names at most five paths and counts the rest.
 func listPaths(paths []string) string { return boundedPaths(paths, 5) }
 
@@ -627,6 +639,9 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 		p := readiness.Plan{SchemaVersion: "v1", MoleculeID: r.ID, Revision: 1, Inputs: readiness.Inputs{Repository: w.Repo, TargetBranch: target, BaseCommit: w.BaseCommit, FormulaSHA256: f.SHA256, EvidenceSHA256: evidenceHash, BindingSHA256: bindingDigest, Issue: issueInput(issue), MandatoryConstraints: o.MandatoryConstraints}, Evidence: snapshot.References(), Analysis: a, Policy: readiness.ExecutionPolicy{Environment: []string{"PATH"}, SetupNetwork: "unrestricted", CheckNetwork: "unrestricted", Containment: "filtered-environment"}}
 		p.Analysis.Checks = append(append([]readiness.Check(nil), p.Analysis.Checks...), o.Checks...)
 		p.NewFiles = readiness.CitedNewFiles(p.Analysis.Checks, readiness.NewScopeFiles(a.Scope, snapshot.Files))
+		if markdown := snapshot.MarkdownScopeFiles(a.Scope); len(markdown) > 0 {
+			p.MarkdownNewFiles = markdown
+		}
 		p.HarnessTimeoutMS = proposeHarnessTimeoutMS(codingBinding, len(p.Analysis.Scope))
 		if o.Policy != nil {
 			p.Policy = *o.Policy
@@ -832,6 +847,9 @@ func runIntake(ctx context.Context, o Options, key string) (r Record, err error)
 	}
 	if note, ok := newFilesNote(p); ok {
 		r.Notes = append(r.Notes, note)
+	}
+	if len(p.MarkdownNewFiles) > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("New scope paths accepted without a component manifest by the %s: %s.", readiness.MarkdownRule, boundedPaths(p.MarkdownNewFiles, maxListedViolations)))
 	}
 	if note, ok := scopeGateSensitivePathsNote(f); ok {
 		r.Notes = append(r.Notes, note)
@@ -1478,6 +1496,9 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		r.Readiness = &state
 		atom(&r, roles.atoms[formula.Coding], "failed", detail)
 		return finishStopped(r, detail)
+	}
+	if markdown := capturedMarkdownFiles(p, capture); len(markdown) > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("Scope audit: captured new paths allowed by the %s: %s.", readiness.MarkdownRule, boundedPaths(markdown, maxListedViolations)))
 	}
 	// Preserve the validated report independently of capture/policy decisions.
 	phase, detail := coding.Outcome, coding.Reason
