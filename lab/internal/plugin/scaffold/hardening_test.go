@@ -65,6 +65,14 @@ func TestPinRefusesASwappedTempManifest(t *testing.T) {
 	}{
 		{"replaced by an identical file", func(t *testing.T, root *os.Root, path string) {
 			raw := readFile(t, path)
+			// Hold the original open so its inode stays allocated: ext4 reuses a
+			// freed inode number at once, which would give the replacement the
+			// same identity.
+			held, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { held.Close() })
 			removeFile(t, path)
 			if err := os.WriteFile(path, raw, 0o600); err != nil {
 				t.Fatal(err)
