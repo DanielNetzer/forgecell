@@ -70,6 +70,52 @@ func capturedMarkdownFiles(p readiness.Plan, capture verification.CaptureResult)
 	return out
 }
 
+// maxRetainedWorkPaths bounds how many paths the retained-work note names.
+const maxRetainedWorkPaths = 20
+
+// retainedWorkPaths returns the changed paths of the pre-coding capture that an
+// earlier coding attempt left for a revision after the first: only exact repository
+// paths in the approved scope, in capture order. A first revision has none.
+func retainedWorkPaths(p readiness.Plan, captured verification.CaptureResult) []string {
+	if p.Revision <= 1 {
+		return nil
+	}
+	scope := map[string]bool{}
+	for _, s := range p.Analysis.Scope {
+		scope[s.Path] = true
+	}
+	out := []string{}
+	for _, change := range captured.Changes {
+		if readiness.ValidatePath(change) == nil && scope[change] {
+			out = append(out, change)
+		}
+	}
+	return out
+}
+
+// retainedWorkText is the retained-work instruction naming at most
+// maxRetainedWorkPaths paths, each as a JSON string so a path can never add prose,
+// and counting the rest. It is empty when there are no paths.
+func retainedWorkText(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	shown := paths
+	if len(shown) > maxRetainedWorkPaths {
+		shown = shown[:maxRetainedWorkPaths]
+	}
+	items := make([]string, len(shown))
+	for i, p := range shown {
+		raw, _ := json.Marshal(p)
+		items[i] = string(raw)
+	}
+	out := retainedWorkInstruction + strings.Join(items, ", ")
+	if len(paths) > len(shown) {
+		out += fmt.Sprintf(", and %d more", len(paths)-len(shown))
+	}
+	return out + "."
+}
+
 // listPaths names at most five paths and counts the rest.
 func listPaths(paths []string) string { return boundedPaths(paths, 5) }
 
@@ -1267,6 +1313,7 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		authHint                 string
 		notAuthenticated         bool
 	)
+	retainedPaths := retainedWorkPaths(p, captured)
 	for {
 		// A resume starts after a wait that may be long, so the Formula and its bindings
 		// are checked again: a change since approval stops the stage instead of resuming
@@ -1293,6 +1340,15 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		launcher := harness.ResolveAttempt(codingBinding.Command)
 		forgecell := harness.RecordProvenanceWith(codingBinding.Command, launcher)
 		codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
+		// The retained-work note comes first, then the amended-plan, operator-note and
+		// resume notes. It is derived at run time from the pre-coding capture, never
+		// stored in the plan, so the approved digest is unchanged.
+		if retained := retainedWorkText(retainedPaths); retained != "" {
+			codingRequest["instruction"] = codingRequest["instruction"].(string) + retained
+			if len(stage) == 0 {
+				r.Notes = append(r.Notes, fmt.Sprintf("Retained-work instruction given to coding attempt %s: %d changed file(s) from an earlier attempt.", attemptID, len(retainedPaths)))
+			}
+		}
 		if p.Revision > 1 {
 			added := newAcceptance(r, p)
 			codingRequest["newAcceptance"] = added

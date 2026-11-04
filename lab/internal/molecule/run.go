@@ -152,6 +152,10 @@ var transientBackoff = [maxTransientResumes]time.Duration{30 * time.Second, 120 
 // resumeInstruction is added to the coding instruction of an automatic resume.
 const resumeInstruction = " The previous attempt was interrupted by a provider network error; the workspace contains its partial work. Review it and complete every acceptance item. If the retained work already satisfies every acceptance item, report outcome completed, not no-change."
 
+// retainedWorkInstruction is added to the coding instruction of a revision after the
+// first whose kept tree already has changes; the JSON-quoted changed paths follow it.
+const retainedWorkInstruction = " An earlier coding attempt already changed these files in this workspace; it may have been interrupted, recovered or stopped for this amendment. Read them, and the plan's acceptance, before editing. Build on the earlier changes, and do not redo or revert them unless the plan requires it. If an earlier change contradicts the plan, report that instead of silently discarding it. Changed files (JSON strings): "
+
 // TransientRetriesExhausted reports whether the Molecule's coding stage ended because
 // its transient provider errors outlasted the automatic resumes. It reads only the
 // TransientExhausted marker that path records, and only while the marked attempt is
