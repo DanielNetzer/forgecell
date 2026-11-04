@@ -118,6 +118,14 @@ unknown method or an unknown tool) with a JSON-RPC error instead. Forgecell name
 failures with further reasons, such as `timeout`, `output-too-large`, `schema-invalid`,
 `contract-mismatch`, `not-installed` and `manifest-changed`. A plugin doesn't send those.
 
+In a Go skeleton, a handler names its reason with `fail(reason, message)` and the
+constants `authMissing`, `rateLimited`, `network` and `failed`. `fail` turns any other
+reason into `failed`, and an error that is not from `fail` is answered with reason
+`failed` and a fixed message. The skeleton also enforces each tool's contract
+`maxOutputBytes` and `timeoutMs` itself, from the `limits` table `plugin new` copies from
+the contract: a larger result is never sent, and a call past its timeout is answered then.
+Both fail with reason `failed`. Until a timed-out handler returns, every later call fails.
+
 ## The manifest
 
 `plugin.json` is strict JSON: no unknown or repeated keys. `plugin new` writes a template,
@@ -181,9 +189,13 @@ interpreter, accepting that this can affect other admin users of that Homebrew.
    contract has them, check every argument yourself, and keep every answer within its
    bounds.
 
-3. **Build it or pick the interpreter.** For Go, `go -C ./demo-tracker build -o demo-tracker .`.
-   For TypeScript, `node ./demo-tracker/build.mjs` builds `server.js`. For Python, there is
-   nothing to build: find the interpreter's path as shown above.
+3. **Build it or pick the interpreter.** For Go,
+   `GOWORK=off GOFLAGS= go -C ./demo-tracker build -o demo-tracker .`. `GOWORK=off` builds
+   the skeleton's module on its own even when a `go.work` file in a directory above would
+   join it to other modules, and the empty `GOFLAGS` keeps flags from your environment,
+   such as `-mod=vendor`, from changing what is built. For TypeScript,
+   `node ./demo-tracker/build.mjs` builds `server.js`. For Python, there is nothing to
+   build: find the interpreter's path as shown above.
 
 4. **Pin it.**
 

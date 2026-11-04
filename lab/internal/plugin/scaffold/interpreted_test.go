@@ -220,22 +220,22 @@ func TestInterpretedSkeletonFiles(t *testing.T) {
 // inputs, to its SHA-256 as slice 6a wrote it.
 func TestGoSkeletonIsByteIdentical(t *testing.T) {
 	want := map[string]string{
-		"tracker/README.md":         "24f398a470d47b741cdfc4123b4595737feca2ded276864c1a02d7a2a3c79def",
+		"tracker/README.md":         "cb3a7918ca14b000e3c559c849f213f50961f6a8e5b4aeca6c7a112c964281b2",
 		"tracker/fixture.json":      "58a87405a1aabccff41579eb664dcd5aeb1a7ffecfdd60b2260bcd768080aefa",
 		"tracker/go.mod":            "d40bb225ee099817b4d986475995ee6681eddef32a46c55b12cc606465348649",
-		"tracker/main.go":           "bdb9044eae692bfcd932bdec6dc4863f3051cf16369264e84f7a37a1a4217597",
+		"tracker/main.go":           "527148f0cb6bafa5a0f8c144014fa87e0ce0dfcdcae1045d55c52efb66c7e06d",
 		"tracker/plugin.json.tmpl":  "3472c4411f8ca9d36e06fadae0adc91a8d20c9b644df9997c22425c877f15cb6",
 		"tracker/tools.json":        "dc5ef221c3aa39cba5ce08400b0a24d1fb8b9947c2dea83d550de2ed71b72b87",
-		"forge/README.md":           "7705eed9442a1e5fedc8166a434c0576538315fde05913800c495d8026f792a5",
+		"forge/README.md":           "0eaeaf986903a63bc91a0b53658064d2e845c4d8301775db5cdd2ba148dd8060",
 		"forge/fixture.json":        "63eab287edf4b427af2fbb9dd75e65d738836826e7b5557234573aaa100353b2",
 		"forge/go.mod":              "ecc815e9012ac642bd5cd56fe57b2fd58550ff0abf7e73f30f15fea877836401",
-		"forge/main.go":             "041090aec0de96403bb48897e6aa7385aef42c117e918575dfe5c0736107924b",
+		"forge/main.go":             "cf98cc0eedc99ef246fbdccfb003e1699e2b001ea1547a264ebbbdaaf81febbd",
 		"forge/plugin.json.tmpl":    "5efc663e2c445e93942b4db8d2a801dd412971da621dc6ee1c9b354c4ca799ca",
 		"forge/tools.json":          "1112ceb61726228c3ffa2011f400df901f1397c131a9bb0856007053eac8dca6",
-		"reviewer/README.md":        "c5c5db093b8c00dd930175a153bd718cd699b7f2404907af4d1e23cfa287b8f9",
+		"reviewer/README.md":        "ce0026d426615d4222279d666819ee7d79eab658b588d797415201e0f35bfd8e",
 		"reviewer/fixture.json":     "7240275607175e07e3194b8d504c311b12ed366458de0ce3dee438b9d6be5f0a",
 		"reviewer/go.mod":           "fc1ccc378d12de9b88ab6231ca57bed7bd87a736fc7aa65729434095209e80aa",
-		"reviewer/main.go":          "d400690099e095e77cb88ee97b34879d06581f3ea374c1b78bd2767460cfcf52",
+		"reviewer/main.go":          "9ab1f42fdd39d68226bfdc39948f5a29fd9a659e4a13b843efeb9fb7764b4ccd",
 		"reviewer/plugin.json.tmpl": "6731514edecc9daa18bf96a78db37f40c01467c2465592c9d372169120744f6b",
 		"reviewer/tools.json":       "ed13a5946ded0e0a054a438a1c9ca48bf8b1554a135ad821734552bd69798288",
 	}
