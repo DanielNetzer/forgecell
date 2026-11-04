@@ -155,21 +155,39 @@ func watchLoop(ctx context.Context, options molecule.LoopOptions, interval time.
 	options.Work = context.WithoutCancel(ctx)
 	code, failures := 0, 0
 	errored := false
+	// last is what the last completed pass rendered; until one completed, a pass
+	// prints its full report. A skip repeated with the same reason prints one line.
+	var last *watchView
+	skipped, lastSkip := false, ""
 	for n := 1; ctx.Err() == nil; n++ {
-		fmt.Fprintf(out, "Watch pass %d\n", n)
 		// Below a soft floor the pass is skipped, with its reason in the pass report;
 		// the next pass checks again after the interval.
 		if guard := options.Template.Resources; guard != nil {
 			if level, reason := guard.Check(); level != resources.OK {
-				fmt.Fprintf(out, "Pass skipped: %s\n", reason)
+				if skipped && reason == lastSkip {
+					fmt.Fprintf(out, "Watch pass %d: skipped (same reason)\n", n)
+				} else {
+					fmt.Fprintf(out, "Watch pass %d\nPass skipped: %s\n", n, reason)
+				}
+				skipped, lastSkip = true, reason
 				if !watchWait(ctx, interval) {
 					break
 				}
 				continue
 			}
 		}
+		skipped = false
 		report, err := runLoop(ctx, options)
-		renderLoop(out, report, options.Select, options.MaxConcurrent)
+		view := newWatchView(report)
+		if err != nil || last == nil {
+			fmt.Fprintf(out, "Watch pass %d\n", n)
+			renderLoop(out, report, options.Select, options.MaxConcurrent)
+		} else {
+			renderWatchChanges(out, n, *last, view, report)
+		}
+		if err == nil {
+			last = &view
+		}
 		renderLearnNotices(out, stderr, lab)
 		wait := interval
 		if err != nil {
@@ -290,32 +308,7 @@ func renderLoop(out io.Writer, report molecule.LoopReport, selector intake.Selec
 			fmt.Fprintf(out, "Warning: %s\n", note)
 		}
 		for _, item := range pass.Items {
-			id := item.MoleculeID
-			if id == "" {
-				id = "none"
-			}
-			actions := ""
-			if item.Started {
-				actions += " · started intake"
-			}
-			if item.Approved {
-				actions += " · approved by policy"
-			}
-			if item.Key != "" {
-				fmt.Fprintf(out, "%s %s · %s · Molecule %s%s\n  %s\n", item.Repository, flatten(item.Key), item.State, id, actions, item.Reason)
-			} else {
-				fmt.Fprintf(out, "%s#%d · %s · Molecule %s%s\n  %s\n", item.Repository, item.Issue, item.State, id, actions, item.Reason)
-			}
-			if p := item.Proposal; p != nil {
-				saved := "saved"
-				if p.Existing {
-					saved = "already proposed"
-				}
-				fmt.Fprintf(out, "  Recovery proposal (%s; the loop never runs it): %s\n    %s\n", saved, flatten(p.Path), p.Command)
-				for _, step := range p.Followup {
-					fmt.Fprintf(out, "    then: %s\n", step)
-				}
-			}
+			io.WriteString(out, loopItemText(item))
 		}
 		if pass.Stopped != "" {
 			fmt.Fprintf(out, "Pass %d stopped: %s\n", n+1, flatten(pass.Stopped))
@@ -324,4 +317,129 @@ func renderLoop(out io.Writer, report molecule.LoopReport, selector intake.Selec
 	if n := report.NonProgress(); n > 0 {
 		fmt.Fprintf(out, "%d Issue(s) made no progress in the final pass and need attention\n", n)
 	}
+}
+
+// loopItemText is the lines renderLoop prints for one item: the item line, its
+// reason, and any recovery proposal with its follow-ups.
+func loopItemText(item molecule.LoopItem) string {
+	var b strings.Builder
+	id := item.MoleculeID
+	if id == "" {
+		id = "none"
+	}
+	actions := ""
+	if item.Started {
+		actions += " · started intake"
+	}
+	if item.Approved {
+		actions += " · approved by policy"
+	}
+	if item.Key != "" {
+		fmt.Fprintf(&b, "%s %s · %s · Molecule %s%s\n  %s\n", item.Repository, flatten(item.Key), item.State, id, actions, item.Reason)
+	} else {
+		fmt.Fprintf(&b, "%s#%d · %s · Molecule %s%s\n  %s\n", item.Repository, item.Issue, item.State, id, actions, item.Reason)
+	}
+	if p := item.Proposal; p != nil {
+		saved := "saved"
+		if p.Existing {
+			saved = "already proposed"
+		}
+		fmt.Fprintf(&b, "  Recovery proposal (%s; the loop never runs it): %s\n    %s\n", saved, flatten(p.Path), p.Command)
+		for _, step := range p.Followup {
+			fmt.Fprintf(&b, "    then: %s\n", step)
+		}
+	}
+	return b.String()
+}
+
+// watchView is what one completed watch pass rendered, so the next pass prints
+// only what changed. It holds no more than that pass's report already did.
+type watchView struct {
+	order    []string
+	labels   map[string]string
+	items    map[string]string
+	warnings []string
+	stops    []watchStop
+}
+
+type watchStop struct{ reason, line string }
+
+func newWatchView(report molecule.LoopReport) watchView {
+	v := watchView{labels: map[string]string{}, items: map[string]string{}}
+	if report.Repository == "" {
+		// renderLoop prints nothing for such a report.
+		return v
+	}
+	for n, pass := range report.Passes {
+		for _, note := range pass.Notes {
+			v.warnings = append(v.warnings, fmt.Sprintf("Warning: %s\n", note))
+		}
+		for _, item := range pass.Items {
+			// The kind prefix keeps a keyed item from colliding with a numbered one.
+			key, label := fmt.Sprintf("n\x00%s\x00%d", item.Repository, item.Issue), fmt.Sprintf("%s#%d", item.Repository, item.Issue)
+			if item.Key != "" {
+				key, label = "k\x00"+item.Repository+"\x00"+item.Key, item.Repository+" "+flatten(item.Key)
+			}
+			if _, seen := v.items[key]; !seen {
+				v.order = append(v.order, key)
+			}
+			v.labels[key], v.items[key] = label, loopItemText(item)
+		}
+		if pass.Stopped != "" {
+			reason := flatten(pass.Stopped)
+			v.stops = append(v.stops, watchStop{reason, fmt.Sprintf("Pass %d stopped: %s\n", n+1, reason)})
+		}
+	}
+	return v
+}
+
+// renderWatchChanges prints a later watch pass: one summary line in place of the
+// pass and loop headers, then each new warning, each new or changed item, one
+// line per item no longer eligible, and each new stop line. Every printed group
+// counts as one change.
+func renderWatchChanges(out io.Writer, n int, prev, cur watchView, report molecule.LoopReport) {
+	var body strings.Builder
+	changes := 0
+	seenWarning := map[string]bool{}
+	for _, w := range prev.warnings {
+		seenWarning[w] = true
+	}
+	for _, w := range cur.warnings {
+		if !seenWarning[w] {
+			seenWarning[w] = true
+			body.WriteString(w)
+			changes++
+		}
+	}
+	for _, key := range cur.order {
+		if text := cur.items[key]; prev.items[key] != text {
+			body.WriteString(text)
+			changes++
+		}
+	}
+	for _, key := range prev.order {
+		if _, ok := cur.items[key]; !ok {
+			fmt.Fprintf(&body, "%s · no longer eligible\n", prev.labels[key])
+			changes++
+		}
+	}
+	seenStop := map[string]bool{}
+	for _, s := range prev.stops {
+		seenStop[s.reason] = true
+	}
+	for _, s := range cur.stops {
+		if !seenStop[s.reason] {
+			seenStop[s.reason] = true
+			body.WriteString(s.line)
+			changes++
+		}
+	}
+	summary := "no change"
+	if changes > 0 {
+		summary = fmt.Sprintf("%d change(s)", changes)
+	}
+	if j := report.NonProgress(); j > 0 {
+		summary += fmt.Sprintf(" · %d Issue(s) need attention", j)
+	}
+	fmt.Fprintf(out, "Watch pass %d: %s\n%s", n, summary, body.String())
 }

@@ -161,7 +161,8 @@ forgecell deliver MOLECULE_ID --lab DIR --base BRANCH -- FILE...   # preview, th
 `loop --max-concurrent N` sets how many Molecules it advances at once (default 1) and `--once` makes a
 single pass; `loop --watch` repeats a pass every `--interval` (default 5m), and
 `--learn` also runs the pending learn requests after each pass, like
-`learn --pending`. `retire MOLECULE_ID --reason TEXT` retires a stale Molecule and
+`learn --pending`. After its first pass, a watch prints only what changed, plus a
+one-line summary. `retire MOLECULE_ID --reason TEXT` retires a stale Molecule and
 keeps every record; `recover MOLECULE_ID --plan DIGEST --confirm-stopped` recovers an
 interrupted one; `checks` reads a pull request's required CI checks at an exact commit for
 a Molecule's delivery and exits nonzero unless they passed.
