@@ -26,11 +26,14 @@ proposed improvements to the durable recipe that guides the next run.
 
 **Start on your machine. Keep the evidence. Improve the process.**
 
-> **Early release.** The current Go source supports ticket analysis, approved execution,
-> verification and separately approved draft PRs, also available in the downloadable
-> `v0.4.2` release. Merge, deployment and issue closure
-> remain manual. v0.4.0 also ships the plugin runtime with bundled GitLab (forge), Jira
+> **Early release (`v0.4.2`).** Forgecell analyzes a ticket, runs the approved plan in
+> your own coding harness, verifies the result with independent checks, and opens a draft
+> PR only after you approve it. Merge, deployment and issue closure stay manual. Findings
+> from outside reviewers come back as fix rounds that you approve before anything is
+> pushed. v0.4.0 also ships the plugin runtime with bundled GitLab (forge), Jira
 > (tracker) and `forgecomments` (reviewer) plugins; see [plugins](lab/plugins/README.md).
+> The GitLab and Jira plugins pass conformance tests against fake servers but have not
+> yet run against a live GitLab or Jira.
 
 ## How it works
 
