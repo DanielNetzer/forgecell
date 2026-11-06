@@ -624,3 +624,45 @@ func TestSliceBCheckDefinitionsMustCiteWholeFileEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestLabellingViolationNamesCheckAndField(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*Check)
+		want   string
+	}{
+		"reviewedAcceptance":    {func(c *Check) { c.ReviewedAcceptance = "README documents the repository's existing test command." }, `check "existing-go-tests": reviewedAcceptance must be empty`},
+		"independentProvenance": {func(c *Check) { c.IndependentProvenance = "human review" }, `check "existing-go-tests": independentProvenance must be empty`},
+		"category":              {func(c *Check) { c.Category = "independent-acceptance" }, `check "existing-go-tests": category must not be independent-acceptance`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, err := DecodeAnalysis(analysisWithCheck(t, func(c *Check) {
+				c.ID = "existing-go-tests"
+				tc.mutate(c)
+			}))
+			var violation *PolicyViolation
+			if !errors.As(err, &violation) || PolicyClass(violation) != PolicyClassLabelling {
+				t.Fatalf("not rejected as a labelling violation: %v", err)
+			}
+			if want := LabellingViolationMessage + ": " + tc.want; violation.Reason != want {
+				t.Fatalf("reason %q, want %q", violation.Reason, want)
+			}
+			if len(a.Checks) != 1 {
+				t.Fatalf("the rejected response was not returned for the corrective prompt: %+v", a)
+			}
+		})
+	}
+}
+
+func TestLabellingViolationBoundsAndQuotesCheckID(t *testing.T) {
+	_, err := DecodeAnalysis(analysisWithCheck(t, func(c *Check) {
+		c.ID = "bad\nid" + strings.Repeat("x", 500)
+		c.ReviewedAcceptance = "x"
+	}))
+	var violation *PolicyViolation
+	if !errors.As(err, &violation) || PolicyClass(violation) != PolicyClassLabelling {
+		t.Fatalf("not rejected as a labelling violation: %v", err)
+	}
+	if strings.ContainsRune(violation.Reason, '\n') || len(violation.Reason) > len(LabellingViolationMessage)+200 || !strings.HasSuffix(violation.Reason, ": reviewedAcceptance must be empty") {
+		t.Fatalf("check ID was not bounded and quoted: %q", violation.Reason)
+	}
+}

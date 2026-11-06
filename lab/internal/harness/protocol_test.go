@@ -115,6 +115,24 @@ func TestAnalysisAsksEveryBlockingQuestionAtOnce(t *testing.T) {
 	}
 }
 
+func TestAnalysisInstructionLeavesHumanOnlyFieldsEmpty(t *testing.T) {
+	const sentence = "independentProvenance and reviewedAcceptance must be empty strings in every check, because only a human sets them."
+	if !strings.Contains(analysisInstruction, sentence) {
+		t.Fatalf("analysis instruction must name the human-only check fields: %s", analysisInstruction)
+	}
+	// Cursor does not run ticket analysis.
+	for _, id := range []string{"codex", "claude-code"} {
+		invocation, err := BuildInvocation(id, map[string]any{"kind": "ticket-analysis"}, "output")
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(invocation)
+		if !strings.Contains(invocation.Input, sentence) && !strings.Contains(string(raw), sentence) {
+			t.Fatalf("%s: the analysis invocation lacks the human-only field sentence", id)
+		}
+	}
+}
+
 func TestCapabilitiesMatchInvocationSupport(t *testing.T) {
 	for _, id := range []string{"codex", "claude-code", "cursor"} {
 		c := AdapterCapabilities(id)

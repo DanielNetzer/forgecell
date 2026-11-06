@@ -194,7 +194,7 @@ func TestInScopeDefinitionSharesTheSingleRetry(t *testing.T) {
 				if a.Status != want || a.Ordinal != i+1 {
 					t.Fatalf("attempt %d: %+v want %s", i, a, want)
 				}
-				if want == "failed" && ((a.Error != policyMessage && a.Error != capMessage && !strings.HasPrefix(a.Error, readiness.InScopeDefinitionMessage)) || a.Response == nil) {
+				if want == "failed" && ((!strings.HasPrefix(a.Error, policyMessage) && a.Error != capMessage && !strings.HasPrefix(a.Error, readiness.InScopeDefinitionMessage)) || a.Response == nil) {
 					t.Fatalf("attempt %d lost its validator error or response: %+v", i, a)
 				}
 			}

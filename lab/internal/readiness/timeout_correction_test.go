@@ -33,7 +33,7 @@ func TestAnalysisCorrectiveRetryClassifiesOnlyIndependentAcceptanceAsPolicy(t *t
 			if err == nil || !errors.As(err, &violation) || !IsPolicyViolation(err) {
 				t.Fatalf("not classified as a policy violation: %v", err)
 			}
-			if err.Error() != independentAcceptanceMessage {
+			if !strings.HasPrefix(err.Error(), independentAcceptanceMessage+": check ") {
 				t.Fatalf("validator message changed: %q", err.Error())
 			}
 			if a.Summary == "" || len(a.Checks) != 1 {

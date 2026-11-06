@@ -7,6 +7,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/install"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,17 @@ func installRelease(t *testing.T, home, bin, version string) {
 	if _, err := install.Install(context.Background(), install.Options{Home: home, Bin: bin, Source: source, Version: version}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// staleProtocol is an adapter protocol the running build does not speak, so a
+// protocol bump never makes the fixture current.
+func staleProtocol(t *testing.T) string {
+	t.Helper()
+	current, err := strconv.Atoi(harness.AdapterProtocolVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strconv.Itoa(current + 1)
 }
 
 func savedBindingOf(t *testing.T, lab string) map[string]any {
@@ -66,14 +78,15 @@ func TestDoctorBlocksAnIncompatibleProtocolAndOffersTheReviewedRebind(t *testing
 	t.Setenv("PATH", filepath.Dir(provider))
 	launcherDir := t.TempDir()
 	launcher := writeTool(t, launcherDir, "forgecell", "#!/bin/sh\nexit 0\n")
-	os.WriteFile(filepath.Join(launcherDir, "manifest.json"), []byte(`{"version":"0.2.0","sha256":"x","protocolVersion":"7"}`), 0600)
+	stale := staleProtocol(t)
+	os.WriteFile(filepath.Join(launcherDir, "manifest.json"), []byte(`{"version":"0.2.0","sha256":"x","protocolVersion":"`+stale+`"}`), 0600)
 	saveBinding(t, lab, "codex", []string{launcher, "__adapter", "codex", provider})
 	saved := savedBindingOf(t, lab)
 	states := bindingStates(saved)
 	if saved["readiness"] != "blocked" || len(states) != 1 || states[0]["state"] != "launcher-incompatible" {
 		t.Fatalf("%v", saved)
 	}
-	for _, want := range []string{launcher, "version 0.2.0", "adapter protocol 7", "adapter protocol " + harness.AdapterProtocolVersion, "version 0.3.0"} {
+	for _, want := range []string{launcher, "version 0.2.0", "adapter protocol " + stale, "adapter protocol " + harness.AdapterProtocolVersion, "version 0.3.0"} {
 		if !strings.Contains(states[0]["detail"].(string), want) {
 			t.Fatalf("detail omits %q: %v", want, states[0]["detail"])
 		}
@@ -83,7 +96,7 @@ func TestDoctorBlocksAnIncompatibleProtocolAndOffersTheReviewedRebind(t *testing
 		t.Fatalf("next command %v, want the reviewed rebind %s", saved["nextCommand"], want)
 	}
 	_, human := runDoctor(t, lab, "--verbose")
-	for _, want := range []string{"launcher-incompatible", "Launcher (saved): " + launcher, "adapter protocol 7", "adapter protocol " + harness.AdapterProtocolVersion} {
+	for _, want := range []string{"launcher-incompatible", "Launcher (saved): " + launcher, "adapter protocol " + stale, "adapter protocol " + harness.AdapterProtocolVersion} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human view omits %q:\n%s", want, human)
 		}

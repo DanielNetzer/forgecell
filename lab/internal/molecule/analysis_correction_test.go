@@ -35,6 +35,24 @@ func policyRejected(t *testing.T, valid readiness.Analysis) (readiness.Analysis,
 	return a, err
 }
 
+// reviewedAcceptanceRejected is what a Codex-style response yields when it fills
+// reviewedAcceptance on a check with prose.
+func reviewedAcceptanceRejected(t *testing.T, valid readiness.Analysis) (readiness.Analysis, error) {
+	t.Helper()
+	valid.Checks = append([]readiness.Check(nil), valid.Checks...)
+	valid.Checks[0].ID = "existing-go-tests"
+	valid.Checks[0].ReviewedAcceptance = "README documents the repository's existing test command."
+	raw, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := readiness.DecodeAnalysis(raw)
+	if !readiness.IsPolicyViolation(err) {
+		t.Fatalf("fixture is not a policy violation: %v", err)
+	}
+	return a, err
+}
+
 func evidenceRequest() readiness.Analysis {
 	return readiness.Analysis{Summary: "Need named committed content", EvidenceRequests: []readiness.EvidenceRequest{{Path: "code.txt", Reason: "Inspect implementation", Evidence: []string{"issue"}}}}
 }
@@ -72,6 +90,8 @@ func scripted(t *testing.T, o *Options, steps ...string) (calls *int, correction
 		switch step {
 		case "policy":
 			return policyRejected(t, a)
+		case "reviewed":
+			return reviewedAcceptanceRejected(t, a)
 		case "evidence":
 			return evidenceRequest(), nil
 		case "cap":
@@ -260,7 +280,7 @@ func TestAnalysisCorrectiveRetryEvidenceRequestCapSharesTheSingleRetry(t *testin
 				if a.Status != want || a.Ordinal != i+1 {
 					t.Fatalf("attempt %d: %+v want %s", i, a, want)
 				}
-				if want == "failed" && ((a.Error != policyMessage && a.Error != capMessage) || a.Response == nil) {
+				if want == "failed" && ((!strings.HasPrefix(a.Error, policyMessage) && a.Error != capMessage) || a.Response == nil) {
 					t.Fatalf("attempt %d lost its validator error or response: %+v", i, a)
 				}
 			}
@@ -432,13 +452,13 @@ func TestAnalysisCorrectiveRetryPolicyViolationThenValidYieldsPlan(t *testing.T)
 	if first != (analysisCorrection{}) {
 		t.Fatalf("the first analysis must not carry a correction: %+v", first)
 	}
-	if second.ValidatorMessage != policyMessage {
+	if !strings.HasPrefix(second.ValidatorMessage, policyMessage) || second.ValidatorMessage != r.AnalysisAttempts[0].Error {
 		t.Fatalf("corrective call did not receive the exact validator message: %q", second.ValidatorMessage)
 	}
 	if !strings.Contains(second.PreviousResponse, `"independent-acceptance"`) || !strings.Contains(second.PreviousResponse, `"summary":"Change code"`) {
 		t.Fatalf("corrective call did not receive the previous response: %q", second.PreviousResponse)
 	}
-	if len(r.AnalysisAttempts) != 2 || r.AnalysisAttempts[0].Status != "failed" || r.AnalysisAttempts[0].Error != policyMessage || r.AnalysisAttempts[1].Status != "completed" || r.AnalysisAttempts[1].Response == nil {
+	if len(r.AnalysisAttempts) != 2 || r.AnalysisAttempts[0].Status != "failed" || !strings.HasPrefix(r.AnalysisAttempts[0].Error, policyMessage) || r.AnalysisAttempts[1].Status != "completed" || r.AnalysisAttempts[1].Response == nil {
 		t.Fatalf("both attempts must be recorded: %+v", r.AnalysisAttempts)
 	}
 	if r.AnalysisAttempts[0].Ordinal != 1 || r.AnalysisAttempts[1].Ordinal != 2 {
@@ -455,6 +475,51 @@ func TestAnalysisCorrectiveRetryPolicyViolationThenValidYieldsPlan(t *testing.T)
 		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" {
 			t.Fatalf("plan retained a model-asserted independent acceptance: %+v", c)
 		}
+	}
+}
+
+func TestAnalysisCorrectiveRetryLabellingNamesCheckAndField(t *testing.T) {
+	t.Parallel()
+	const named = policyMessage + `: check "existing-go-tests": reviewedAcceptance must be empty`
+	o, _ := fixture(t)
+	calls, corrections := scripted(t, &o, "reviewed", "valid")
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 2 || r.Status != "waiting" || r.Readiness == nil {
+		t.Fatalf("calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
+	}
+	if got := (*corrections)[1].ValidatorMessage; got != named {
+		t.Fatalf("correction does not name the check and field: %q", got)
+	}
+	if len(r.AnalysisAttempts) != 2 || r.AnalysisAttempts[0].Error != named || r.AnalysisAttempts[0].Response == nil || r.AnalysisAttempts[0].Response.Checks[0].ReviewedAcceptance == "" {
+		t.Fatalf("the rejected attempt must keep its named error and response: %+v", r.AnalysisAttempts)
+	}
+	for _, c := range r.Readiness.Plans[0].Plan.Analysis.Checks {
+		if c.ReviewedAcceptance != "" {
+			t.Fatalf("plan retained a model-filled reviewedAcceptance: %+v", c)
+		}
+	}
+}
+
+func TestAnalysisCorrectiveRetryLabellingTwiceBlocks(t *testing.T) {
+	t.Parallel()
+	for _, steps := range [][]string{{"reviewed", "reviewed"}, {"reviewed", "policy"}, {"policy", "reviewed"}} {
+		t.Run(strings.Join(steps, "+"), func(t *testing.T) {
+			o, _ := fixture(t)
+			calls, _ := scripted(t, &o, steps...)
+			r, err := Run(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if *calls != 2 || r.Status != "blocked" || r.Readiness != nil || len(r.HarnessAttempts) != 0 {
+				t.Fatalf("calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
+			}
+			if got := AnalysisPolicyRejectionClass(r); got != readiness.PolicyClassLabelling {
+				t.Fatalf("stop class %q, want labelling: %v", got, r.Notes)
+			}
+		})
 	}
 }
 
@@ -498,7 +563,7 @@ func TestAnalysisCorrectiveRetryBoundedSequences(t *testing.T) {
 				if r.AnalysisAttempts[i].Status != want || r.AnalysisAttempts[i].Ordinal != i+1 {
 					t.Fatalf("attempt %d: %+v want %s", i, r.AnalysisAttempts[i], want)
 				}
-				if want == "failed" && r.AnalysisAttempts[i].Error != policyMessage {
+				if want == "failed" && !strings.HasPrefix(r.AnalysisAttempts[i].Error, policyMessage) {
 					t.Fatalf("attempt %d lost its own validator error: %q", i, r.AnalysisAttempts[i].Error)
 				}
 			}
@@ -593,9 +658,10 @@ func TestAnalysisCorrectiveRetryDefaultAnalysisOnlyClassifiesValidatedRejections
 	if err != nil {
 		t.Fatal(err)
 	}
-	policyResult := process.Result{Error: harness.InvalidAnalysisPrefix + policyMessage, Stdout: string(rejected)}
+	named := policyMessage + `: check "check": category must not be independent-acceptance`
+	policyResult := process.Result{Error: harness.InvalidAnalysisPrefix + named, Stdout: string(rejected)}
 	a, err := decodeAnalysisResult(policyResult)
-	if !readiness.IsPolicyViolation(err) || a.Summary != "Change code" || !strings.HasPrefix(err.Error(), "analysis failed: invalid readiness analysis: "+policyMessage) {
+	if !readiness.IsPolicyViolation(err) || a.Summary != "Change code" || !strings.HasPrefix(err.Error(), "analysis failed: invalid readiness analysis: "+named) {
 		t.Fatalf("validated rejection not classified: %v %+v", err, a)
 	}
 	for _, tc := range []struct {
@@ -603,9 +669,10 @@ func TestAnalysisCorrectiveRetryDefaultAnalysisOnlyClassifiesValidatedRejections
 		result process.Result
 	}{
 		{"timeout", process.Result{Error: "context deadline exceeded", TimedOut: true, Stdout: string(rejected)}},
-		{"no preserved text", process.Result{Error: harness.InvalidAnalysisPrefix + policyMessage}},
+		{"no preserved text", process.Result{Error: harness.InvalidAnalysisPrefix + named}},
 		{"other validation", process.Result{Error: harness.InvalidAnalysisPrefix + "analysis needs a bounded summary", Stdout: string(rejected)}},
-		{"raw envelope", process.Result{Error: harness.InvalidAnalysisPrefix + policyMessage, Stdout: `{"result":"x"}`}},
+		{"raw envelope", process.Result{Error: harness.InvalidAnalysisPrefix + named, Stdout: `{"result":"x"}`}},
+		{"bare message for a named rejection", process.Result{Error: harness.InvalidAnalysisPrefix + policyMessage, Stdout: string(rejected)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := decodeAnalysisResult(tc.result); err == nil || readiness.IsPolicyViolation(err) {

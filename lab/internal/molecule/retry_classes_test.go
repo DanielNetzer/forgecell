@@ -69,7 +69,7 @@ func TestHardening129EachPolicyClassGetsItsOwnCorrectiveRetry(t *testing.T) {
 	if *calls != 3 || r.Status != "waiting" || r.Readiness == nil || r.Readiness.Phase != "scope-waiting" {
 		t.Fatalf("a labelling violation followed by an in-scope-definition rejection must reach a second correction: calls=%d status=%s notes=%v", *calls, r.Status, r.Notes)
 	}
-	if (*corrections)[0] != (analysisCorrection{}) || (*corrections)[1].ValidatorMessage != policyMessage || !strings.HasPrefix((*corrections)[2].ValidatorMessage, readiness.InScopeDefinitionMessage) {
+	if (*corrections)[0] != (analysisCorrection{}) || !strings.HasPrefix((*corrections)[1].ValidatorMessage, policyMessage) || !strings.HasPrefix((*corrections)[2].ValidatorMessage, readiness.InScopeDefinitionMessage) {
 		t.Fatalf("each correction must carry the rejection that caused it: %+v", *corrections)
 	}
 	if len(r.AnalysisAttempts) != 3 || r.AnalysisAttempts[0].Status != "failed" || r.AnalysisAttempts[1].Status != "failed" || r.AnalysisAttempts[2].Status != "completed" {
