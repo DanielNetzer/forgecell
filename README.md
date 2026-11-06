@@ -30,7 +30,9 @@ proposed improvements to the durable recipe that guides the next run.
 > your own coding harness, verifies the result with independent checks, and opens a draft
 > PR only after you approve it. Merge, deployment and issue closure stay manual. Findings
 > from outside reviewers come back as fix rounds that you approve before anything is
-> pushed. v0.4.0 also ships the plugin runtime with bundled GitLab (forge), Jira
+> pushed. Outside reviewers need a plugin forge such as GitLab; GitHub Labs can't serve
+> review comments to reviewer plugins yet (see
+> [outside reviewers](docs/install.md#outside-reviewers-and-fix-rounds)). v0.4.0 also ships the plugin runtime with bundled GitLab (forge), Jira
 > (tracker) and `forgecomments` (reviewer) plugins; see [plugins](lab/plugins/README.md).
 > The GitLab and Jira plugins pass conformance tests against fake servers but have not
 > yet run against a live GitLab or Jira.
