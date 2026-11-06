@@ -136,13 +136,17 @@ func (w *Watchdog) watch(c *capture, done <-chan struct{}) {
 type Result struct {
 	Reconciled  bool   `json:"reconciled"`
 	Uncertainty string `json:"uncertainty,omitempty"`
-	RawStdout   string `json:"rawStdout,omitempty"`
-	OK          bool   `json:"ok"`
-	Stdout      string `json:"stdout"`
-	Stderr      string `json:"stderr"`
-	Code        int    `json:"code"`
-	TimedOut    bool   `json:"timedOut"`
-	Interrupted bool   `json:"interrupted"`
+	// ReconcileNote records leftover group members that reconciliation stopped
+	// after the leader exited, naming the signal that cleared them. Uncertainty
+	// stays empty whenever Reconciled is true.
+	ReconcileNote string `json:"reconcileNote,omitempty"`
+	RawStdout     string `json:"rawStdout,omitempty"`
+	OK            bool   `json:"ok"`
+	Stdout        string `json:"stdout"`
+	Stderr        string `json:"stderr"`
+	Code          int    `json:"code"`
+	TimedOut      bool   `json:"timedOut"`
+	Interrupted   bool   `json:"interrupted"`
 	// Stalled means the run's Watchdog stopped it; Interrupted is then true too and
 	// Error starts with "interrupted: stalled:".
 	Stalled  bool `json:"stalled,omitempty"`
@@ -436,7 +440,9 @@ func Run(parent context.Context, o Options) (result Result) {
 		}
 	}
 	if cmd.Process != nil {
-		result.Reconciled, result.Uncertainty = reconcileProcess(cmd)
+		// A cancelled run's group was already sent SIGKILL; only an uncancelled
+		// leader that exited on its own can leave leftovers to stop.
+		result.Reconciled, result.Uncertainty, result.ReconcileNote = reconcileProcess(cmd, ctx.Err() != nil)
 	}
 	if cmd.ProcessState != nil {
 		result.Code = cmd.ProcessState.ExitCode()
@@ -468,6 +474,13 @@ func Run(parent context.Context, o Options) (result Result) {
 	result.TimedOut = expired && !callerDeadlineFirst
 	result.ParentDeadline = expired && callerDeadlineFirst
 	result.Interrupted = errors.Is(cause, context.Canceled)
+	// A pipe-drain timeout caused by leftovers that were then stopped is not a
+	// failure of a leader that exited 0; only the output after it may be cut off.
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() &&
+		cause == nil && !result.Overflow && result.Reconciled && result.ReconcileNote != "" {
+		err = nil
+		result.ReconcileNote += "; output after the harness exited may be incomplete"
+	}
 	result.OK = err == nil && cause == nil && !result.Overflow && result.Reconciled
 	if err != nil {
 		result.Error = err.Error()

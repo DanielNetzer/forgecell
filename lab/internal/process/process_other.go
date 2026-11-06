@@ -8,6 +8,6 @@ import "os/exec"
 // targets until process-tree cleanup is implemented and verified for that OS.
 func configureProcess(cmd *exec.Cmd) {}
 
-func reconcileProcess(cmd *exec.Cmd) (bool, string) {
-	return false, "process-tree reconciliation is unsupported on this platform"
+func reconcileProcess(cmd *exec.Cmd, cancelled bool) (bool, string, string) {
+	return false, "process-tree reconciliation is unsupported on this platform", ""
 }
