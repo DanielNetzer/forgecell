@@ -18,6 +18,7 @@ var adapterContractDigests = map[string]string{
 	"4": "1fc9b2bc45c047ebe028ea02753265786e8d43f83bd6b6bda3948bbf5f376208",
 	"5": "7be0c738aec6dea76f8a4d64dd61f4bb8c4d0326533bb3d38c458e37fb80435f",
 	"6": "65f4a5f18b8bcdcd538ab3ac5ce44c26de3fd62ebd07c8577f3413f14fc0e2fb",
+	"7": "9a2549ee76ecae7395ab23915224d6294bd4ad8e46ca326f83ea6b0692da0d69",
 }
 
 func adapterContractDigest(t *testing.T) string {

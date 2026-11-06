@@ -421,8 +421,9 @@ type PolicyViolation struct{ Reason string }
 
 func (e *PolicyViolation) Error() string { return e.Reason }
 
-// LabellingViolationMessage is the exact rejection of an analysis that labels its
-// own checks as independent acceptance.
+// LabellingViolationMessage is the exact prefix of the rejection of an analysis
+// that labels its own checks as independent acceptance; ": check "ID": field"
+// follows, naming the offending check and field.
 const LabellingViolationMessage = "analysis cannot assert independent acceptance review; retain as a candidate check for separate human review"
 
 // PlanValidationMessage prefixes the rejection of an analysis whose candidate plan
@@ -448,7 +449,7 @@ func PolicyClass(v *PolicyViolation) string {
 	switch {
 	case v == nil:
 		return PolicyClassOther
-	case v.Reason == LabellingViolationMessage:
+	case strings.HasPrefix(v.Reason, LabellingViolationMessage):
 		return PolicyClassLabelling
 	case strings.HasPrefix(v.Reason, InScopeDefinitionMessage):
 		return PolicyClassInScopeDefinition
@@ -540,8 +541,8 @@ func DecodeAnalysis(raw []byte) (Analysis, error) {
 		return a, fmt.Errorf("analysis needs a bounded summary")
 	}
 	for _, c := range a.Checks {
-		if c.Category == "independent-acceptance" || c.IndependentProvenance != "" || c.ReviewedAcceptance != "" {
-			return a, &PolicyViolation{Reason: LabellingViolationMessage}
+		if violation := labellingViolation(c); violation != "" {
+			return a, &PolicyViolation{Reason: LabellingViolationMessage + ": " + violation}
 		}
 		if c.Select != "" {
 			return a, fmt.Errorf("analysis cannot declare a check selection; only the Formula or a reviewed evaluation plan sets select")
@@ -551,6 +552,28 @@ func DecodeAnalysis(raw []byte) (Analysis, error) {
 		return a, err
 	}
 	return a, nil
+}
+
+// labellingViolation names the check and the field of a model-asserted
+// independent acceptance, or returns "" when the check asserts none. The ID is
+// untrusted model output, so it is bounded and quoted.
+func labellingViolation(c Check) string {
+	var field string
+	switch {
+	case c.Category == "independent-acceptance":
+		field = "category must not be independent-acceptance"
+	case c.IndependentProvenance != "":
+		field = "independentProvenance must be empty"
+	case c.ReviewedAcceptance != "":
+		field = "reviewedAcceptance must be empty"
+	default:
+		return ""
+	}
+	id := c.ID
+	if len(id) > 128 {
+		id = id[:128]
+	}
+	return fmt.Sprintf("check %q: %s", id, field)
 }
 func uniqueJSON(raw []byte) error {
 	d := json.NewDecoder(bytes.NewReader(raw))
