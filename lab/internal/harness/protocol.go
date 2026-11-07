@@ -33,7 +33,40 @@ const analysisInstruction = "You are assessing ticket readiness during the intak
 // Version 6 adds the read-only review invocation to the pinned contract.
 // Version 7 tells ticket analysis to leave independentProvenance and
 // reviewedAcceptance empty.
-const AdapterProtocolVersion = "7"
+// Version 8 reads the Lab-owned harness Go cache (harnessGoCache) on a Codex coding
+// request: --add-dir names it, and GOCACHE and GOTMPDIR point into it.
+const AdapterProtocolVersion = "8"
+
+// harnessCacheRequestKey carries the root of the Lab-owned harness Go cache in a Codex
+// coding request. Like harnessModel it is private to the Lab and never reaches the
+// model-visible prompt.
+const harnessCacheRequestKey = "harnessGoCache"
+
+// requestHarnessCache reads the harness cache root from a request. An absent key means
+// no cache; a present key must be a clean absolute path.
+func requestHarnessCache(request map[string]any) (string, error) {
+	value, present := request[harnessCacheRequestKey]
+	if !present {
+		return "", nil
+	}
+	root, ok := value.(string)
+	if !ok || root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root || hasControlRune(root) {
+		return "", fmt.Errorf("invalid harness Go cache path")
+	}
+	return root, nil
+}
+
+// WithHarnessCache returns the request with the harness Go cache root attached, or the
+// request itself when root is empty. The caller's map is never modified. BuildInvocation
+// accepts it only on a Codex coding request.
+func WithHarnessCache(request map[string]any, root string) map[string]any {
+	if root == "" {
+		return request
+	}
+	attached := maps.Clone(request)
+	attached[harnessCacheRequestKey] = root
+	return attached
+}
 
 // modelRequestKey carries the Formula-pinned model in a request. Like mcpServers it
 // is private to the Lab: it never reaches the model-visible prompt.
@@ -376,11 +409,20 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	if model != "" && (id == "codex" || id == "cursor") {
 		return Invocation{}, fmt.Errorf("a pinned model is not supported for %s in v1", id)
 	}
-	// Server commands, paths and the pinned model are private to the Lab, so they
-	// never enter the model-visible request. Absent keys leave the prompt unchanged.
+	cache, err := requestHarnessCache(request)
+	if err != nil {
+		return Invocation{}, err
+	}
+	if cache != "" && (id != "codex" || kind != "molecule") {
+		return Invocation{}, fmt.Errorf("a harness Go cache is supported only for Codex coding requests")
+	}
+	// Server commands, paths, the pinned model and the harness cache are private to the
+	// Lab, so they never enter the model-visible request. Absent keys leave the prompt
+	// unchanged.
 	visible := maps.Clone(request)
 	delete(visible, "mcpServers")
 	delete(visible, modelRequestKey)
+	delete(visible, harnessCacheRequestKey)
 	payload, err := json.Marshal(visible)
 	if err != nil {
 		return Invocation{}, err
@@ -399,6 +441,10 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			for _, feature := range []string{"shell_tool", "unified_exec", "apps", "plugins", "hooks", "multi_agent", "browser_use", "computer_use", "image_generation", "view_image", "code_mode_host", "skill_mcp_dependency_install", "shell_snapshot"} {
 				result.Args = append(result.Args, "--disable", feature)
 			}
+		}
+		if cache != "" {
+			// The workspace-write sandbox may also write exactly the Lab-owned cache.
+			result.Args = append(result.Args, "--add-dir", cache)
 		}
 		result.Args = append(result.Args, "-")
 	case "claude-code":

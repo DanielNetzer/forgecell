@@ -70,6 +70,12 @@ func capturedMarkdownFiles(p readiness.Plan, capture verification.CaptureResult)
 	return out
 }
 
+// nativeCodex reports whether command is the native Codex adapter binding
+// `launcher __adapter codex PROVIDER`.
+func nativeCodex(command []string) bool {
+	return len(command) == 4 && command[1] == "__adapter" && command[2] == "codex"
+}
+
 // maxRetainedWorkPaths bounds how many paths the retained-work note names.
 const maxRetainedWorkPaths = 20
 
@@ -1326,6 +1332,17 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		if len(r.HarnessAttempts) >= 100 {
 			return finishFailed(r, "harness history capacity reached; no process started")
 		}
+		// A native Codex coding run's workspace-write sandbox cannot write the user's Go
+		// build cache, so it gets the Lab-owned one (#396), checked before any process
+		// starts; an unsafe directory ends the stage and nothing retries outside it.
+		var harnessCache *resources.HarnessCache
+		if nativeCodex(codingBinding.Command) {
+			c, cacheErr := resources.HarnessGoCache(o.LabDir)
+			if cacheErr != nil {
+				return finishFailed(r, "Harness Go cache refused; no process started: "+cacheErr.Error())
+			}
+			harnessCache = &c
+		}
 		// The approval may come long after intake, so the extensions are verified again
 		// here. A required one that is no longer usable starts no coding harness.
 		codingServers, cleanupExtensions, extErr := attachExtensions(ctx, &r, f, formula.CodingHarness)
@@ -1367,7 +1384,10 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 			codingRequest["instruction"] = codingRequest["instruction"].(string) + resumeInstruction
 		}
 		codingRequest = harness.WithModel(codingRequest, codingBinding.Model)
-		attempt := HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell, Resumed: resumed}
+		if harnessCache != nil {
+			codingRequest = harness.WithHarnessCache(codingRequest, harnessCache.Root)
+		}
+		attempt := HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell, Resumed: resumed, HarnessCache: harnessCache}
 		attempt.RecordInvocation(codingBinding.Command, codingRequest)
 		r.HarnessAttempts = append(r.HarnessAttempts, attempt)
 		stage = append(stage, attemptID)
