@@ -8,6 +8,7 @@ import (
 	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
+	"github.com/DanielNetzer/forgecell/lab/internal/resources"
 	"io"
 	"maps"
 	"math"
@@ -35,7 +36,9 @@ const analysisInstruction = "You are assessing ticket readiness during the intak
 // reviewedAcceptance empty.
 // Version 8 reads the Lab-owned harness Go cache (harnessGoCache) on a Codex coding
 // request: --add-dir names it, and GOCACHE and GOTMPDIR point into it.
-const AdapterProtocolVersion = "8"
+// Version 9 also sets GOCACHE and GOTMPDIR through shell_environment_policy.set
+// overrides, which the user's Codex shell_environment_policy cannot filter.
+const AdapterProtocolVersion = "9"
 
 // harnessCacheRequestKey carries the root of the Lab-owned harness Go cache in a Codex
 // coding request. Like harnessModel it is private to the Lab and never reaches the
@@ -54,6 +57,31 @@ func requestHarnessCache(request map[string]any) (string, error) {
 		return "", fmt.Errorf("invalid harness Go cache path")
 	}
 	return root, nil
+}
+
+// tomlBasicString quotes s as a TOML basic string, escaping backslash and double quote.
+// A newline cannot be written into a single-line override, so it is refused.
+func tomlBasicString(s string) (string, error) {
+	if strings.ContainsAny(s, "\r\n") {
+		return "", fmt.Errorf("a newline cannot be quoted in a Codex config override")
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`, nil
+}
+
+// codexHarnessCacheOverrides returns the -c overrides that set GOCACHE and GOTMPDIR for
+// every command Codex runs. shell_environment_policy.set applies after inherit and the
+// include and exclude filters, so the user's policy cannot drop them.
+func codexHarnessCacheOverrides(root string) ([]string, error) {
+	cache := resources.HarnessCacheAt(root)
+	var args []string
+	for _, v := range []struct{ name, path string }{{"GOCACHE", cache.BuildCache}, {"GOTMPDIR", cache.TmpDir}} {
+		quoted, err := tomlBasicString(v.path)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "-c", "shell_environment_policy.set."+v.name+"="+quoted)
+	}
+	return args, nil
 }
 
 // WithHarnessCache returns the request with the harness Go cache root attached, or the
@@ -292,7 +320,7 @@ func AdapterIsolation(id string) Isolation {
 	case "claude-code":
 		return Isolation{IsolationPartial, "Coding, formula-improvement and analysis with extensions run with --setting-sources project; analysis and review without extensions run with --safe-mode; MCP servers are limited to the Lab-approved set (--strict-mcp-config). User settings, plugins and hooks are excluded, so user hooks that rewrite tool output no longer change what the harness sees (observed in a live probe of --setting-sources user versus project). Not verified, hence partial: managed (enterprise) policy settings, and whether a user-level CLAUDE.md, user agents or user skills still load under --setting-sources project. Project .claude/settings.json can still load: it is fingerprinted from the base commit, a coding or formula-improvement run is refused when .claude holds settings, hooks or agents, and a coding run that changes .claude fails as a scope violation."}
 	case "codex":
-		return Isolation{IsolationPartial, "Codex coding and formula-improvement runs still read the user's CODEX_HOME/config.toml (profiles, hooks, MCP servers); they run with approval_policy never and a sandbox, and config.toml is fingerprinted. Analysis and review add --strict-config, --ignore-rules and disable shell, plugins and hooks. A pinned model is not supported."}
+		return Isolation{IsolationPartial, "Codex coding and formula-improvement runs still read the user's CODEX_HOME/config.toml (profiles, hooks, MCP servers); they run with approval_policy never and a sandbox, and config.toml is fingerprinted. Coding runs with the Lab-owned Go cache override shell_environment_policy.set.GOCACHE and GOTMPDIR, so the user's shell_environment_policy cannot drop them. Analysis and review add --strict-config, --ignore-rules and disable shell, plugins and hooks. A pinned model is not supported."}
 	case "cursor":
 		return Isolation{IsolationUnknown, "Cursor Agent's user configuration (rules, MCP servers, plugins, hooks) is not verified to be excluded: runs only pass --sandbox enabled and --trust (and --mode ask for formula-improvement), and no Cursor configuration is fingerprinted. Analysis and review are unavailable. A pinned model is not supported."}
 	}
@@ -443,8 +471,14 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			}
 		}
 		if cache != "" {
-			// The workspace-write sandbox may also write exactly the Lab-owned cache.
+			// The workspace-write sandbox may also write exactly the Lab-owned cache, and
+			// every command Codex runs is pointed at it.
+			overrides, err := codexHarnessCacheOverrides(cache)
+			if err != nil {
+				return Invocation{}, err
+			}
 			result.Args = append(result.Args, "--add-dir", cache)
+			result.Args = append(result.Args, overrides...)
 		}
 		result.Args = append(result.Args, "-")
 	case "claude-code":

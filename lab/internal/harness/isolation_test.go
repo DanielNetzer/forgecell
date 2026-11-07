@@ -587,6 +587,12 @@ func TestAdapterIsolationReport(t *testing.T) {
 			t.Fatalf("the claude-code reason omits %q: %s", mention, claude)
 		}
 	}
+	codex := AdapterIsolation("codex").Reason
+	for _, mention := range []string{"shell_environment_policy.set.GOCACHE", "GOTMPDIR"} {
+		if !strings.Contains(codex, mention) {
+			t.Fatalf("the codex reason omits %q: %s", mention, codex)
+		}
+	}
 	native := []string{"/forgecell", "__adapter", "claude-code", "/claude"}
 	if got := BindingIsolation(native); got != AdapterIsolation("claude-code") {
 		t.Fatalf("%+v", got)
