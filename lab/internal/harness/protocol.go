@@ -494,7 +494,38 @@ func ReadResult(id, output string, meta bool) (string, error) {
 	if err := json.Unmarshal(value["result"], &result); err != nil || strings.TrimSpace(result) == "" {
 		return "", fmt.Errorf("%s did not return a final result", id)
 	}
+	if id == "cursor" {
+		return cursorTrailingObject(result), nil
+	}
 	return result, nil
+}
+
+// cursorTrailingObject returns the JSON object that ends Cursor's result when
+// narration comes before it (#394). Cursor joins all assistant text of a run into
+// one result string. The object is the rightmost '{' that decodes to one complete
+// object followed only by whitespace. Without such an object, or when the text
+// already starts with '{', the result is returned unchanged so decoding fails as
+// before.
+func cursorTrailingObject(result string) string {
+	if strings.HasPrefix(strings.TrimSpace(result), "{") {
+		return result
+	}
+	for end := len(result); end > 0; {
+		start := strings.LastIndexByte(result[:end], '{')
+		if start < 0 {
+			break
+		}
+		end = start
+		dec := json.NewDecoder(strings.NewReader(result[start:]))
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			continue
+		}
+		if strings.TrimSpace(result[start+int(dec.InputOffset()):]) == "" {
+			return result[start:]
+		}
+	}
+	return result
 }
 
 // TokenCategories holds the four token categories the issue records (#149), as a
