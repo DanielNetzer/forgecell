@@ -264,7 +264,7 @@ func fingerprintWith(command []string, protocol string, in FingerprintInputs) (s
 	}
 	files := []string{}
 	environment := map[string]string{}
-	model, project := "", ""
+	model, project, codex := "", "", ""
 	addExecutable := func(name string) error {
 		file, err := exec.LookPath(name)
 		if err != nil {
@@ -297,7 +297,9 @@ func fingerprintWith(command []string, protocol string, in FingerprintInputs) (s
 			if root == "" {
 				root = filepath.Join(home, ".codex")
 			}
-			files = append(files, filepath.Join(root, "config.toml"))
+			if codex, err = codexConfigDigest(filepath.Join(root, "config.toml")); err != nil {
+				return "", err
+			}
 		case "claude-code":
 			if in.ProjectRoot != "" {
 				var err error
@@ -322,9 +324,236 @@ func fingerprintWith(command []string, protocol string, in FingerprintInputs) (s
 		Environment map[string]string
 		Model       string `json:",omitempty"`
 		Project     string `json:",omitempty"`
-	}{digest, contract, protocol, environment, model, project})
+		Codex       string `json:",omitempty"`
+	}{digest, contract, protocol, environment, model, project, codex})
 	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }
+
+// maxHarnessInput bounds a single hashed harness input.
+const maxHarnessInput = 1000000000
+
+// codexConfigDigest digests $CODEX_HOME/config.toml for a native Codex binding.
+// Codex rewrites that file for its own bookkeeping while it runs, so the digest
+// covers a normalized view that leaves out what Codex writes for itself:
+//
+//   - last_updated directly inside a [marketplaces.<name>] table;
+//   - the [desktop] table and every [desktop.*] subtable (desktop app UI state);
+//   - every [projects.<path>] table (per-folder trust_level). Forgecell passes
+//     approval_policy="never" and an explicit --sandbox on every run, so
+//     per-project trust does not change what a Forgecell run does.
+//
+// Everything else counts, including keys Forgecell does not know about: model,
+// providers, approval and sandbox settings, MCP servers, plugins, profiles and so
+// on. Trailing whitespace and blank lines are ignored. When the file uses syntax
+// the line filter cannot handle safely (see normalizeCodexConfig), the raw bytes
+// are hashed instead. The digest names the form it used, so the two never collide.
+//
+// The config used to be hashed raw alongside the executables, so this changes the
+// fingerprint of every existing Codex binding once, at upgrade; plans approved
+// before then need a fresh intake.
+func codexConfigDigest(file string) (string, error) {
+	f, err := os.Open(file)
+	if os.IsNotExist(err) {
+		return fmt.Sprintf("absent:%x", sha256.Sum256([]byte(file))), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot fingerprint harness configuration: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxHarnessInput {
+		return "", fmt.Errorf("unbounded or non-regular harness input")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxHarnessInput+1))
+	if err != nil || len(data) > maxHarnessInput {
+		return "", fmt.Errorf("cannot fingerprint complete harness input")
+	}
+	form := "raw"
+	if normalized, ok := normalizeCodexConfig(string(data)); ok {
+		form, data = "normalized", []byte(normalized)
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00", file, form)
+	h.Write(data)
+	return fmt.Sprintf("%s:%x", form, h.Sum(nil)), nil
+}
+
+// normalizeCodexConfig applies the line filter codexConfigDigest describes. It
+// reports false, so the caller hashes the raw bytes, for any multi-line string, an
+// array-of-tables header or a bare [projects] header for a dropped name, a dotted
+// or inline form of a dropped name, a quoted key with escapes, a multi-line
+// marketplace last_updated value, or a line it cannot read.
+func normalizeCodexConfig(data string) (string, bool) {
+	if strings.Contains(data, `"""`) || strings.Contains(data, `'''`) {
+		return "", false
+	}
+	var kept []string
+	var table []string
+	dropTable := false
+	depth := 0
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimRight(line, " \t\r")
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" {
+			continue
+		}
+		if depth > 0 {
+			var ok bool
+			if depth, ok = scanTOMLValue(trimmed, depth); !ok {
+				return "", false
+			}
+			if !dropTable {
+				kept = append(kept, line)
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			if !dropTable {
+				kept = append(kept, line)
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			array := strings.HasPrefix(trimmed, "[[")
+			inner := strings.TrimPrefix(trimmed, "[")
+			closing := "]"
+			if array {
+				inner, closing = strings.TrimPrefix(inner, "["), "]]"
+			}
+			keys, rest, ok := parseTOMLKey(inner)
+			if !ok || !strings.HasPrefix(rest, closing) {
+				return "", false
+			}
+			if rest = strings.TrimLeft(rest[len(closing):], " \t"); rest != "" && !strings.HasPrefix(rest, "#") {
+				return "", false
+			}
+			switch {
+			case keys[0] == "desktop" || keys[0] == "projects":
+				if array || len(keys) == 1 && keys[0] == "projects" {
+					return "", false
+				}
+				dropTable = true
+			case keys[0] == "marketplaces" && (array || len(keys) > 2 && keys[2] == "last_updated"):
+				return "", false
+			default:
+				dropTable = false
+			}
+			table = keys
+			if !dropTable {
+				kept = append(kept, line)
+			}
+			continue
+		}
+		keys, rest, ok := parseTOMLKey(trimmed)
+		if !ok || !strings.HasPrefix(rest, "=") {
+			return "", false
+		}
+		if depth, ok = scanTOMLValue(rest[1:], 0); !ok {
+			return "", false
+		}
+		if dropTable {
+			continue
+		}
+		full := append(slices.Clone(table), keys...)
+		switch full[0] {
+		case "desktop", "projects":
+			return "", false
+		case "marketplaces":
+			if len(table) == 2 && table[0] == "marketplaces" && len(keys) == 1 && keys[0] == "last_updated" {
+				if depth != 0 {
+					return "", false
+				}
+				continue
+			}
+			if len(full) < 3 || full[2] == "last_updated" {
+				return "", false
+			}
+		}
+		kept = append(kept, line)
+	}
+	if depth != 0 {
+		return "", false
+	}
+	return strings.Join(kept, "\n"), true
+}
+
+// parseTOMLKey reads a dotted key from the start of s: bare segments, or quoted
+// segments without escapes. It returns the segments and the text after the key
+// with leading whitespace removed.
+func parseTOMLKey(s string) ([]string, string, bool) {
+	var keys []string
+	for {
+		s = strings.TrimLeft(s, " \t")
+		if s == "" {
+			return nil, "", false
+		}
+		var key string
+		switch s[0] {
+		case '"', '\'':
+			end := strings.IndexByte(s[1:], s[0])
+			if end < 0 {
+				return nil, "", false
+			}
+			key = s[1 : end+1]
+			if strings.ContainsAny(key, "\\\"'") {
+				return nil, "", false
+			}
+			s = s[end+2:]
+		default:
+			end := strings.IndexFunc(s, func(r rune) bool {
+				return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
+			})
+			if end == 0 {
+				return nil, "", false
+			}
+			if end < 0 {
+				end = len(s)
+			}
+			key, s = s[:end], s[end:]
+		}
+		keys = append(keys, key)
+		s = strings.TrimLeft(s, " \t")
+		if !strings.HasPrefix(s, ".") {
+			return keys, s, true
+		}
+		s = s[1:]
+	}
+}
+
+// scanTOMLValue follows the array and inline-table nesting of one line of a value,
+// starting at depth, and returns the depth at the end of the line. Strings must
+// close on the line they open.
+func scanTOMLValue(s string, depth int) (int, bool) {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '#':
+			return depth, true
+		case '"':
+			for i++; i < len(s) && s[i] != '"'; i++ {
+				if s[i] == '\\' {
+					i++
+				}
+			}
+			if i >= len(s) {
+				return 0, false
+			}
+		case '\'':
+			end := strings.IndexByte(s[i+1:], '\'')
+			if end < 0 {
+				return 0, false
+			}
+			i += end + 1
+		case '[', '{':
+			depth++
+		case ']', '}':
+			if depth--; depth < 0 {
+				return 0, false
+			}
+		}
+	}
+	return depth, true
+}
+
 func fingerprintFiles(files []string) (string, error) {
 	h := sha256.New()
 	for _, file := range files {
