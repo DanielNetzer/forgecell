@@ -33,6 +33,19 @@ type Execution struct {
 	Process process.Result `json:"process"`
 }
 
+// HarnessCacheEnvironment returns env with GOCACHE and GOTMPDIR replaced by the
+// harness cache's directories. Every other entry, GOMODCACHE included, is kept.
+func HarnessCacheEnvironment(env []string, c resources.HarnessCache) []string {
+	out := make([]string, 0, len(env)+2)
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == "GOCACHE" || name == "GOTMPDIR" {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GOCACHE="+c.BuildCache, "GOTMPDIR="+c.TmpDir)
+}
+
 func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 	providerStarted := false
 	fail := func(message string) Execution {
@@ -77,6 +90,20 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 			base = os.Environ()
 		}
 		o.Env = ReviewEnvironment(base, o.WithheldEnv)
+	}
+	if coding {
+		// BuildInvocation accepted a cache root only on a Codex coding request.
+		root, err := requestHarnessCache(o.Request)
+		if err != nil {
+			return fail(err.Error())
+		}
+		if root != "" {
+			base := o.Env
+			if base == nil {
+				base = os.Environ()
+			}
+			o.Env = HarnessCacheEnvironment(base, resources.HarnessCacheAt(root))
+		}
 	}
 	if err = os.WriteFile(output+".schema.json", []byte(schema), 0600); err != nil {
 		return fail(err.Error())

@@ -135,6 +135,9 @@ type HarnessAttempt struct {
 	// Resumed is "resumed after transient-provider-error (n of 2)" on an attempt the Lab
 	// started automatically from the retained tree of the transient attempt before it.
 	Resumed string `json:"resumed,omitempty"`
+	// HarnessCache records the paths of the Lab-owned Go cache a Codex coding attempt
+	// could write (#396). It is absent for every other attempt and in earlier ledgers.
+	HarnessCache *resources.HarnessCache `json:"harnessCache,omitempty"`
 }
 
 // maxTransientResumes bounds the automatic resumes of one coding stage after

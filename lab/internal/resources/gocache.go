@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -203,6 +204,85 @@ func CacheSettingsNote(output string, forwarded []string) string {
 		return ""
 	}
 	return "This failure comes from Forgecell's shared Go cache settings (GOPROXY=off, GOTOOLCHAIN=local, GOFLAGS with -trimpath), not necessarily from the candidate: warm the caller's module cache (for example `go mod download` in the module) and install the required toolchain, or forward GOPROXY or GOTOOLCHAIN in the reviewed policy."
+}
+
+// Names of the Lab-owned harness Go cache: <lab>/caches/harness holds go-build (GOCACHE)
+// and gotmp (GOTMPDIR) for a sandboxed coding harness, apart from the user's own cache.
+const (
+	HarnessCacheParent  = "caches"
+	HarnessCacheName    = "harness"
+	HarnessGoBuildName  = "go-build"
+	HarnessGoTempName   = "gotmp"
+	harnessCacheSubject = "harness Go cache directory"
+)
+
+// HarnessCache is the Lab-owned Go build cache a sandboxed coding harness may write:
+// Root is the one directory its sandbox is given, BuildCache (GOCACHE) and TmpDir
+// (GOTMPDIR) lie directly under it.
+type HarnessCache struct {
+	Root       string `json:"root"`
+	BuildCache string `json:"gocache"`
+	TmpDir     string `json:"gotmpdir"`
+}
+
+// HarnessCacheAt returns the cache layout under root without creating anything.
+func HarnessCacheAt(root string) HarnessCache {
+	return HarnessCache{Root: root, BuildCache: filepath.Join(root, HarnessGoBuildName), TmpDir: filepath.Join(root, HarnessGoTempName)}
+}
+
+// HarnessGoCache creates, or reuses, the Lab-owned harness cache <lab>/caches/harness
+// with go-build and gotmp under it, each at 0700, and returns their absolute paths with
+// the Lab's symbolic links resolved. It is shared by every attempt and Molecule of the
+// Lab. As for LabTempDir, a symbolic link, a non-directory or another user's directory at
+// any of those paths is refused with an error naming it, and an owned directory with
+// other permissions is made 0700 again. The shared check cache (ResolveGoCache) is not
+// involved.
+func HarnessGoCache(lab string) (HarnessCache, error) {
+	resolved, err := resolvedLab(lab)
+	if err != nil {
+		return HarnessCache{}, err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return HarnessCache{}, err
+	}
+	if !info.IsDir() {
+		return HarnessCache{}, fmt.Errorf("lab is not a directory: %s", resolved)
+	}
+	c := HarnessCacheAt(filepath.Join(resolved, HarnessCacheParent, HarnessCacheName))
+	for _, dir := range []string{filepath.Dir(c.Root), c.Root, c.BuildCache, c.TmpDir} {
+		if err := ownedCacheDir(dir); err != nil {
+			return HarnessCache{}, err
+		}
+	}
+	return c, nil
+}
+
+// ownedCacheDir creates dir at 0700 unless it exists, and refuses it unless it is a real
+// directory (Lstat, never followed) of the current user, which it then makes 0700.
+func ownedCacheDir(dir string) error {
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("%s %s: %w", harnessCacheSubject, dir, err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", harnessCacheSubject, dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symbolic link: %s", harnessCacheSubject, dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory: %s", harnessCacheSubject, dir)
+	}
+	if !ownedByUser(dir, info) {
+		return fmt.Errorf("%s belongs to another user: %s", harnessCacheSubject, dir)
+	}
+	if info.Mode().Perm() != 0700 {
+		if err := os.Chmod(dir, 0700); err != nil {
+			return fmt.Errorf("%s %s: %w", harnessCacheSubject, dir, err)
+		}
+	}
+	return nil
 }
 
 type checkTempDirKey struct{}
