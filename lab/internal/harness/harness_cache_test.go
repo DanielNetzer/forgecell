@@ -63,8 +63,8 @@ func TestHarnessCacheReachesCodexCodingInvocation(t *testing.T) {
 	if !reflect.DeepEqual(plainEnv, []string{"GOCACHE=/user/go-build", "GOMODCACHE=/user/mod", "GOTMPDIR=/user/gotmp"}) {
 		t.Fatalf("a coding run without the cache changed the environment: %q", plainEnv)
 	}
-	if slices.Contains(plainArgv, "--add-dir") {
-		t.Fatalf("a coding run without the cache got --add-dir: %q", plainArgv)
+	if slices.Contains(plainArgv, "--add-dir") || slices.ContainsFunc(plainArgv, func(a string) bool { return strings.HasPrefix(a, "shell_environment_policy.") }) {
+		t.Fatalf("a coding run without the cache got --add-dir or a policy override: %q", plainArgv)
 	}
 	cachedArgv, cachedEnv := runCodexEcho(t, WithHarnessCache(request, root), base)
 	want := []string{"GOCACHE=" + filepath.Join(root, "go-build"), "GOMODCACHE=/user/mod", "GOTMPDIR=" + filepath.Join(root, "gotmp")}
@@ -78,9 +78,51 @@ func TestHarnessCacheReachesCodexCodingInvocation(t *testing.T) {
 	if cachedArgv[len(cachedArgv)-1] != "-" || cachedArgv[slices.Index(cachedArgv, "--sandbox")+1] != "workspace-write" {
 		t.Fatalf("sandbox or stdin argument changed: %q", cachedArgv)
 	}
-	stripped := slices.Delete(slices.Clone(cachedArgv), i, i+2)
+	overrides := []string{
+		"-c", `shell_environment_policy.set.GOCACHE="` + filepath.Join(root, "go-build") + `"`,
+		"-c", `shell_environment_policy.set.GOTMPDIR="` + filepath.Join(root, "gotmp") + `"`,
+	}
+	if i+2+len(overrides) > len(cachedArgv) || !reflect.DeepEqual(cachedArgv[i+2:i+2+len(overrides)], overrides) {
+		t.Fatalf("argv lacks the shell_environment_policy overrides %q: %q", overrides, cachedArgv)
+	}
+	stripped := slices.Delete(slices.Clone(cachedArgv), i, i+2+len(overrides))
 	if !reflect.DeepEqual(withoutOutputPaths(stripped), withoutOutputPaths(plainArgv)) {
-		t.Fatalf("argv differs beyond --add-dir:\n%q\n%q", stripped, plainArgv)
+		t.Fatalf("argv differs beyond --add-dir and the overrides:\n%q\n%q", stripped, plainArgv)
+	}
+}
+
+func TestHarnessCacheOverridesQuoteTheRoot(t *testing.T) {
+	for _, c := range []struct{ root, gocache, gotmpdir string }{
+		{`/lab/a"b`, `"/lab/a\"b/go-build"`, `"/lab/a\"b/gotmp"`},
+		{`/lab/a\b`, `"/lab/a\\b/go-build"`, `"/lab/a\\b/gotmp"`},
+		{`/lab/a\"b`, `"/lab/a\\\"b/go-build"`, `"/lab/a\\\"b/gotmp"`},
+	} {
+		call, err := BuildInvocation("codex", WithHarnessCache(map[string]any{"kind": "molecule"}, c.root), "/fixture/result")
+		if err != nil {
+			t.Fatalf("%q: %v", c.root, err)
+		}
+		for _, want := range []string{"shell_environment_policy.set.GOCACHE=" + c.gocache, "shell_environment_policy.set.GOTMPDIR=" + c.gotmpdir} {
+			if i := slices.Index(call.Args, want); i < 1 || call.Args[i-1] != "-c" {
+				t.Fatalf("%q: argv lacks -c %s: %q", c.root, want, call.Args)
+			}
+		}
+	}
+}
+
+func TestHarnessCacheOverridesRefuseANewline(t *testing.T) {
+	for _, s := range []string{"/lab/a\nb", "/lab/a\rb"} {
+		if _, err := tomlBasicString(s); err == nil {
+			t.Fatalf("quoted %q", s)
+		}
+		if _, err := codexHarnessCacheOverrides(s); err == nil {
+			t.Fatalf("built overrides for %q", s)
+		}
+		if _, err := BuildInvocation("codex", WithHarnessCache(map[string]any{"kind": "molecule"}, s), "/fixture/result"); err == nil {
+			t.Fatalf("built an invocation for %q", s)
+		}
+	}
+	if got, err := tomlBasicString(`/lab/plain`); err != nil || got != `"/lab/plain"` {
+		t.Fatalf("plain path quoted as %q, %v", got, err)
 	}
 }
 
