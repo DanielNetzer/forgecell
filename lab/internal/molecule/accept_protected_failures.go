@@ -322,7 +322,8 @@ func failingProtectedChecks(p readiness.Plan, result verification.Result) ([]fai
 // result stopped on and its observation. The protected view must have failed for
 // that check's own exit, not for setup, a definition change or a source mutation.
 // An earlier check may have failed only where the view accepted it under declared
-// deltas.
+// deltas. The checks that ran must be the plan's regression checks in plan order, up to
+// the one it stopped on, less the covered checks protectedRanChecks leaves out.
 func failingProtectedCheck(p readiness.Plan, result verification.Result) (readiness.Check, verification.Observation, error) {
 	v := result.Protected
 	if v == nil || v.RequiredChecksPassed {
@@ -369,8 +370,10 @@ func failingProtectedCheck(p readiness.Plan, result verification.Result) (readin
 // protectedRanChecks returns the observations of protected view v that ran on their own,
 // in plan order, and the plan's regression checks they are matched against. A targeted
 // check the view recorded as covered by a baseline check (a CoveredBy observation in
-// Checks, or a not-run record when that baseline failed) never ran, so it is left out of
-// both; each such record must name the covering check the plan itself gives it.
+// Checks, or a CoveredBy not-run record when that baseline failed or an earlier required
+// check stopped the view before it) never ran on its own, so it is left out of both,
+// even when plan order lists it before the check the view stopped on; each such record
+// must name the covering check the plan itself gives it.
 func protectedRanChecks(p readiness.Plan, v *verification.Result) ([]verification.Observation, []readiness.Check, error) {
 	planned := map[string]readiness.Check{}
 	for _, c := range p.Analysis.Checks {

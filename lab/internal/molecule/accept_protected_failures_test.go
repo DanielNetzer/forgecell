@@ -3,6 +3,7 @@ package molecule
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -124,6 +125,25 @@ func acceptBaselineFixture(t *testing.T, mode string) (Options, Record) {
 
 func acceptFixtureFiles(t *testing.T, mode string, tests map[string]string, baseline bool, argv []string) (Options, Record) {
 	t.Helper()
+	return acceptFixtureWith(t, mode, tests, nil, func(a *readiness.Analysis, manifest string) {
+		a.Checks = append(a.Checks, acceptRegressionCheck(acceptCheck, manifest, "Module tests", argv...))
+		if baseline {
+			a.Scope = append(a.Scope, readiness.ScopedPath{Path: acceptOtherTest, Reason: "Another test of the package", Evidence: []string{"issue"}})
+			a.Checks = append(a.Checks, acceptRegressionCheck(acceptBaseline, manifest, "Formula baseline", "go", "test", "-timeout", "20m", "./..."))
+		}
+	})
+}
+
+// acceptRegressionCheck is a required regression check in lab defined by its manifest.
+func acceptRegressionCheck(id, manifest, reason string, argv ...string) readiness.Check {
+	return readiness.Check{ID: id, Category: "regression", Argv: append([]string{}, argv...), Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: reason, Evidence: []string{"issue", manifest}}
+}
+
+// acceptFixtureWith runs the accept fixture: prepare, when set, changes the source
+// repository or the approved Formula before the pinned test is committed, and extend
+// adds the regression checks (and any scope) to the analysis after the pinned test's.
+func acceptFixtureWith(t *testing.T, mode string, tests map[string]string, prepare func(o Options, repo string), extend func(a *readiness.Analysis, manifest string)) (Options, Record) {
+	t.Helper()
 	bin := resolvedTempDir(t)
 	if err := writeStub(filepath.Join(bin, "go"), []byte(acceptFakeGo), 0700); err != nil {
 		t.Fatal(err)
@@ -131,6 +151,9 @@ func acceptFixtureFiles(t *testing.T, mode string, tests map[string]string, base
 	setAcceptMode(t, bin, mode)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	o, repo := fixture(t)
+	if prepare != nil {
+		prepare(o, repo)
+	}
 	files := map[string]string{"lab/go.mod": "module example.test/lab\n"}
 	for file, body := range tests {
 		files[file] = body
@@ -159,11 +182,7 @@ func acceptFixtureFiles(t *testing.T, mode string, tests map[string]string, base
 			}
 		}
 		a.Scope = append(a.Scope, readiness.ScopedPath{Path: acceptTest, Reason: "The pinned behaviour changes by design", Evidence: []string{"issue"}})
-		a.Checks = append(a.Checks, readiness.Check{ID: acceptCheck, Category: "regression", Argv: append([]string{}, argv...), Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: "Module tests", Evidence: []string{"issue", manifest}})
-		if baseline {
-			a.Scope = append(a.Scope, readiness.ScopedPath{Path: acceptOtherTest, Reason: "Another test of the package", Evidence: []string{"issue"}})
-			a.Checks = append(a.Checks, readiness.Check{ID: acceptBaseline, Category: "regression", Argv: []string{"go", "test", "-timeout", "20m", "./..."}, Dir: "lab", TimeoutMS: fixtureCheckTimeoutMS, Required: true, Definitions: []string{manifest}, Reason: "Formula baseline", Evidence: []string{"issue", manifest}})
-		}
+		extend(&a, manifest)
 		return a, err
 	}
 	r, err := runApprovedFixture(t, o)
@@ -498,6 +517,119 @@ func TestAcceptProtectedFailuresSkipsCoveredTargetedChecks(t *testing.T) {
 		if _, err := failingProtectedChecks(p, result); err == nil || !strings.Contains(err.Error(), "does not cover it with") {
 			t.Fatalf("%s: forged coverage: %v", name, err)
 		}
+	}
+}
+
+// The #403 order: a full-suite check listed first in the plan is covered by the later
+// Formula baseline, so the protected view skips it and stops on the targeted check
+// after it, which fails by design. The covered check is recorded as not run with
+// CoveredBy, so --accept-protected-failures leaves it out of the plan-order prefix
+// and declares the targeted check's failure, which the approved checks-only run
+// accepts.
+func TestAcceptProtectedFailuresAcceptsACoveredFullSuiteListedFirst(t *testing.T) {
+	const full, targeted = "go-test-all", "pin-tests"
+	prepare := func(o Options, repo string) {
+		if err := os.MkdirAll(filepath.Join(repo, ".github", "workflows"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, filepath.FromSlash(baselineWorkflow)), []byte("name: CI\non: pull_request\njobs: {}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(o.LabDir, "formulas", "sample.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, _ := json.Marshal(map[string]any{"id": acceptBaseline, "argv": []string{"go", "test", "-timeout", "20m", "./..."}, "dir": "lab", "timeoutMs": fixtureCheckTimeoutMS, "workflow": baselineWorkflow, "reason": "CI runs the module tests."})
+		approveFixture(t, o.LabDir, string(raw)+"requiredChecks:\n  - "+string(entry)+"\n", "baseline")
+	}
+	o, r := acceptFixtureWith(t, "by-design", map[string]string{acceptTest: acceptPinnedBase}, prepare, func(a *readiness.Analysis, manifest string) {
+		a.Checks = append(a.Checks,
+			acceptRegressionCheck(full, manifest, "The full suite", "go", "test", "-timeout", "20m", "./..."),
+			acceptRegressionCheck(targeted, manifest, "The pinned package", "go", "test", "-json", "./pin"))
+	})
+	parent := latestPlan(r)
+	var regression []string
+	for _, c := range parent.Plan.Analysis.Checks {
+		if c.Category == "regression" {
+			regression = append(regression, c.ID)
+		}
+	}
+	if want := []string{full, targeted, acceptBaseline}; !reflect.DeepEqual(regression, want) || !reflect.DeepEqual(parent.Plan.FormulaBaseline, []string{acceptBaseline}) {
+		t.Fatalf("regression checks %v baseline %v, want %v", regression, parent.Plan.FormulaBaseline, want)
+	}
+	v := r.Verification
+	if statePhase(r) != "failed" || v.Protected == nil || v.Protected.RequiredChecksPassed || !strings.HasPrefix(v.Protected.Error, "required command "+targeted+" did not pass") {
+		t.Fatalf("fixture did not fail only in the protected view on %s: %s %+v", targeted, statePhase(r), v.Protected)
+	}
+	for _, obs := range v.Protected.Checks {
+		if obs.ID == full {
+			t.Fatalf("the covered full suite is among the protected checks: %+v", obs)
+		}
+	}
+	coveredBy := map[string]string{}
+	for _, obs := range v.Protected.NotRun {
+		if obs.Result.OK || obs.NotRun != verification.NotRunEarlierFailure {
+			t.Fatalf("protected not-run record %+v", obs)
+		}
+		coveredBy[obs.ID] = obs.CoveredBy
+	}
+	if want := map[string]string{acceptBaseline: "", full: acceptBaseline}; !reflect.DeepEqual(coveredBy, want) {
+		t.Fatalf("protected not-run records %v, want %v", coveredBy, want)
+	}
+	tree := r.Capture.Tree
+	r, err := AmendFromLatest(context.Background(), o.LabDir, r.ID, AmendRequest{AcceptProtectedFailures: true})
+	if err != nil {
+		t.Fatalf("the by-design failure after a covered full suite was refused: %v", err)
+	}
+	got := latestPlan(r)
+	if got.Plan.Continuation != "checks-only" || !reflect.DeepEqual(got.Plan.Analysis.Checks, parent.Plan.Analysis.Checks) {
+		t.Fatalf("the amendment changed the checks or continuation %q", got.Plan.Continuation)
+	}
+	deltas := got.Plan.ExpectedProtectedDeltas
+	if len(deltas) != 1 || deltas[0].CheckID != targeted || deltas[0].Package != acceptPackage || deltas[0].Test != "TestX" || deltas[0].ScopePath != acceptTest || deltas[0].DeltaScope != readiness.DeltaScopeIdentity {
+		t.Fatalf("deltas %+v", deltas)
+	}
+	o.Approve = got.Digest
+	if r, err = Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	v = r.Verification
+	if r.Readiness.Phase != "review-waiting" || v == nil || !v.RequiredChecksPassed || len(r.HarnessAttempts) != 1 || r.Capture.Tree != tree || len(v.AcceptedDeltas) == 0 {
+		t.Fatalf("checks-only did not accept the declared failure: phase %s %+v", r.Readiness.Phase, v)
+	}
+	for _, d := range v.AcceptedDeltas {
+		if d.Test != "TestX" || d.Package != acceptPackage {
+			t.Fatalf("accepted deltas %+v", v.AcceptedDeltas)
+		}
+	}
+}
+
+// TestAcceptProtectedFailuresLeavesOutACheckCoveredByANotRunBaseline: a covered check
+// listed before the check the protected view stopped on is left out of the plan-order
+// prefix only through a CoveredBy record the plan backs. Without one, as a record
+// written before CoveredBy was kept, the run is still refused.
+func TestAcceptProtectedFailuresLeavesOutACheckCoveredByANotRunBaseline(t *testing.T) {
+	t.Parallel()
+	tree, derived := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	full := readiness.Check{ID: "go-test-all", Category: "regression", Argv: []string{"go", "test", "-timeout", "20m", "./..."}, Dir: "lab", Required: true}
+	targeted := readiness.Check{ID: acceptCheck, Category: "regression", Argv: []string{"go", "test", "-json", "./pin"}, Dir: "lab", Required: true}
+	baseline := readiness.Check{ID: acceptBaseline, Category: "regression", Argv: []string{"go", "test", "-timeout", "20m", "./..."}, Dir: "lab", Required: true}
+	p := readiness.Plan{FormulaBaseline: []string{baseline.ID}, Analysis: readiness.Analysis{Checks: []readiness.Check{full, targeted, baseline}}}
+	failing := verification.Observation{ID: targeted.ID, Category: "regression", SourceTree: derived, Command: targeted, Result: process.Result{Reconciled: true, Code: 1}}
+	notRun := func(c readiness.Check, coveredBy string) verification.Observation {
+		return verification.Observation{ID: c.ID, Category: "regression", SourceTree: derived, Command: c, CoveredBy: coveredBy, NotRun: verification.NotRunEarlierFailure, Result: process.Result{Reconciled: true, Code: -1}}
+	}
+	result := func(covered verification.Observation) verification.Result {
+		return verification.Result{SourceTree: tree, Protected: &verification.Result{SourceTree: derived, Setup: []verification.Observation{}, Checks: []verification.Observation{failing}, NotRun: []verification.Observation{notRun(baseline, ""), covered}, Error: "required command " + targeted.ID + " did not pass"}}
+	}
+	if c, _, err := failingProtectedCheck(p, result(notRun(full, baseline.ID))); err != nil || c.ID != targeted.ID {
+		t.Fatalf("a covered check left unrun by an earlier stop: %v %q", err, c.ID)
+	}
+	if _, _, err := failingProtectedCheck(p, result(notRun(full, ""))); err == nil || !strings.Contains(err.Error(), "observation 1 does not match the approved check") {
+		t.Fatalf("a not-run record without CoveredBy was left out of the prefix: %v", err)
+	}
+	if _, _, err := failingProtectedCheck(p, result(notRun(full, "go-vet"))); err == nil || !strings.Contains(err.Error(), "does not cover it with") {
+		t.Fatalf("coverage the plan does not give was accepted: %v", err)
 	}
 }
 

@@ -80,7 +80,10 @@ func formatOnlyScript(script string) bool {
 // keeping plan order within a tier. The protected view keeps plan order: it runs only
 // once the candidate view's cheap checks passed (or beside it, stopped by its failure),
 // and --accept-protected-failures reads its run as a plan-order prefix ending at the
-// check it stopped on.
+// check it stopped on. A targeted check a baseline covers is skipped in that order and
+// recorded with CoveredBy naming the baseline: as covered once the baseline ran, or as
+// not run when the baseline failed or an earlier required check stopped the view first.
+// The prefix leaves every such record out, wherever plan order lists the check.
 func executionOrder(commands []readiness.Check, setup int, protected bool) []int {
 	order := make([]int, len(commands))
 	for i := range order {

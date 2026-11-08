@@ -797,7 +797,10 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			checkIndex = append(checkIndex, i)
 		}
 	}
-	// notRun records every command in rest, and the checks those cover, as never run.
+	// notRun records every command in rest, and the checks those cover, as never run. A
+	// covered check keeps CoveredBy naming its baseline, wherever it sits in plan order,
+	// so --accept-protected-failures leaves it out of the plan-order prefix as it does
+	// when the baseline itself failed; a not-run record is never delivery evidence.
 	notRun := func(rest []int, reason string) {
 		for _, j := range rest {
 			if covered[j] {
@@ -805,7 +808,9 @@ func runViewDeltas(ctx context.Context, source, destination string, p readiness.
 			}
 			v.NotRun = append(v.NotRun, notRunObservation(commands[j], categoryOf(j), c.Tree, reason))
 			for _, k := range covers[j] {
-				v.NotRun = append(v.NotRun, notRunObservation(commands[k], categoryOf(k), c.Tree, reason))
+				o := notRunObservation(commands[k], categoryOf(k), c.Tree, reason)
+				o.CoveredBy = commands[j].ID
+				v.NotRun = append(v.NotRun, o)
 			}
 		}
 	}
