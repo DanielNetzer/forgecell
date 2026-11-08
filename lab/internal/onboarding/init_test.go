@@ -2,6 +2,7 @@ package onboarding
 
 import (
 	"context"
+	"github.com/DanielNetzer/forgecell/lab/internal/formula"
 	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/resources"
@@ -219,8 +220,12 @@ func TestInitReportsCursorBeforeApprovalWithoutFallback(t *testing.T) {
 	if out.Selection.ID != "cursor" || out.Binding == nil || out.Binding.Candidate.WorkflowCapability().State != "unsupported" || out.Proposal.CapabilityEvidence == nil {
 		t.Fatalf("%+v", out)
 	}
-	if strings.Contains(out.Proposal.YAML, "binding: codex") || strings.Contains(out.Proposal.YAML, "type: learn") {
-		t.Fatal("changed selection or added learning")
+	f, err := formula.Parse([]byte(out.Proposal.YAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Harness.Binding != "cursor" || f.Harnesses[string(formula.AnalysisHarness)].Binding != "codex" || strings.Contains(out.Proposal.YAML, "type: learn") {
+		t.Fatal("changed selection, missed the codex planner or added learning")
 	}
 	saved, err := InspectProposal(dir, out.Proposal.ID)
 	if err != nil || saved.CapabilityEvidence.Candidate.Capabilities.Analysis.Reason != c.Capabilities.Analysis.Reason {

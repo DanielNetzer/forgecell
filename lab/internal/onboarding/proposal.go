@@ -235,7 +235,11 @@ func saveWithEvidence(dir, yaml string, evidence *Repository, reports ...*Bindin
 			p.CapabilityVersion = "v2"
 		}
 		reports[0].Candidate = reports[0].Candidate.CompleteUnknowns()
-		reports[0].Workflow = reports[0].Candidate.WorkflowCapability()
+		// Intake runs a declared harnesses.analysis binding, so the caller's workflow
+		// observation of that binding is kept; otherwise it is the default's.
+		if _, declared := f.Harnesses[string(formula.AnalysisHarness)]; !declared || reports[0].Workflow.State == "" {
+			reports[0].Workflow = reports[0].Candidate.WorkflowCapability()
+		}
 		reports[0].Roles = RoleCapabilities(f)
 		p.CapabilityEvidence = withoutProbeDetail(*reports[0])
 		if !reflect.DeepEqual(p.CapabilityEvidence.Command, f.Harness.Command) || p.CapabilityEvidence.Candidate.ID != f.Harness.Binding {

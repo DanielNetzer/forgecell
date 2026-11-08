@@ -92,7 +92,8 @@ forgecell ui         # 3. Set up your Lab in the browser, then pick an Issue.
 ```
 
 You need Git, the GitHub CLI signed in (`gh auth login`), and one coding agent signed in
-with its own CLI: Claude Code, Codex or Cursor. The UI walks you through the rest:
+with its own CLI: Claude Code, Codex or Cursor. Cursor codes only, so setup pairs it
+with Claude Code or Codex for planning. The UI walks you through the rest:
 
 - **Set up your Lab**: your repository and `gh` sign-in status, pick a coding agent,
   create the Lab, then review and approve its first Formula, with or without the review
@@ -129,6 +130,8 @@ authentication, and proposes a Formula for review. It does not silently activate
 
 Binding support and read-only ticket-analysis support are different: Codex analysis is
 verified; other bindings have [documented limits](docs/ticket-readiness.md#provider-and-policy-support).
+Cursor codes only: it can't do read-only ticket analysis, so setup pairs it with Claude
+Code, or else Codex, for planning (`harnesses.analysis`), and refuses if neither is ready.
 Your harness supplies coding and reasoning. Forgecell keeps the workflow and its evidence.
 A learn binding is separate and is not silently configured during onboarding.
 

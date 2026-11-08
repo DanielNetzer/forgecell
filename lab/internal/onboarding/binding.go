@@ -161,6 +161,18 @@ func (c Candidate) WorkflowCapability() harness.Capability {
 	return harness.Capability{State: "conditional", Reason: "Ticket analysis can be attempted with verified controls; model access and end-to-end workflow remain unverified."}
 }
 
+// FormulaWorkflowCapability describes whether intake can start for Formula f:
+// when f declares harnesses.analysis, intake runs that binding, so its probed
+// workflow capability is reported; otherwise the default candidate's, unchanged.
+// The probe runs only the fixed read-only adapter checks of ProbeBinding.
+func FormulaWorkflowCapability(ctx context.Context, f formula.Formula, def Candidate, cwd string, run Runner) harness.Capability {
+	b, declared := f.Harnesses[string(formula.AnalysisHarness)]
+	if !declared {
+		return def.WorkflowCapability()
+	}
+	return ProbeBinding(ctx, b, cwd, run).CompleteUnknowns().WorkflowCapability()
+}
+
 func nativeAdapter(b formula.Binding) bool {
 	return len(b.Command) == 4 && b.Command[1] == "__adapter"
 }

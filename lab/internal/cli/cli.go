@@ -629,7 +629,11 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				source = "saved observation; not current verification"
 			}
 			if result.Binding != nil {
-				renderCapabilities(out, result.Binding.Candidate, result.Binding.LearnBound, source)
+				text := result.BeforeYAML
+				if result.Proposal != nil {
+					text = result.Proposal.YAML
+				}
+				renderCapabilitiesWorkflow(out, result.Binding.Candidate, result.Binding.LearnBound, source, bindingWorkflow(*result.Binding, text))
 			}
 			if result.Meta != nil {
 				renderMeta(out, *result.Meta, source)
@@ -785,6 +789,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer
 				firstRoleCommand = roles[i].NextCommand
 			}
 		}
+		workflow = analysisRoleWorkflow(probed, roles, workflow)
 		if len(active.Formula.Harnesses) > 0 {
 			ready = !unapproved && git.OK && ghReady && rolesReady
 		}
@@ -1391,7 +1396,9 @@ func presentRun(out io.Writer, r molecule.Record) {
 		}
 		if p.Continuation == "" {
 			fmt.Fprintln(out, codingTimeoutLine(r.FormulaSnapshot.YAML, p.HarnessTimeoutMS))
-			if len(p.CodingAllowlist) == 0 {
+			if line := codingAllowlistNotApplied(r.FormulaSnapshot.YAML); line != "" {
+				fmt.Fprintln(out, line)
+			} else if len(p.CodingAllowlist) == 0 {
 				fmt.Fprintln(out, "Claude Code coding allowlist: none stored (plan predates derivation); the earlier fixed Node allowance applies.")
 			} else {
 				fmt.Fprintln(out, "Claude Code coding allowlist (approved with this plan; each Bash entry runs repository code):")
@@ -1566,6 +1573,28 @@ func protectedFailures(r molecule.Record) []readiness.FailingTest {
 		}
 	}
 	return failing
+}
+
+// codingAllowlistNotApplied is the one plan-view line for a snapshot whose coding
+// binding runs a native adapter that ignores the coding allowlist: only the
+// claude-code adapter passes it to the harness. It is "" for a claude-code, custom
+// or unreadable binding, which keep the Claude Code allowlist wording.
+func codingAllowlistNotApplied(snapshot string) string {
+	f, err := formula.Parse([]byte(snapshot))
+	if err != nil {
+		return ""
+	}
+	b, _ := f.RoleBinding(formula.CodingHarness)
+	if len(b.Command) != 4 || b.Command[1] != "__adapter" {
+		return ""
+	}
+	switch b.Command[2] {
+	case "codex":
+		return "Coding allowlist: not applied — coding is bound to Codex, whose adapter does not pass the Claude Code tool allowlist; Codex runs under its own sandbox."
+	case "cursor":
+		return "Coding allowlist: not applied — coding is bound to Cursor, whose adapter does not pass the Claude Code tool allowlist; Cursor runs under its own sandbox."
+	}
+	return ""
 }
 
 // codingTimeoutLine states the timeout the approved plan will use, so a reviewed
@@ -1809,7 +1838,7 @@ func renderProposal(out, stderr io.Writer, p onboarding.Proposal, dir string, js
 		}
 	}
 	report := proposalCapabilities(p)
-	renderCapabilities(out, report.Candidate, report.LearnBound, "saved observation; not current verification")
+	renderCapabilitiesWorkflow(out, report.Candidate, report.LearnBound, "saved observation; not current verification", bindingWorkflow(report, p.YAML))
 	renderRoleCapabilities(out, report.Roles, "saved observation; not current verification")
 	meta := proposalMeta(p)
 	renderMeta(out, meta, "saved observation; not current verification")
@@ -1843,6 +1872,35 @@ func selectedWorkflow(candidates []onboarding.Candidate, id string) harness.Capa
 		}
 	}
 	return harness.Capability{State: "unknown", Reason: "No binding selected."}
+}
+
+// bindingWorkflow is the GitHub Issue workflow line of a binding report for
+// Formula YAML text: the report's own workflow, which Prepare takes from the
+// analysis binding, when the Formula declares harnesses.analysis, else the
+// default candidate's as before.
+func bindingWorkflow(report onboarding.BindingReport, text string) harness.Capability {
+	if f, err := formula.Parse([]byte(text)); err == nil && report.Workflow.State != "" {
+		if _, declared := f.Harnesses[string(formula.AnalysisHarness)]; declared {
+			return report.Workflow
+		}
+	}
+	return report.Candidate.WorkflowCapability()
+}
+
+// analysisRoleWorkflow is the GitHub Issue workflow capability of a Formula that
+// declares harnesses.analysis: intake runs that role's binding, so its probed
+// capability replaces the default binding's. Any other Formula, or one whose
+// roles were not probed, keeps fallback.
+func analysisRoleWorkflow(f formula.Formula, roles []onboarding.RoleReadiness, fallback harness.Capability) harness.Capability {
+	if _, declared := f.Harnesses[string(formula.AnalysisHarness)]; !declared {
+		return fallback
+	}
+	for _, r := range roles {
+		if r.Role == string(formula.AnalysisHarness) && r.Source == "override" {
+			return r.Capability
+		}
+	}
+	return fallback
 }
 
 // runIssue is the engine call behind forgecell run; tests may replace it.
@@ -2229,11 +2287,18 @@ func renderDoctorCandidate(out io.Writer, title string, c doctorCandidate) {
 }
 
 func renderCapabilities(out io.Writer, c onboarding.Candidate, learn bool, source string) {
+	renderCapabilitiesWorkflow(out, c, learn, source, c.WorkflowCapability())
+}
+
+// renderCapabilitiesWorkflow is renderCapabilities with the GitHub Issue workflow
+// line taken from workflow, which differs from the default binding's only when
+// the Formula declares harnesses.analysis (see bindingWorkflow).
+func renderCapabilitiesWorkflow(out io.Writer, c onboarding.Candidate, learn bool, source string, workflow harness.Capability) {
 	fmt.Fprintf(out, "Capabilities (%s):\nCLI probe: %s — %s\n", source, c.Readiness, c.Detail)
 	for _, item := range []struct {
 		name  string
 		value harness.Capability
-	}{{"Installed CLI", c.Installed}, {"Authentication", c.Authentication}, {"Coding adapter", c.Capabilities.Coding}, {"Read-only ticket analysis adapter", c.Capabilities.Analysis}, {"Installed analysis controls", c.Capabilities.AnalysisControls}, {"Meta-learning adapter", c.Capabilities.Meta}, {"Model access", c.Capabilities.ModelAccess}, {"GitHub Issue workflow", c.WorkflowCapability()}} {
+	}{{"Installed CLI", c.Installed}, {"Authentication", c.Authentication}, {"Coding adapter", c.Capabilities.Coding}, {"Read-only ticket analysis adapter", c.Capabilities.Analysis}, {"Installed analysis controls", c.Capabilities.AnalysisControls}, {"Meta-learning adapter", c.Capabilities.Meta}, {"Model access", c.Capabilities.ModelAccess}, {"GitHub Issue workflow", workflow}} {
 		if item.value.State == "" {
 			item.value = harness.Capability{State: "unknown", Reason: "Not recorded."}
 		}

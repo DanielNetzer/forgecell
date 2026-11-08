@@ -434,6 +434,32 @@ func learnCommand(f formula.Formula) []string {
 	return b.Command
 }
 
+// bootstrapPlanners are the harnesses a bootstrap pairs with a coding harness
+// that cannot do read-only ticket analysis, in order of preference.
+var bootstrapPlanners = []string{"claude-code", "codex"}
+
+// bootstrapPlanner returns nil when the coding binding can do read-only ticket
+// analysis itself. Otherwise it returns the first ready, discovered planner whose
+// adapter can, with the native command harnesses.analysis would run, or an error
+// quoting the coding adapter's reason when there is none. It executes nothing.
+func bootstrapPlanner(candidates []Candidate, coding string, command []string, launcher, lab string) (*Candidate, []string, error) {
+	analysis := roleCapability(formula.AnalysisHarness, formula.Binding{Binding: coding, Command: command})
+	if analysis.State != "unsupported" {
+		return nil, nil, nil
+	}
+	for _, id := range bootstrapPlanners {
+		for i := range candidates {
+			if candidates[i].ID != id || candidates[i].Readiness != "ready" || candidates[i].Executable == "" {
+				continue
+			}
+			if planner, err := roleHarnessTarget(candidates, id, launcher, formula.AnalysisHarness, lab); err == nil {
+				return &candidates[i], planner, nil
+			}
+		}
+	}
+	return nil, nil, fmt.Errorf("cannot propose a bootstrap Formula that codes with %s: it cannot be used for read-only ticket analysis: %s; planning needs a ready Claude Code or Codex harness and neither is ready; install or sign in to Claude Code or Codex, then rerun forgecell init; no proposal saved", coding, analysis.Reason)
+}
+
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if o.pluginInitRequested() {
 		return preparePluginInit(ctx, o)
@@ -627,7 +653,7 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	}
 	if active.Approved && o.Preferred == "" && (o.MetaHarness == "" && o.MetaCommand == nil || LearnBound(active.Formula)) {
 		checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
-		out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
+		out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: FormulaWorkflowCapability(ctx, active.Formula, checked, out.Repository.Root, o.Runner), LearnBound: LearnBound(active.Formula)}
 		out.Status = "unchanged"
 		out.BeforeYAML = active.Formula.YAML
 		out.Note = "Preserved existing approved Formula and exact command bindings. Explicitly choose --harness to propose a rebind."
@@ -658,6 +684,15 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	}
 	if active.Approved && o.Preferred != "" && o.Rebind == "" {
 		if err = CheckAnalysisFallback(active.Formula, formula.Binding{Binding: selected.ID, Command: command}); err != nil {
+			return out, err
+		}
+	}
+	// A bootstrap whose coding harness cannot do read-only ticket analysis pairs it
+	// with a planning harness, or refuses before anything is saved.
+	var planner *Candidate
+	var plannerCommand []string
+	if !active.Approved {
+		if planner, plannerCommand, err = bootstrapPlanner(out.Candidates, selected.ID, command, o.Launcher, o.LabDir); err != nil {
 			return out, err
 		}
 	}
@@ -718,6 +753,10 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			return out, err
 		}
 		out.Note = "Bootstrap Assay is read-only. Proposed checks are evidence, not executed commands. Approving binds the coding harness; runs still stop at human review."
+		if planner != nil {
+			recipe["harnesses"] = map[string]any{string(formula.AnalysisHarness): map[string]any{"binding": planner.ID, "command": plannerCommand}}
+			out.Note += fmt.Sprintf(" %s cannot do read-only ticket analysis, so harnesses.analysis binds planning to %s, the first ready harness that can (claude-code, then codex); %s still codes. To plan with another harness after approval, run forgecell init --harness ID --role analysis.", selected.ID, planner.ID, selected.ID)
+		}
 		if len(baseline) > 0 {
 			recipe["requiredChecks"] = baseline
 			ids := make([]string, len(baseline))
@@ -807,6 +846,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		return out, err
 	}
 	out.Binding = &BindingReport{Command: command, Candidate: selected, Workflow: selected.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
+	if planner != nil {
+		out.Binding.Workflow = planner.WorkflowCapability()
+	}
 	if o.MetaHarness != "" || o.MetaCommand != nil || LearnBound(active.Formula) {
 		out.Binding.Meta = out.Meta
 		out.Binding.LearnBound = true
