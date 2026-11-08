@@ -33,6 +33,10 @@ type InitOptions struct {
 	// RoleHarness marks an explicit --harness ID --role ROLE: Preferred is proposed
 	// as the harnesses.<Role> override only, declaring the role when it is absent.
 	RoleHarness bool
+	// Planner chooses the harnesses.analysis binding of a bootstrap whose coding
+	// harness cannot do read-only ticket analysis; empty keeps the first ready
+	// planner (claude-code, then codex).
+	Planner string
 	// RefreshBaseline proposes a baseline-only change: requiredChecks re-derived
 	// from the current pull-request workflows of the approved Formula's repository.
 	RefreshBaseline bool
@@ -447,20 +451,68 @@ func bootstrapPlanner(candidates []Candidate, coding string, command []string, l
 	if analysis.State != "unsupported" {
 		return nil, nil, nil
 	}
+	if planner, plannerCommand := firstBootstrapPlanner(candidates, launcher, lab); planner != nil {
+		return planner, plannerCommand, nil
+	}
+	return nil, nil, fmt.Errorf("cannot propose a bootstrap Formula that codes with %s: it cannot be used for read-only ticket analysis: %s; planning needs a ready Claude Code or Codex harness and neither is ready; install or sign in to Claude Code or Codex, then rerun forgecell init; no proposal saved", coding, analysis.Reason)
+}
+
+// firstBootstrapPlanner is the first ready, discovered bootstrap planner whose
+// adapter can do read-only ticket analysis, with its native command, or nil.
+func firstBootstrapPlanner(candidates []Candidate, launcher, lab string) (*Candidate, []string) {
 	for _, id := range bootstrapPlanners {
 		for i := range candidates {
 			if candidates[i].ID != id || candidates[i].Readiness != "ready" || candidates[i].Executable == "" {
 				continue
 			}
 			if planner, err := roleHarnessTarget(candidates, id, launcher, formula.AnalysisHarness, lab); err == nil {
-				return &candidates[i], planner, nil
+				return &candidates[i], planner
 			}
 		}
 	}
-	return nil, nil, fmt.Errorf("cannot propose a bootstrap Formula that codes with %s: it cannot be used for read-only ticket analysis: %s; planning needs a ready Claude Code or Codex harness and neither is ready; install or sign in to Claude Code or Codex, then rerun forgecell init; no proposal saved", coding, analysis.Reason)
+	return nil, nil
+}
+
+// DefaultBootstrapPlanner is the harness a bootstrap that codes with a harness
+// unable to plan binds harnesses.analysis to when no Planner is chosen, or ""
+// when none is ready. It executes nothing.
+func DefaultBootstrapPlanner(candidates []Candidate, launcher string) string {
+	if planner, _ := firstBootstrapPlanner(candidates, launcher, ""); planner != nil {
+		return planner.ID
+	}
+	return ""
+}
+
+// PlanningCapability is the static support of the native adapter id for
+// read-only ticket analysis. It executes nothing.
+func PlanningCapability(id string) harness.Capability {
+	return roleCapability(formula.AnalysisHarness, formula.Binding{Binding: id, Command: []string{"", "__adapter", id, ""}})
+}
+
+// explicitBootstrapPlanner is the chosen Planner of a bootstrap whose coding
+// binding cannot do read-only ticket analysis. It refuses a coding binding that
+// can plan itself, and a planner that is not ready or cannot plan, quoting the
+// adapter's reason. It executes nothing.
+func explicitBootstrapPlanner(candidates []Candidate, coding string, command []string, id, launcher, lab string) (*Candidate, []string, error) {
+	if analysis := roleCapability(formula.AnalysisHarness, formula.Binding{Binding: coding, Command: command}); analysis.State != "unsupported" {
+		return nil, nil, fmt.Errorf("%s can do read-only ticket analysis itself, so a bootstrap that codes with it takes no separate planner; no proposal saved", coding)
+	}
+	plannerCommand, err := roleHarnessTarget(candidates, id, launcher, formula.AnalysisHarness, lab)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range candidates {
+		if candidates[i].ID == id {
+			return &candidates[i], plannerCommand, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("cannot bind harnesses.analysis to %q: no such harness was discovered; no proposal saved", id)
 }
 
 func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
+	if o.Planner != "" && (o.pluginInitRequested() || o.Preferred == "" || o.Rebind != "" || o.RoleHarness || o.EnableReview || o.RefreshBaseline || o.ModelSet || o.Role != "" || o.MetaHarness != "" || o.MetaCommand != nil) {
+		return out, fmt.Errorf("a planner is chosen only for a GitHub bootstrap with --harness ID; do not combine it with plugins, --rebind, --role, --enable-review, --refresh-baseline, --model, --meta-harness or --meta-command; no proposal saved")
+	}
 	if o.pluginInitRequested() {
 		return preparePluginInit(ctx, o)
 	}
@@ -546,6 +598,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if o.RoleHarness {
 			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before --harness --role", formula.ShellWord(o.LabDir), pending.ID)
 		}
+		if o.Planner != "" {
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before choosing a planner", formula.ShellWord(o.LabDir), pending.ID)
+		}
 		f, e := formula.Parse([]byte(pending.YAML))
 		if e != nil {
 			return out, e
@@ -586,6 +641,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	}
 	if o.RoleHarness && active.Formula.ID == "" {
 		return out, fmt.Errorf("--harness --role needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
+	}
+	if o.Planner != "" && active.Formula.ID != "" {
+		return out, fmt.Errorf("a planner is chosen only for a bootstrap; this Lab already has a Formula, so run forgecell init --harness ID --role analysis after approval; no proposal saved")
 	}
 	if active.Formula.ID != "" {
 		approved, e := formula.Load(o.LabDir, "")
@@ -691,7 +749,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	// with a planning harness, or refuses before anything is saved.
 	var planner *Candidate
 	var plannerCommand []string
-	if !active.Approved {
+	if !active.Approved && o.Planner != "" {
+		if planner, plannerCommand, err = explicitBootstrapPlanner(out.Candidates, selected.ID, command, o.Planner, o.Launcher, o.LabDir); err != nil {
+			return out, err
+		}
+	} else if !active.Approved {
 		if planner, plannerCommand, err = bootstrapPlanner(out.Candidates, selected.ID, command, o.Launcher, o.LabDir); err != nil {
 			return out, err
 		}
@@ -755,7 +817,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		out.Note = "Bootstrap Assay is read-only. Proposed checks are evidence, not executed commands. Approving binds the coding harness; runs still stop at human review."
 		if planner != nil {
 			recipe["harnesses"] = map[string]any{string(formula.AnalysisHarness): map[string]any{"binding": planner.ID, "command": plannerCommand}}
-			out.Note += fmt.Sprintf(" %s cannot do read-only ticket analysis, so harnesses.analysis binds planning to %s, the first ready harness that can (claude-code, then codex); %s still codes. To plan with another harness after approval, run forgecell init --harness ID --role analysis.", selected.ID, planner.ID, selected.ID)
+			chosen := "the first ready harness that can (claude-code, then codex)"
+			if o.Planner != "" {
+				chosen = "the planner you chose"
+			}
+			out.Note += fmt.Sprintf(" %s cannot do read-only ticket analysis, so harnesses.analysis binds planning to %s, %s; %s still codes. To plan with another harness after approval, run forgecell init --harness ID --role analysis.", selected.ID, planner.ID, chosen, selected.ID)
 		}
 		if len(baseline) > 0 {
 			recipe["requiredChecks"] = baseline

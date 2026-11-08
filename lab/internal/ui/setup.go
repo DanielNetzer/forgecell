@@ -28,7 +28,7 @@ import (
 //	GET  /api/setup                                → the step, read from the Lab's own state
 //	POST /api/setup/check   {}                     → onboarding.ReadRepository and Discover (read-only)
 //	POST /api/setup/choose  {"lab"}                → one of the matching Labs, by index
-//	POST /api/setup/create  {"harness"}            → onboarding.Prepare, as forgecell init --harness ID
+//	POST /api/setup/create  {"harness","planner"?} → onboarding.Prepare, as forgecell init --harness ID
 //	POST /api/setup/approve {"proposal","digest"}  → onboarding.Review approve, as init --approve
 //	POST /api/setup/review  {}                     → onboarding.Prepare EnableReview, a second proposal
 //
@@ -146,6 +146,9 @@ type SetupView struct {
 	Repository *SetupRepository `json:"repository,omitempty"`
 	Agents     []SetupAgent     `json:"agents,omitempty"`
 	Proposal   *SetupProposal   `json:"proposal,omitempty"`
+	// Planner is the planning agent a bootstrap pairs with a coding agent that
+	// cannot plan when none is chosen, as the engine picks it; empty when none is ready.
+	Planner string `json:"planner,omitempty"`
 	// ReviewAtom is present, available or unavailable once the Formula is approved.
 	ReviewAtom string `json:"reviewAtom,omitempty"`
 	Problem    string `json:"problem,omitempty"`
@@ -180,6 +183,10 @@ type SetupAgent struct {
 	Installed string `json:"installed"`
 	SignIn    string `json:"signIn"`
 	Detail    string `json:"detail"`
+	// Plans reports whether its adapter can do read-only ticket analysis; one
+	// that cannot codes only, and PlanReason is the adapter's reason.
+	Plans      bool   `json:"plans"`
+	PlanReason string `json:"planReason,omitempty"`
 }
 
 // SetupProposal is the waiting Formula proposal in plain words. ID and Digest
@@ -190,9 +197,12 @@ type SetupProposal struct {
 	// Kind is bootstrap, enable-review or change.
 	Kind string `json:"kind"`
 	// Resume marks an approval that started and must be finished.
-	Resume    bool         `json:"resume"`
-	Formula   string       `json:"formula"`
-	Binding   string       `json:"binding"`
+	Resume  bool   `json:"resume"`
+	Formula string `json:"formula"`
+	Binding string `json:"binding"`
+	// Planning and Coding are the bindings intake and coding resolve to.
+	Planning  string       `json:"planning,omitempty"`
+	Coding    string       `json:"coding,omitempty"`
 	Atoms     []SetupAtom  `json:"atoms"`
 	Checks    []SetupCheck `json:"checks"`
 	Gates     []SetupGate  `json:"gates"`
@@ -337,6 +347,7 @@ func (h *handler) setupView() SetupView {
 		repository := s.repository
 		v.Repository = &repository
 		v.Agents = agentViews(s.candidates)
+		v.Planner = setupDefaultPlanner(s.candidates, s.o.Launcher)
 	}
 	st, err := readSetupLab(s.lab)
 	switch {
@@ -389,6 +400,8 @@ type chooseRequest struct {
 
 type createRequest struct {
 	Harness string `json:"harness"`
+	// Planner optionally chooses the planning agent of a coding agent that cannot plan.
+	Planner string `json:"planner"`
 }
 
 type approveRequest struct {
@@ -506,6 +519,9 @@ func (h *handler) setupCreate(ctx context.Context, w http.ResponseWriter, req cr
 		h.refuseGate(w, http.StatusBadRequest, "invalid", "choose claude-code, codex or cursor")
 		return false
 	}
+	if req.Planner != "" && !h.setupPlannerChoice(w, req) {
+		return false
+	}
 	lab, ok := h.setupLabDir(w)
 	if !ok {
 		return false
@@ -546,11 +562,18 @@ func (h *handler) setupCreate(ctx context.Context, w http.ResponseWriter, req cr
 		h.refuseWith(w, http.StatusConflict, "agent", "that coding agent is not ready now; nothing was written", "Sign in with its own CLI, then Check Again")
 		return false
 	}
+	if req.Planner != "" {
+		j := slices.IndexFunc(candidates, func(c onboarding.Candidate) bool { return c.ID == req.Planner })
+		if j < 0 || candidates[j].Readiness != "ready" || candidates[j].Executable == "" {
+			h.refuseWith(w, http.StatusConflict, "planner", "that planning agent is not ready now; nothing was written", "Sign in to "+setupHarnessNames[req.Planner]+" with its own CLI, then Check Again, or choose another planning agent")
+			return false
+		}
+	}
 	env := map[string]string{}
 	for k, v := range s.o.Env {
 		env[k] = v
 	}
-	out, err := s.o.Prepare(ctx, onboarding.InitOptions{Cwd: h.opts.SourceRoot, LabDir: lab, Launcher: s.o.Launcher, Preferred: req.Harness, Env: env, Candidates: candidates})
+	out, err := s.o.Prepare(ctx, onboarding.InitOptions{Cwd: h.opts.SourceRoot, LabDir: lab, Launcher: s.o.Launcher, Preferred: req.Harness, Planner: req.Planner, Env: env, Candidates: candidates})
 	if err != nil {
 		h.refuseWith(w, http.StatusUnprocessableEntity, "refused", "the engine did not create the Lab; nothing else was attempted", setupReason(err))
 		return false
@@ -560,6 +583,45 @@ func (h *handler) setupCreate(ctx context.Context, w http.ResponseWriter, req cr
 		return false
 	}
 	return true
+}
+
+// setupPlannerChoice checks a chosen planning agent before anything is read or
+// probed: one of the offered agents, sent only with a coding agent that cannot
+// plan, and able to plan itself. A planner that cannot plan is refused with its
+// adapter's reason, redacted.
+func (h *handler) setupPlannerChoice(w http.ResponseWriter, req createRequest) bool {
+	if !slices.Contains(SetupHarnesses, req.Planner) {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", "choose claude-code or codex as the planning agent")
+		return false
+	}
+	if onboarding.PlanningCapability(req.Harness).State != "unsupported" {
+		h.refuseGate(w, http.StatusBadRequest, "invalid", setupHarnessNames[req.Harness]+" plans itself; send a planning agent only with a coding agent that cannot plan")
+		return false
+	}
+	if c := onboarding.PlanningCapability(req.Planner); c.State != "supported" {
+		h.refuseWith(w, http.StatusUnprocessableEntity, "planner", setupHarnessNames[req.Planner]+" cannot plan; nothing was written", setupPlanReason(c.Reason))
+		return false
+	}
+	return true
+}
+
+// setupPlanReason is an adapter's reason it cannot plan: one bounded, redacted
+// line without its final stop.
+func setupPlanReason(reason string) string {
+	if text := strings.TrimRight(setupText(reason), ". "); text != "" {
+		return text
+	}
+	return "Its adapter cannot do read-only ticket analysis"
+}
+
+// setupDefaultPlanner is the planning agent the engine pairs with a coding agent
+// that cannot plan when none is chosen; empty when none is ready.
+func setupDefaultPlanner(candidates []onboarding.Candidate, launcher string) string {
+	id := onboarding.DefaultBootstrapPlanner(candidates, launcher)
+	if !slices.Contains(SetupHarnesses, id) {
+		return ""
+	}
+	return id
 }
 
 func (h *handler) setupApprove(w http.ResponseWriter, req approveRequest) bool {
@@ -635,6 +697,8 @@ var setupReasons = []struct{ part, reason string }{
 	{"belongs to another repository", "This Lab belongs to another repository; run forgecell ui with --lab-name NAME for a separate Lab"},
 	{"repository discovery failed for gh", "Run gh auth login, then Check Again"},
 	{"launcher are required", "Install Forgecell so its launcher is known, then Check Again"},
+	{"cannot bind harnesses.analysis", "Choose a ready planning agent, then Check Again"},
+	{"planning needs a ready Claude Code or Codex harness", "Install or sign in to Claude Code or Codex for planning, then Check Again"},
 }
 
 func setupReason(err error) string {
@@ -679,6 +743,11 @@ func agentViews(candidates []onboarding.Candidate) []SetupAgent {
 	var out []SetupAgent
 	for _, id := range SetupHarnesses {
 		a := SetupAgent{ID: id, Name: setupHarnessNames[id], Readiness: "missing", Installed: "missing", SignIn: "unknown", Detail: "Not found on this machine. Install it, sign in with its own CLI, then Check Again."}
+		if plan := onboarding.PlanningCapability(id); plan.State == "supported" {
+			a.Plans = true
+		} else {
+			a.PlanReason = setupPlanReason(plan.Reason)
+		}
 		if i := slices.IndexFunc(candidates, func(c onboarding.Candidate) bool { return c.ID == id }); i >= 0 {
 			c := candidates[i].CompleteUnknowns()
 			a.Ready = c.Readiness == "ready"
@@ -722,6 +791,9 @@ func proposalView(p onboarding.Proposal, resume bool) *SetupProposal {
 		v.Kind = "enable-review"
 	}
 	v.Formula, v.Binding = setupText(f.Name), setupText(f.Harness.Binding)
+	planning, _ := f.ExecutionBinding(formula.IntakeRole)
+	coding, _ := f.ExecutionBinding(formula.Coding)
+	v.Planning, v.Coding = setupText(planning.Binding), setupText(coding.Binding)
 	for i, a := range f.Atoms {
 		if i == maxSetupItems {
 			v.Truncated = true
