@@ -357,7 +357,7 @@ func publishPlugin(ctx context.Context, o PublishOptions, r Receipt, record mole
 		if r.CreationAttemptedAt != "" {
 			return reconcile("MISSING", "no "+noun+" found for unresolved creation attempt; replacement requires reconciliation")
 		}
-		body := fmt.Sprintf("Implements issue %s.\n\nMolecule: `%s`\nFormula: `%s`\nBase: `%s`\nDelivery: `%s`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n", record.Issue.DisplayKey(), record.ID, record.FormulaID, r.Preview.BaseCommit, r.Commit)
+		body := pullRequestBody(record, r.Preview.BaseCommit, r.Commit)
 		r.CreationAttemptedAt = now()
 		r.Lifecycle = &LifecycleObservation{State: "UNKNOWN", ObservedAt: r.CreationAttemptedAt, Reconciliation: noun + " creation intent recorded; outcome unresolved"}
 		if err = save(); err != nil {

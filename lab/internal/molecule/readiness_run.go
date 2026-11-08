@@ -1356,7 +1356,7 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		}
 		launcher := harness.ResolveAttempt(codingBinding.Command)
 		forgecell := harness.RecordProvenanceWith(codingBinding.Command, launcher)
-		codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
+		codingRequest := map[string]any{"kind": "molecule", "moleculeId": r.ID, "formulaId": f.ID, "recipeInstructions": codingBinding.Instructions, "issue": r.Issue, "approvedPlan": p, "codingAllowlist": allowlist, "codingOutcomeSchema": json.RawMessage(harness.CodingOutcomeSchema()), "scopeChangeProtocol": `If blocked by scope, return only JSON {"schemaVersion":"v1","outcome":"scope-change","reason":"why","paths":["exact/path"]}; do not write those new paths.`, "instruction": "Implement only the approved exact scope. Do not commit, push, merge, deploy or comment. Stop and report a scope-change request if the plan is insufficient. Return only JSON with schemaVersion (v1), outcome (completed, environment-blocked, blocked, scope-change, or no-change), reason (bounded account of changes, validation, or blocker), and paths (exact requested paths for scope-change, otherwise an empty array), matching codingOutcomeSchema. Environment-blocked means the edits are complete and only the sandbox denied your own verification; name the denied resource and operation. No-change requires allowNoChange in the exact approved plan. Checks are executed independently by the Lab."}
 		// The retained-work note comes first, then the amended-plan, operator-note and
 		// resume notes. It is derived at run time from the pre-coding capture, never
 		// stored in the plan, so the approved digest is unchanged.
@@ -1582,11 +1582,17 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		phase = "unknown"
 		detail = "Completed coding reported without captured source edits."
 	}
+	if phase == "environment-blocked" && len(capture.Changes) == 0 {
+		phase = "unknown"
+		detail = "Environment-blocked coding reported without captured source edits."
+	}
 	if phase == "no-change" && (!p.AllowNoChange || len(capture.Changes) != 0) {
 		phase = "unknown"
 		detail = "No-change requires exact approved permission and no source edits."
 	}
-	if phase != "completed" && phase != "no-change" {
+	// Environment-blocked goes on to the independent checks like completed, and
+	// for nothing else: the harness did not verify its own work.
+	if phase != "completed" && phase != "environment-blocked" && phase != "no-change" {
 		state, e := r.Readiness.FinishAttempt(phase, detail, stamp())
 		if e != nil {
 			return r, e
@@ -1598,10 +1604,13 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 	// An amendment exists to change the retained tree; a completed attempt that left
 	// it byte-identical satisfies nothing new, so it is not verified.
 	// Retained artifact bytes count as a change too.
-	if phase == "completed" && p.Revision > 1 && p.Continuation == "" && capture.Tree == p.PausedTree && (p.PausedArtifactsSHA256 == "" || artifactHash(capture) == p.PausedArtifactsSHA256) {
+	if (phase == "completed" || phase == "environment-blocked") && p.Revision > 1 && p.Continuation == "" && capture.Tree == p.PausedTree && (p.PausedArtifactsSHA256 == "" || artifactHash(capture) == p.PausedArtifactsSHA256) {
 		return finishNoChange(r, p, capture, coding)
 	}
 	atom(&r, roles.atoms[formula.Coding], "done", coding.Outcome+": "+coding.Reason)
+	if phase == "environment-blocked" {
+		r.Notes = append(r.Notes, EnvironmentBlockedText(coding.Reason))
+	}
 	state, err = r.Readiness.FinishAttempt("check-pending", "Coding output captured: "+capture.Tree, stamp())
 	if err != nil {
 		return r, err

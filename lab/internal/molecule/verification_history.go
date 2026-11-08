@@ -64,7 +64,9 @@ func completedCoding(r Record) bool {
 	allowed := false
 	for _, proposal := range r.Readiness.Plans {
 		if proposal.Digest == a.PlanDigest && proposal.Plan.Continuation == "" {
-			allowed = (a.Coding.Outcome == "completed" && len(a.Capture.Changes) > 0) || (a.Coding.Outcome == "no-change" && proposal.Plan.AllowNoChange && len(a.Capture.Changes) == 0)
+			// An environment-blocked attempt with captured changes is finished work
+			// whose own verification the sandbox denied; the Lab's checks verify it.
+			allowed = ((a.Coding.Outcome == "completed" || a.Coding.Outcome == EnvironmentBlockedOutcome) && len(a.Capture.Changes) > 0) || (a.Coding.Outcome == "no-change" && proposal.Plan.AllowNoChange && len(a.Capture.Changes) == 0)
 		}
 	}
 	if !allowed {

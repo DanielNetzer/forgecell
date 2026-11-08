@@ -266,6 +266,9 @@ type PreviewView struct {
 	Diff                 string   `json:"diff"`
 	DiffBytes            int      `json:"diffBytes"`
 	DiffTruncated        bool     `json:"diffTruncated"`
+	// HarnessVerificationBlocked quotes the sandbox denial of an
+	// environment-blocked coding attempt: the harness did not verify its own work.
+	HarnessVerificationBlocked string `json:"harnessVerificationBlocked,omitempty"`
 }
 
 func previewView(lab string, r molecule.Record, p delivery.PreviewResult) PreviewView {
@@ -276,7 +279,11 @@ func previewView(lab string, r molecule.Record, p delivery.PreviewResult) Previe
 	for _, f := range p.Files {
 		files = append(files, x.text(f))
 	}
-	return PreviewView{Digest: p.Digest, MoleculeID: p.MoleculeID, Repo: p.Repo, BaseBranch: p.BaseBranch, BaseCommit: p.BaseCommit, Branch: p.Branch, Tree: p.Tree, Files: files, AcceptanceUnverified: p.AcceptanceUnverified, Diff: diff, DiffBytes: len(p.Diff), DiffTruncated: len(text) > maxPreviewDiff}
+	view := PreviewView{Digest: p.Digest, MoleculeID: p.MoleculeID, Repo: p.Repo, BaseBranch: p.BaseBranch, BaseCommit: p.BaseCommit, Branch: p.Branch, Tree: p.Tree, Files: files, AcceptanceUnverified: p.AcceptanceUnverified, Diff: diff, DiffBytes: len(p.Diff), DiffTruncated: len(text) > maxPreviewDiff}
+	if reason, ok := molecule.EnvironmentBlockedReason(r); ok {
+		view.HarnessVerificationBlocked = x.text(molecule.EnvironmentBlockedText(reason))
+	}
+	return view
 }
 
 func (h *handler) previewDelivery(w http.ResponseWriter, r molecule.Record) {

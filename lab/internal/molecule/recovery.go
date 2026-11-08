@@ -127,7 +127,7 @@ func Recover(ctx context.Context, lab, id, digest string, confirmedStopped bool)
 		if !outcome.OK {
 			phase = "failed"
 			detail = harnessOutcomeSummary(outcome, *a.Evidence)
-		} else if a.Coding != nil && a.Capture != nil && a.CaptureError == "" && len(a.CaptureEvidence) > 0 && a.Capture.Tree == capture.Tree && artifactHash(*a.Capture) == artifactHash(capture) && len(a.Capture.Violations) == 0 && len(capture.Violations) == 0 && ((coding.Outcome == "completed" && len(a.Capture.Changes) > 0) || (coding.Outcome == "no-change" && p.AllowNoChange && len(a.Capture.Changes) == 0)) {
+		} else if a.Coding != nil && a.Capture != nil && a.CaptureError == "" && len(a.CaptureEvidence) > 0 && a.Capture.Tree == capture.Tree && artifactHash(*a.Capture) == artifactHash(capture) && len(a.Capture.Violations) == 0 && len(capture.Violations) == 0 && (((coding.Outcome == "completed" || coding.Outcome == "environment-blocked") && len(a.Capture.Changes) > 0) || (coding.Outcome == "no-change" && p.AllowNoChange && len(a.Capture.Changes) == 0)) {
 			phase = "check-pending"
 			detail = "Recovered durable validated coding capture; explicit successor approval required before verification."
 		} else if coding.Outcome == "blocked" || coding.Outcome == "unknown" || coding.Outcome == "scope-change" {
