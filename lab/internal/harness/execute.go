@@ -46,6 +46,19 @@ func HarnessCacheEnvironment(env []string, c resources.HarnessCache) []string {
 	return append(out, "GOCACHE="+c.BuildCache, "GOTMPDIR="+c.TmpDir)
 }
 
+// SandboxDeniesEnvironment returns env with FORGECELL_SANDBOX_DENIES replaced by denies.
+// Every other entry is kept.
+func SandboxDeniesEnvironment(env []string, denies string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == SandboxDeniesVariable {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, SandboxDeniesVariable+"="+denies)
+}
+
 func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 	providerStarted := false
 	fail := func(message string) Execution {
@@ -103,6 +116,18 @@ func Execute(ctx context.Context, o ExecuteOptions) (result Execution) {
 				base = os.Environ()
 			}
 			o.Env = HarnessCacheEnvironment(base, resources.HarnessCacheAt(root))
+		}
+		// BuildInvocation accepted a denies list only on a Codex coding request.
+		denies, err := requestSandboxDenies(o.Request)
+		if err != nil {
+			return fail(err.Error())
+		}
+		if denies != "" {
+			base := o.Env
+			if base == nil {
+				base = os.Environ()
+			}
+			o.Env = SandboxDeniesEnvironment(base, denies)
 		}
 	}
 	if err = os.WriteFile(output+".schema.json", []byte(schema), 0600); err != nil {

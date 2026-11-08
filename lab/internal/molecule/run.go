@@ -138,6 +138,10 @@ type HarnessAttempt struct {
 	// HarnessCache records the paths of the Lab-owned Go cache a Codex coding attempt
 	// could write (#396). It is absent for every other attempt and in earlier ledgers.
 	HarnessCache *resources.HarnessCache `json:"harnessCache,omitempty"`
+	// SandboxProbe records the Codex version and the capabilities the probe found in a
+	// Codex coding attempt's sandbox before it started (#403). It is absent for every
+	// other attempt and in earlier ledgers.
+	SandboxProbe *harness.SandboxProbe `json:"sandboxProbe,omitempty"`
 }
 
 // maxTransientResumes bounds the automatic resumes of one coding stage after

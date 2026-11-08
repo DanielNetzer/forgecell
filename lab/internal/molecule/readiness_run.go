@@ -1343,6 +1343,17 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 			}
 			harnessCache = &c
 		}
+		// The same Codex sandbox is then probed with no model call (#403). A probe that
+		// cannot run is recorded as unavailable and coding starts as before; a sandbox
+		// that denies the Lab-owned cache would fail the run anyway, so it starts none.
+		var sandboxProbe *harness.SandboxProbe
+		if harnessCache != nil {
+			probe := harness.ProbeSandbox(ctx, codingBinding.Command[3], r.Workspace.Path, harnessCache.Root, harness.DefaultSandboxProbeTimeout)
+			if probe.Denies(harness.SandboxHarnessCacheWrite) {
+				return finishFailed(r, "Harness Go cache is not writable inside the Codex sandbox; no coding process started.")
+			}
+			sandboxProbe = &probe
+		}
 		// The approval may come long after intake, so the extensions are verified again
 		// here. A required one that is no longer usable starts no coding harness.
 		codingServers, cleanupExtensions, extErr := attachExtensions(ctx, &r, f, formula.CodingHarness)
@@ -1383,11 +1394,17 @@ func resumeApprovedIssue(ctx context.Context, o Options, expected formula.Loaded
 		if resumed != "" {
 			codingRequest["instruction"] = codingRequest["instruction"].(string) + resumeInstruction
 		}
+		if sandboxProbe != nil {
+			codingRequest["instruction"] = codingRequest["instruction"].(string) + sandboxProbe.Instruction()
+		}
 		codingRequest = harness.WithModel(codingRequest, codingBinding.Model)
 		if harnessCache != nil {
 			codingRequest = harness.WithHarnessCache(codingRequest, harnessCache.Root)
 		}
-		attempt := HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell, Resumed: resumed, HarnessCache: harnessCache}
+		if sandboxProbe != nil {
+			codingRequest = harness.WithSandboxDenies(codingRequest, sandboxProbe.DeniesValue())
+		}
+		attempt := HarnessAttempt{ID: attemptID, PlanDigest: o.Approve, CodingAllowlist: allowlist, Forgecell: &forgecell, Resumed: resumed, HarnessCache: harnessCache, SandboxProbe: sandboxProbe}
 		attempt.RecordInvocation(codingBinding.Command, codingRequest)
 		r.HarnessAttempts = append(r.HarnessAttempts, attempt)
 		stage = append(stage, attemptID)

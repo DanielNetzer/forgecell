@@ -40,7 +40,48 @@ const analysisInstruction = "You are assessing ticket readiness during the intak
 // overrides, which the user's Codex shell_environment_policy cannot filter.
 // Version 10 adds the environment-blocked coding outcome to the outcome schema
 // and the coding instruction.
-const AdapterProtocolVersion = "10"
+// Version 11 reads the sandbox capabilities a Codex coding sandbox denies
+// (harnessSandboxDenies) and sets FORGECELL_SANDBOX_DENIES through a
+// shell_environment_policy.set override.
+const AdapterProtocolVersion = "11"
+
+// sandboxDeniesRequestKey carries the comma-separated capabilities the sandbox probe
+// found denied in a Codex coding request (#403). Like harnessGoCache it is private to the
+// Lab and never reaches the model-visible prompt.
+const sandboxDeniesRequestKey = "harnessSandboxDenies"
+
+// requestSandboxDenies reads the denied capabilities from a request. An absent key means
+// none; a present key must list known capabilities, comma-separated, each once.
+func requestSandboxDenies(request map[string]any) (string, error) {
+	value, present := request[sandboxDeniesRequestKey]
+	if !present {
+		return "", nil
+	}
+	list, ok := value.(string)
+	if !ok || list == "" {
+		return "", fmt.Errorf("invalid sandbox denies list")
+	}
+	seen := map[string]bool{}
+	for _, name := range strings.Split(list, ",") {
+		if !slices.Contains(SandboxCapabilities, name) || seen[name] {
+			return "", fmt.Errorf("invalid sandbox denies list")
+		}
+		seen[name] = true
+	}
+	return list, nil
+}
+
+// WithSandboxDenies returns the request with the denied capabilities attached, or the
+// request itself when denies is empty. The caller's map is never modified.
+// BuildInvocation accepts it only on a Codex coding request.
+func WithSandboxDenies(request map[string]any, denies string) map[string]any {
+	if denies == "" {
+		return request
+	}
+	attached := maps.Clone(request)
+	attached[sandboxDeniesRequestKey] = denies
+	return attached
+}
 
 // harnessCacheRequestKey carries the root of the Lab-owned harness Go cache in a Codex
 // coding request. Like harnessModel it is private to the Lab and never reaches the
@@ -446,13 +487,21 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 	if cache != "" && (id != "codex" || kind != "molecule") {
 		return Invocation{}, fmt.Errorf("a harness Go cache is supported only for Codex coding requests")
 	}
-	// Server commands, paths, the pinned model and the harness cache are private to the
-	// Lab, so they never enter the model-visible request. Absent keys leave the prompt
-	// unchanged.
+	denies, err := requestSandboxDenies(request)
+	if err != nil {
+		return Invocation{}, err
+	}
+	if denies != "" && (id != "codex" || kind != "molecule") {
+		return Invocation{}, fmt.Errorf("sandbox denies are supported only for Codex coding requests")
+	}
+	// Server commands, paths, the pinned model, the harness cache and the sandbox denies
+	// are private to the Lab, so they never enter the model-visible request. Absent keys
+	// leave the prompt unchanged.
 	visible := maps.Clone(request)
 	delete(visible, "mcpServers")
 	delete(visible, modelRequestKey)
 	delete(visible, harnessCacheRequestKey)
+	delete(visible, sandboxDeniesRequestKey)
 	payload, err := json.Marshal(visible)
 	if err != nil {
 		return Invocation{}, err
@@ -481,6 +530,10 @@ func BuildInvocation(id string, request map[string]any, output string) (Invocati
 			}
 			result.Args = append(result.Args, "--add-dir", cache)
 			result.Args = append(result.Args, overrides...)
+		}
+		if denies != "" {
+			// The denies list holds only known capability names, so it needs no escaping.
+			result.Args = append(result.Args, "-c", "shell_environment_policy.set."+SandboxDeniesVariable+`="`+denies+`"`)
 		}
 		result.Args = append(result.Args, "-")
 	case "claude-code":
