@@ -100,6 +100,10 @@ func repoFixture(t *testing.T) string {
 		}
 	}
 	run("init", "-b", "main")
+	// No background git may still write under .git when t.TempDir cleans up.
+	run("config", "gc.auto", "0")
+	run("config", "maintenance.auto", "false")
+	run("config", "core.fsmonitor", "false")
 	run("config", "user.email", "test@example.com")
 	run("config", "user.name", "Fixture")
 	for p, s := range map[string]string{"lab/go.mod": "module test\n\ngo 1.27.0\n", "lab/a.go": "package test\n", "README.md": "# Test\n", ".github/workflows/test.yml": "name: checks\n", ".env": "SECRET=do-not-collect\n"} {

@@ -63,8 +63,8 @@ type fakeGitLab struct {
 	hang       bool
 	bigPage    bool
 	// postFault creates the merge request a POST asks for, then loses the
-	// answer: "hang" never answers, "malformed" and "oversized" send a body
-	// the plugin refuses.
+	// answer: "drop" closes the connection without answering, "malformed" and
+	// "oversized" send a body the plugin refuses.
 	postFault   string
 	release     chan struct{}
 	requests    []seenRequest
@@ -190,8 +190,15 @@ func (f *fakeGitLab) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Unlock()
 	switch fault {
-	case "hang":
-		hang = true
+	case "drop":
+		// The merge request is recorded above, so closing here loses only the
+		// answer, with no timing involved.
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			panic(err)
+		}
+		conn.Close()
+		return
 	case "malformed":
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

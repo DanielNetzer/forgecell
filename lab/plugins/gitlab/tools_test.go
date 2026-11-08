@@ -273,14 +273,11 @@ func TestPublishDraftRefusesABlankTitle(t *testing.T) {
 // reported even when the create answer is lost.
 func TestPublishDraftRecoversALostAnswer(t *testing.T) {
 	args := map[string]any{"project": "example/project", "headBranch": "forgecell/new", "base": "main", "title": "T", "body": "", "commit": headCommit}
-	for _, fault := range []string{"hang", "malformed", "oversized"} {
+	for _, fault := range []string{"drop", "malformed", "oversized"} {
 		fake := newFakeGitLab(t)
 		cfg, err := loadConfig(lookupFrom(fake.env(t)))
 		if err != nil {
 			t.Fatal(err)
-		}
-		if fault == "hang" {
-			cfg.timeout = 50 * time.Millisecond
 		}
 		h := &harness{fake: fake, f: &forge{c: newClient(cfg)}}
 		fake.set(func(f *fakeGitLab) { f.postFault = fault })
