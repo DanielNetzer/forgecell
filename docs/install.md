@@ -43,7 +43,12 @@ credentials. GitLab and Jira ship in the v0.4.0 release as bundled
       status. This step only reads; sign-in stays in `gh`.
    2. **Coding agent**: pick claude-code, codex or cursor. Each one shows whether it is
       ready and signed in. An agent that is not ready can't be picked: install it, sign
-      in with its own CLI, then press Check Again.
+      in with its own CLI, then press Check Again. Cursor codes only: it can't plan
+      (read-only ticket analysis), so setup pairs it with Claude Code, or else Codex,
+      for planning, as `harnesses.analysis` in the proposed Formula. If neither is
+      ready, setup refuses and saves nothing: install or sign in to Claude Code or Codex
+      first. To plan with another agent later, run
+      `forgecell init --harness ID --role analysis`.
    3. **Create the Lab**: press Create Lab. Forgecell saves the Lab and proposes its
       first Formula, as `forgecell init --harness` does. Nothing is approved yet.
    4. **Approve the Formula**: review the Atoms in order, the baseline checks taken from
