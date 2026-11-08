@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DanielNetzer/forgecell/lab/internal/testenv"
 )
 
 func queueGH(t *testing.T, body string) {
@@ -76,6 +78,7 @@ func TestIssueQueueSelectionAndFailures(t *testing.T) {
 }
 
 func TestIssueQueueCancellationStopsPipeHoldingDescendant(t *testing.T) {
+	testenv.SkipIfSandboxDenies(t, "ps")
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("Unix process groups")
 	}

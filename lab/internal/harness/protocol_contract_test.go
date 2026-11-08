@@ -22,6 +22,7 @@ var adapterContractDigests = map[string]string{
 	"8":  "df91601b9703e2a050087e824b5106cdb54fba19adbd3f4a86c9ea34a365b4bd",
 	"9":  "4d29883a0a8602024f44e7031fd4e72bda1845992dcaa6d2c6177c101548d8de",
 	"10": "74c1394d24976dd43685cc84d82e4831c1881d0f276ecbe31de57ec999cfffe4",
+	"11": "1c889a6a2199dbeaafd9383575e9c934fccaa8cfdb6e662aaa286c8731ff676e",
 }
 
 func adapterContractDigest(t *testing.T) string {
@@ -45,6 +46,7 @@ func adapterContractDigest(t *testing.T) string {
 			{"review", map[string]any{"kind": ReviewKind}}, {"review+extensions", map[string]any{"kind": ReviewKind, "mcpServers": servers}},
 			{"review+model", map[string]any{"kind": ReviewKind, "harnessModel": "model-fixture"}},
 			{"molecule+harnessCache", map[string]any{"kind": "molecule", "codingAllowlist": allowlist, "harnessGoCache": "/fixture/lab/caches/harness"}},
+			{"molecule+sandboxDenies", map[string]any{"kind": "molecule", "codingAllowlist": allowlist, "harnessGoCache": "/fixture/lab/caches/harness", "harnessSandboxDenies": "ps,localhost-bind"}},
 		} {
 			call, err := BuildInvocation(id, c.request, "/fixture/result")
 			if err != nil {
