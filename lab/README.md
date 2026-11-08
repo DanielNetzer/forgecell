@@ -99,6 +99,26 @@ approved Formula with only the target binding keys and those recorded launcher
 rewrites applied, and `--rebind` refuses with "nothing to rebind" when no key would
 change.
 
+`forgecell init --lab DIR --harness ID --role analysis|coding|meta` proposes a reviewed,
+binding-only change to one role override through the same flow (pending proposal,
+`--review`, `--approve`). If `harnesses.ROLE` is declared it rebinds it to `ID` with the
+native command `[launcher, "__adapter", ID, provider]` on the running launcher, keeping its
+other keys; otherwise it declares it with that binding and command. `ID` must be a
+discovered, ready harness whose adapter can perform the role (for example Cursor is refused
+for `analysis`, with Cursor's own reason). A request that leaves the role's effective
+binding unchanged, such as `--role coding` with the default harness, is refused with
+"nothing to change"; there is no remove mode. The proposal is verified to equal the approved
+Formula with only `harnesses.ROLE` binding and command changed, each change is listed as
+`path: old -> new` (or `path: (none) -> new`), and the result must still pass Formula
+validation, so for example a coding override must match the harness Atom's binding and a
+meta override must match the learn Atom's command. It needs a current exact approval and no
+pending proposal, and cannot be combined with `--rebind`, `--model`, `--meta-harness`,
+`--meta-command`, the timeout flags, `--review`, `--approve` or `--dismiss`. `--role`
+without `--harness` or `--model` is refused. When `init --harness ID` on an approved Formula
+is refused because `ID` cannot do read-only ticket analysis and no `harnesses.analysis` is
+declared, declare one first, for example with
+`forgecell init --lab DIR --harness claude-code --role analysis`.
+
 ## Review a ticket (development build)
 
 Ticket readiness on this branch is **not in the published `0.2.0-preview.1`**.
@@ -385,8 +405,8 @@ rewritten. `ID` is validated with the same rules as `harness.model`.
   Atom's command, which has no model, and does not inherit it. The proposal summary states
   this for each such role, derived from the resolution code.
 - With `--role ROLE` it changes only `harnesses.ROLE`. If that override is not declared the
-  proposal is refused, naming the role; run without `--role` or declare the override first.
-  Init never creates an override.
+  proposal is refused, naming the role; run without `--role` or declare the override first
+  with `init --harness ID --role ROLE` (below). `--model --role` never creates an override.
 - Setting a pin on a binding that is not native Claude Code is refused: the message names
   each Codex, Cursor or custom command binding (Forgecell cannot enforce a pin on a custom
   command), and without `--role` the whole proposal is refused. A Formula that declares no
