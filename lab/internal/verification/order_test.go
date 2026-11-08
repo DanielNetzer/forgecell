@@ -359,6 +359,62 @@ func TestCheckCoveredByAFailingBaselineIsNotRun(t *testing.T) {
 	}
 }
 
+// TestCheckCoveredByANotRunBaselineKeepsCoveredBy: the #403 order. A full-suite check
+// the Formula baseline covers is listed first and a cheaper targeted check after it
+// fails in the protected view before the baseline runs. The covered check is listed in
+// NotRun as not run, with CoveredBy naming the baseline, never among the checks and
+// never as evidence. The candidate view runs every check, cheapest first, as before.
+func TestCheckCoveredByANotRunBaselineKeepsCoveredBy(t *testing.T) {
+	bin, dir, p, c := orderFixture(t, "by-design")
+	full := p.Analysis.Checks[1]
+	full.ID, full.Reason = "go-test-all", "The full suite"
+	pinned := p.Analysis.Checks[0]
+	pinned.ID, pinned.Argv = "pinned", []string{"go", "test", "-run", "TestA", "./pkg/..."}
+	p.Analysis.Checks = []readiness.Check{full, pinned, p.Analysis.Checks[1]}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := CoveringCheckID(p, full); !ok || id != baselineCheck {
+		t.Fatalf("the full suite is not covered by the baseline: %q %v", id, ok)
+	}
+	v := runDelta(t, dir, p, c)
+	if got := ids(v.Checks); !reflect.DeepEqual(got, []string{full.ID, pinned.ID, baselineCheck}) || len(v.NotRun) != 0 || v.CandidateError != "" {
+		t.Fatalf("candidate checks %v not run %v error %q", got, ids(v.NotRun), v.CandidateError)
+	}
+	for _, o := range v.Checks {
+		if !o.Result.OK || o.CoveredBy != "" {
+			t.Fatalf("candidate record %+v", o)
+		}
+	}
+	if v.RequiredChecksPassed || v.Protected == nil || !strings.HasPrefix(v.Protected.Error, "required command pinned did not pass") {
+		t.Fatalf("protected verdict %q", v.Error)
+	}
+	if got := ids(v.Protected.Checks); !reflect.DeepEqual(got, []string{pinned.ID}) {
+		t.Fatalf("protected checks %v", got)
+	}
+	if got := ids(v.Protected.NotRun); !reflect.DeepEqual(got, []string{baselineCheck, full.ID}) {
+		t.Fatalf("protected not run %v", got)
+	}
+	baseline, covered := v.Protected.NotRun[0], v.Protected.NotRun[1]
+	if baseline.NotRun != NotRunEarlierFailure || baseline.CoveredBy != "" || baseline.Result.OK {
+		t.Fatalf("baseline record %+v", baseline)
+	}
+	if covered.NotRun != NotRunEarlierFailure || covered.CoveredBy != baselineCheck || covered.Result.OK || covered.Result.Stdout != "" || !reflect.DeepEqual(covered.Command, full) {
+		t.Fatalf("covered record %+v", covered)
+	}
+	if !validCoverage(p, full, covered) {
+		t.Fatal("the covered record does not name the plan's covering baseline")
+	}
+	if MatchesCheckObservation(p, full, covered, v.Protected.SourceTree, true) || MatchesCheckObservation(p, full, covered, v.Protected.SourceTree, false) {
+		t.Fatal("a covered check left unrun by an earlier stop matched")
+	}
+	// The candidate view ran all three checks cheapest first; the protected view ran the
+	// targeted check alone.
+	if got := argvLog(t, bin); len(got) != 4 || got[0] != "test -run TestA ./pkg/..." || got[1] != "test -timeout 20m ./..." || got[2] != "test -timeout 20m ./..." || strings.Contains(got[3], "./...") {
+		t.Fatalf("argv %q", got)
+	}
+}
+
 // TestCoverageNeverCrossesANestedModule: go test ./... skips a nested module, so a
 // targeted package in one, or below a directory holding one, is never covered by the
 // baseline; a package in the module itself still is.
