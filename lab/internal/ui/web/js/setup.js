@@ -18,12 +18,14 @@ const STEPS = [
 const STEP_INDEX = { choose: 0, repository: 0, agent: 1, review: 3, done: 4, problem: 0 };
 const KNOWN_STEPS = ['choose', 'repository', 'agent', 'review', 'done', 'problem'];
 const AGENT_IDS = ['claude-code', 'codex', 'cursor'];
+const AGENT_NAMES = { 'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor' };
 const ASSAY_ID = /^assay-[a-f0-9]{64}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 
 // setup is this view's state: the last view served, the action in flight, the
-// inline error and the form it belongs to, and each card's last rendered key.
-const setup = { root: null, view: null, pending: '', error: '', errorFor: '', keys: {}, timer: null, review: false, live: '' };
+// inline error and the form it belongs to, each card's last rendered key, and
+// the coding and planning agents picked, kept across card rebuilds.
+const setup = { root: null, view: null, pending: '', error: '', errorFor: '', keys: {}, timer: null, review: false, live: '', choice: { harness: '', planner: '' } };
 
 const text = (value, fallback) => (typeof value === 'string' && value ? value : fallback);
 
@@ -189,7 +191,7 @@ function render() {
   let previous = null;
   for (const [name, build] of cards) {
     const id = 'setup-card-' + name;
-    const key = JSON.stringify([view.step, view.busy, view[name === 'agent' ? 'agents' : name] || null, view.repository || null, view.proposal || null, view.reviewAtom || '', view.problem || '', view.labs || null, setup.pending, setup.error, setup.errorFor, setup.review]);
+    const key = JSON.stringify([view.step, view.busy, view[name === 'agent' ? 'agents' : name] || null, view.repository || null, view.proposal || null, view.reviewAtom || '', view.problem || '', view.labs || null, view.planner || '', setup.pending, setup.error, setup.errorFor, setup.review]);
     let node = document.getElementById(id);
     if (!node || setup.keys[id] !== key) {
       const focused = node && node.contains(document.activeElement) ? document.activeElement : null;
@@ -280,20 +282,63 @@ function repositoryCard(view) {
 
 function agentCard(view) {
   const agents = (Array.isArray(view.agents) ? view.agents : []).filter((a) => a && AGENT_IDS.includes(a.id));
-  const firstReady = agents.find((a) => a.ready === true);
-  const ready = agents.filter((a) => a.ready === true).length;
+  const readyAgents = agents.filter((a) => a.ready === true);
+  const ready = readyAgents.length;
+  const picked = readyAgents.find((a) => a.id === setup.choice.harness) || readyAgents[0];
+  // Planners are the ready agents that can plan, offered when the coding agent cannot.
+  const planners = readyAgents.filter((a) => a.plans === true);
+  const planner = planners.find((a) => a.id === setup.choice.planner) || planners.find((a) => a.id === view.planner) || planners[0];
+  const needsPlanner = (id) => agents.some((a) => a.id === id && a.plans === false);
   return card('2. Coding agent',
     el('p', { class: 'setup-note' }, ready ? 'Pick the coding agent that writes changes. You can change it later with a reviewed Formula change.' : 'No coding agent is ready yet. Install one and sign in with its own CLI, then Check Again.'),
-    form('agent', (f) => { const picked = f.querySelector('input[name="harness"]:checked'); if (picked) submit('create', { harness: picked.value }, 'agent'); },
-      el('fieldset', { class: 'setup-options' }, el('legend', { class: 'sr-only' }, 'Coding agents'),
+    form('agent', (f) => {
+      const harness = f.querySelector('input[name="harness"]:checked');
+      if (!harness) return;
+      if (!needsPlanner(harness.value)) { submit('create', { harness: harness.value }, 'agent'); return; }
+      const chosen = f.querySelector('input[name="planner"]:checked');
+      if (chosen) { submit('create', { harness: harness.value, planner: chosen.value }, 'agent'); return; }
+      setup.error = 'Choose a planning agent first. Install or sign in to Claude Code or Codex, then Check Again.';
+      setup.errorFor = 'agent';
+      render();
+      focusError('agent');
+    },
+      el('fieldset', { class: 'setup-options', onchange: (e) => pickAgent(e.target, needsPlanner) }, el('legend', { class: 'sr-only' }, 'Coding agents'),
         agents.map((a) => el('label', { class: 'setup-option', for: fieldId('harness-' + a.id), dataset: { ready: a.ready === true ? 'yes' : 'no' } },
-          el('input', { type: 'radio', id: fieldId('harness-' + a.id), name: 'harness', value: a.id, required: true, disabled: a.ready !== true, checked: a === firstReady, 'aria-describedby': 'setup-agent-' + a.id }),
+          el('input', { type: 'radio', id: fieldId('harness-' + a.id), name: 'harness', value: a.id, required: true, disabled: a.ready !== true, checked: a === picked, 'aria-describedby': 'setup-agent-' + a.id + (a.plans === false ? ' setup-agent-plan-' + a.id : '') }),
           el('span', { class: 'setup-option-text' },
             el('strong', null, text(a.name, a.id)),
-            el('small', { id: 'setup-agent-' + a.id }, agentLine(a)))))),
+            el('small', { id: 'setup-agent-' + a.id }, agentLine(a)),
+            a.plans === false ? el('small', { id: 'setup-agent-plan-' + a.id, class: 'setup-codes-only' }, 'Codes only: it needs a second agent for planning.') : null)))),
+      plannerChoice(planners, planner, !(picked && needsPlanner(picked.id))),
       el('p', { class: 'setup-hint' }, '3. Create the Lab: Forgecell saves the Lab and proposes its first Formula, as forgecell init --harness does. Nothing is approved yet.'),
       el('div', { class: 'setup-actions' }, ready ? submitButton('create', 'Create Lab', true) : null)));
 }
+
+// pickAgent keeps the picked agents and shows the planning choice only while
+// the picked coding agent cannot plan. A hidden choice is disabled, so its
+// required radios never block the form.
+function pickAgent(input, needsPlanner) {
+  if (!input || input.type !== 'radio') return;
+  if (input.name === 'planner') { setup.choice.planner = input.value; return; }
+  if (input.name !== 'harness') return;
+  setup.choice.harness = input.value;
+  const choice = document.getElementById(fieldId('planners'));
+  if (choice) { const hide = !needsPlanner(input.value); choice.hidden = hide; choice.disabled = hide; }
+}
+
+// plannerChoice lists the ready agents that can plan, the served default first
+// picked, for a coding agent that codes only.
+function plannerChoice(planners, picked, hidden) {
+  return el('fieldset', { id: fieldId('planners'), class: 'setup-options setup-planners', hidden: hidden, disabled: hidden, onchange: (e) => pickAgent(e.target, () => true) },
+    el('legend', { class: 'setup-sub' }, 'Planning agent'),
+    el('p', { class: 'setup-hint' }, 'This coding agent codes only. Pick the agent that reads each Issue and plans the change; you can change it later with forgecell init --harness ID --role analysis.'),
+    planners.length ? planners.map((a) => el('label', { class: 'setup-option', for: fieldId('planner-' + a.id) },
+      el('input', { type: 'radio', id: fieldId('planner-' + a.id), name: 'planner', value: a.id, required: true, checked: a === picked }),
+      el('span', { class: 'setup-option-text' }, el('strong', null, 'Plans with ' + text(a.name, a.id)), el('small', null, 'Ready · reads the Issue and proposes the plan you approve'))))
+      : el('p', { class: 'setup-note setup-warn' }, 'No planning agent is ready. Install or sign in to Claude Code or Codex, then Check Again.'));
+}
+
+const agentName = (id) => AGENT_NAMES[id] || text(id, 'Not recorded');
 
 const SIGN_IN = { verified: 'Signed in', 'login-required': 'Sign-in needed', unknown: 'Sign-in not verified' };
 function agentLine(a) {
@@ -313,7 +358,8 @@ function reviewCard(view) {
     : 'Formula ready for your approval. Approving binds the coding agent; every run still stops for your plan approval and your review.';
   return card(title,
     el('p', { class: 'setup-note' }, intro),
-    el('p', { class: 'setup-formula' }, text(p.formula, 'Formula'), ' · coding agent ', el('code', null, text(p.binding, 'Not recorded'))),
+    el('p', { class: 'setup-formula' }, text(p.formula, 'Formula')),
+    el('p', { class: 'setup-bindings' }, 'Plans with ', el('strong', null, agentName(text(p.planning, p.binding))), ' · Codes with ', el('strong', null, agentName(text(p.coding, p.binding)))),
     el('h3', { class: 'setup-sub' }, 'Atoms, in order'),
     el('ol', { class: 'setup-atoms' }, atoms.map((a) => el('li', null, text(a.label, 'Atom'), ' ', el('small', null, text(a.type, ''))))),
     el('h3', { class: 'setup-sub' }, 'Baseline checks from CI ', el('span', { class: 'setup-count' }, String(checks.length))),

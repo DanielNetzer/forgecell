@@ -38,6 +38,10 @@ body.setup-mode .shell { grid-template-columns: minmax(0, 1fr); }
 .setup-option input:focus-visible, .setup-toggle input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .setup-option-text { display: grid; gap: 2px; min-width: 0; }
 .setup-option-text small { color: var(--muted); }
+.setup-codes-only { color: var(--needs-ink); }
+.setup-planners { padding-top: 4px; }
+.setup-planners legend { padding: 0; margin-bottom: 4px; }
+.setup-bindings { margin: 0; }
 .setup-toggle { display: flex; align-items: flex-start; gap: 8px; min-height: 44px; touch-action: manipulation; }
 .setup-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .setup-actions .btn { touch-action: manipulation; }
@@ -62,4 +66,5 @@ body.setup-mode .shell { grid-template-columns: minmax(0, 1fr); }
   .setup-card, .setup-head, .setup-option { background: Canvas; color: CanvasText; box-shadow: none; border: 1px solid CanvasText; }
   .setup-option:has(input:checked) { border-color: Highlight; }
   .setup-error { border: 1px solid CanvasText; }
+  .setup-codes-only { color: CanvasText; }
 }
