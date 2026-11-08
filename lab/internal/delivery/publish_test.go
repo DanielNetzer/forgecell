@@ -11,8 +11,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
+	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 )
+
+func TestPullRequestBodyQuotesAnEnvironmentBlockedDenial(t *testing.T) {
+	const denial = "go test: open ~/Library/Caches/go-build/ab: operation not permitted"
+	base := "Implements issue #9.\n\nMolecule: `mol-fixture`\nFormula: `delivery-fixture`\nBase: `b`\nDelivery: `c`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n"
+	record := molecule.Record{ID: "mol-fixture", FormulaID: "delivery-fixture", Issue: molecule.Issue{Number: 9}}
+	record.HarnessAttempts = []molecule.HarnessAttempt{{Coding: &harness.CodingOutcome{SchemaVersion: "v1", Outcome: "completed", Reason: "done", Paths: []string{}}}}
+	if got := pullRequestBody(record, "b", "c"); got != base {
+		t.Fatalf("completed body changed:\n%s", got)
+	}
+	record.HarnessAttempts[0].Coding.Outcome, record.HarnessAttempts[0].Coding.Reason = "environment-blocked", denial
+	got := pullRequestBody(record, "b", "c")
+	if !strings.HasPrefix(got, base) || !strings.Contains(got, "verification blocked by the sandbox") || !strings.Contains(got, `"`+denial+`"`) {
+		t.Fatalf("environment-blocked body does not state the sandbox denial:\n%s", got)
+	}
+}
 
 func TestPublishResumesAfterPushFailure(t *testing.T) {
 	o := fixture(t)

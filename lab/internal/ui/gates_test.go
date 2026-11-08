@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/harness"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 	"net/http"
@@ -21,6 +22,21 @@ import (
 )
 
 const testOrigin = "http://" + testHost
+
+func TestUIDeliveryPreviewShowsAnEnvironmentBlockedDenial(t *testing.T) {
+	lab := t.TempDir()
+	r := molecule.Record{ID: "mol-1", LabDir: lab}
+	r.HarnessAttempts = []molecule.HarnessAttempt{{Coding: &harness.CodingOutcome{SchemaVersion: "v1", Outcome: "completed", Reason: "done", Paths: []string{}}}}
+	if v := previewView(lab, r, delivery.PreviewResult{}); v.HarnessVerificationBlocked != "" {
+		t.Fatalf("completed attempt shows a denial: %q", v.HarnessVerificationBlocked)
+	}
+	r.HarnessAttempts[0].Coding.Outcome = "environment-blocked"
+	r.HarnessAttempts[0].Coding.Reason = "go test: open " + filepath.Join(lab, "go-build") + ": operation not permitted\x1b[2J"
+	v := previewView(lab, r, delivery.PreviewResult{})
+	if !strings.Contains(v.HarnessVerificationBlocked, "environment-blocked") || !strings.Contains(v.HarnessVerificationBlocked, "<lab>/go-build: operation not permitted") || strings.Contains(v.HarnessVerificationBlocked, lab) || strings.ContainsRune(v.HarnessVerificationBlocked, 0x1b) {
+		t.Fatalf("gate summary does not quote the bounded, redacted denial: %q", v.HarnessVerificationBlocked)
+	}
+}
 
 // fakeEngine replaces the engine seams; it counts every call, so a test can
 // prove a refused or duplicate request never reached the engine. No git, gh or

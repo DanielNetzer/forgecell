@@ -13,14 +13,15 @@ import (
 // version, so any change to how a provider is invoked, such as dropping a
 // Claude isolation flag, must bump AdapterProtocolVersion and record a new digest.
 var adapterContractDigests = map[string]string{
-	"2": "cfd20646d39c5596c499bc60e99fa529731920ea47e0ce64f790b00539ca6c5e",
-	"3": "e6b8d50990a38664b0fa8c5248a4f1ed734ad4e20c208b7fc496fb05f1c5bf41",
-	"4": "1fc9b2bc45c047ebe028ea02753265786e8d43f83bd6b6bda3948bbf5f376208",
-	"5": "7be0c738aec6dea76f8a4d64dd61f4bb8c4d0326533bb3d38c458e37fb80435f",
-	"6": "65f4a5f18b8bcdcd538ab3ac5ce44c26de3fd62ebd07c8577f3413f14fc0e2fb",
-	"7": "9a2549ee76ecae7395ab23915224d6294bd4ad8e46ca326f83ea6b0692da0d69",
-	"8": "df91601b9703e2a050087e824b5106cdb54fba19adbd3f4a86c9ea34a365b4bd",
-	"9": "4d29883a0a8602024f44e7031fd4e72bda1845992dcaa6d2c6177c101548d8de",
+	"2":  "cfd20646d39c5596c499bc60e99fa529731920ea47e0ce64f790b00539ca6c5e",
+	"3":  "e6b8d50990a38664b0fa8c5248a4f1ed734ad4e20c208b7fc496fb05f1c5bf41",
+	"4":  "1fc9b2bc45c047ebe028ea02753265786e8d43f83bd6b6bda3948bbf5f376208",
+	"5":  "7be0c738aec6dea76f8a4d64dd61f4bb8c4d0326533bb3d38c458e37fb80435f",
+	"6":  "65f4a5f18b8bcdcd538ab3ac5ce44c26de3fd62ebd07c8577f3413f14fc0e2fb",
+	"7":  "9a2549ee76ecae7395ab23915224d6294bd4ad8e46ca326f83ea6b0692da0d69",
+	"8":  "df91601b9703e2a050087e824b5106cdb54fba19adbd3f4a86c9ea34a365b4bd",
+	"9":  "4d29883a0a8602024f44e7031fd4e72bda1845992dcaa6d2c6177c101548d8de",
+	"10": "74c1394d24976dd43685cc84d82e4831c1881d0f276ecbe31de57ec999cfffe4",
 }
 
 func adapterContractDigest(t *testing.T) string {

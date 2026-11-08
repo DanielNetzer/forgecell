@@ -17,6 +17,30 @@ import (
 	"time"
 )
 
+// EnvironmentBlockedOutcome is the coding outcome of a harness whose edits are
+// complete but whose own verification the sandbox denied. It goes on to the
+// independent checks like completed and is treated as success for nothing else.
+const EnvironmentBlockedOutcome = "environment-blocked"
+
+// EnvironmentBlockedText states that the harness did not verify its own work and
+// quotes the denial it reported, bounded to one line.
+func EnvironmentBlockedText(reason string) string {
+	return fmt.Sprintf("Harness verification blocked by the sandbox (environment-blocked): the harness did not verify its own work; the Lab's independent checks are the only verification. Denial: %q", oneLine(reason))
+}
+
+// EnvironmentBlockedReason returns the reported denial when the latest coding
+// attempt is environment-blocked.
+func EnvironmentBlockedReason(r Record) (string, bool) {
+	if len(r.HarnessAttempts) == 0 {
+		return "", false
+	}
+	a := r.HarnessAttempts[len(r.HarnessAttempts)-1]
+	if a.Coding == nil || a.Coding.Outcome != EnvironmentBlockedOutcome {
+		return "", false
+	}
+	return a.Coding.Reason, true
+}
+
 func atomicWrite(file string, data []byte) error {
 	dir := filepath.Dir(file)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -172,6 +196,9 @@ func save(r Record) error {
 	for _, a := range r.HarnessAttempts {
 		if a.Coding != nil {
 			fmt.Fprintf(&b, "\nImplementation outcome: %s\nReason: %s\n", a.Coding.Outcome, a.Coding.Reason)
+			if a.Coding.Outcome == EnvironmentBlockedOutcome {
+				fmt.Fprintln(&b, EnvironmentBlockedText(a.Coding.Reason))
+			}
 		} else {
 			fmt.Fprintln(&b, "\nImplementation outcome: unknown (historical evidence missing)")
 		}

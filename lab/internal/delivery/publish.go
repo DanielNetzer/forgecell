@@ -15,6 +15,7 @@ import (
 
 	"github.com/DanielNetzer/forgecell/lab/internal/forge"
 	"github.com/DanielNetzer/forgecell/lab/internal/mcpadapter"
+	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 	"github.com/DanielNetzer/forgecell/lab/internal/process"
 	"github.com/DanielNetzer/forgecell/lab/internal/readiness"
 )
@@ -63,6 +64,17 @@ type PublishOptions struct {
 	// nil keeps GitHub. Runner still runs git fetch and push.
 	Changes forge.Changes
 	Plugin  PluginForge
+}
+
+// pullRequestBody is the body of a published change request. An
+// environment-blocked coding attempt adds that the harness's own verification
+// was blocked by the sandbox, quoting the recorded denial.
+func pullRequestBody(record molecule.Record, base, commit string) string {
+	body := fmt.Sprintf("Implements issue %s.\n\nMolecule: `%s`\nFormula: `%s`\nBase: `%s`\nDelivery: `%s`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n", record.Issue.DisplayKey(), record.ID, record.FormulaID, base, commit)
+	if reason, ok := molecule.EnvironmentBlockedReason(record); ok {
+		body += "\n" + molecule.EnvironmentBlockedText(reason) + "\n"
+	}
+	return body
 }
 
 func digest(p PreviewResult) string {
@@ -370,7 +382,7 @@ func Publish(ctx context.Context, o PublishOptions) (r Receipt, err error) {
 		if r.CreationAttemptedAt != "" {
 			return reconcile("MISSING", "no PR found for unresolved creation attempt; replacement requires reconciliation")
 		}
-		body := fmt.Sprintf("Implements issue %s.\n\nMolecule: `%s`\nFormula: `%s`\nBase: `%s`\nDelivery: `%s`\n\nAwaiting exact-commit CI and human review. Harness-reported checks are not independent CI evidence. No merge, deployment or issue closure is authorized.\n", record.Issue.DisplayKey(), record.ID, record.FormulaID, r.Preview.BaseCommit, r.Commit)
+		body := pullRequestBody(record, r.Preview.BaseCommit, r.Commit)
 		f, err := os.CreateTemp(filepath.Join(o.LabDir, "deliveries"), ".pr-body-")
 		if err != nil {
 			return r, err

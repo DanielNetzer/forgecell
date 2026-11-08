@@ -20,6 +20,22 @@ func TestStrictCodingOutcome(t *testing.T) {
 	}
 }
 
+func TestEnvironmentBlockedCodingOutcome(t *testing.T) {
+	valid := `{"schemaVersion":"v1","outcome":"environment-blocked","reason":"go test: open ~/Library/Caches/go-build/ab: operation not permitted","paths":[]}`
+	out, err := DecodeCodingOutcome([]byte(valid))
+	if err != nil || out.Outcome != "environment-blocked" || !strings.Contains(out.Reason, "operation not permitted") {
+		t.Fatalf("environment-blocked rejected: %+v %v", out, err)
+	}
+	for _, raw := range []string{strings.Replace(valid, `"paths":[]`, `"paths":["lab/helper.go"]`, 1), strings.Replace(valid, `"reason":"go test: open ~/Library/Caches/go-build/ab: operation not permitted"`, `"reason":""`, 1), strings.Replace(valid, `"reason":"go test: open ~/Library/Caches/go-build/ab: operation not permitted"`, `"reason":"  "`, 1)} {
+		if _, err := DecodeCodingOutcome([]byte(raw)); err == nil {
+			t.Fatalf("accepted %q", raw)
+		}
+	}
+	if !strings.Contains(CodingOutcomeSchema(), `"environment-blocked"`) || !strings.Contains(codingInstruction, "environment-blocked") {
+		t.Fatal("schema or coding instruction does not name environment-blocked")
+	}
+}
+
 func TestCodexMalformedFinalPreservesTransport(t *testing.T) {
 	executable := fake(t, `while [ "$#" -gt 0 ]; do
  if [ "$1" = "--output-last-message" ]; then shift; out="$1"; fi

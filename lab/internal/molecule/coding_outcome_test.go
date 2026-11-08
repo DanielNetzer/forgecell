@@ -125,6 +125,86 @@ func TestCodingCompletionRequiresEditsOrExactNoChangePermission(t *testing.T) {
 	}
 }
 
+func TestCodingEnvironmentBlockedGoesOnToChecks(t *testing.T) {
+	t.Parallel()
+	const denial = "go test: open /Users/x/Library/Caches/go-build/ab: operation not permitted"
+	for _, edit := range []bool{true, false} {
+		t.Run(fmt.Sprintf("edit=%t", edit), func(t *testing.T) {
+			o, _ := fixture(t)
+			counts := t.TempDir()
+			body := "#!/bin/sh\ncat >/dev/null\n"
+			if edit {
+				body += "printf changed > code.txt\n"
+			}
+			body += "printf '%s' '{\"schemaVersion\":\"v1\",\"outcome\":\"environment-blocked\",\"reason\":\"" + denial + "\",\"paths\":[]}'\n"
+			if err := writeStub(filepath.Join(filepath.Dir(o.SourceRoot), "harness"), []byte(body), 0700); err != nil {
+				t.Fatal(err)
+			}
+			analyze := o.Analyze
+			o.Analyze = func(ctx context.Context, b formula.Binding, i Issue, s readiness.RepositorySnapshot) (readiness.Analysis, error) {
+				a, e := analyze(ctx, b, i, s)
+				a.Checks[0].Argv = []string{"/bin/sh", "-c", fmt.Sprintf("echo call >> %q", filepath.Join(counts, "checks"))}
+				return a, e
+			}
+			r, err := runApprovedFixture(t, o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.HarnessAttempts[0].Coding == nil || r.HarnessAttempts[0].Coding.Outcome != EnvironmentBlockedOutcome || r.HarnessAttempts[0].Coding.Reason != denial {
+				t.Fatalf("environment-blocked outcome not retained: %+v", r.HarnessAttempts[0].Coding)
+			}
+			if !edit {
+				if r.Verification != nil || len(r.VerificationAttempts) != 0 || statePhase(r) != "unknown" || r.Status != "blocked" {
+					t.Fatalf("environment-blocked without edits went on to checks: phase=%s status=%s", statePhase(r), r.Status)
+				}
+				return
+			}
+			if r.Verification == nil || !r.Verification.RequiredChecksPassed || len(r.VerificationAttempts) == 0 {
+				t.Fatalf("environment-blocked did not run the approved checks: phase=%s verification=%+v", statePhase(r), r.Verification)
+			}
+			if calls, _ := os.ReadFile(filepath.Join(counts, "checks")); len(calls) == 0 {
+				t.Fatal("approved check was not executed")
+			}
+			if r.Status != "waiting" || r.Atoms[2].Status != "done" {
+				t.Fatalf("passing checks after environment-blocked did not wait for review: status=%s phase=%s", r.Status, statePhase(r))
+			}
+			markdown, err := os.ReadFile(filepath.Join(o.LabDir, "ledgers", r.ID+".md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := EnvironmentBlockedText(denial)
+			if !strings.Contains(string(markdown), "Implementation outcome: environment-blocked") || !strings.Contains(string(markdown), want) || !strings.Contains(want, denial) {
+				t.Fatalf("ledger does not quote the denial:\n%s", markdown)
+			}
+			if reason, ok := EnvironmentBlockedReason(r); !ok || reason != denial {
+				t.Fatalf("EnvironmentBlockedReason = %q, %t", reason, ok)
+			}
+			// checks-only accepts the captured environment-blocked attempt as it
+			// accepts completed, and verifies the retained tree without coding.
+			if !completedCoding(r) {
+				t.Fatal("environment-blocked attempt with captured changes is not eligible for checks-only")
+			}
+			parent := r.Readiness.Plans[0]
+			next := copyPlan(t, parent.Plan)
+			next.Continuation = "checks-only"
+			if r, err = Amend(context.Background(), o.LabDir, r.ID, parent.Digest, next, ""); err != nil {
+				t.Fatalf("checks-only refused after environment-blocked: %v", err)
+			}
+			verifications := len(r.VerificationAttempts)
+			o.Approve = r.Readiness.Plans[1].Digest
+			if r, err = Run(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			if len(r.HarnessAttempts) != 1 || len(r.VerificationAttempts) <= verifications || r.Verification == nil || !r.Verification.RequiredChecksPassed {
+				t.Fatalf("checks-only after environment-blocked: attempts=%d verifications=%d phase=%s", len(r.HarnessAttempts), len(r.VerificationAttempts), statePhase(r))
+			}
+			if calls, _ := os.ReadFile(filepath.Join(counts, "checks")); strings.Count(string(calls), "call") < 2 {
+				t.Fatalf("checks-only did not rerun the approved check: %q", calls)
+			}
+		})
+	}
+}
+
 func TestCodingScopeChangeRetainsWorkAndCannotStartChecks(t *testing.T) {
 	t.Parallel()
 	o, _ := fixture(t)
