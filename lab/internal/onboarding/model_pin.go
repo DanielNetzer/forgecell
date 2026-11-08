@@ -20,8 +20,11 @@ var pinRoles = append(slices.Clone(formula.HarnessRoles), formula.ReviewHarness)
 // read or written.
 func checkModelPinOptions(o InitOptions, budgetRequested bool) error {
 	if !o.ModelSet {
+		if o.Role != "" && o.RoleHarness {
+			return nil
+		}
 		if o.Role != "" || o.Model != "" {
-			return fmt.Errorf("--role needs --model")
+			return fmt.Errorf("--role needs --model ID to pin a model, or --harness ID to propose a role harness override")
 		}
 		return nil
 	}
@@ -500,17 +503,9 @@ func proposeModelPin(ctx context.Context, o InitOptions, out Outcome, active for
 	out.BeforeYAML = f.YAML
 	out.Binding = &BindingReport{Command: f.Harness.Command, Candidate: probed, Workflow: probed.WorkflowCapability(), LearnBound: LearnBound(f), BeforeYAML: f.YAML}
 	// Saved meta evidence must describe the one learn Atom that carries a command.
-	learns := 0
-	for _, a := range f.Atoms {
-		if a.Type == "learn" {
-			learns++
-		}
-	}
-	if learn := metaLearnAtom(f); learns == 1 && learn != nil && len(learn.Command) > 0 {
-		r := DescribeMeta(learn.Command, learn.Binding, learn.TimeoutMS, Candidate{})
-		r.BeforeYAML = f.YAML
-		out.Meta = &r
-		out.Binding.Meta = &r
+	if r := learnMetaReport(f); r != nil {
+		out.Meta = r
+		out.Binding.Meta = r
 	}
 	p, err := saveWithEvidence(o.LabDir, proposedText, evidence, out.Binding)
 	if err != nil {

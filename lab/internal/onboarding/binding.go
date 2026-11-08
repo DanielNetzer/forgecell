@@ -365,7 +365,7 @@ func CheckAnalysisFallback(f formula.Formula, target formula.Binding) error {
 		return nil
 	}
 	if c := roleCapability(formula.AnalysisHarness, target); c.State == "unsupported" {
-		return fmt.Errorf("cannot rebind to %s: harnesses.analysis is not declared, so read-only ticket analysis would fall back to the default binding, which cannot be used for it: %s; declare harnesses.analysis with a supported harness first", target.Binding, c.Reason)
+		return fmt.Errorf("cannot rebind to %s: harnesses.analysis is not declared, so read-only ticket analysis would fall back to the default binding, which cannot be used for it: %s; declare harnesses.analysis with a supported harness first, for example with forgecell init --lab DIR --harness claude-code --role analysis", target.Binding, c.Reason)
 	}
 	return nil
 }

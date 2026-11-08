@@ -30,6 +30,9 @@ type InitOptions struct {
 	// pin. Role limits the proposal to the named harnesses.<role> override.
 	Model, Role string
 	ModelSet    bool
+	// RoleHarness marks an explicit --harness ID --role ROLE: Preferred is proposed
+	// as the harnesses.<Role> override only, declaring the role when it is absent.
+	RoleHarness bool
 	// RefreshBaseline proposes a baseline-only change: requiredChecks re-derived
 	// from the current pull-request workflows of the approved Formula's repository.
 	RefreshBaseline bool
@@ -447,6 +450,11 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if o.RefreshBaseline && (o.Preferred != "" || o.Rebind != "" || o.MetaHarness != "" || o.MetaCommand != nil || o.ModelSet || o.Role != "" || budgetRequested) {
 		return out, fmt.Errorf("--refresh-baseline changes only requiredChecks; do not combine it with --harness, --rebind, --meta-harness, --meta-command, --model or the timeout flags")
 	}
+	if o.RoleHarness {
+		if err = checkRoleHarnessOptions(o, budgetRequested); err != nil {
+			return out, err
+		}
+	}
 	if o.Rebind != "" {
 		if o.Preferred != "" || o.MetaHarness != "" || o.MetaCommand != nil || budgetRequested {
 			return out, fmt.Errorf("--rebind changes only the binding; do not combine it with --harness, --meta-harness, --meta-command or the timeout flags")
@@ -509,6 +517,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 		if o.ModelSet {
 			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before --model", formula.ShellWord(o.LabDir), pending.ID)
 		}
+		if o.RoleHarness {
+			return out, fmt.Errorf("a proposal is already pending; review, approve or dismiss it with init --lab %s --review/--approve/--dismiss %s before --harness --role", formula.ShellWord(o.LabDir), pending.ID)
+		}
 		f, e := formula.Parse([]byte(pending.YAML))
 		if e != nil {
 			return out, e
@@ -547,6 +558,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	if o.ModelSet && active.Formula.ID == "" {
 		return out, fmt.Errorf("--model needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
 	}
+	if o.RoleHarness && active.Formula.ID == "" {
+		return out, fmt.Errorf("--harness --role needs an approved Formula; run init --lab %s and approve the bootstrap proposal first", formula.ShellWord(o.LabDir))
+	}
 	if active.Formula.ID != "" {
 		approved, e := formula.Load(o.LabDir, "")
 		if e != nil || !approved.Approved {
@@ -561,6 +575,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 			}
 			if o.ModelSet {
 				return out, fmt.Errorf("--model needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
+			}
+			if o.RoleHarness {
+				return out, fmt.Errorf("--harness --role needs a current exact approval of the active Formula; run init --lab %s to review it, then init --lab %s --approve PROPOSAL_ID", formula.ShellWord(o.LabDir), formula.ShellWord(o.LabDir))
 			}
 			checked := ProbeBinding(ctx, active.Formula.Harness, out.Repository.Root, o.Runner)
 			out.Binding = &BindingReport{Command: active.Formula.Harness.Command, Candidate: checked, Workflow: checked.WorkflowCapability(), LearnBound: LearnBound(active.Formula)}
@@ -584,6 +601,9 @@ func Prepare(ctx context.Context, o InitOptions) (out Outcome, err error) {
 	}
 	if o.ModelSet {
 		return proposeModelPin(ctx, o, out, active)
+	}
+	if o.RoleHarness {
+		return proposeRoleHarness(ctx, o, out, active)
 	}
 	out.Candidates = o.Candidates
 	if out.Candidates == nil {
