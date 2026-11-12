@@ -1,9 +1,9 @@
 # Install Forgecell CLI
 
-Public CLI `v0.4.8` release; core source licensed under the [MIT License](../LICENSE). No repository access, Node or Go is needed to install.
+Public CLI `v0.4.9` release; core source licensed under the [MIT License](../LICENSE). No repository access, Node or Go is needed to install.
 
 ```sh
-sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.4.8/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
+sh -c 'set -eu; script=$(mktemp "${TMPDIR:-/tmp}/forgecell-bootstrap.XXXXXXXX") || { echo "Forgecell: cannot create bootstrap temporary file." >&2; exit 1; }; trap '"'"'rm -f "$script"'"'"' 0; trap '"'"'exit 1'"'"' HUP INT TERM; curl -fsSL --proto "=https" --proto-redir "=https" --connect-timeout 15 --max-time 30 https://github.com/DanielNetzer/forgecell/releases/download/v0.4.9/install.sh -o "$script" || { echo "Forgecell: bootstrap download failed." >&2; exit 1; }; [ -s "$script" ] || { echo "Forgecell: bootstrap download was empty." >&2; exit 1; }; sh "$script"'
 ```
 
 The command downloads the bootstrap over HTTPS before executing it. A failed download
@@ -177,7 +177,7 @@ a Molecule's delivery and exits nonzero unless they passed.
 and authentication checks; it does not prove model access or repository policy
 readiness. `forgecell --help` lists every command and flag.
 
-The `v0.4.8` release uses a distinct directory under `~/.forgecell/labs/`
+The `v0.4.9` release uses a distinct directory under `~/.forgecell/labs/`
 for each checkout by default; `forgecell doctor --json` reports the exact location.
 Existing preview.1 checkout Labs in the ignored `.forgecell` directory are left
 intact. Use the same `--lab .forgecell` path for every command to continue using one;
@@ -187,7 +187,7 @@ path such as the example above keeps records outside the checkout.
 
 ## Versions, upgrade and rollback
 
-The command above pins `v0.4.8`. v0.4.0 adds plugins: other trackers, forges and reviewers through pinned MCP plugins, and the `plugin new`/`pin`/`test` contributor kit. v0.4.1 hardens them: plugin pin, the plugin new skeletons, forgecomments severity markers, and intake for new Markdown files. v0.4.2 makes `loop --watch` print only what changed after its first pass, and tells a later coding attempt which files an earlier attempt already changed. v0.4.3 lets Codex plan Issues. v0.4.4 lets Cursor run the whole loop when a Formula binds planning to another harness, stopping leftover helper processes and reading Cursor's outcome after its progress text. v0.4.5 lets Codex coding runs write a Lab-owned Go build cache and stops Codex's own config edits from blocking amend and resume. v0.4.6 gets that cache past Codex's `shell_environment_policy`, lets a run blocked only by the sandbox go on to the Lab's checks, and probes the Codex sandbox before coding. v0.4.7 lets `--accept-protected-failures` accept a by-design protected failure whatever order the plan lists its checks in. v0.4.8 pairs Cursor with a planning agent at setup and adds `init --harness ID --role ROLE`. Repeating it safely reinstalls that version. For another GitHub release, use its matching versioned installer; `FORGECELL_VERSION` overrides require the generic `FORGECELL_RELEASE_BASE` layout. Review release notes before upgrading.
+The command above pins `v0.4.9`. v0.4.0 adds plugins: other trackers, forges and reviewers through pinned MCP plugins, and the `plugin new`/`pin`/`test` contributor kit. v0.4.1 hardens them: plugin pin, the plugin new skeletons, forgecomments severity markers, and intake for new Markdown files. v0.4.2 makes `loop --watch` print only what changed after its first pass, and tells a later coding attempt which files an earlier attempt already changed. v0.4.3 lets Codex plan Issues. v0.4.4 lets Cursor run the whole loop when a Formula binds planning to another harness, stopping leftover helper processes and reading Cursor's outcome after its progress text. v0.4.5 lets Codex coding runs write a Lab-owned Go build cache and stops Codex's own config edits from blocking amend and resume. v0.4.6 gets that cache past Codex's `shell_environment_policy`, lets a run blocked only by the sandbox go on to the Lab's checks, and probes the Codex sandbox before coding. v0.4.7 lets `--accept-protected-failures` accept a by-design protected failure whatever order the plan lists its checks in. v0.4.8 pairs Cursor with a planning agent at setup and adds `init --harness ID --role ROLE`. v0.4.9 is a test-reliability release with no behaviour changes. Repeating it safely reinstalls that version. For another GitHub release, use its matching versioned installer; `FORGECELL_VERSION` overrides require the generic `FORGECELL_RELEASE_BASE` layout. Review release notes before upgrading.
 
 `forgecell rollback` restores the previous verified installation when one exists. Installation preserves Formulas and ledgers, stores versioned executables under `~/.forgecell/releases`, and refuses conflicting unmanaged launchers.
 
@@ -261,7 +261,7 @@ Native maintainers use [the distribution design](design/native-cli-distribution.
 
 ## Published public-core release and legacy provenance
 
-The pinned installer uses `DanielNetzer/forgecell` and the `v0.4.8` tag.
+The pinned installer uses `DanielNetzer/forgecell` and the `v0.4.9` tag.
 The earlier published [v0.2.0-preview.2 prerelease](https://github.com/DanielNetzer/forgecell/releases/tag/v0.2.0-preview.2)
 was built from public-core source `801a9846fc9066dde985bb678348cac2bc89a249`.
 Installation requires no GitHub token, Git, gh, Go or Node.
