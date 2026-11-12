@@ -391,14 +391,17 @@ function rangeText(low, high) {
   return a + '–' + b;
 }
 
-export function renderRoles(d) {
+// renderRoles patches the roles row. reviewers are the outside reviewer
+// plugins the Molecule's Formula declares: a review step too.
+export function renderRoles(d, reviewers) {
   const c = ensureMoleculeView();
   const v = d.view;
   $('#mv-roles').hidden = !v;
   if (!v) return;
   const r = v.roles || {};
   setText(c.roles.coding, [plainText(r.coding, ''), plainText(r.model, '')].filter(Boolean).join(' · ') || 'Not recorded');
-  setText(c.roles.reviewer, typeof r.reviewer === 'string' && r.reviewer ? r.reviewer + ', read-only' : 'No review step');
+  const outside = Array.isArray(reviewers) ? reviewers.filter((n) => typeof n === 'string' && n) : [];
+  setText(c.roles.reviewer, [typeof r.reviewer === 'string' && r.reviewer ? r.reviewer + ', read-only' : '', outside.join(', ')].filter(Boolean).join(' · ') || 'No review step');
   const p = v.planningCost, total = p && money(p.usd);
   setText(c.roles.cost, !total ? 'Not recorded' : p.partial ? total + ' · reported for ' + count(p.reported) + ' of ' + counted(count(p.attempts), 'attempt', 'attempts') : total);
 }

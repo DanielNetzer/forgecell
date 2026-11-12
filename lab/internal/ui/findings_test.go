@@ -656,6 +656,95 @@ func TestFindingsProposeServesALineOnlyWithItsPath(t *testing.T) {
 	}
 }
 
+// findingsTestLifecycle records the change request's observed state on the
+// Molecule's receipt.
+func findingsTestLifecycle(t *testing.T, lab, id, state string) {
+	t.Helper()
+	path := filepath.Join(lab, "deliveries", id+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := strings.Replace(string(raw), `"state":"published"`, `"state":"published","lifecycle":{"state":"`+state+`","observedAt":"2026-11-02T10:00:00Z"}`, 1)
+	if err := os.WriteFile(path, []byte(observed), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Item 3 of #386: each open finding serves its body, redacted, control-free
+// with its lines kept, and bounded; the snapshot's reviewer plugins are named.
+func TestFindingsViewServesFindingBodies(t *testing.T) {
+	lab := t.TempDir()
+	r := findingsTestRecord(lab, findingsTestID, true)
+	findingsTestReceipt(t, lab, r.ID)
+	explained := findingsTestFinding("a", "high", "src/a.go", "Nil deref")
+	explained.Body = "The pointer is nil with " + findingsTestSecret + ".\r\n\n\n\x1b[31mSee " + r.Workspace.Path + "/src/a.go\x07 too.\nLast line."
+	long := findingsTestFinding("b", "medium", "src/b.go", "Long")
+	long.Body = strings.Repeat("word ", 2000)
+	bare := findingsTestFinding("c", "low", "src/c.go", "No body")
+	findingsTestWrite(t, lab, r.ID, nil, findingsTestRound(findingsTestCommit, delivery.FindingsComplete, true, explained, long, bare))
+	h, _ := findingsTestHandler(t, lab, "/src", r)
+	v, body := findingsGetView(t, h, r.ID)
+	if len(v.Open) != 3 || len(v.Plugins) != 1 || v.Plugins[0] != "critic" || v.Lifecycle != "" {
+		t.Fatalf("view %+v", v)
+	}
+	got := v.Open[0]
+	if got.BodyTruncated || !strings.HasPrefix(got.Body, "The pointer is nil with ") || !strings.HasSuffix(got.Body, "\nLast line.") || strings.Count(got.Body, "\n") != 3 || strings.Contains(got.Body, "\n\n\n") {
+		t.Fatalf("body %q", got.Body)
+	}
+	if strings.ContainsAny(got.Body, "\r\x1b\x07") || strings.Contains(got.Body, findingsTestSecret) || strings.Contains(body, r.Workspace.Path) {
+		t.Fatalf("body served unredacted: %q", got.Body)
+	}
+	if n := len([]rune(v.Open[1].Body)); !v.Open[1].BodyTruncated || n == 0 || n > findingsMaxBodyRunes {
+		t.Fatalf("long body: %d runes, truncated %v", n, v.Open[1].BodyTruncated)
+	}
+	if v.Open[2].Body != "" || v.Open[2].BodyTruncated || strings.Count(body, `"body":`) != 2 {
+		t.Fatalf("an empty body was served: %+v", v.Open[2])
+	}
+}
+
+// Item 5 of #386: the engine's "this Lab's Formula declares no reviewers" is
+// its own refusal, whose next step names the Formula mismatch.
+func TestFindingsProposeNoActiveReviewersReason(t *testing.T) {
+	_, r, h, fake := findingsTestLab(t, "/src")
+	fake.proposeErr = delivery.ErrNoReviewers
+	got := findingsRefusalOf(t, do(t, h, gatePost("/api/molecules/"+r.ID+"/findings/propose", `{"include":[]}`)), http.StatusConflict, "no-active-reviewers")
+	if got.Error != "this Lab's Formula declares no reviewers; nothing was proposed" || got.Reason != findingsReasons["no-active-reviewers"] {
+		t.Fatalf("refusal %+v", got)
+	}
+	if !strings.Contains(got.Reason, "This Molecule's Formula snapshot declares reviewers, but the Lab's active approved Formula does not") {
+		t.Fatalf("reason %q", got.Reason)
+	}
+}
+
+// Item 4 of #386: once the change request is merged or closed, the view says
+// so and a proposal is refused without calling the engine.
+func TestFindingsProposeRefusedAfterMergeOrClose(t *testing.T) {
+	for state, want := range map[string]string{"MERGED": "merged", "CLOSED": "closed"} {
+		t.Run(state, func(t *testing.T) {
+			lab, r, h, fake := findingsTestLab(t, "/src")
+			findingsTestLifecycle(t, lab, r.ID, state)
+			if v, _ := findingsGetView(t, h, r.ID); v.Lifecycle != want || !v.Published {
+				t.Fatalf("view lifecycle %q, want %q", v.Lifecycle, want)
+			}
+			got := findingsRefusalOf(t, do(t, h, gatePost("/api/molecules/"+r.ID+"/findings/propose", `{"include":[]}`)), http.StatusConflict, "not-live")
+			if got.Reason != findingsReasons["not-live"] {
+				t.Fatalf("refusal %+v", got)
+			}
+			if _, proposes, _, pushes := fake.counts(); proposes != 0 || pushes != 0 {
+				t.Fatalf("a refused proposal called the engine: %d proposals, %d pushes", proposes, pushes)
+			}
+		})
+	}
+	// An open change request still proposes.
+	lab, r, h, fake := findingsTestLab(t, "/src")
+	findingsTestLifecycle(t, lab, r.ID, "OPEN")
+	fake.proposal = fixround.Proposal{Round: 1, None: true}
+	if w := do(t, h, gatePost("/api/molecules/"+r.ID+"/findings/propose", `{"include":[]}`)); w.Code != http.StatusOK {
+		t.Fatalf("open change request: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestFindingsSampleDataServesNoFindings(t *testing.T) {
 	h := testHandler(t, Options{Demo: true})
 	if w := do(t, h, authed("/api/molecules/"+findingsTestID+"/findings")); w.Code != http.StatusNotFound {

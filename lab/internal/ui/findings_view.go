@@ -16,10 +16,15 @@ import (
 // declares no reviewers serves {"reviewers": false} alone.
 type ReviewerFindingsView struct {
 	Reviewers bool `json:"reviewers"`
+	// Plugins names the snapshot's reviewer plugins in declaration order, for
+	// display; the reviewer fields below keep the reviewer keys.
+	Plugins []string `json:"plugins,omitempty"`
 	// Published is set when the receipt is a published delivery; Head is then
-	// its change request's current head.
+	// its change request's current head. Lifecycle is "merged" or "closed" once
+	// the receipt observed its change request so; a proposal is then refused.
 	Published bool   `json:"published,omitempty"`
 	Head      string `json:"head,omitempty"`
+	Lifecycle string `json:"lifecycle,omitempty"`
 	// Unreadable is set, with a fixed Error, when the findings record could not
 	// be read; nothing else of it is served.
 	Unreadable bool                 `json:"unreadable,omitempty"`
@@ -55,17 +60,32 @@ type FindingsRoundView struct {
 }
 
 // FindingsOpenView is one open finding of the latest complete round. Repeated
-// is set when an earlier fix round addressed it and it came back.
+// is set when an earlier fix round addressed it and it came back. Body is the
+// reviewer's explanation, served on the view only (findingsBody).
 type FindingsOpenView struct {
-	Reviewer    string `json:"reviewer"`
-	Plugin      string `json:"plugin"`
-	Severity    string `json:"severity"`
-	Path        string `json:"path,omitempty"`
-	Line        int64  `json:"line,omitempty"`
-	Title       string `json:"title"`
-	Fingerprint string `json:"fingerprint"`
-	AutoFix     bool   `json:"autoFix"`
-	Repeated    bool   `json:"repeated"`
+	Reviewer      string `json:"reviewer"`
+	Plugin        string `json:"plugin"`
+	Severity      string `json:"severity"`
+	Path          string `json:"path,omitempty"`
+	Line          int64  `json:"line,omitempty"`
+	Title         string `json:"title"`
+	Body          string `json:"body,omitempty"`
+	BodyTruncated bool   `json:"bodyTruncated,omitempty"`
+	Fingerprint   string `json:"fingerprint"`
+	AutoFix       bool   `json:"autoFix"`
+	Repeated      bool   `json:"repeated"`
+}
+
+// findingsLifecycle is "merged" or "closed" for a receipt whose change request
+// is no longer live, or "".
+func findingsLifecycle(receipt delivery.Receipt) string {
+	switch {
+	case findingsLive(receipt):
+		return ""
+	case receipt.Lifecycle.State == "MERGED":
+		return "merged"
+	}
+	return "closed"
 }
 
 // FindingsDismissal is one dismissed finding and the operator's reason.
@@ -142,6 +162,9 @@ func (h *handler) findingsView(ctx context.Context, r molecule.Record) ReviewerF
 	lab := h.opts.LabDir
 	x := newRedactor(lab, r)
 	v := ReviewerFindingsView{Reviewers: true, Collecting: h.findingsBusy(r.ID)}
+	for _, ref := range f.Reviewers() {
+		v.Plugins = append(v.Plugins, findingsText(x, ref.Plugin, findingsMaxRuneText))
+	}
 	if j, ok := h.jobs.get(findingsJobKey(r.ID)); ok {
 		v.Collect = findingsJobOf(j)
 	}
@@ -153,6 +176,7 @@ func (h *handler) findingsView(ctx context.Context, r molecule.Record) ReviewerF
 	if rerr == nil {
 		v.Published = true
 		v.Head, _ = delivery.ReceiptHead(receipt)
+		v.Lifecycle = findingsLifecycle(receipt)
 		for _, fr := range receipt.FixRounds {
 			v.FixRounds = append(v.FixRounds, FindingsFixRound{Round: fr.Round, Commit: fr.Commit, PushedAt: stepSince(fr.PushedAt)})
 			for _, fp := range fr.Findings {
@@ -208,7 +232,8 @@ func findingsRecordView(x redactor, f formula.Formula, record delivery.FindingsR
 				title = "(untitled)"
 			}
 			path := findingsPath(x, sf.Path)
-			v.Open = append(v.Open, FindingsOpenView{Reviewer: findingsText(x, sf.Reviewer, findingsMaxRuneText), Plugin: findingsText(x, sf.Plugin, findingsMaxRuneText), Severity: sf.Severity, Path: path, Line: findingsLine(path, sf.Line), Title: title, Fingerprint: sf.Fingerprint, AutoFix: sf.AutoFix, Repeated: addressed[sf.Fingerprint]})
+			body, cut := findingsBody(x, sf.Body, sf.BodyTruncated)
+			v.Open = append(v.Open, FindingsOpenView{Reviewer: findingsText(x, sf.Reviewer, findingsMaxRuneText), Plugin: findingsText(x, sf.Plugin, findingsMaxRuneText), Severity: sf.Severity, Path: path, Line: findingsLine(path, sf.Line), Title: title, Body: body, BodyTruncated: cut && body != "", Fingerprint: sf.Fingerprint, AutoFix: sf.AutoFix, Repeated: addressed[sf.Fingerprint]})
 		}
 	}
 	v.OpenCount = count(v.OpenCount)

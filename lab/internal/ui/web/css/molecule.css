@@ -112,6 +112,10 @@
 .confirm-question { font-size: 14px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
 .confirm-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .confirm-actions .btn { flex: 1 1 auto; }
+/* In the column form a field's 150px flex basis is a height: keep the label on its input. */
+.confirm-form .drive-field { flex: 0 0 auto; align-content: start; }
+/* A finding's body is the reviewer's own lines, wrapped. */
+.mv-finding-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; color: #3e5448; }
 
 /* The Timeline tab: origin, totals, the Formula snapshot and the Atoms. */
 .run-panel { padding: 22px; }

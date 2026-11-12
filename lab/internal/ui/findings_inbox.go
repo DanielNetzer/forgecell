@@ -99,9 +99,10 @@ func findingsLive(receipt delivery.Receipt) bool {
 // confirmation, else open reviewer findings to triage when none of them is
 // pending in a fix round. It replaces only an In-progress, Recently recorded
 // or empty entry, never a scope, publish or blocked card, and reads no
-// workspace and starts no process.
+// workspace and starts no process. A merged or closed change request has no
+// findings decision: its entry stays as it is.
 func inboxFindingsOverlay(lab string, r molecule.Record, v *InboxView) {
-	if v == nil || r.Status == molecule.StatusRetired || (v.Kind != "" && v.Kind != InboxProgress && v.Kind != InboxRecorded) {
+	if v == nil || v.Merged || r.Status == molecule.StatusRetired || (v.Kind != "" && v.Kind != InboxProgress && v.Kind != InboxRecorded) {
 		return
 	}
 	f, ok := findingsSnapshot(r)

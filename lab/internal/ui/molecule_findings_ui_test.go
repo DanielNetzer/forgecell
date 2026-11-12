@@ -253,6 +253,162 @@ func TestMoleculeFindingsTabMarkup(t *testing.T) {
 	}
 }
 
+// moleculeFindingsWants checks that each named function of js holds its wants.
+func moleculeFindingsWants(t *testing.T, js string, wants map[string][]string) {
+	t.Helper()
+	for name, list := range wants {
+		body := moduleFunction(t, js, name)
+		for _, want := range list {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s lacks %q", name, want)
+			}
+		}
+	}
+}
+
+// Item 2 of #386: a failed reviewer's round shows the failure and its reason
+// only, never "round complete" next to it. Item 1: every reviewer is shown by
+// its plugin name, never by its key ("0:forgecomments").
+func TestMoleculeFindingsFailedRoundShowsFailureOnly(t *testing.T) {
+	js := moleculeFindingsModule(t)
+	round := moduleFunction(t, js, "findingsRoundItem")
+	failure := "const line = status === 'failed' ? 'Failed: ' + (error || 'no reason was recorded') + '.' : "
+	at := strings.Index(round, failure)
+	if at < 0 {
+		t.Fatalf("findingsRoundItem lacks the failure-only line: %s", round)
+	}
+	// The round's completeness is only on the branch of a reviewer that did not fail.
+	for _, text := range []string{"'round complete'", "'round incomplete'"} {
+		if i := strings.Index(round, text); i < at+len(failure) {
+			t.Errorf("findingsRoundItem shows %s outside the not-failed branch", text)
+		}
+	}
+	if !strings.Contains(round, "status !== 'failed' && error ? el('p', { class: 'file-reason' }, error) : null") {
+		t.Error("findingsRoundItem repeats a failed reviewer's error")
+	}
+	moleculeFindingsWants(t, js, map[string][]string{
+		"findingsName":            {"plainText(r.plugin, '')", ".replace(/^\\d+:/, '')"},
+		"findingsRoundItem":       {"el('code', null, findingsName(r))"},
+		"findingsOpenItem":        {"el('p', { class: 'file-reason' }, findingsName(f))"},
+		"findingsRenderDismissed": {"[findingsName(d), when ? 'dismissed ' + when : '']"},
+	})
+	for _, bad := range []string{"plainText(r.reviewer, 'Reviewer'))", "plainText(f.reviewer, '')", "plainText(d.reviewer, 'Reviewer')"} {
+		if strings.Contains(js, bad) {
+			t.Errorf("molecule-findings.js still shows a reviewer key: %q", bad)
+		}
+	}
+}
+
+// Item 4 of #386: once the change request is merged or closed, on its receipt
+// or as the GitHub sync observed it, Propose is disabled with its reason.
+// Item 10: without open findings Propose is hidden, not only disabled.
+func TestMoleculeFindingsProposeDisabledAfterMerge(t *testing.T) {
+	js := moleculeFindingsModule(t)
+	moleculeFindingsWants(t, js, map[string][]string{
+		"findingsEnsure": {
+			"c.proposeHelp = el('p', { class: 'drive-help', id: uid('mv-propose-help'), hidden: true });",
+			"'aria-describedby': c.proposeHelp.id, dataset: { gate: 'findings-propose' }",
+			"c.propose, c.proposeHelp, c.proposal",
+		},
+		"findingsRenderOpen": {
+			"const s = syncOf(fx.id), pr = s && s.pr, ended = v.lifecycle === 'merged' || (pr && pr.state === 'MERGED') ? 'merged' : v.lifecycle === 'closed' || (pr && pr.state !== 'OPEN') ? 'closed' : '';",
+			"c.propose.hidden = open.length === 0;",
+			"c.propose.disabled = busy || v.published !== true || open.length === 0 || Boolean(ended);",
+			"setText(c.proposeHelp, ended ? 'The change request is ' + ended + ', so there is nothing left to propose a fix round for.' : '');",
+			"c.proposeHelp.hidden = !ended || open.length === 0;",
+		},
+	})
+	if !regexp.MustCompile(`(?m)^import \{[^}]*\bsyncOf\b[^}]*\} from './core\.js';$`).MatchString(js) {
+		t.Error("molecule-findings.js does not read the sync state from core.js")
+	}
+}
+
+// Item 5 of #386: a refused proposal shows the served category, message and
+// reason through refusalText, never a bare "Refused (refused)".
+func TestMoleculeFindingsShowsRefusalReason(t *testing.T) {
+	js := moleculeFindingsModule(t)
+	moleculeFindingsWants(t, js, map[string][]string{
+		"findingsPost":    {"if (!res.ok) { findingsSay(refusalText(data)); return null; }"},
+		"findingsSay":     {"fx.message = text;", "fx.announce = true;"},
+		"findingsPropose": {"const proposal = await findingsPost('findings/propose', { include: include });"},
+	})
+	gates := do(t, testHandler(t, Options{LabDir: t.TempDir()}), authed("/js/core-gates.js")).Body.String()
+	moleculeFindingsWants(t, gates, map[string][]string{
+		"refusalText": {"body.category", "notRecorded(body && body.error)", "reasonText(body)"},
+		"reasonText":  {"body.reason"},
+	})
+	// The server side: the engine's no-reviewers refusal has its own category
+	// and a next step that names the Formula mismatch.
+	for _, category := range []string{"no-active-reviewers", "not-live"} {
+		if reason := findingsReasons[category]; !boundedReason(reason) {
+			t.Errorf("category %s has reason %q", category, reason)
+		}
+	}
+	if !strings.Contains(findingsReasons["no-active-reviewers"], "Formula snapshot declares reviewers, but the Lab's active approved Formula does not") {
+		t.Errorf("no-active-reviewers reason %q", findingsReasons["no-active-reviewers"])
+	}
+}
+
+// Item 6 of #386: a refused or lost proposal keeps every ticked include box;
+// only a proposal, or another Molecule, clears them.
+func TestMoleculeFindingsKeepsSelectionAfterRefusal(t *testing.T) {
+	js := moleculeFindingsModule(t)
+	propose := moduleFunction(t, js, "findingsPropose")
+	for _, want := range []string{
+		"const id = fx.id, kept = new Set(fx.checked);",
+		"if (!proposal) { fx.checked = kept; findingsRender(); return; }",
+	} {
+		if !strings.Contains(propose, want) {
+			t.Errorf("findingsPropose lacks %q", want)
+		}
+	}
+	refused, cleared := strings.Index(propose, "if (!proposal) {"), strings.Index(propose, "fx.checked = new Set();")
+	if refused < 0 || cleared < refused || strings.Count(propose, "fx.checked = new Set();") != 1 {
+		t.Errorf("findingsPropose clears the ticks before a proposal: %s", propose)
+	}
+	// Every render restores the boxes from fx.checked; only the success path,
+	// a dismissal of that finding and a new selection change it.
+	moleculeFindingsWants(t, js, map[string][]string{
+		"findingsRenderOpen": {"for (const box of c.open.querySelectorAll('input[type=checkbox]')) box.checked = fx.checked.has(box.dataset.fingerprint);"},
+		"findingsSelect":     {"fx.checked = new Set();"},
+	})
+	for _, name := range []string{"findingsPost", "findingsSay", "findingsLoad", "findingsRender"} {
+		if strings.Contains(moduleFunction(t, js, name), "fx.checked") {
+			t.Errorf("%s changes the ticked findings", name)
+		}
+	}
+}
+
+// Item 3 of #386: a finding's body is shown as text under its title, collapsed
+// when long or multi-line. Item 7: the roles row names the declared reviewers.
+func TestMoleculeFindingsShowsBodiesAndDeclaredReviewers(t *testing.T) {
+	js := moleculeFindingsModule(t)
+	moleculeFindingsWants(t, js, map[string][]string{
+		"findingsBodyBlock": {
+			"el('p', { class: 'mv-finding-body' }, body + (f.bodyTruncated === true ? ' …' : ''))",
+			"body.length <= FINDINGS_BODY_SHORT && !body.includes('\\n')",
+			"el('details', { class: 'mv-details' }, el('summary', null, 'The reviewer’s explanation')",
+		},
+		"findingsOpenItem":  {"el('p', { class: 'file-reason' }, plainText(f.title, '(untitled)')),\n      findingsBodyBlock(f),"},
+		"findingsReviewers": {"fx.id === id", "fx.view.plugins"},
+		"findingsShowTab":   {"if (fx.onView) fx.onView();"},
+	})
+	h := testHandler(t, Options{LabDir: t.TempDir()})
+	moleculeFindingsWants(t, do(t, h, authed("/js/molecule.js")).Body.String(), map[string][]string{
+		"renderDetail": {"renderRoles(d, findingsReviewers(d.id));"},
+		"mount":        {"mountFindings(chooseTab, () => { const d = state.detail; if (d && d.view) renderRoles(d, findingsReviewers(d.id)); });"},
+	})
+	moleculeFindingsWants(t, do(t, h, authed("/js/molecule-decision.js")).Body.String(), map[string][]string{
+		"renderRoles": {"Array.isArray(reviewers) ? reviewers.filter(", "outside.join(', ')", "|| 'No review step'"},
+	})
+	css := servedCSS(t)
+	for _, want := range []string{".confirm-form .drive-field { flex: 0 0 auto; align-content: start; }", ".mv-finding-body { white-space: pre-wrap;"} {
+		if !strings.Contains(css, want) {
+			t.Errorf("molecule.css lacks %q", want)
+		}
+	}
+}
+
 // moleculeFindingsDocText is a document as one lower-case line: quote markers
 // and line breaks do not hide a phrase.
 func moleculeFindingsDocText(raw string) string {

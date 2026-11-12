@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
+	"github.com/DanielNetzer/forgecell/lab/internal/forgesync"
 	"github.com/DanielNetzer/forgecell/lab/internal/molecule"
 )
 
@@ -127,6 +128,93 @@ func TestInboxFindingsKindsAndTheirPrecedence(t *testing.T) {
 				t.Fatalf("steps changed: %+v, base %+v", got, base)
 			}
 		})
+	}
+}
+
+// Item 4 of #386: a merged or closed change request has no findings or
+// fix-round entry, whether its receipt observed it or the entry already
+// carries the merge; a live one keeps its entry.
+func TestInboxFindingsMergedOrClosedDropsTheEntry(t *testing.T) {
+	a := findingsTestFinding("a", "high", "src/a.go", "Nil deref")
+	b := findingsTestFinding("b", "low", "docs/x.md", "Typo")
+	for _, state := range []string{"MERGED", "CLOSED"} {
+		for name, pending := range map[string]bool{"findings": false, "fix round": true} {
+			t.Run(state+" "+name, func(t *testing.T) {
+				lab := t.TempDir()
+				r := findingsTestRecord(lab, findingsTestID, true)
+				findingsTestReceipt(t, lab, r.ID)
+				findingsTestWrite(t, lab, r.ID, nil, findingsTestRound(findingsTestCommit, delivery.FindingsComplete, true, a, b))
+				if pending {
+					findingsTestPending(&r, 1, findingsTestCommit, findingsTestTree, true, true, b.Fingerprint)
+				}
+				findingsTestLifecycle(t, lab, r.ID, state)
+				got := summarize(lab, r, delivery.ReadReceiptStatus).Inbox
+				if got.Kind == InboxFindings || got.Kind == InboxFixRound || inboxFindingsJSON(t, got) != inboxFindingsJSON(t, inboxFindingsBase(lab, r)) {
+					t.Fatalf("entry %+v", got)
+				}
+			})
+		}
+	}
+	// An entry that already carries the merge is left as it is, even over a
+	// receipt still observed open.
+	lab := t.TempDir()
+	r := findingsTestRecord(lab, findingsTestID, true)
+	findingsTestReceipt(t, lab, r.ID)
+	findingsTestWrite(t, lab, r.ID, nil, findingsTestRound(findingsTestCommit, delivery.FindingsComplete, true, a, b))
+	v := InboxView{Kind: InboxRecorded, Title: "Merged", Action: "Open", Merged: true}
+	inboxFindingsOverlay(lab, r, &v)
+	if v.Kind != InboxRecorded || v.Title != "Merged" || !v.Merged {
+		t.Fatalf("merged entry %+v", v)
+	}
+	live := InboxView{Kind: InboxRecorded, Title: "Draft published", Action: "Open"}
+	inboxFindingsOverlay(lab, r, &live)
+	if live.Kind != InboxFindings {
+		t.Fatalf("live entry %+v", live)
+	}
+	// /api/sync counts a findings entry under Needs you only while GitHub has
+	// not seen its pull request merged or closed. The pull request decides,
+	// whatever bucket the Issue or the ledger lane files the state under.
+	issue := func(state, reason, reopenedAt string) *forgesync.Issue {
+		return &forgesync.Issue{Number: 351, Found: true, State: state, StateReason: reason, ReopenedAt: reopenedAt}
+	}
+	pr := func(state string) map[int64]forgesync.PR {
+		p := forgesync.PR{Number: 374, Found: true, State: state}
+		if state == forgesync.PRMerged {
+			p.MergedAt, p.MergeCommit = "2026-11-01T10:00:00Z", findingsTestCommit
+		}
+		return map[int64]forgesync.PR{374: p}
+	}
+	mol := func(lane string) forgesync.Molecule {
+		return forgesync.Molecule{ID: findingsTestID, Lane: lane, StartedAt: "2026-11-01T09:00:00Z", PRNumber: 374, PublishedCommit: findingsTestCommit}
+	}
+	open, closed := forgesync.IssueOpen, forgesync.IssueClosed
+	for name, c := range map[string]struct {
+		issue *forgesync.Issue
+		pr    string
+		lane  string
+		live  bool
+	}{
+		"merged":                      {issue(closed, forgesync.ReasonCompleted, ""), forgesync.PRMerged, forgesync.LaneFinished, false},
+		"merged, Issue open":          {issue(open, "", ""), forgesync.PRMerged, forgesync.LaneFinished, false},
+		"PR closed":                   {issue(open, "", ""), forgesync.PRClosed, forgesync.LaneFinished, false},
+		"not planned, PR merged":      {issue(closed, forgesync.ReasonNotPlanned, ""), forgesync.PRMerged, forgesync.LaneFinished, false},
+		"closed elsewhere, PR closed": {issue(closed, forgesync.ReasonCompleted, ""), forgesync.PRClosed, forgesync.LaneFinished, false},
+		"reopened after merge":        {issue(open, forgesync.ReasonReopened, "2026-11-02T10:00:00Z"), forgesync.PRMerged, forgesync.LaneFinished, false},
+		"live ledger lane, PR merged": {issue(open, "", ""), forgesync.PRMerged, forgesync.LaneDecision, false},
+		"draft PR open":               {issue(open, "", ""), forgesync.PROpen, forgesync.LaneFinished, true},
+		"open PR, Issue closed":       {issue(closed, forgesync.ReasonCompleted, ""), forgesync.PROpen, forgesync.LaneFinished, true},
+		"PR not checked":              {issue(open, "", ""), "", forgesync.LaneFinished, true},
+		"GitHub not checked":          {nil, "", forgesync.LaneFinished, true},
+		"live ledger lane, PR open":   {issue(open, "", ""), forgesync.PROpen, forgesync.LaneDecision, true},
+	} {
+		prs := map[int64]forgesync.PR{}
+		if c.pr != "" {
+			prs = pr(c.pr)
+		}
+		d := forgesync.ForMolecule(c.issue, prs, mol(c.lane))
+		if got := syncFindingsLive(d); got != c.live {
+			t.Errorf("%s (%s, bucket %s): findings entry live %v, want %v", name, d.Kind, d.Bucket, got, c.live)
+		}
 	}
 }
 

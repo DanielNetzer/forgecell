@@ -8,7 +8,7 @@ import { $, add, el, fill, state, ctx, newGate, issueLabel, issueURL, laneLabel,
 import { mv, ensureMoleculeView, renderDecision, renderRoles, loadStats, mergedOf, mergeText } from './molecule-decision.js';
 import { renderPlan, copyDigest } from './molecule-plan.js';
 import { renderTimeline, mountTimeline } from './molecule-timeline.js';
-import { mountFindings, findingsSelect, findingsOpened, findingsTick } from './molecule-findings.js';
+import { mountFindings, findingsSelect, findingsOpened, findingsTick, findingsReviewers } from './molecule-findings.js';
 
 const TONES = ['needs', 'running', 'blocked', 'merged', 'neutral'];
 const STEP_STATES = ['done', 'current', 'blocked', 'todo'];
@@ -121,7 +121,7 @@ function renderDetail() {
   renderHeader(d);
   renderPlan(d);
   renderDecision(d);
-  renderRoles(d);
+  renderRoles(d, findingsReviewers(d.id));
   loadStats(d);
   renderTimeline(d);
 }
@@ -295,7 +295,8 @@ export function mount(root, ctx) {
     e.preventDefault();
     chooseTab(nextTab(e.key, b.dataset.tab), true);
   });
-  mountFindings(chooseTab);
+  // The roles row names the reviewers the findings view declares once it is read.
+  mountFindings(chooseTab, () => { const d = state.detail; if (d && d.view) renderRoles(d, findingsReviewers(d.id)); });
   $('#mv-timeline').addEventListener('focusout', (e) => {
     if (mv.timelineDirty && state.detail && !$('#mv-timeline').contains(e.relatedTarget)) renderTimeline(state.detail);
   });
