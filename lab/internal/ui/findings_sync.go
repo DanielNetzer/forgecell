@@ -20,8 +20,10 @@ import (
 // holds a pending or errored reviewer. Each Molecule is collected at most once
 // per max(60s, the largest needs.minPollSeconds of its reviewer plugins); a
 // failed collection, or one whose newest round is incomplete or holds an
-// errored reviewer, doubles that wait for each further consecutive failure, up
-// to one hour, as the keyed Issues view does. A Lab UI started without a source checkout runs nothing.
+// errored reviewer, waits twice that, and doubles the wait for each further
+// consecutive failure, up to one hour, as the keyed Issues view does. So a
+// failing reviewer is not collected again a minute after the Lab opens. A Lab
+// UI started without a source checkout runs nothing.
 // The pass never proposes, dismisses or pushes.
 
 const (
@@ -229,10 +231,17 @@ func (h *handler) findingsSyncPass(ctx context.Context, ids []string) {
 			s.entries[d.id] = e
 		}
 		e.ttl = issuesKeyedBackoff(d.interval, e.ttl, e.failed, failed)
+		if failed {
+			e.ttl = min(max(e.ttl, findingsSyncFailedWait(d.interval)), issuesKeyedMaxPoll)
+		}
 		e.finished, e.failed = h.findingsNow(), failed
 		s.mu.Unlock()
 	}
 }
+
+// findingsSyncFailedWait is the shortest wait after a failed collection:
+// twice the Molecule's interval.
+func findingsSyncFailedWait(interval time.Duration) time.Duration { return 2 * interval }
 
 // findingsSyncFailedRound reports a collection whose newest round is cut by a
 // bound or holds a reviewer that errored: it backs off as a failure does.

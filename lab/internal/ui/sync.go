@@ -29,6 +29,14 @@ func needsYou(d forgesync.DisplayState) bool {
 	return d.Bucket == forgesync.BucketDecision || d.Bucket == forgesync.BucketBlocked
 }
 
+// syncFindingsLive reports a state whose pull request GitHub has not seen
+// merged or closed: only then is a findings or fix-round entry a decision. It
+// reads the pull request itself, never the bucket, which the Issue and the
+// ledger lane decide first. No pull request read leaves the receipt to decide.
+func syncFindingsLive(d forgesync.DisplayState) bool {
+	return d.PR == nil || d.PR.State == forgesync.PROpen
+}
+
 func (h *handler) syncStates(w http.ResponseWriter, r *http.Request) {
 	if h.opts.Demo {
 		h.json(w, http.StatusOK, demoSync())
@@ -68,7 +76,7 @@ func (h *handler) syncStates(w http.ResponseWriter, r *http.Request) {
 		if d.Bucket != forgesync.BucketRetired {
 			out.Counts[d.Bucket]++
 		}
-		if needsYou(d) || s.Inbox.Kind == InboxFixRound || s.Inbox.Kind == InboxFindings {
+		if needsYou(d) || (syncFindingsLive(d) && (s.Inbox.Kind == InboxFixRound || s.Inbox.Kind == InboxFindings)) {
 			out.NeedsYou[s.ID] = true
 		}
 	}

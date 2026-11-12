@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/DanielNetzer/forgecell/lab/internal/delivery"
 	"github.com/DanielNetzer/forgecell/lab/internal/fixround"
@@ -45,6 +46,8 @@ const (
 	findingsMaxOpen = 500
 	// findingsMaxRuneText bounds a served finding title or error.
 	findingsMaxRuneText = 300
+	// findingsMaxBodyRunes bounds a served finding body.
+	findingsMaxBodyRunes = 4000
 	// findingsMaxPathBytes bounds a served finding path.
 	findingsMaxPathBytes = 1024
 	// findingsWriteTimeout bounds a synchronous findings write and the
@@ -89,6 +92,10 @@ var findingsReasons = map[string]string{
 	"fix-rounds-stop": "This change request has reached its fix-round bound; continue it by hand",
 	"too-many":        "Raise the reviewers' autoFix level in the Formula or include fewer findings",
 	"no-formula":      "This Lab has no approved active Formula; approve one with forgecell init first",
+	// The tab follows this Molecule's Formula snapshot; a proposal follows the
+	// Lab's active approved Formula, so the two can differ.
+	"no-active-reviewers": "This Molecule's Formula snapshot declares reviewers, but the Lab's active approved Formula does not; approve a Formula that declares them, then propose again",
+	"not-live":            "The change request is merged or closed, so there is nothing left to fix on it",
 }
 
 // findingsRefuse answers a findings refusal with its fixed message and the
@@ -192,6 +199,35 @@ func findingsAutoFix(f formula.Formula) map[string]string {
 // paths replaced, controls stripped.
 func findingsText(x redactor, s string, limit int) string {
 	return harness.ReviewDisplayText(x.text(redactSecrets(s)), limit)
+}
+
+// findingsBody is an untrusted finding body as bounded display text: secrets
+// and local paths replaced, each line control-free with its whitespace
+// collapsed, blank runs kept to one empty line, at most findingsMaxBodyRunes
+// in all. cut reports a body the record or this bound shortened.
+func findingsBody(x redactor, body string, recordedCut bool) (string, bool) {
+	var lines []string
+	left, cut := findingsMaxBodyRunes, recordedCut
+	for _, line := range strings.Split(x.text(redactSecrets(body)), "\n") {
+		line = harness.ReviewDisplayText(line, findingsMaxBodyRunes)
+		if line == "" && (len(lines) == 0 || lines[len(lines)-1] == "") {
+			continue
+		}
+		n := utf8.RuneCountInString(line) + 1
+		if n > left {
+			if left > 1 {
+				lines = append(lines, harness.ReviewDisplayText(line, left-1))
+			}
+			cut = true
+			break
+		}
+		left -= n
+		lines = append(lines, line)
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n"), cut
 }
 
 // findingsPath is a finding's recorded path when it serves unchanged, or "".
@@ -356,6 +392,10 @@ func (h *handler) findingsPost(w http.ResponseWriter, r *http.Request, id, actio
 	case "findings/collect":
 		h.findingsCollectPost(w, id, f)
 	case "findings/propose":
+		if !findingsLive(receipt) {
+			h.findingsRefuse(w, http.StatusConflict, "not-live", "the change request is merged or closed; nothing was proposed")
+			return
+		}
 		h.findingsProposePost(w, id, propose.Include)
 	case "findings/dismiss":
 		h.findingsDismissPost(w, id, dismiss.Fingerprint, func() error {
@@ -474,6 +514,10 @@ func (h *handler) findingsEngineRefusal(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		h.refuseGate(w, http.StatusServiceUnavailable, "interrupted", "the request was interrupted before the engine finished")
+		return
+	}
+	if errors.Is(err, delivery.ErrNoReviewers) {
+		h.findingsRefuse(w, http.StatusConflict, "no-active-reviewers", "this Lab's Formula declares no reviewers; nothing was proposed")
 		return
 	}
 	text := err.Error()

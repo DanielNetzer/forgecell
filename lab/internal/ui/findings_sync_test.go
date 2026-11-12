@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -216,14 +217,16 @@ func TestFindingsSyncBacksOffOnFailure(t *testing.T) {
 			t.Fatalf("at %v: %d collections, want %d", clock.get().Format(time.TimeOnly), got, want)
 		}
 	}
-	at(1) // fails: the next waits a minute
+	at(1) // fails: the next waits twice the minute
 	clock.advance(time.Minute)
-	at(2) // fails again: the wait doubles to 2 minutes
+	at(1)
 	clock.advance(time.Minute)
+	at(2) // fails again: the wait doubles to 4 minutes
+	clock.advance(3 * time.Minute)
 	at(2)
 	clock.advance(time.Minute)
-	at(3) // 4 minutes next
-	clock.advance(3 * time.Minute)
+	at(3) // 8 minutes next
+	clock.advance(7 * time.Minute)
 	at(3)
 	clock.advance(time.Minute)
 	at(4)
@@ -262,14 +265,16 @@ func TestFindingsSyncRetriesAnErroredReviewerWithBackoff(t *testing.T) {
 	findingsTestWrite(t, lab, id, nil, errored)
 	c.returns(delivery.FindingsRecord{Rounds: []delivery.FindingsRound{errored}})
 	at := func(want int) { t.Helper(); findingsSyncAt(t, h, list, clock, c, want) }
-	at(1) // collected without error, but the reviewer errored: a minute next
+	at(1) // collected without error, but the reviewer errored: 2 minutes next
 	clock.advance(time.Minute)
-	at(2) // errored again: the wait doubles to 2 minutes
+	at(1)
 	clock.advance(time.Minute)
+	at(2) // errored again: the wait doubles to 4 minutes
+	clock.advance(3 * time.Minute)
 	at(2)
 	clock.advance(time.Minute)
-	at(3) // 4 minutes next
-	clock.advance(3 * time.Minute)
+	at(3) // 8 minutes next
+	clock.advance(7 * time.Minute)
 	at(3)
 	// The reviewer answers: a good round resets the wait, and a complete
 	// round on the head without errors is not collected again.
@@ -297,10 +302,12 @@ func TestFindingsSyncBacksOffATruncatedRound(t *testing.T) {
 	at := func(want int) { t.Helper(); findingsSyncAt(t, h, list, clock, c, want) }
 	at(1)
 	clock.advance(time.Minute)
+	at(1) // not a minute later: a failure waits twice the minute
+	clock.advance(time.Minute)
 	at(2)
 	clock.advance(time.Minute)
-	at(2) // not every minute: the wait doubled
-	clock.advance(time.Minute)
+	at(2) // the wait doubled
+	clock.advance(3 * time.Minute)
 	at(3)
 	// A persistently truncated reviewer settles at one collection an hour.
 	for i := 0; i < 10; i++ {
@@ -320,6 +327,38 @@ func TestFindingsSyncBacksOffATruncatedRound(t *testing.T) {
 		if findingsSyncFailedRound(r) {
 			t.Fatalf("failed round %+v", r)
 		}
+	}
+}
+
+// Opening the Lab while a reviewer fails collects once, not again a minute
+// later: a failed round waits twice the interval. Collect now still runs.
+func TestFindingsSyncDoesNotRecollectAFailedRoundWithinTheWindow(t *testing.T) {
+	h, list, clock, c := findingsSyncFixture(t, 1, "/src")
+	h.findingsPoll = func(string, formula.Formula) time.Duration { return 0 }
+	errored := findingsTestRound(findingsTestCommit, delivery.FindingsError, true)
+	errored.Reviewers[0].Error = "the reviewer failed"
+	c.returns(delivery.FindingsRecord{Rounds: []delivery.FindingsRound{errored}})
+	at := func(want int) { t.Helper(); findingsSyncAt(t, h, list, clock, c, want) }
+	at(1)
+	clock.advance(findingsSyncMinPoll)
+	at(1)
+	clock.advance(findingsSyncMinPoll - time.Second)
+	at(1)
+	clock.advance(time.Second)
+	at(2)
+	h.findingsSync.mu.Lock()
+	ttl := h.findingsSync.entries[list[0].ID].ttl
+	h.findingsSync.mu.Unlock()
+	if ttl < findingsSyncFailedWait(findingsSyncMinPoll) {
+		t.Fatalf("wait %v after two failures", ttl)
+	}
+	// The throttle is the background pass's alone: Collect now is not held back.
+	if w := do(t, h, gatePost("/api/molecules/"+list[0].ID+"/findings/collect", `{}`)); w.Code != http.StatusAccepted {
+		t.Fatalf("collect now: %d %s", w.Code, w.Body)
+	}
+	waitJob(t, h, findingsJobKey(list[0].ID))
+	if got := len(c.collected()); got != 3 {
+		t.Fatalf("%d collections after Collect now, want 3", got)
 	}
 }
 

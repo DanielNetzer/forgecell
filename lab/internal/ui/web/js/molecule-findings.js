@@ -8,7 +8,7 @@
 // round runs a git preview, so it is never read in a tight loop or while the
 // page is hidden. A collection or a push started here is followed by the
 // bounded poll below, since /job does not report these jobs.
-import { $, el, uid, fill, state, ctx, PULL_URL, externalLink, api, failed, keepFocus, setText, plainText, count, counted, whenText, dateTitle, SessionError } from './core.js';
+import { $, el, uid, fill, state, ctx, PULL_URL, externalLink, api, failed, keepFocus, setText, plainText, count, counted, whenText, dateTitle, SessionError, syncOf } from './core.js';
 import { postJSON, refusalText, reasonText } from './core-gates.js';
 import { submitButton, field, fillKeyed } from './molecule-actions.js';
 
@@ -26,6 +26,7 @@ const FINDINGS_MAX_LIST = 50;
 const FINDINGS_MAX_FILES = 200;
 const FINDINGS_MAX_INCLUDES = 50;
 const FINDINGS_MAX_REASON = 500;
+const FINDINGS_BODY_SHORT = 280; // a longer or multi-line body starts collapsed
 const FINDINGS_SEVERITIES = [['high', 'High'], ['medium', 'Medium'], ['low', 'Low'], ['info', 'Info']];
 const FINDINGS_ROUND_STATUS = { complete: 'complete', pending: 'pending', error: 'failed' };
 const FINDINGS_PENDING_TEXT = {
@@ -37,12 +38,15 @@ const FINDINGS_PENDING_TEXT = {
 };
 
 // fx is the panel's state, for the one open Molecule.
-const fx = { id: null, token: 0, loading: false, view: null, readFailed: false, fetchedAt: 0, want: false, follow: null, pending: false, message: '', announce: false, note: '', proposal: null, checked: new Set(), dismissing: '', reasonError: '', confirming: '', ids: new Map(), chooseTab: null, c: null };
+const fx = { id: null, token: 0, loading: false, view: null, readFailed: false, fetchedAt: 0, want: false, follow: null, pending: false, message: '', announce: false, note: '', proposal: null, checked: new Set(), dismissing: '', reasonError: '', confirming: '', ids: new Map(), chooseTab: null, onView: null, c: null };
 const FINDINGS_READ_FAILED = 'could not read the findings; showing the last read';
 
 // mountFindings takes the Molecule view's tab switch, so the panel can select
-// the Findings or the Plan tab without importing the view.
-export function mountFindings(chooseTab) { fx.chooseTab = chooseTab; }
+// the Findings or the Plan tab without importing the view, and a call run
+// whenever the tab shows or hides (the roles row names the reviewers).
+export function mountFindings(chooseTab, onView) { fx.chooseTab = chooseTab; fx.onView = onView || null; }
+// findingsReviewers is Molecule id's declared reviewer plugins, or [].
+export function findingsReviewers(id) { return (id && fx.id === id && fx.view && Array.isArray(fx.view.plugins) ? fx.view.plugins : []).filter((n) => typeof n === 'string' && n).slice(0, FINDINGS_MAX_LIST); }
 
 // findingsSelect starts the panel for Molecule id, or closes it for null.
 // want selects the Findings tab once the view says it shows, as for an Inbox
@@ -130,6 +134,7 @@ function findingsShowTab(on) {
   if (tab.hidden !== !on) tab.hidden = !on;
   if (!on && tab.getAttribute('aria-selected') === 'true' && fx.chooseTab) fx.chooseTab('plan', false);
   if (on && fx.want && fx.chooseTab) { fx.want = false; fx.chooseTab('findings', false); }
+  if (fx.onView) fx.onView();
 }
 
 // ---- Following a job ---------------------------------------------------------------
@@ -234,9 +239,11 @@ async function findingsPropose() {
   const open = findingsOpenRows(fx.view);
   const include = [...fx.checked].filter((fp) => open.some((f) => f.fingerprint === fp && !f.autoFix));
   if (include.length > FINDINGS_MAX_INCLUDES) { findingsSay('Include at most ' + FINDINGS_MAX_INCLUDES + ' findings below the threshold in one fix round.'); return; }
-  const id = fx.id;
+  const id = fx.id, kept = new Set(fx.checked);
   const proposal = await findingsPost('findings/propose', { include: include });
-  if (!proposal || fx.id !== id) return;
+  if (fx.id !== id) return;
+  // A refused or lost proposal keeps every tick; only a proposal clears them.
+  if (!proposal) { fx.checked = kept; findingsRender(); return; }
   fx.proposal = { body: proposal, open: open };
   fx.checked = new Set();
   await findingsLoad();
@@ -338,7 +345,8 @@ function findingsEnsure(panel) {
   c.collect = el('button', { type: 'button', class: 'btn btn-secondary', 'aria-describedby': c.collectHelp.id, dataset: { gate: 'findings-collect' }, onclick: findingsCollect }, 'Collect now');
   c.openCount = el('p', { class: 'drive-help' });
   c.open = el('div');
-  c.propose = el('button', { type: 'button', class: 'btn btn-secondary', dataset: { gate: 'findings-propose' }, onclick: findingsPropose }, 'Propose a fix round');
+  c.proposeHelp = el('p', { class: 'drive-help', id: uid('mv-propose-help'), hidden: true });
+  c.propose = el('button', { type: 'button', class: 'btn btn-secondary', 'aria-describedby': c.proposeHelp.id, dataset: { gate: 'findings-propose' }, onclick: findingsPropose }, 'Propose a fix round');
   c.proposal = el('div', { class: 'gate-status' });
   const reasonId = uid('mv-dismiss-reason');
   // The reason's validation error sits next to it and stays until fixed.
@@ -369,7 +377,7 @@ function findingsEnsure(panel) {
   c.root = el('div', { class: 'mv-sections' },
     c.message, c.note, c.stale, c.unreadable,
     findingsSection('Latest collection', c.rounds, c.collect, c.collectHelp),
-    findingsSection('Open findings', c.openCount, c.open, c.propose, c.proposal),
+    findingsSection('Open findings', c.openCount, c.open, c.propose, c.proposeHelp, c.proposal),
     c.pendingSection, c.pushedSection, c.dismissedBlock);
   fill(panel, c.root);
   fx.c = c;
@@ -427,15 +435,18 @@ function findingsRenderCollect(c, v) {
   setText(c.collect, collecting ? 'Collecting…' : 'Collect now');
 }
 
+// findingsName is a reviewer's plugin name, never its key ("0:forgecomments").
+function findingsName(r) { return plainText(r.plugin, '') || plainText(r.reviewer, 'Reviewer').replace(/^\d+:/, ''); }
+// findingsRoundItem is a reviewer's latest round; a failure shows only itself and its reason.
 function findingsRoundItem(r) {
-  const status = FINDINGS_ROUND_STATUS[r.status] || 'pending';
-  const when = whenText(r.collectedAt);
+  const status = FINDINGS_ROUND_STATUS[r.status] || 'pending', when = whenText(r.collectedAt), error = plainText(r.error, '');
+  const line = status === 'failed' ? 'Failed: ' + (error || 'no reason was recorded') + '.' : [when ? 'collected ' + when : 'not collected', r.complete === true ? 'round complete' : 'round incomplete'].join(' · ');
   return el('li', { class: 'file' },
     el('span', { class: 'file-badge' + (status === 'complete' ? ' is-new' : '') }, status),
     el('div', { class: 'file-text' },
-      el('code', null, plainText(r.reviewer, 'Reviewer')),
-      el('p', { class: 'file-reason', title: dateTitle(r.collectedAt) }, [plainText(r.plugin, ''), when ? 'collected ' + when : 'not collected', r.complete === true ? 'round complete' : 'round incomplete'].filter(Boolean).join(' · ')),
-      r.error ? el('p', { class: 'file-reason' }, plainText(r.error, '')) : null));
+      el('code', null, findingsName(r)),
+      el('p', { class: 'file-reason', title: dateTitle(r.collectedAt) }, line),
+      status !== 'failed' && error ? el('p', { class: 'file-reason' }, error) : null));
 }
 
 function findingsRenderOpen(c, v) {
@@ -456,7 +467,20 @@ function findingsRenderOpen(c, v) {
   });
   if (typing && c.reason.isConnected && document.activeElement !== c.reason) c.reason.focus({ preventScroll: true });
   for (const box of c.open.querySelectorAll('input[type=checkbox]')) box.checked = fx.checked.has(box.dataset.fingerprint);
-  c.propose.disabled = busy || v.published !== true || open.length === 0;
+  // Propose shows only with open findings; a merged or closed change request
+  // (on its receipt or the pull request GitHub sync read) disables it and says why.
+  const s = syncOf(fx.id), pr = s && s.pr, ended = v.lifecycle === 'merged' || (pr && pr.state === 'MERGED') ? 'merged' : v.lifecycle === 'closed' || (pr && pr.state !== 'OPEN') ? 'closed' : '';
+  c.propose.hidden = open.length === 0;
+  c.propose.disabled = busy || v.published !== true || open.length === 0 || Boolean(ended);
+  setText(c.proposeHelp, ended ? 'The change request is ' + ended + ', so there is nothing left to propose a fix round for.' : '');
+  c.proposeHelp.hidden = !ended || open.length === 0;
+}
+
+// findingsBodyBlock is a finding's body as text, collapsed when long or multi-line.
+function findingsBodyBlock(f) {
+  const body = typeof f.body === 'string' ? f.body.trim() : '', text = body && el('p', { class: 'mv-finding-body' }, body + (f.bodyTruncated === true ? ' …' : ''));
+  if (!body || (body.length <= FINDINGS_BODY_SHORT && !body.includes('\n'))) return text || null;
+  return el('details', { class: 'mv-details' }, el('summary', null, 'The reviewer’s explanation'), el('div', { class: 'mv-details-body' }, text));
 }
 
 function findingsOpenItem(f, locked) {
@@ -477,7 +501,8 @@ function findingsOpenItem(f, locked) {
     el('div', { class: 'file-text' },
       el('code', null, where),
       el('p', { class: 'file-reason' }, plainText(f.title, '(untitled)')),
-      el('p', { class: 'file-reason' }, plainText(f.reviewer, '')),
+      findingsBodyBlock(f),
+      el('p', { class: 'file-reason' }, findingsName(f)),
       marks.length ? el('p', null, marks) : null,
       include, dismiss, open ? fx.c.dismissForm : null));
 }
@@ -567,7 +592,7 @@ function findingsRenderDismissed(c, v) {
     return el('li', { class: 'file' },
       el('span', { class: 'file-badge is-unknown' }, 'dismissed'),
       el('div', { class: 'file-text' },
-        el('p', { title: dateTitle(d.at) }, [plainText(d.reviewer, 'Reviewer'), when ? 'dismissed ' + when : ''].filter(Boolean).join(' · ')),
+        el('p', { title: dateTitle(d.at) }, [findingsName(d), when ? 'dismissed ' + when : ''].filter(Boolean).join(' · ')),
         el('p', { class: 'file-reason' }, 'Reason: ' + plainText(d.reason, 'Not recorded')),
         el('button', { type: 'button', class: 'btn btn-secondary btn-small', disabled: busy, dataset: { gate: 'findings-undismiss-' + d.fingerprint }, onclick: () => findingsUndismiss(d.fingerprint) }, 'Undismiss')));
   }));
